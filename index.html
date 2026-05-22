@@ -220,6 +220,75 @@
         .grid::-webkit-scrollbar-thumb:hover {
             background: #555;
         }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background-color: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 32px;
+            width: 90%;
+            max-width: 400px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+
+        .modal-header h2 {
+            font-size: 18px;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-close:hover {
+            color: #fff;
+        }
+
+        .modal .upload-area {
+            margin-bottom: 16px;
+        }
+
+        .modal textarea {
+            margin-bottom: 16px;
+        }
+
+        .modal .upload-buttons {
+            margin-bottom: 0;
+        }
     </style>
 </head>
 
@@ -240,8 +309,6 @@
         </div>
 
         <div class="upload-panel">
-            <h3>Add Content</h3>
-            
             <div id="wifiStatus">
                 <button class="wifi-connect-btn" onclick="connectToWiFi()">
                     Connect to WiFi
@@ -251,27 +318,18 @@
                 </p>
             </div>
 
-            <div id="uploadUI" style="display: none;">
-                <div class="upload-area" id="uploadArea">
-                    <div class="upload-icon">📸</div>
-                    <div class="upload-text">Drag photo, video, or post</div>
-                </div>
-
-                <textarea id="postText" placeholder="Write something..." style="
-                    padding: 12px;
+            <div id="connectionInfo" style="display: none;">
+                <h3 style="margin-bottom: 12px;">Connected</h3>
+                <div style="
+                    background-color: #0a0a0a;
                     border: 1px solid #333;
                     border-radius: 6px;
-                    background-color: #0a0a0a;
-                    color: white;
-                    font-family: inherit;
-                    font-size: 14px;
-                    resize: vertical;
-                    min-height: 80px;
-                "></textarea>
-
-                <div class="upload-buttons">
-                    <button onclick="uploadPost()">Post to Grid</button>
-                    <button class="secondary-btn" onclick="disconnectWiFi()">Disconnect</button>
+                    padding: 16px;
+                    text-align: center;
+                ">
+                    <div style="font-size: 12px; color: #666; margin-bottom: 8px;">Network</div>
+                    <div id="displayWiFiName" style="font-size: 16px; font-weight: 600; margin-bottom: 16px;"></div>
+                    <button class="secondary-btn" onclick="disconnectWiFi()" style="width: 100%;">Disconnect</button>
                 </div>
             </div>
         </div>
@@ -279,12 +337,45 @@
 
     <input type="file" id="fileInput" accept="image/*,video/*">
 
+    <div class="modal" id="uploadModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Add to Grid</h2>
+                <button class="modal-close" onclick="closeModal()">×</button>
+            </div>
+
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📸</div>
+                <div class="upload-text">Drag photo, video, or post</div>
+            </div>
+
+            <textarea id="postText" placeholder="Write something..." style="
+                padding: 12px;
+                border: 1px solid #333;
+                border-radius: 6px;
+                background-color: #0a0a0a;
+                color: white;
+                font-family: inherit;
+                font-size: 14px;
+                resize: vertical;
+                min-height: 80px;
+                width: 100%;
+            "></textarea>
+
+            <div class="upload-buttons">
+                <button onclick="uploadPost()">Post to Grid</button>
+                <button class="secondary-btn" onclick="closeModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const gridSize = 48;
         let isConnected = false;
         let currentWiFi = '';
-        let gridContent = {}; // Stores content by WiFi network
+        let gridContent = {};
         let selectedFile = null;
+        let selectedBoxIndex = -1;
 
         // Initialize grid
         function initializeGrid() {
@@ -300,17 +391,10 @@
                 if (i === 0) {
                     box.innerHTML = '<div style="text-align: center; line-height: 1.2;"><div style="font-size: 32px; margin-bottom: 4px;">+</div><div style="font-size: 11px; color: #999;">Add content to grid</div></div>';
                     box.style.cursor = 'pointer';
-                    box.onclick = () => {
-                        if (isConnected) {
-                            document.getElementById('uploadArea').click();
-                        } else {
-                            alert('Connect to WiFi first');
-                        }
-                    };
-                } else {
-                    box.onclick = () => selectBox(i);
                 }
                 
+                // All boxes are clickable
+                box.onclick = () => openModal(i);
                 grid.appendChild(box);
             }
             
@@ -328,42 +412,69 @@
             }
         }
 
-        // WiFi Connection - Connect to actual device WiFi
+        // Modal functions
+        function openModal(boxIndex) {
+            if (!isConnected) {
+                alert('Connect to WiFi first');
+                return;
+            }
+
+            // Don't allow editing filled boxes
+            const box = document.getElementById(`box-${boxIndex}`);
+            if (box.classList.contains('filled') && boxIndex !== 0) {
+                return;
+            }
+
+            selectedBoxIndex = boxIndex;
+            document.getElementById('uploadModal').classList.add('active');
+            
+            // Reset form
+            document.getElementById('postText').value = '';
+            document.getElementById('uploadArea').innerHTML = '<div class="upload-icon">📸</div><div class="upload-text">Drag photo, video, or post</div>';
+            document.getElementById('fileInput').value = '';
+            selectedFile = null;
+        }
+
+        function closeModal() {
+            document.getElementById('uploadModal').classList.remove('active');
+            selectedBoxIndex = -1;
+            selectedFile = null;
+        }
+
+        // Click outside modal to close
+        document.addEventListener('click', (e) => {
+            const modal = document.getElementById('uploadModal');
+            if (e.target === modal) {
+                closeModal();
+            }
+        });
+
+        // WiFi Connection
         async function connectToWiFi() {
             try {
-                // For web apps, we need to detect the connected WiFi network
-                // In production, this would use native app or backend API
-                
-                // Try to get WiFi info from device (requires permissions)
                 let wifiName = null;
                 
-                // Method 1: Try using native device capabilities if available
                 if (navigator.connection && navigator.connection.type) {
-                    // This is available on some mobile apps
                     wifiName = 'Connected WiFi Network';
                 }
                 
-                // For now, simulate by asking user
-                // In production with a backend, you'd identify by IP or device MAC
                 if (!wifiName) {
                     wifiName = 'WiFi Network ' + new Date().getTime().toString().slice(-4);
-                    // In a real app: backend would identify network by IP address
                 }
                 
                 isConnected = true;
                 currentWiFi = wifiName;
                 
-                // Initialize content storage for this WiFi network if not exists
                 if (!gridContent[currentWiFi]) {
                     gridContent[currentWiFi] = [];
                 }
                 
                 document.getElementById('wifiStatus').style.display = 'none';
-                document.getElementById('uploadUI').style.display = 'flex';
+                document.getElementById('connectionInfo').style.display = 'block';
+                document.getElementById('displayWiFiName').textContent = wifiName;
                 document.getElementById('wifiInfo').classList.add('connected');
                 document.getElementById('wifiName').textContent = wifiName;
                 
-                // Refresh grid to show content from this WiFi network
                 initializeGrid();
             } catch (error) {
                 alert('Unable to connect to WiFi. Please try again.');
@@ -374,8 +485,9 @@
             isConnected = false;
             currentWiFi = '';
             selectedFile = null;
+            closeModal();
             document.getElementById('wifiStatus').style.display = 'block';
-            document.getElementById('uploadUI').style.display = 'none';
+            document.getElementById('connectionInfo').style.display = 'none';
             document.getElementById('wifiInfo').classList.remove('connected');
             initializeGrid();
         }
@@ -415,13 +527,6 @@
             }
         }
 
-        function selectBox(index) {
-            if (!isConnected) {
-                alert('Please connect to WiFi first');
-                return;
-            }
-        }
-
         function uploadPost() {
             if (!isConnected) {
                 alert('Please connect to WiFi first');
@@ -436,17 +541,19 @@
                 return;
             }
 
-            // Find empty box to place content
-            let emptyBox = -1;
-            for (let i = 1; i < gridSize; i++) {
-                const box = document.getElementById(`box-${i}`);
-                if (!box.classList.contains('filled')) {
-                    emptyBox = i;
-                    break;
+            // Use selected box or find first empty
+            let boxIndex = selectedBoxIndex;
+            if (boxIndex === -1 || boxIndex === 0) {
+                for (let i = 1; i < gridSize; i++) {
+                    const box = document.getElementById(`box-${i}`);
+                    if (!box.classList.contains('filled')) {
+                        boxIndex = i;
+                        break;
+                    }
                 }
             }
 
-            if (emptyBox === -1) {
+            if (boxIndex === -1) {
                 alert('Grid is full');
                 return;
             }
@@ -459,24 +566,20 @@
             }
 
             // Add to grid
-            const box = document.getElementById(`box-${emptyBox}`);
+            const box = document.getElementById(`box-${boxIndex}`);
             box.innerHTML = icon;
             box.classList.add('filled');
 
             // Store in gridContent for this WiFi network
             gridContent[currentWiFi].push({
-                boxIndex: emptyBox,
+                boxIndex: boxIndex,
                 content: postText,
                 file: selectedFile,
                 icon: icon,
                 timestamp: new Date().getTime()
             });
 
-            // Reset form
-            document.getElementById('postText').value = '';
-            uploadArea.innerHTML = '<div class="upload-icon">📸</div><div class="upload-text">Drag photo, video, or post</div>';
-            fileInput.value = '';
-            selectedFile = null;
+            closeModal();
         }
 
         // Initialize on load
