@@ -435,8 +435,21 @@
     <div class="view-modal" id="viewModal">
         <div class="view-modal-content">
             <button class="view-modal-close" onclick="closeViewModal()">×</button>
-            <div class="view-content-icon" id="viewIcon"></div>
             <div class="view-content-text" id="viewText"></div>
+            <div id="deleteSection" style="display: none; margin-top: 32px; padding-top: 32px; border-top: 1px solid #333;">
+                <button onclick="deletePost()" style="
+                    width: 100%;
+                    padding: 12px 16px;
+                    background-color: #ff4444;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    font-weight: 600;
+                    font-size: 14px;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                " onmouseover="this.style.backgroundColor='#ff2222'" onmouseout="this.style.backgroundColor='#ff4444'">Delete Post</button>
+            </div>
         </div>
     </div>
 
@@ -447,11 +460,13 @@
         let gridContent = {};
         let selectedFile = null;
         let selectedBoxIndex = -1;
+        let userPostBox = -1; // Track which box the user posted to
 
         // Initialize grid
         function initializeGrid() {
             const grid = document.getElementById('grid');
             grid.innerHTML = '';
+            userPostBox = -1; // Reset user post tracking
             
             for (let i = 0; i < gridSize; i++) {
                 const box = document.createElement('div');
@@ -474,8 +489,10 @@
                         // Check if this is a filled box
                         if (box.classList.contains('filled')) {
                             openViewModal(i);
-                        } else {
+                        } else if (userPostBox === -1) {
                             openModal(i);
+                        } else {
+                            alert('You can only post once per WiFi network');
                         }
                     };
                 }
@@ -492,10 +509,11 @@
                             if (post.boxIndex === 0) {
                                 box.innerHTML = '<div style="text-align: center; line-height: 1.2;"><div style="font-size: 32px; margin-bottom: 4px;">+</div><div style="font-size: 11px; color: #999;">Add content to grid</div></div>';
                             } else {
-                                let displayText = post.content ? post.content.substring(0, 30) : '';
-                                if (displayText.length >= 30) displayText += '...';
-                                box.innerHTML = `<div style="text-align: center; font-size: 32px; margin-bottom: 8px;">${post.icon}</div><div style="font-size: 12px; color: #fff; overflow: hidden; text-overflow: ellipsis; line-height: 1.2;">${displayText || post.icon}</div>`;
+                                box.innerHTML = `<div style="font-size: 13px; color: #fff; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; text-align: left;">${post.content}</div>`;
                                 box.classList.add('filled');
+                                if (post.isUserPost) {
+                                    userPostBox = post.boxIndex;
+                                }
                             }
                         }
                     }
@@ -508,8 +526,17 @@
             const post = gridContent[currentWiFi].find(p => p.boxIndex === boxIndex);
             if (!post) return;
 
-            document.getElementById('viewIcon').textContent = post.icon;
-            document.getElementById('viewText').textContent = post.content || '(No text)';
+            document.getElementById('viewText').textContent = post.content || '(No content)';
+            
+            // Show delete button only for user's own posts
+            const deleteSection = document.getElementById('deleteSection');
+            if (post.isUserPost) {
+                deleteSection.style.display = 'block';
+                selectedBoxIndex = boxIndex; // Store for delete function
+            } else {
+                deleteSection.style.display = 'none';
+            }
+            
             document.getElementById('viewModal').classList.add('active');
         }
 
@@ -517,10 +544,33 @@
             document.getElementById('viewModal').classList.remove('active');
         }
 
+        function deletePost() {
+            if (selectedBoxIndex === -1) return;
+
+            // Remove from gridContent
+            gridContent[currentWiFi] = gridContent[currentWiFi].filter(
+                p => p.boxIndex !== selectedBoxIndex
+            );
+
+            // Update grid display
+            const box = document.getElementById(`box-${selectedBoxIndex}`);
+            box.innerHTML = '';
+            box.classList.remove('filled');
+
+            userPostBox = -1; // User can post again
+            closeViewModal();
+        }
+
         // Modal functions
         function openModal(boxIndex) {
             if (!isConnected) {
                 alert('Connect to WiFi first');
+                return;
+            }
+
+            // Prevent posting if user already posted
+            if (userPostBox !== -1) {
+                alert('You can only post once per WiFi network');
                 return;
             }
 
@@ -645,6 +695,11 @@
                 return;
             }
 
+            if (userPostBox !== -1) {
+                alert('You can only post once per WiFi network');
+                return;
+            }
+
             const postText = document.getElementById('postText').value;
             const hasFile = selectedFile !== null;
 
@@ -670,31 +725,21 @@
                 return;
             }
 
-            // Determine icon
-            let icon = '';
-            if (selectedFile) {
-                const isVideo = selectedFile.type.startsWith('video');
-                icon = isVideo ? '🎬' : '📸';
-            } else if (postText) {
-                icon = '💭';
-            }
-
             // Store in gridContent for this WiFi network
             const post = {
                 boxIndex: boxIndex,
                 content: postText,
                 file: selectedFile,
-                icon: icon,
-                timestamp: new Date().getTime()
+                timestamp: new Date().getTime(),
+                isUserPost: true
             };
 
             gridContent[currentWiFi].push(post);
+            userPostBox = boxIndex;
 
             // Update grid display
             const box = document.getElementById(`box-${boxIndex}`);
-            let displayText = postText ? postText.substring(0, 30) : '';
-            if (displayText.length >= 30) displayText += '...';
-            box.innerHTML = `<div style="text-align: center; font-size: 32px; margin-bottom: 8px;">${icon}</div><div style="font-size: 12px; color: #fff; overflow: hidden; text-overflow: ellipsis; line-height: 1.2;">${displayText || icon}</div>`;
+            box.innerHTML = `<div style="font-size: 13px; color: #fff; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; text-align: left;">${postText}</div>`;
             box.classList.add('filled');
 
             closeModal();
