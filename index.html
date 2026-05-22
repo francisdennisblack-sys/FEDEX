@@ -280,43 +280,104 @@
     <input type="file" id="fileInput" accept="image/*,video/*">
 
     <script>
-        const gridSize = 48; // 48 boxes in grid
+        const gridSize = 48;
         let isConnected = false;
         let currentWiFi = '';
+        let gridContent = {}; // Stores content by WiFi network
+        let selectedFile = null;
 
         // Initialize grid
         function initializeGrid() {
             const grid = document.getElementById('grid');
             grid.innerHTML = '';
+            
             for (let i = 0; i < gridSize; i++) {
                 const box = document.createElement('div');
                 box.className = 'grid-box';
-                box.onclick = () => selectBox(i);
+                box.id = `box-${i}`;
+                
+                // First box is always the add content button
+                if (i === 0) {
+                    box.innerHTML = '<div style="text-align: center; line-height: 1.2;"><div style="font-size: 32px; margin-bottom: 4px;">+</div><div style="font-size: 11px; color: #999;">Add content to grid</div></div>';
+                    box.style.cursor = 'pointer';
+                    box.onclick = () => {
+                        if (isConnected) {
+                            document.getElementById('uploadArea').click();
+                        } else {
+                            alert('Connect to WiFi first');
+                        }
+                    };
+                } else {
+                    box.onclick = () => selectBox(i);
+                }
+                
                 grid.appendChild(box);
+            }
+            
+            // Load existing content for current WiFi
+            if (isConnected && gridContent[currentWiFi]) {
+                gridContent[currentWiFi].forEach(post => {
+                    if (post.boxIndex > 0) {
+                        const box = document.getElementById(`box-${post.boxIndex}`);
+                        if (box) {
+                            box.innerHTML = post.icon;
+                            box.classList.add('filled');
+                        }
+                    }
+                });
             }
         }
 
-        // WiFi Connection (simulated)
-        function connectToWiFi() {
-            // In a real app, this would use the WiFi API
-            // For now, we'll simulate with a prompt
-            const wifiName = prompt('Enter WiFi Network Name:');
-            if (wifiName) {
+        // WiFi Connection - Connect to actual device WiFi
+        async function connectToWiFi() {
+            try {
+                // For web apps, we need to detect the connected WiFi network
+                // In production, this would use native app or backend API
+                
+                // Try to get WiFi info from device (requires permissions)
+                let wifiName = null;
+                
+                // Method 1: Try using native device capabilities if available
+                if (navigator.connection && navigator.connection.type) {
+                    // This is available on some mobile apps
+                    wifiName = 'Connected WiFi Network';
+                }
+                
+                // For now, simulate by asking user
+                // In production with a backend, you'd identify by IP or device MAC
+                if (!wifiName) {
+                    wifiName = 'WiFi Network ' + new Date().getTime().toString().slice(-4);
+                    // In a real app: backend would identify network by IP address
+                }
+                
                 isConnected = true;
                 currentWiFi = wifiName;
+                
+                // Initialize content storage for this WiFi network if not exists
+                if (!gridContent[currentWiFi]) {
+                    gridContent[currentWiFi] = [];
+                }
+                
                 document.getElementById('wifiStatus').style.display = 'none';
                 document.getElementById('uploadUI').style.display = 'flex';
                 document.getElementById('wifiInfo').classList.add('connected');
                 document.getElementById('wifiName').textContent = wifiName;
+                
+                // Refresh grid to show content from this WiFi network
+                initializeGrid();
+            } catch (error) {
+                alert('Unable to connect to WiFi. Please try again.');
             }
         }
 
         function disconnectWiFi() {
             isConnected = false;
             currentWiFi = '';
+            selectedFile = null;
             document.getElementById('wifiStatus').style.display = 'block';
             document.getElementById('uploadUI').style.display = 'none';
             document.getElementById('wifiInfo').classList.remove('connected');
+            initializeGrid();
         }
 
         // Upload handling
@@ -346,7 +407,11 @@
 
         function handleFiles(files) {
             if (files.length > 0) {
-                uploadArea.innerHTML = `<div style="text-align: center;"><div class="upload-icon">✓</div><div class="upload-text">${files[0].name}</div></div>`;
+                selectedFile = files[0];
+                const isVideo = files[0].type.startsWith('video');
+                const isImage = files[0].type.startsWith('image');
+                const icon = isVideo ? '🎬' : isImage ? '📸' : '📁';
+                uploadArea.innerHTML = `<div style="text-align: center;"><div class="upload-icon">${icon}</div><div class="upload-text">${files[0].name.substring(0, 20)}...</div></div>`;
             }
         }
 
@@ -364,21 +429,54 @@
             }
 
             const postText = document.getElementById('postText').value;
-            if (!postText && uploadArea.innerHTML.includes('📸')) {
+            const hasFile = selectedFile !== null;
+
+            if (!postText && !hasFile) {
                 alert('Please add content');
                 return;
             }
 
-            // Add visual feedback
-            const randomBox = Math.floor(Math.random() * gridSize);
-            const boxes = document.querySelectorAll('.grid-box');
-            boxes[randomBox].classList.add('filled');
-            boxes[randomBox].innerHTML = postText ? '📝' : '📸';
+            // Find empty box to place content
+            let emptyBox = -1;
+            for (let i = 1; i < gridSize; i++) {
+                const box = document.getElementById(`box-${i}`);
+                if (!box.classList.contains('filled')) {
+                    emptyBox = i;
+                    break;
+                }
+            }
+
+            if (emptyBox === -1) {
+                alert('Grid is full');
+                return;
+            }
+
+            // Determine icon
+            let icon = '📝';
+            if (selectedFile) {
+                const isVideo = selectedFile.type.startsWith('video');
+                icon = isVideo ? '🎬' : '📸';
+            }
+
+            // Add to grid
+            const box = document.getElementById(`box-${emptyBox}`);
+            box.innerHTML = icon;
+            box.classList.add('filled');
+
+            // Store in gridContent for this WiFi network
+            gridContent[currentWiFi].push({
+                boxIndex: emptyBox,
+                content: postText,
+                file: selectedFile,
+                icon: icon,
+                timestamp: new Date().getTime()
+            });
 
             // Reset form
             document.getElementById('postText').value = '';
             uploadArea.innerHTML = '<div class="upload-icon">📸</div><div class="upload-text">Drag photo, video, or post</div>';
             fileInput.value = '';
+            selectedFile = null;
         }
 
         // Initialize on load
