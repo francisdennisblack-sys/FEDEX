@@ -34,7 +34,13 @@ app.get('/api/network-id', (req, res) => {
     });
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+const PORT = process.env.PORT || 5001;
+
+const server = app.listen(PORT, () => {
+    console.log(`[${new Date().toISOString()}] Server running on http://localhost:${PORT}`);
+});
+
+server.on('error', (err) => {
+    console.error('Server error:', err);
+    process.exit(1);
 });
