@@ -707,7 +707,8 @@
         console.log('  database:', database);
         console.log('  storage:', storage);
 
-        const gridSize = 100;
+        const initialGridSize = 20; // Start with 20 squares visible
+        let maxGridSize = 20; // Dynamically expand this
         let isConnected = false;
         let currentWiFi = '';
         let gridContent = {};
@@ -720,6 +721,7 @@
         let adminLongPressTimer = null;
         let refreshInterval = null;
         let firebaseUnsubscribe = null;
+        let isLoadingMore = false;
         
         // Determine API URL - only used for WiFi network detection
         // All photos and posts are stored in Firebase (Realtime Database + Cloud Storage)
@@ -911,13 +913,14 @@
             document.getElementById('adminPage').classList.remove('active');
         }
 
-        // Initialize grid
+        // Initialize grid with infinite scroll
         function initializeGrid() {
             const grid = document.getElementById('grid');
             grid.innerHTML = '';
             userPostBoxes = []; // Reset user post tracking
+            maxGridSize = initialGridSize; // Reset to start size
             
-            for (let i = 0; i < gridSize; i++) {
+            for (let i = 0; i < maxGridSize; i++) {
                 const box = document.createElement('div');
                 box.className = 'grid-box';
                 box.id = `box-${i}`;
@@ -949,52 +952,57 @@
                 grid.appendChild(box);
             }
             
+            // Set up scroll listener for infinite loading
+            setupInfiniteScroll();
+            
             // Load existing content for current WiFi
             if (isConnected && gridContent[currentWiFi]) {
-                const hiddenForThisWiFi = hiddenPosts[currentWiFi] || [];
-                
-                // Sort posts by timestamp (newest first)
-                const sortedPosts = [...gridContent[currentWiFi]].sort((a, b) => {
-                    return (b.timestamp || 0) - (a.timestamp || 0);
-                });
-                
-                // Assign sorted posts to grid positions
-                let gridPosition = 1;
-                sortedPosts.forEach(post => {
-                    // Skip if user has hidden this post
-                    if (hiddenForThisWiFi.includes(post.id)) {
-                        return;
-                    }
-                    
-                    const box = document.getElementById(`box-${gridPosition}`);
-                    if (box) {
-                        // Check for Firebase Storage URL or legacy base64
-                        const imageSource = post.photoURL || post.imageData;
-                        const likes = post.likes || 0;
-                        const dislikes = post.dislikes || 0;
-                        
-                        if (imageSource) {
-                            // Posts with photos: hide text content in grid, only show photo + vote badge
-                            // Text appears when user opens the modal
-                            const voteBadge = `<div style="position: absolute; bottom: 8px; left: 8px; display: flex; gap: 6px; font-size: 12px; color: #fff; font-weight: 600;"><button style="padding: 4px 8px; background-color: ${likes > 0 ? '#4CAF50' : '#333'}; color: #fff; border: none; border-radius: 4px; font-size: 11px; cursor: pointer;">↑ ${likes}</button><button style="padding: 4px 8px; background-color: ${dislikes > 0 ? '#f44336' : '#333'}; color: #fff; border: none; border-radius: 4px; font-size: 11px; cursor: pointer;">↓ ${dislikes}</button></div>`;
-                            box.innerHTML = `<div style="width: 100%; height: 100%; background-color: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 8px 8px 0 0;"><img src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;"></div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; top: 0;">${voteBadge}</div>`;
-                            box.style.position = 'relative';
-                        } else {
-                            // Text-only posts - show text centered with vote badge
-                            box.innerHTML = `<div style="font-size: 13px; color: #fff; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; text-align: center; padding: 12px; word-wrap: break-word; padding-bottom: 70px; display: flex; align-items: center; justify-content: center; height: 100%;">${post.content}</div><div style="position: absolute; bottom: 0; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#4CAF50' : '#333'}; color: #fff; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#f44336' : '#333'}; color: #fff; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>`;
-                            box.style.position = 'relative';
-                        }
-                        box.classList.add('filled');
-                        box.setAttribute('data-post-id', post.id);
-                        if (post.isUserPost) {
-                            if (!userPostBoxes.includes(gridPosition)) {
-                                userPostBoxes.push(gridPosition);
-                            }
-                        }
-                    }
-                    gridPosition++;
-                });
+                renderGrid();
             }
+        }
+
+        // Detect when user scrolls near bottom and load more squares
+        function setupInfiniteScroll() {
+            const grid = document.getElementById('grid');
+            
+            grid.addEventListener('scroll', () => {
+                // Check if user scrolled near the bottom (within 500px)
+                if (grid.scrollHeight - grid.scrollTop - grid.clientHeight < 500 && !isLoadingMore) {
+                    isLoadingMore = true;
+                    loadMoreSquares();
+                }
+            });
+        }
+
+        // Add more squares dynamically
+        function loadMoreSquares() {
+            const grid = document.getElementById('grid');
+            const newCount = maxGridSize + 20; // Add 20 more squares
+            
+            for (let i = maxGridSize; i < newCount; i++) {
+                const box = document.createElement('div');
+                box.className = 'grid-box';
+                box.id = `box-${i}`;
+                
+                box.onclick = (e) => {
+                    // Check if this is a filled box
+                    if (box.classList.contains('filled')) {
+                        openViewModal(i);
+                    } else if (userPostBoxes.length < 5) {
+                        openModal(i);
+                    } else {
+                        alert('You can post up to 5 times per WiFi network');
+                    }
+                };
+                
+                grid.appendChild(box);
+            }
+            
+            maxGridSize = newCount;
+            isLoadingMore = false;
+            
+            // Re-render grid to fill new squares with posts
+            renderGrid();
         }
 
         // Like/Dislike functions
@@ -1352,6 +1360,16 @@
             const sortedPosts = [...(gridContent[currentWiFi] || [])].sort((a, b) => {
                 return (b.timestamp || 0) - (a.timestamp || 0);
             });
+            
+            // CRITICAL: First reset ALL boxes to empty state (up to maxGridSize)
+            for (let i = 1; i < maxGridSize; i++) {
+                const box = document.getElementById(`box-${i}`);
+                if (box) {
+                    box.innerHTML = '';
+                    box.classList.remove('filled');
+                    box.removeAttribute('data-post-id');
+                }
+            }
             
             // Render posts to grid
             let gridPosition = 1;
