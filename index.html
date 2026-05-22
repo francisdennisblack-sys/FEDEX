@@ -707,12 +707,21 @@
         // Firebase Database Functions
         async function savePostToFirebase(networkId, postId, postData) {
             try {
+                console.log('🔥 SAVING POST TO FIREBASE');
+                console.log('  networkId:', networkId);
+                console.log('  postId:', postId);
+                console.log('  postData:', postData);
+                
                 const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
+                console.log('  ref path:', `networks/${networkId}/posts/${postId}`);
+                
                 await set(postRef, postData);
-                console.log('Post saved to Firebase:', postId);
+                console.log('✅ POST SAVED SUCCESSFULLY');
                 return { success: true, postId };
             } catch (error) {
-                console.error('Error saving post to Firebase:', error);
+                console.error('❌ ERROR SAVING POST:', error.message);
+                console.error('Error code:', error.code);
+                console.error('Full error:', error);
                 throw error;
             }
         }
@@ -720,20 +729,27 @@
         async function uploadPhotoToFirebase(networkId, postId, file) {
             try {
                 const photoPath = `networks/${networkId}/photos/${postId}`;
-                console.log('Starting photo upload to:', photoPath);
-                console.log('File details:', { name: file.name, size: file.size, type: file.type });
+                console.log('🔥 STARTING PHOTO UPLOAD TO STORAGE');
+                console.log('  Network ID:', networkId);
+                console.log('  Post ID:', postId);
+                console.log('  Storage path:', photoPath);
+                console.log('  File details:', { name: file.name, size: file.size, type: file.type });
                 
                 const photoRef = storageRef(storage, photoPath);
+                console.log('  Storage reference created');
+                
                 const snapshot = await uploadBytes(photoRef, file);
-                console.log('File uploaded successfully to Storage');
+                console.log('✅ File uploaded to Storage');
                 
                 const downloadURL = await getDownloadURL(snapshot.ref);
-                console.log('Photo URL obtained:', downloadURL);
+                console.log('✅ PHOTO URL OBTAINED:', downloadURL);
                 
                 return downloadURL;
             } catch (error) {
-                console.error('Error uploading photo:', error);
-                console.error('Error code:', error.code);
+                console.error('❌ ERROR UPLOADING PHOTO:', error.message);
+                console.error('  Error code:', error.code);
+                console.error('  Full error:', error);
+
                 console.error('Error message:', error.message);
                 throw error;
             }
@@ -937,26 +953,28 @@
 
             const voteKey = `${currentWiFi}_${selectedPostId}`;
             const currentVote = userVotes[voteKey];
+            let newLikes = post.likes || 0;
+            let newDislikes = post.dislikes || 0;
 
             if (currentVote === 'like') {
                 // Remove like
-                post.likes--;
+                newLikes--;
                 userVotes[voteKey] = null;
             } else if (currentVote === 'dislike') {
                 // Change from dislike to like
-                post.dislikes--;
-                post.likes++;
+                newDislikes--;
+                newLikes++;
                 userVotes[voteKey] = 'like';
             } else {
                 // Add like
-                post.likes++;
+                newLikes++;
                 userVotes[voteKey] = 'like';
             }
 
-            // Save to Firebase
+            // Update Firebase ONLY - let listener update local state
             updatePostVotesFirebase(currentWiFi, selectedPostId, {
-                likes: post.likes,
-                dislikes: post.dislikes
+                likes: newLikes,
+                dislikes: newDislikes
             });
 
             updateVoteDisplay();
@@ -968,26 +986,28 @@
 
             const voteKey = `${currentWiFi}_${selectedPostId}`;
             const currentVote = userVotes[voteKey];
+            let newLikes = post.likes || 0;
+            let newDislikes = post.dislikes || 0;
 
             if (currentVote === 'dislike') {
                 // Remove dislike
-                post.dislikes--;
+                newDislikes--;
                 userVotes[voteKey] = null;
             } else if (currentVote === 'like') {
                 // Change from like to dislike
-                post.likes--;
-                post.dislikes++;
+                newLikes--;
+                newDislikes++;
                 userVotes[voteKey] = 'dislike';
             } else {
                 // Add dislike
-                post.dislikes++;
+                newDislikes++;
                 userVotes[voteKey] = 'dislike';
             }
 
-            // Save to Firebase
+            // Update Firebase ONLY - let listener update local state
             updatePostVotesFirebase(currentWiFi, selectedPostId, {
-                likes: post.likes,
-                dislikes: post.dislikes
+                likes: newLikes,
+                dislikes: newDislikes
             });
 
             updateVoteDisplay();
@@ -1121,12 +1141,7 @@
         function deletePost() {
             if (!selectedPostId) return;
 
-            // Remove from gridContent
-            gridContent[currentWiFi] = gridContent[currentWiFi].filter(
-                p => p.id !== selectedPostId
-            );
-
-            // Delete from Firebase
+            // Delete from Firebase ONLY - let listener update local state
             deletePostFromFirebase(currentWiFi, selectedPostId).catch(error => {
                 console.error('Failed to delete from Firebase:', error);
             });
@@ -1349,7 +1364,9 @@
             console.log('Disconnected from WiFi network');
             
             // Clear grid since content is WiFi-only
-            gridContent = {};
+            if (currentWiFi && gridContent[currentWiFi]) {
+                gridContent[currentWiFi] = [];
+            }
             hiddenPosts = {};
             initializeGrid();
         }
@@ -1693,22 +1710,20 @@
 
                 console.log('Post data prepared:', postData);
 
-                // Save post to Firebase Realtime Database
-                console.log('Saving post to Firebase...');
+                // Save post to Firebase Realtime Database ONLY
+                console.log('🔥 ABOUT TO SAVE POST TO FIREBASE');
+                console.log('  currentWiFi:', currentWiFi);
+                console.log('  postId:', postId);
                 await savePostToFirebase(currentWiFi, postId, postData);
 
-                // Update local grid
-                if (!gridContent[currentWiFi]) {
-                    gridContent[currentWiFi] = [];
-                }
-                gridContent[currentWiFi].push(postData);
+                // DO NOT update local grid - let Firebase listener handle it
+                // The listener will fire when post appears in Firebase
                 userPostBox = boxIndex;
 
-                // Refresh grid display
-                renderGrid();
+                // Close modal and show notification
                 closeModal();
                 showNotification('Post published successfully!');
-                console.log('=== Post creation complete ===');
+                console.log('=== Post creation complete - waiting for Firebase listener ===');
                 
             } catch (error) {
                 console.error('=== Failed to upload post ===', error);
