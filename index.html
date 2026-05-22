@@ -809,11 +809,12 @@
                 // Get IP-based network ID
                 const response = await fetch(`${apiUrl}/api/network-id`);
                 const data = await response.json();
+                console.log('WiFi network detected:', data.networkId);
                 return data.networkId;
             } catch (error) {
-                console.log('WiFi detection failed, using fallback');
-                // Fallback: use device ID + location
-                return 'Local Network';
+                console.log('WiFi detection failed - no WiFi connection detected');
+                // STRICT: Throw error if WiFi not detected
+                throw new Error('WiFi network not available. Please connect to WiFi to use this app.');
             }
         }
 
@@ -1217,8 +1218,18 @@
                 startAutoRefresh();
                 console.log('startAutoRefresh() complete');
             } catch (error) {
-                alert('Unable to detect WiFi network');
                 console.error('WiFi detection error:', error);
+                // Show error message but keep connection status hidden
+                document.getElementById('wifiStatus').style.display = 'block';
+                document.getElementById('wifiStatus').innerHTML = `
+                    <div style="font-size: 10.8px; color: #888; margin-bottom: 7.2px;">Status</div>
+                    <div style="font-size: 12.6px; font-weight: 600; color: #ff6b6b;">📡 WiFi Required</div>
+                    <div style="font-size: 11px; color: #999; margin-top: 8px;">Connect to WiFi to use this app</div>
+                `;
+                document.getElementById('connectionInfo').style.display = 'none';
+                document.getElementById('testButtons').style.display = 'none';
+                document.getElementById('grid').style.display = 'none';
+                isConnected = false;
             }
         }
 
@@ -1335,6 +1346,10 @@
             }
             
             console.log('Disconnected from WiFi network');
+            
+            // Clear grid since content is WiFi-only
+            gridContent = {};
+            hiddenPosts = {};
             initializeGrid();
         }
 
@@ -1358,15 +1373,33 @@
 
         // Check WiFi on page load
         function checkWiFiOnLoad() {
-            // Automatically connect to WiFi on page load
+            // Automatically try to connect to WiFi on page load
+            console.log('Checking WiFi connection on page load...');
             connectToWiFi();
         }
+        
+        // Retry WiFi connection periodically if not connected
+        function retryWiFiConnection() {
+            if (!isConnected) {
+                console.log('Retrying WiFi connection...');
+                connectToWiFi();
+            }
+        }
+        
+        // Set up WiFi retry interval (every 5 seconds if not connected)
+        setInterval(retryWiFiConnection, 5000);
 
-        // Upload handling
+        // Upload handling - with WiFi check
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
 
-        uploadArea.addEventListener('click', () => fileInput.click());
+        uploadArea.addEventListener('click', () => {
+            if (!isConnected) {
+                alert('WiFi connection required to upload');
+                return;
+            }
+            fileInput.click();
+        });
 
         uploadArea.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -1378,16 +1411,29 @@
         });
 
         uploadArea.addEventListener('drop', (e) => {
+            if (!isConnected) {
+                alert('WiFi connection required to upload');
+                e.preventDefault();
+                return;
+            }
             e.preventDefault();
             uploadArea.classList.remove('dragover');
             handleFiles(e.dataTransfer.files);
         });
 
         fileInput.addEventListener('change', (e) => {
+            if (!isConnected) {
+                alert('WiFi connection required to upload');
+                return;
+            }
             handleFiles(e.target.files);
         });
 
         function handleFiles(files) {
+            if (!isConnected) {
+                alert('WiFi connection required to upload');
+                return;
+            }
             if (files.length > 0) {
                 selectedFile = files[0];
                 const isVideo = files[0].type.startsWith('video');
