@@ -447,26 +447,6 @@
 </head>
 
 <body>
-    <!-- Debug Display (top-right corner) -->
-    <div id="debugDisplay" style="
-        position: fixed;
-        top: 10px;
-        right: 10px;
-        width: 400px;
-        height: 200px;
-        background: #000;
-        color: #0f0;
-        border: 2px solid #0f0;
-        border-radius: 4px;
-        padding: 10px;
-        font-family: monospace;
-        font-size: 11px;
-        overflow-y: auto;
-        z-index: 99999;
-        box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
-        line-height: 1.4;
-    "></div>
-    
     <div class="header">
         <div class="logo" id="logoElement" onmousedown="startAdminLongPress()" onmouseup="stopAdminLongPress()" onmouseleave="stopAdminLongPress()" ontouchstart="startAdminLongPress()" ontouchend="stopAdminLongPress()">Grid</div>
         <div class="wifi-info" id="wifiInfo">
@@ -490,6 +470,30 @@
             <div id="connectionInfo" style="display: none; cursor: pointer; padding: 14.4px; background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; text-align: center;">
                 <div style="font-size: 10.8px; color: #888; margin-bottom: 7.2px;">Connected to</div>
                 <div id="displayWiFiName" style="font-size: 12.6px; font-weight: 600; color: #4ade80;"></div>
+            </div>
+
+            <!-- Test buttons for disconnect/reconnect workflow -->
+            <div id="testButtons" style="display: none; gap: 8px; flex-direction: column;">
+                <button onclick="testDisconnectReconnect()" style="
+                    padding: 10px 12px;
+                    background-color: #1a1a1a;
+                    border: 1px solid #333;
+                    border-radius: 6px;
+                    color: #fff;
+                    cursor: pointer;
+                    font-size: 12px;
+                    font-weight: 500;
+                ">Test: Disconnect</button>
+                <button onclick="testReconnect()" style="
+                    padding: 10px 12px;
+                    background-color: #1a1a1a;
+                    border: 1px solid #333;
+                    border-radius: 6px;
+                    color: #fff;
+                    cursor: pointer;
+                    font-size: 12px;
+                    font-weight: 500;
+                ">Test: Reconnect</button>
             </div>
         </div>
     </div>
@@ -693,18 +697,6 @@
         let adminLongPressTimer = null;
         let refreshInterval = null;
         let firebaseUnsubscribe = null;
-        let debugMessages = [];
-        
-        // Wrapper for console.log that also displays on page
-        function debugLog(message) {
-            console.log(message);
-            debugMessages.push(message);
-            const debugDiv = document.getElementById('debugDisplay');
-            if (debugDiv) {
-                debugDiv.innerHTML = debugMessages.slice(-20).join('<br>');
-                debugDiv.scrollTop = debugDiv.scrollHeight;
-            }
-        }
         
         // Determine API URL - use localhost for development, production URL for deployed
         const apiUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
@@ -716,10 +708,9 @@
             try {
                 const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
                 await set(postRef, postData);
-                debugLog('✓ Post saved to Firebase: ' + postId);
+                console.log('Post saved to Firebase:', postId);
                 return { success: true, postId };
             } catch (error) {
-                debugLog('✗ Error saving post: ' + error.message);
                 console.error('Error saving post to Firebase:', error);
                 throw error;
             }
@@ -728,20 +719,21 @@
         async function uploadPhotoToFirebase(networkId, postId, file) {
             try {
                 const photoPath = `networks/${networkId}/photos/${postId}`;
-                debugLog('Starting photo upload to: ' + photoPath);
-                debugLog('File: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)');
+                console.log('Starting photo upload to:', photoPath);
+                console.log('File details:', { name: file.name, size: file.size, type: file.type });
                 
                 const photoRef = storageRef(storage, photoPath);
                 const snapshot = await uploadBytes(photoRef, file);
-                debugLog('✓ File uploaded to Storage');
+                console.log('File uploaded successfully to Storage');
                 
                 const downloadURL = await getDownloadURL(snapshot.ref);
-                debugLog('✓ Photo URL obtained');
+                console.log('Photo URL obtained:', downloadURL);
                 
                 return downloadURL;
             } catch (error) {
-                debugLog('✗ Photo upload failed: ' + error.code + ' - ' + error.message);
                 console.error('Error uploading photo:', error);
+                console.error('Error code:', error.code);
+                console.error('Error message:', error.message);
                 throw error;
             }
         }
@@ -767,7 +759,6 @@
 
         function subscribeToFirebasePosts(networkId, callback) {
             try {
-                debugLog('Subscribing to Firebase posts for: ' + networkId);
                 const postsRef = ref(database, `networks/${networkId}/posts`);
                 
                 const unsubscribe = onValue(postsRef, (snapshot) => {
@@ -777,21 +768,16 @@
                             id: key,
                             ...postsObj[key]
                         }));
-                        debugLog('✓ Received ' + posts.length + ' posts from Firebase');
                         callback(posts);
                     } else {
-                        debugLog('No posts found in Firebase (empty)');
                         callback([]);
                     }
                 }, (error) => {
-                    debugLog('✗ Firebase listener error: ' + error.message);
                     console.error('Firebase listener error:', error);
                 });
                 
-                debugLog('Firebase listener active');
                 return unsubscribe;
             } catch (error) {
-                debugLog('✗ Subscription error: ' + error.message);
                 console.error('Error subscribing to Firebase posts:', error);
                 return () => {};
             }
@@ -820,13 +806,13 @@
         // Detect WiFi network
         async function detectWiFiNetwork() {
             try {
-                debugLog('Detecting WiFi network...');
+                // Get IP-based network ID
                 const response = await fetch(`${apiUrl}/api/network-id`);
                 const data = await response.json();
-                debugLog('✓ Network detected: ' + data.networkId);
                 return data.networkId;
             } catch (error) {
-                debugLog('✗ WiFi detection failed: ' + error.message);
+                console.log('WiFi detection failed, using fallback');
+                // Fallback: use device ID + location
                 return 'Local Network';
             }
         }
@@ -1203,8 +1189,8 @@
                 // Detect WiFi network
                 const wifiName = await detectWiFiNetwork();
                 
-                debugLog('====== WiFi CONNECTION ======');
-                debugLog('Detected network: ' + wifiName);
+                console.log('====== WiFi CONNECTION ======');
+                console.log('Detected network:', wifiName);
                 
                 isConnected = true;
                 currentWiFi = wifiName;
@@ -1213,22 +1199,24 @@
                     gridContent[currentWiFi] = [];
                 }
                 
-                debugLog('gridContent initialized for: ' + currentWiFi);
+                console.log('gridContent initialized for network:', currentWiFi);
+                console.log('Current gridContent:', gridContent);
                 
                 document.getElementById('wifiStatus').style.display = 'none';
                 document.getElementById('connectionInfo').style.display = 'block';
+                document.getElementById('testButtons').style.display = 'flex';
                 document.getElementById('displayWiFiName').textContent = wifiName;
                 document.getElementById('grid').style.display = 'grid';
                 
-                debugLog('Grid display enabled, calling initializeGrid()');
+                console.log('About to call initializeGrid()');
                 initializeGrid();
-                debugLog('initializeGrid() complete');
+                console.log('initializeGrid() complete');
                 
-                debugLog('Starting Firebase listener...');
+                // Start auto-refresh for new content
+                console.log('About to call startAutoRefresh()');
                 startAutoRefresh();
-                debugLog('startAutoRefresh() complete');
+                console.log('startAutoRefresh() complete');
             } catch (error) {
-                debugLog('✗ WiFi ERROR: ' + error.message);
                 alert('Unable to detect WiFi network');
                 console.error('WiFi detection error:', error);
             }
@@ -1321,6 +1309,7 @@
         }
 
         function disconnectWiFi() {
+            console.log('====== WiFi DISCONNECT ======');
             isConnected = false;
             currentWiFi = '';
             selectedFile = null;
@@ -1328,21 +1317,43 @@
             closeViewModal();
             document.getElementById('wifiStatus').style.display = 'block';
             document.getElementById('connectionInfo').style.display = 'none';
+            document.getElementById('testButtons').style.display = 'none';
             document.getElementById('grid').style.display = 'none';
             
             // Stop auto-refresh
             if (refreshInterval) {
                 clearInterval(refreshInterval);
                 refreshInterval = null;
+                console.log('Auto-refresh interval cleared');
             }
             
             // Unsubscribe from Firebase listeners
             if (firebaseUnsubscribe) {
+                console.log('Unsubscribing from Firebase listener');
                 firebaseUnsubscribe();
                 firebaseUnsubscribe = null;
             }
             
+            console.log('Disconnected from WiFi network');
             initializeGrid();
+        }
+
+        // Test functions for disconnect/reconnect workflow
+        function testDisconnectReconnect() {
+            console.log('🧪 TEST: Starting disconnect/reconnect test');
+            console.log('Current network before disconnect:', currentWiFi);
+            disconnectWiFi();
+            console.log('✅ TEST: Disconnect completed');
+        }
+
+        function testReconnect() {
+            console.log('🧪 TEST: Starting reconnect');
+            if (!currentWiFi) {
+                console.log('🔄 TEST: Reconnecting to WiFi...');
+                connectToWiFi();
+            } else {
+                console.log('⚠️ TEST: Already connected to', currentWiFi);
+            }
         }
 
         // Check WiFi on page load
@@ -1442,20 +1453,21 @@
             const postId = `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             
             try {
-                debugLog('=== Starting post creation ===');
-                debugLog('Network: ' + currentWiFi + ' | Post ID: ' + postId);
-                debugLog('Has photo: ' + (!!imageFile ? 'YES' : 'NO'));
+                console.log('=== Starting post creation ===');
+                console.log('Network ID:', currentWiFi);
+                console.log('Post ID:', postId);
+                console.log('Has photo:', !!imageFile);
                 
                 let photoURL = null;
 
                 // Upload photo to Firebase Storage if provided
                 if (imageFile) {
-                    debugLog('Uploading photo to Firebase Storage...');
+                    console.log('Uploading photo to Firebase Storage...');
                     try {
                         photoURL = await uploadPhotoToFirebase(currentWiFi, postId, imageFile);
-                        debugLog('✓ Photo upload complete');
+                        console.log('Photo upload complete. URL:', photoURL);
                     } catch (photoError) {
-                        debugLog('✗ Photo upload FAILED: ' + photoError.message);
+                        console.error('Photo upload FAILED:', photoError);
                         alert('Photo upload failed: ' + photoError.message);
                         throw photoError;
                     }
@@ -1473,9 +1485,10 @@
                     isUserPost: true
                 };
 
-                debugLog('Saving post to Firebase...');
+                console.log('Post data prepared:', postData);
 
                 // Save post to Firebase Realtime Database
+                console.log('Saving post to Firebase...');
                 await savePostToFirebase(currentWiFi, postId, postData);
 
                 // Update local grid
@@ -1488,18 +1501,19 @@
                 // Refresh grid display
                 renderGrid();
                 closeModal();
-                debugLog('✓ POST COMPLETE - now REFRESH PAGE to test persistence');
                 showNotification('Post published successfully!');
+                console.log('=== Post creation complete ===');
                 
             } catch (error) {
-                debugLog('✗ POST FAILED: ' + error.message);
+                console.error('=== Failed to upload post ===', error);
+                console.error('Error stack:', error.stack);
                 alert('Failed to publish post: ' + error.message);
             }
         }
 
         // Auto-initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
-            debugLog('PAGE LOADED - Initializing grid...');
+            console.log('Page loaded, initializing WiFi grid...');
             initializeGrid();
             checkWiFiOnLoad();
         });
@@ -1508,7 +1522,6 @@
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', checkWiFiOnLoad);
         } else {
-            debugLog('PAGE ALREADY LOADED - Initializing...');
             setTimeout(checkWiFiOnLoad, 100);
         }
 
