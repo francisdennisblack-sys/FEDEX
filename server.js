@@ -5,6 +5,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// In-memory storage for posts
+let postsDatabase = {}; // { networkId: [post1, post2, ...] }
+let postIdCounter = 0;
+
 // Get network ID based on client IP
 app.get('/api/network-id', (req, res) => {
     // Get client IP from request headers
@@ -32,6 +36,69 @@ app.get('/api/network-id', (req, res) => {
         networkId: networkId,
         ip: clientIp 
     });
+});
+
+// Get all posts for a network
+app.get('/api/posts/:networkId', (req, res) => {
+    const networkId = req.params.networkId;
+    const posts = postsDatabase[networkId] || [];
+    res.json({ posts });
+});
+
+// Create a new post
+app.post('/api/posts', (req, res) => {
+    const { networkId, content, imageData, timestamp } = req.body;
+    
+    if (!networkId) {
+        return res.status(400).json({ error: 'networkId required' });
+    }
+    
+    if (!postsDatabase[networkId]) {
+        postsDatabase[networkId] = [];
+    }
+    
+    const post = {
+        id: postIdCounter++,
+        networkId,
+        content,
+        imageData,
+        timestamp: timestamp || Date.now(),
+        likes: 0,
+        dislikes: 0
+    };
+    
+    postsDatabase[networkId].push(post);
+    res.json({ success: true, post });
+});
+
+// Delete a post
+app.delete('/api/posts/:postId', (req, res) => {
+    const postId = parseInt(req.params.postId);
+    
+    // Find and remove the post from all networks
+    for (let networkId in postsDatabase) {
+        postsDatabase[networkId] = postsDatabase[networkId].filter(p => p.id !== postId);
+    }
+    
+    res.json({ success: true });
+});
+
+// Update post votes
+app.put('/api/posts/:postId', (req, res) => {
+    const postId = parseInt(req.params.postId);
+    const { likes, dislikes } = req.body;
+    
+    // Find and update the post
+    for (let networkId in postsDatabase) {
+        const post = postsDatabase[networkId].find(p => p.id === postId);
+        if (post) {
+            if (likes !== undefined) post.likes = likes;
+            if (dislikes !== undefined) post.dislikes = dislikes;
+            return res.json({ success: true, post });
+        }
+    }
+    
+    res.status(404).json({ error: 'Post not found' });
 });
 
 const PORT = process.env.PORT || 5001;
