@@ -447,6 +447,26 @@
 </head>
 
 <body>
+    <!-- Debug Display (top-right corner) -->
+    <div id="debugDisplay" style="
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        width: 400px;
+        height: 200px;
+        background: #000;
+        color: #0f0;
+        border: 2px solid #0f0;
+        border-radius: 4px;
+        padding: 10px;
+        font-family: monospace;
+        font-size: 11px;
+        overflow-y: auto;
+        z-index: 99999;
+        box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+        line-height: 1.4;
+    "></div>
+    
     <div class="header">
         <div class="logo" id="logoElement" onmousedown="startAdminLongPress()" onmouseup="stopAdminLongPress()" onmouseleave="stopAdminLongPress()" ontouchstart="startAdminLongPress()" ontouchend="stopAdminLongPress()">Grid</div>
         <div class="wifi-info" id="wifiInfo">
@@ -673,6 +693,18 @@
         let adminLongPressTimer = null;
         let refreshInterval = null;
         let firebaseUnsubscribe = null;
+        let debugMessages = [];
+        
+        // Wrapper for console.log that also displays on page
+        function debugLog(message) {
+            console.log(message);
+            debugMessages.push(message);
+            const debugDiv = document.getElementById('debugDisplay');
+            if (debugDiv) {
+                debugDiv.innerHTML = debugMessages.slice(-20).join('<br>');
+                debugDiv.scrollTop = debugDiv.scrollHeight;
+            }
+        }
         
         // Determine API URL - use localhost for development, production URL for deployed
         const apiUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
@@ -684,9 +716,10 @@
             try {
                 const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
                 await set(postRef, postData);
-                console.log('Post saved to Firebase:', postId);
+                debugLog('✓ Post saved to Firebase: ' + postId);
                 return { success: true, postId };
             } catch (error) {
+                debugLog('✗ Error saving post: ' + error.message);
                 console.error('Error saving post to Firebase:', error);
                 throw error;
             }
@@ -695,21 +728,20 @@
         async function uploadPhotoToFirebase(networkId, postId, file) {
             try {
                 const photoPath = `networks/${networkId}/photos/${postId}`;
-                console.log('Starting photo upload to:', photoPath);
-                console.log('File details:', { name: file.name, size: file.size, type: file.type });
+                debugLog('Starting photo upload to: ' + photoPath);
+                debugLog('File: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)');
                 
                 const photoRef = storageRef(storage, photoPath);
                 const snapshot = await uploadBytes(photoRef, file);
-                console.log('File uploaded successfully to Storage');
+                debugLog('✓ File uploaded to Storage');
                 
                 const downloadURL = await getDownloadURL(snapshot.ref);
-                console.log('Photo URL obtained:', downloadURL);
+                debugLog('✓ Photo URL obtained');
                 
                 return downloadURL;
             } catch (error) {
+                debugLog('✗ Photo upload failed: ' + error.code + ' - ' + error.message);
                 console.error('Error uploading photo:', error);
-                console.error('Error code:', error.code);
-                console.error('Error message:', error.message);
                 throw error;
             }
         }
@@ -735,6 +767,7 @@
 
         function subscribeToFirebasePosts(networkId, callback) {
             try {
+                debugLog('Subscribing to Firebase posts for: ' + networkId);
                 const postsRef = ref(database, `networks/${networkId}/posts`);
                 
                 const unsubscribe = onValue(postsRef, (snapshot) => {
@@ -744,16 +777,21 @@
                             id: key,
                             ...postsObj[key]
                         }));
+                        debugLog('✓ Received ' + posts.length + ' posts from Firebase');
                         callback(posts);
                     } else {
+                        debugLog('No posts found in Firebase (empty)');
                         callback([]);
                     }
                 }, (error) => {
+                    debugLog('✗ Firebase listener error: ' + error.message);
                     console.error('Firebase listener error:', error);
                 });
                 
+                debugLog('Firebase listener active');
                 return unsubscribe;
             } catch (error) {
+                debugLog('✗ Subscription error: ' + error.message);
                 console.error('Error subscribing to Firebase posts:', error);
                 return () => {};
             }
@@ -782,13 +820,13 @@
         // Detect WiFi network
         async function detectWiFiNetwork() {
             try {
-                // Get IP-based network ID
+                debugLog('Detecting WiFi network...');
                 const response = await fetch(`${apiUrl}/api/network-id`);
                 const data = await response.json();
+                debugLog('✓ Network detected: ' + data.networkId);
                 return data.networkId;
             } catch (error) {
-                console.log('WiFi detection failed, using fallback');
-                // Fallback: use device ID + location
+                debugLog('✗ WiFi detection failed: ' + error.message);
                 return 'Local Network';
             }
         }
@@ -1165,8 +1203,8 @@
                 // Detect WiFi network
                 const wifiName = await detectWiFiNetwork();
                 
-                console.log('====== WiFi CONNECTION ======');
-                console.log('Detected network:', wifiName);
+                debugLog('====== WiFi CONNECTION ======');
+                debugLog('Detected network: ' + wifiName);
                 
                 isConnected = true;
                 currentWiFi = wifiName;
@@ -1175,23 +1213,22 @@
                     gridContent[currentWiFi] = [];
                 }
                 
-                console.log('gridContent initialized for network:', currentWiFi);
-                console.log('Current gridContent:', gridContent);
+                debugLog('gridContent initialized for: ' + currentWiFi);
                 
                 document.getElementById('wifiStatus').style.display = 'none';
                 document.getElementById('connectionInfo').style.display = 'block';
                 document.getElementById('displayWiFiName').textContent = wifiName;
                 document.getElementById('grid').style.display = 'grid';
                 
-                console.log('About to call initializeGrid()');
+                debugLog('Grid display enabled, calling initializeGrid()');
                 initializeGrid();
-                console.log('initializeGrid() complete');
+                debugLog('initializeGrid() complete');
                 
-                // Start auto-refresh for new content
-                console.log('About to call startAutoRefresh()');
+                debugLog('Starting Firebase listener...');
                 startAutoRefresh();
-                console.log('startAutoRefresh() complete');
+                debugLog('startAutoRefresh() complete');
             } catch (error) {
+                debugLog('✗ WiFi ERROR: ' + error.message);
                 alert('Unable to detect WiFi network');
                 console.error('WiFi detection error:', error);
             }
@@ -1405,21 +1442,20 @@
             const postId = `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             
             try {
-                console.log('=== Starting post creation ===');
-                console.log('Network ID:', currentWiFi);
-                console.log('Post ID:', postId);
-                console.log('Has photo:', !!imageFile);
+                debugLog('=== Starting post creation ===');
+                debugLog('Network: ' + currentWiFi + ' | Post ID: ' + postId);
+                debugLog('Has photo: ' + (!!imageFile ? 'YES' : 'NO'));
                 
                 let photoURL = null;
 
                 // Upload photo to Firebase Storage if provided
                 if (imageFile) {
-                    console.log('Uploading photo to Firebase Storage...');
+                    debugLog('Uploading photo to Firebase Storage...');
                     try {
                         photoURL = await uploadPhotoToFirebase(currentWiFi, postId, imageFile);
-                        console.log('Photo upload complete. URL:', photoURL);
+                        debugLog('✓ Photo upload complete');
                     } catch (photoError) {
-                        console.error('Photo upload FAILED:', photoError);
+                        debugLog('✗ Photo upload FAILED: ' + photoError.message);
                         alert('Photo upload failed: ' + photoError.message);
                         throw photoError;
                     }
@@ -1437,10 +1473,9 @@
                     isUserPost: true
                 };
 
-                console.log('Post data prepared:', postData);
+                debugLog('Saving post to Firebase...');
 
                 // Save post to Firebase Realtime Database
-                console.log('Saving post to Firebase...');
                 await savePostToFirebase(currentWiFi, postId, postData);
 
                 // Update local grid
@@ -1453,19 +1488,18 @@
                 // Refresh grid display
                 renderGrid();
                 closeModal();
+                debugLog('✓ POST COMPLETE - now REFRESH PAGE to test persistence');
                 showNotification('Post published successfully!');
-                console.log('=== Post creation complete ===');
                 
             } catch (error) {
-                console.error('=== Failed to upload post ===', error);
-                console.error('Error stack:', error.stack);
+                debugLog('✗ POST FAILED: ' + error.message);
                 alert('Failed to publish post: ' + error.message);
             }
         }
 
         // Auto-initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
-            console.log('Page loaded, initializing WiFi grid...');
+            debugLog('PAGE LOADED - Initializing grid...');
             initializeGrid();
             checkWiFiOnLoad();
         });
@@ -1474,6 +1508,7 @@
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', checkWiFiOnLoad);
         } else {
+            debugLog('PAGE ALREADY LOADED - Initializing...');
             setTimeout(checkWiFiOnLoad, 100);
         }
 
