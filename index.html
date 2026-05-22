@@ -639,7 +639,27 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        // Import Firebase functions
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
+        import { getDatabase, ref, set, get, update, remove, onValue } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
+        import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyD5A_MF7gRvqnHd_DD3lReYpEkRph6msX4",
+            authDomain: "wificontent-143da.firebaseapp.com",
+            databaseURL: "https://wificontent-143da-default-rtdb.firebaseio.com",
+            projectId: "wificontent-143da",
+            storageBucket: "wificontent-143da.appspot.com",
+            messagingSenderId: "158237266758",
+            appId: "1:158237266758:web:56c5796ce9b9e6e31f0b47"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const database = getDatabase(app);
+        const storage = getStorage(app);
+
         const gridSize = 200;
         let isConnected = false;
         let currentWiFi = '';
@@ -651,11 +671,104 @@
         let hiddenPosts = {};
         let adminLongPressTimer = null;
         let refreshInterval = null;
+        let firebaseUnsubscribe = null;
         
         // Determine API URL - use localhost for development, production URL for deployed
         const apiUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
             ? 'http://localhost:5001' 
             : 'https://fedex-backend.vercel.app'; // Production backend URL
+
+        // Firebase Database Functions
+        async function savePostToFirebase(networkId, postId, postData) {
+            try {
+                const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
+                await set(postRef, postData);
+                console.log('Post saved to Firebase:', postId);
+                return { success: true, postId };
+            } catch (error) {
+                console.error('Error saving post to Firebase:', error);
+                throw error;
+            }
+        }
+
+        async function uploadPhotoToFirebase(networkId, postId, file) {
+            try {
+                const photoPath = `networks/${networkId}/photos/${postId}`;
+                const photoRef = storageRef(storage, photoPath);
+                const snapshot = await uploadBytes(photoRef, file);
+                const downloadURL = await getDownloadURL(snapshot.ref);
+                console.log('Photo uploaded to Firebase:', photoPath);
+                return downloadURL;
+            } catch (error) {
+                console.error('Error uploading photo:', error);
+                throw error;
+            }
+        }
+
+        async function getPostsFromFirebase(networkId) {
+            try {
+                const postsRef = ref(database, `networks/${networkId}/posts`);
+                const snapshot = await get(postsRef);
+                
+                if (snapshot.exists()) {
+                    const postsObj = snapshot.val();
+                    return Object.keys(postsObj).map(key => ({
+                        id: key,
+                        ...postsObj[key]
+                    }));
+                }
+                return [];
+            } catch (error) {
+                console.error('Error getting posts from Firebase:', error);
+                return [];
+            }
+        }
+
+        function subscribeToFirebasePosts(networkId, callback) {
+            try {
+                const postsRef = ref(database, `networks/${networkId}/posts`);
+                
+                const unsubscribe = onValue(postsRef, (snapshot) => {
+                    if (snapshot.exists()) {
+                        const postsObj = snapshot.val();
+                        const posts = Object.keys(postsObj).map(key => ({
+                            id: key,
+                            ...postsObj[key]
+                        }));
+                        callback(posts);
+                    } else {
+                        callback([]);
+                    }
+                }, (error) => {
+                    console.error('Firebase listener error:', error);
+                });
+                
+                return unsubscribe;
+            } catch (error) {
+                console.error('Error subscribing to Firebase posts:', error);
+                return () => {};
+            }
+        }
+
+        async function deletePostFromFirebase(networkId, postId) {
+            try {
+                const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
+                await remove(postRef);
+                console.log('Post deleted from Firebase:', postId);
+            } catch (error) {
+                console.error('Error deleting post:', error);
+            }
+        }
+
+        async function updatePostVotesFirebase(networkId, postId, updates) {
+            try {
+                const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
+                await update(postRef, updates);
+                console.log('Votes updated:', postId);
+            } catch (error) {
+                console.error('Error updating votes:', error);
+            }
+        }
 
         // Detect WiFi network
         async function detectWiFiNetwork() {
@@ -1033,28 +1146,28 @@
                 clearInterval(refreshInterval);
             }
             
-            // Refresh grid every 1 second
-            refreshInterval = setInterval(() => {
-                if (isConnected && gridContent[currentWiFi]) {
-                    // Refresh without resetting state
-                    refreshGridDisplay();
-                }
-            }, 1000);
+            // Clear existing Firebase listener
+            if (firebaseUnsubscribe) {
+                firebaseUnsubscribe();
+            }
+            
+            // Subscribe to real-time updates from Firebase
+            if (isConnected && currentWiFi) {
+                console.log('Subscribing to Firebase posts for network:', currentWiFi);
+                firebaseUnsubscribe = subscribeToFirebasePosts(currentWiFi, (posts) => {
+                    console.log('Posts updated from Firebase:', posts.length);
+                    gridContent[currentWiFi] = posts;
+                    renderGrid();
+                });
+            }
         }
 
         function refreshGridDisplay() {
             if (!isConnected) return;
             
-            // Fetch posts from backend
-            fetch(`${apiUrl}/api/posts/${encodeURIComponent(currentWiFi)}`)
-                .then(res => res.json())
-                .then(data => {
-                    if (data.posts) {
-                        gridContent[currentWiFi] = data.posts;
-                        renderGrid();
-                    }
-                })
-                .catch(err => console.error('Failed to fetch posts:', err));
+            // Firebase listener will handle updates automatically
+            // This function is kept for compatibility but Firebase handles refresh now
+            console.log('Firebase real-time sync active - no manual refresh needed');
         }
 
         function renderGrid() {
@@ -1077,9 +1190,11 @@
                 
                 const box = document.getElementById(`box-${gridPosition}`);
                 if (box) {
-                    if (post.imageData) {
+                    // Check for Firebase Storage URL (photoURL) or legacy base64 (imageData)
+                    if (post.photoURL || post.imageData) {
+                        const imageSource = post.photoURL || post.imageData;
                         const textSection = post.content ? `<div style="position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(to top, rgba(0,0,0,0.8), transparent); padding: 12px; color: #fff; font-size: 12px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; max-height: 60px;">${post.content}</div>` : '';
-                        box.innerHTML = `<div style="width: 100%; height: 100%; background-color: #000; display: flex; align-items: center; justify-content: center; border-radius: 0; overflow: hidden;"><img src="${post.imageData}" style="max-width: 100%; max-height: 100%; object-fit: contain;"></div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0;">${textSection}</div>`;
+                        box.innerHTML = `<div style="width: 100%; height: 100%; background-color: #000; display: flex; align-items: center; justify-content: center; border-radius: 0; overflow: hidden;"><img src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;"></div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0;">${textSection}</div>`;
                         box.style.position = 'relative';
                     } else {
                         box.innerHTML = `<div style="font-size: 13px; color: #fff; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; text-align: left;">${post.content}</div>`;
@@ -1120,6 +1235,12 @@
             if (refreshInterval) {
                 clearInterval(refreshInterval);
                 refreshInterval = null;
+            }
+            
+            // Unsubscribe from Firebase listeners
+            if (firebaseUnsubscribe) {
+                firebaseUnsubscribe();
+                firebaseUnsubscribe = null;
             }
             
             initializeGrid();
@@ -1212,62 +1333,58 @@
                 return;
             }
 
-            // Store image data if it's an image
-            let imageData = null;
-            if (selectedFile && selectedFile.type.startsWith('image')) {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    imageData = e.target.result;
-                    completeUpload(boxIndex, imageData);
+            // Pass File object directly to completeUpload (Firebase will handle it)
+            // selectedFile is already a File object from the input
+            completeUpload(boxIndex, selectedFile);
+        }
+
+        async function completeUpload(boxIndex, imageFile) {
+            const postText = document.getElementById('postText').value;
+            const postId = `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            
+            try {
+                let photoURL = null;
+
+                // Upload photo to Firebase Storage if provided
+                if (imageFile) {
+                    console.log('Uploading photo to Firebase Storage...');
+                    photoURL = await uploadPhotoToFirebase(currentWiFi, postId, imageFile);
+                }
+
+                // Create post data object
+                const postData = {
+                    id: postId,
+                    networkId: currentWiFi,
+                    content: postText,
+                    photoURL: photoURL,
+                    timestamp: new Date().getTime(),
+                    likes: 0,
+                    dislikes: 0,
+                    isUserPost: true
                 };
-                reader.readAsDataURL(selectedFile);
-                return; // Wait for reader to finish
-            } else {
-                completeUpload(boxIndex, null);
+
+                // Save post to Firebase Realtime Database
+                console.log('Saving post to Firebase...');
+                await savePostToFirebase(currentWiFi, postId, postData);
+
+                // Update local grid
+                if (!gridContent[currentWiFi]) {
+                    gridContent[currentWiFi] = [];
+                }
+                gridContent[currentWiFi].push(postData);
+                userPostBox = boxIndex;
+
+                // Refresh grid display
+                renderGrid();
+                closeModal();
+                showNotification('Post published successfully!');
+                
+            } catch (error) {
+                console.error('Failed to upload post:', error);
+                alert('Failed to publish post. Please try again.');
             }
         }
 
-        function completeUpload(boxIndex, imageData) {
-            const postText = document.getElementById('postText').value;
-            
-            // Send post to backend
-            const postData = {
-                networkId: currentWiFi,
-                content: postText,
-                imageData: imageData,
-                timestamp: new Date().getTime()
-            };
-            
-            fetch(`${apiUrl}/api/posts`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(postData)
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.success || data.post) {
-                    // Add to local gridContent
-                    const post = {
-                        id: data.post.id,
-                        boxIndex: boxIndex,
-                        content: postText,
-                        imageData: imageData,
-                        timestamp: data.post.timestamp,
-                        isUserPost: true,
-                        likes: 0,
-                        dislikes: 0
-                    };
-                    gridContent[currentWiFi].push(post);
-                    userPostBox = boxIndex;
-                    initializeGrid();
-                    closeModal();
-                }
-            })
-            .catch(err => {
-                console.error('Failed to upload post:', err);
-                alert('Failed to upload post. Check backend connection.');
-            });
-        }
         // Auto-initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
             console.log('Page loaded, initializing WiFi grid...');
