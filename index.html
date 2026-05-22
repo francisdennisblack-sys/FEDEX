@@ -289,6 +289,66 @@
         .modal .upload-buttons {
             margin-bottom: 0;
         }
+
+        .view-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.9);
+            z-index: 1001;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .view-modal.active {
+            display: flex;
+        }
+
+        .view-modal-content {
+            background-color: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 32px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .view-modal-close {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-left: auto;
+            margin-bottom: 16px;
+        }
+
+        .view-modal-close:hover {
+            color: #fff;
+        }
+
+        .view-content-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .view-content-text {
+            font-size: 16px;
+            line-height: 1.6;
+            word-break: break-word;
+        }
     </style>
 </head>
 
@@ -369,6 +429,14 @@
         </div>
     </div>
 
+    <div class="view-modal" id="viewModal">
+        <div class="view-modal-content">
+            <button class="view-modal-close" onclick="closeViewModal()">×</button>
+            <div class="view-content-icon" id="viewIcon"></div>
+            <div class="view-content-text" id="viewText"></div>
+        </div>
+    </div>
+
     <script>
         const gridSize = 48;
         let isConnected = false;
@@ -391,25 +459,59 @@
                 if (i === 0) {
                     box.innerHTML = '<div style="text-align: center; line-height: 1.2;"><div style="font-size: 32px; margin-bottom: 4px;">+</div><div style="font-size: 11px; color: #999;">Add content to grid</div></div>';
                     box.style.cursor = 'pointer';
+                    box.onclick = () => {
+                        if (isConnected) {
+                            openModal(0);
+                        } else {
+                            alert('Connect to WiFi first');
+                        }
+                    };
+                } else {
+                    box.onclick = (e) => {
+                        // Check if this is a filled box
+                        if (box.classList.contains('filled')) {
+                            openViewModal(i);
+                        } else {
+                            openModal(i);
+                        }
+                    };
                 }
                 
-                // All boxes are clickable
-                box.onclick = () => openModal(i);
                 grid.appendChild(box);
             }
             
             // Load existing content for current WiFi
             if (isConnected && gridContent[currentWiFi]) {
                 gridContent[currentWiFi].forEach(post => {
-                    if (post.boxIndex > 0) {
+                    if (post.boxIndex >= 0) {
                         const box = document.getElementById(`box-${post.boxIndex}`);
                         if (box) {
-                            box.innerHTML = post.icon;
-                            box.classList.add('filled');
+                            if (post.boxIndex === 0) {
+                                box.innerHTML = '<div style="text-align: center; line-height: 1.2;"><div style="font-size: 32px; margin-bottom: 4px;">+</div><div style="font-size: 11px; color: #999;">Add content to grid</div></div>';
+                            } else {
+                                let displayText = post.content ? post.content.substring(0, 30) : '';
+                                if (displayText.length >= 30) displayText += '...';
+                                box.innerHTML = `<div style="text-align: center; font-size: 20px; margin-bottom: 4px;">${post.icon}</div><div style="font-size: 10px; color: #999; overflow: hidden; text-overflow: ellipsis;">${displayText || post.icon}</div>`;
+                                box.classList.add('filled');
+                            }
                         }
                     }
                 });
             }
+        }
+
+        // View modal functions
+        function openViewModal(boxIndex) {
+            const post = gridContent[currentWiFi].find(p => p.boxIndex === boxIndex);
+            if (!post) return;
+
+            document.getElementById('viewIcon').textContent = post.icon;
+            document.getElementById('viewText').textContent = post.content || '(No text)';
+            document.getElementById('viewModal').classList.add('active');
+        }
+
+        function closeViewModal() {
+            document.getElementById('viewModal').classList.remove('active');
         }
 
         // Modal functions
@@ -419,10 +521,12 @@
                 return;
             }
 
-            // Don't allow editing filled boxes
-            const box = document.getElementById(`box-${boxIndex}`);
-            if (box.classList.contains('filled') && boxIndex !== 0) {
-                return;
+            // Don't allow editing filled boxes (except first box)
+            if (boxIndex !== 0) {
+                const box = document.getElementById(`box-${boxIndex}`);
+                if (box.classList.contains('filled')) {
+                    return;
+                }
             }
 
             selectedBoxIndex = boxIndex;
@@ -441,11 +545,15 @@
             selectedFile = null;
         }
 
-        // Click outside modal to close
+        // Click outside modals to close
         document.addEventListener('click', (e) => {
-            const modal = document.getElementById('uploadModal');
-            if (e.target === modal) {
+            const uploadModal = document.getElementById('uploadModal');
+            const viewModal = document.getElementById('viewModal');
+            if (e.target === uploadModal) {
                 closeModal();
+            }
+            if (e.target === viewModal) {
+                closeViewModal();
             }
         });
 
@@ -486,6 +594,7 @@
             currentWiFi = '';
             selectedFile = null;
             closeModal();
+            closeViewModal();
             document.getElementById('wifiStatus').style.display = 'block';
             document.getElementById('connectionInfo').style.display = 'none';
             document.getElementById('wifiInfo').classList.remove('connected');
@@ -565,19 +674,23 @@
                 icon = isVideo ? '🎬' : '📸';
             }
 
-            // Add to grid
-            const box = document.getElementById(`box-${boxIndex}`);
-            box.innerHTML = icon;
-            box.classList.add('filled');
-
             // Store in gridContent for this WiFi network
-            gridContent[currentWiFi].push({
+            const post = {
                 boxIndex: boxIndex,
                 content: postText,
                 file: selectedFile,
                 icon: icon,
                 timestamp: new Date().getTime()
-            });
+            };
+
+            gridContent[currentWiFi].push(post);
+
+            // Update grid display
+            const box = document.getElementById(`box-${boxIndex}`);
+            let displayText = postText ? postText.substring(0, 30) : '';
+            if (displayText.length >= 30) displayText += '...';
+            box.innerHTML = `<div style="text-align: center; font-size: 20px; margin-bottom: 4px;">${icon}</div><div style="font-size: 10px; color: #999; overflow: hidden; text-overflow: ellipsis;">${displayText || icon}</div>`;
+            box.classList.add('filled');
 
             closeModal();
         }
