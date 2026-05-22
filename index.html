@@ -1429,37 +1429,139 @@
             handleFiles(e.target.files);
         });
 
-        // Validate video file (max 20 seconds, max 100MB)
-        async function validateVideo(file) {
+        // Smart video processing: trim to 20s max and compress intelligently
+        async function processVideo(file) {
             return new Promise((resolve) => {
                 const MAX_VIDEO_DURATION = 20; // seconds
                 const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB
+                const QUALITY_LEVELS = [
+                    { name: 'High', videoBitrate: 2500, audioBitrate: 128 },
+                    { name: 'Medium', videoBitrate: 1500, audioBitrate: 96 },
+                    { name: 'Low', videoBitrate: 800, audioBitrate: 64 },
+                    { name: 'Very Low', videoBitrate: 400, audioBitrate: 32 }
+                ];
                 
-                // Check file size
-                if (file.size > MAX_VIDEO_SIZE) {
-                    alert(`Video too large. Maximum size: 100MB (your file: ${(file.size / 1024 / 1024).toFixed(1)}MB)`);
-                    resolve(false);
-                    return;
-                }
-                
-                // Check duration
                 const video = document.createElement('video');
                 video.src = URL.createObjectURL(file);
+                
                 video.onloadedmetadata = () => {
-                    URL.revokeObjectURL(video.src);
-                    if (video.duration > MAX_VIDEO_DURATION) {
-                        alert(`Video too long. Maximum: 20 seconds (your video: ${Math.ceil(video.duration)}s)`);
-                        resolve(false);
-                    } else {
-                        console.log(`Video validated: ${Math.ceil(video.duration)}s, ${(file.size / 1024 / 1024).toFixed(1)}MB`);
-                        resolve(true);
-                    }
+                    const videoDuration = Math.min(video.duration, MAX_VIDEO_DURATION);
+                    console.log(`Video loaded: ${Math.ceil(video.duration)}s duration, will trim to ${Math.ceil(videoDuration)}s`);
+                    
+                    // Try compression at each quality level
+                    let qualityIndex = 0;
+                    
+                    const tryCompress = () => {
+                        if (qualityIndex >= QUALITY_LEVELS.length) {
+                            alert('Unable to compress video enough. Please choose a shorter or smaller video.');
+                            resolve(null);
+                            return;
+                        }
+                        
+                        const quality = QUALITY_LEVELS[qualityIndex];
+                        console.log(`Attempting compression at ${quality.name} quality...`);
+                        
+                        compressVideoAtQuality(video, videoDuration, quality, (processedBlob) => {
+                            if (processedBlob && processedBlob.size <= MAX_VIDEO_SIZE) {
+                                console.log(`✓ Compression successful at ${quality.name} quality: ${(processedBlob.size / 1024 / 1024).toFixed(1)}MB`);
+                                resolve(processedBlob);
+                            } else if (processedBlob) {
+                                console.log(`✗ ${quality.name} quality too large: ${(processedBlob.size / 1024 / 1024).toFixed(1)}MB, trying lower quality...`);
+                                qualityIndex++;
+                                tryCompress();
+                            } else {
+                                qualityIndex++;
+                                tryCompress();
+                            }
+                        });
+                    };
+                    
+                    tryCompress();
                 };
+                
                 video.onerror = () => {
-                    alert('Could not validate video. Make sure it\'s a valid video file.');
-                    resolve(false);
+                    alert('Could not process video. Make sure it\'s a valid video file.');
+                    resolve(null);
                 };
             });
+        }
+        
+        // Compress video at specific quality level
+        function compressVideoAtQuality(videoElement, duration, quality, callback) {
+            const canvas = document.createElement('canvas');
+            const video = videoElement;
+            const ctx = canvas.getContext('2d');
+            
+            // Use lower resolution for lower quality
+            const qualityMultiplier = {
+                'High': 1.0,
+                'Medium': 0.8,
+                'Low': 0.6,
+                'Very Low': 0.4
+            }[quality.name] || 0.6;
+            
+            canvas.width = video.videoWidth * qualityMultiplier;
+            canvas.height = video.videoHeight * qualityMultiplier;
+            
+            const chunks = [];
+            let startTime = null;
+            let frameCount = 0;
+            
+            // MediaRecorder for re-encoding
+            const stream = canvas.captureStream(30); // 30 fps
+            
+            // Try to get audio track if available
+            if (video.currentTime === 0) {
+                video.currentTime = 0;
+            }
+            
+            const mimeType = 'video/webm;codecs=vp8,opus';
+            const options = {
+                mimeType: mimeType,
+                videoBitsPerSecond: quality.videoBitrate * 1000
+            };
+            
+            try {
+                const mediaRecorder = new MediaRecorder(stream, options);
+                
+                mediaRecorder.ondataavailable = (e) => {
+                    chunks.push(e.data);
+                };
+                
+                mediaRecorder.onerror = (e) => {
+                    console.error('MediaRecorder error:', e.error);
+                    callback(null);
+                };
+                
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(chunks, { type: 'video/webm' });
+                    callback(blob);
+                };
+                
+                mediaRecorder.start();
+                startTime = performance.now();
+                
+                // Draw frames from video
+                const drawFrame = () => {
+                    const currentTime = (performance.now() - startTime) / 1000;
+                    
+                    if (currentTime >= duration) {
+                        mediaRecorder.stop();
+                        return;
+                    }
+                    
+                    video.currentTime = currentTime;
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    frameCount++;
+                    
+                    requestAnimationFrame(drawFrame);
+                };
+                
+                drawFrame();
+            } catch (e) {
+                console.error('MediaRecorder not supported:', e);
+                callback(null);
+            }
         }
 
         function handleFiles(files) {
@@ -1472,13 +1574,18 @@
                 const isVideo = file.type.startsWith('video');
                 const isImage = file.type.startsWith('image');
                 
-                // Validate video before accepting
+                // Process video before accepting
                 if (isVideo) {
-                    validateVideo(file).then((isValid) => {
-                        if (isValid) {
-                            selectedFile = file;
-                            const icon = '🎬';
-                            uploadArea.innerHTML = `<div style="text-align: center;"><div class="upload-icon">${icon}</div><div class="upload-text">${file.name.substring(0, 20)}...</div><div style="font-size: 11px; color: #888; margin-top: 4px;">✓ Video validated</div></div>`;
+                    uploadArea.innerHTML = `<div style="text-align: center;"><div class="upload-icon">⏳</div><div class="upload-text">Processing video...</div></div>`;
+                    
+                    processVideo(file).then((processedBlob) => {
+                        if (processedBlob) {
+                            selectedFile = processedBlob;
+                            const originalSize = (file.size / 1024 / 1024).toFixed(1);
+                            const newSize = (processedBlob.size / 1024 / 1024).toFixed(1);
+                            const compression = ((1 - processedBlob.size / file.size) * 100).toFixed(0);
+                            uploadArea.innerHTML = `<div style="text-align: center;"><div class="upload-icon">🎬</div><div class="upload-text">Video Ready</div><div style="font-size: 10px; color: #888; margin-top: 4px;">${newSize}MB (${compression}% compressed)</div></div>`;
+                            console.log(`Video processed and ready: original ${originalSize}MB → ${newSize}MB`);
                         } else {
                             selectedFile = null;
                             uploadArea.innerHTML = '<div class="upload-icon">📸</div><div class="upload-text">Drag photo, video, or post</div>';
