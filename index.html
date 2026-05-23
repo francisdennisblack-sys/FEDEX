@@ -2904,7 +2904,10 @@
             const likes = post.likes || 0;
             const dislikes = post.dislikes || 0;
             
-            // CROWNED, RUNNER-UP, PODIUM BADGES: Top 3 most liked posts locked to positions 1, 2, 3
+            // Get badges for this post to make scoring decisions
+            const badges = calculateBadges(post, allPosts);
+            
+            // CROWN, RUNNER-UP, PODIUM BADGES: Top 3 most liked posts locked to positions 1, 2, 3
             if (allPosts && allPosts.length > 0) {
                 // Get sorted likes array to find top 3
                 const likesArray = [...allPosts.map(p => p.likes || 0)].sort((a, b) => b - a);
@@ -2967,11 +2970,35 @@
             // Final score: weighted combination with strong trending boost
             let score = (engagement * 0.35 + recency * 0.40 + fairness * 0.15) * trendingBoost + (Math.random() * 2);
             
-            // LIKED BADGE BOOST: Posts with more likes than dislikes get a floor to ensure they rank above BALANCED
-            // This applies even to LIKED half-badges and ensures LIKED always beats BALANCED
+            // BADGE HIERARCHY ENFORCEMENT
+            // Priority order: CROWNED/RUNNER-UP/PODIUM (handled above) > TRENDING > SPOTLIGHT > LIKED > MIXED-ONLY > other badges
+            
+            // TRENDING badge boost: ensure trending posts rank well (below top 3 positions)
+            if (badges.includes('trending')) {
+                score = Math.max(score, 750000);
+            }
+            
+            // SPOTLIGHT badge boost: ensure spotlight posts rank below trending but above liked
+            if (badges.includes('spotlight')) {
+                score = Math.max(score, 450000);
+            }
+            
+            // LIKED BADGE: Posts with more likes than dislikes get a floor to ensure they rank above MIXED-ONLY
+            // LIKED posts should appear below top 3 and TRENDING/SPOTLIGHT, but above MIXED-ONLY
             if (likes > dislikes && likes > 0) {
-                // LIKED posts get a minimum floor of 350000, ensuring they always beat BALANCED posts (300000 max)
-                score = Math.max(score, 350000);
+                // Check if this is MIXED-CONTENT only (has media+content but is NOT a LIKED badge post)
+                const hasMedia = post.photoURL || post.imageData;
+                const hasContent = post.content && post.content.trim().length > 0;
+                const hasMixedContent = hasMedia && hasContent;
+                
+                // If this post has LIKED badge, give it higher floor
+                if (badges.includes('liked')) {
+                    // LIKED posts get a minimum floor of 400000, ensuring they beat MIXED-only (250000 max)
+                    score = Math.max(score, 400000);
+                } else if (hasMixedContent && !badges.includes('liked')) {
+                    // MIXED-ONLY posts (no LIKED badge): cap at 250000 to ensure they appear below LIKED
+                    score = Math.min(score, 250000);
+                }
             }
             
             // NEW POST PENALTY: Posts younger than 1 hour but not in top 3 should appear after PODIUM (800000)
