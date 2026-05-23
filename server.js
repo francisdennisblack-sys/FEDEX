@@ -4,6 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const app = express();
 
+// Google Cloud Video Intelligence
+const video = require('@google-cloud/video-intelligence');
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
@@ -209,6 +212,95 @@ app.delete('/api/admin/network/:networkId', (req, res) => {
         res.json({ success: true, message: `Cleared network: ${networkId}` });
     } else {
         res.status(404).json({ error: 'Network not found' });
+    }
+});
+
+// Video Moderation Endpoint
+app.post('/api/moderate-video', async (req, res) => {
+    try {
+        const { videoUrl, postId, networkId } = req.body;
+        
+        console.log('🎥 Starting video moderation:', videoUrl);
+        
+        // Initialize client with service account
+        const client = new video.VideoIntelligenceServiceClient();
+        
+        const request = {
+            inputUri: videoUrl,
+            features: ['EXPLICIT_CONTENT_DETECTION', 'VIOLENCE_DETECTION'],
+            videoContext: {
+                explicitContentDetectionConfig: {
+                    model: 'builtin/default'
+                }
+            }
+        };
+        
+        // Run moderation analysis
+        console.log('📡 Sending to Google Cloud Vision...');
+        const [operation] = await client.annotateVideo(request);
+        console.log('⏳ Waiting for analysis (this may take 30-60 seconds)...');
+        const [response] = await operation.promise();
+        
+        console.log('✅ Analysis complete');
+        
+        // Extract results
+        const annotationResult = response.annotationResults[0] || {};
+        const explicitAnnotation = annotationResult.explicitAnnotation || {};
+        const violenceAnnotations = annotationResult.violenceAnnotations || [];
+        
+        // Check for explicit content
+        let isFlagged = false;
+        let moderationReason = '';
+        let explicitConfidence = 0;
+        let violenceConfidence = 0;
+        
+        // Explicit Content Detection
+        // Likelihood: UNKNOWN=0, VERY_UNLIKELY=1, UNLIKELY=2, POSSIBLE=3, LIKELY=4, VERY_LIKELY=5
+        if (explicitAnnotation.frames && explicitAnnotation.frames.length > 0) {
+            const confidenceValues = explicitAnnotation.frames.map(f => f.pornographyLikelihood || 0);
+            explicitConfidence = Math.max(...confidenceValues);
+            console.log('📊 Explicit content confidence:', explicitConfidence, '(5=VERY_LIKELY, 3=POSSIBLE)');
+            
+            if (explicitConfidence >= 3) {
+                isFlagged = true;
+                moderationReason = 'Explicit/Nudity content detected';
+            }
+        }
+        
+        // Violence Detection
+        if (!isFlagged && violenceAnnotations && violenceAnnotations.length > 0) {
+            const violenceScores = violenceAnnotations.map(v => v.confidence || 0);
+            violenceConfidence = Math.max(...violenceScores);
+            console.log('📊 Violence confidence:', violenceConfidence, '(0.7+ = flagged)');
+            
+            if (violenceConfidence >= 0.7) {
+                isFlagged = true;
+                moderationReason = 'Violence detected';
+            }
+        }
+        
+        console.log(`✅ Moderation complete - Flagged: ${isFlagged}, Reason: ${moderationReason}`);
+        
+        res.json({
+            success: true,
+            isFlagged,
+            moderationReason,
+            explicitConfidence,
+            violenceConfidence,
+            postId,
+            networkId
+        });
+        
+    } catch (error) {
+        console.error('❌ Moderation error:', error.message);
+        console.error('Full error:', error);
+        
+        // Fail-open: allow upload if moderation service is down
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            failOpen: true // Allow upload on error
+        });
     }
 });
 

@@ -1956,6 +1956,61 @@
             }
         }
 
+        // Video Moderation - checks video for nudity and violence
+        async function moderateVideo(videoUrl, postId, networkId) {
+            try {
+                console.log('🎥 Submitting video for moderation:', videoUrl);
+                
+                // Show moderation status
+                const uploadModal = document.getElementById('uploadModal');
+                if (uploadModal) {
+                    const statusMsg = document.createElement('div');
+                    statusMsg.style.cssText = 'text-align: center; color: #888; margin-top: 12px; font-size: 12px;';
+                    statusMsg.textContent = '🔍 Checking video content... (this may take 30-60 seconds)';
+                    uploadModal.appendChild(statusMsg);
+                }
+                
+                const response = await fetch('/api/moderate-video', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ videoUrl, postId, networkId })
+                });
+                
+                const result = await response.json();
+                
+                // Remove status message
+                const uploadModal2 = document.getElementById('uploadModal');
+                if (uploadModal2) {
+                    const statusMsg = uploadModal2.querySelector('div[style*="Checking video"]');
+                    if (statusMsg) statusMsg.remove();
+                }
+                
+                if (result.failOpen) {
+                    console.warn('⚠️ Moderation service unavailable - allowing upload');
+                    return true;
+                }
+                
+                if (result.isFlagged) {
+                    console.log('🚫 Video flagged:', result.moderationReason);
+                    console.log('Explicit confidence:', result.explicitConfidence);
+                    console.log('Violence confidence:', result.violenceConfidence);
+                    
+                    // Delete the post from Firebase
+                    await deletePostFromFirebase(networkId, postId);
+                    alert('❌ Video rejected: ' + result.moderationReason + '\n\nPost has been removed.');
+                    return false;
+                }
+                
+                console.log('✅ Video approved by moderation');
+                return true;
+                
+            } catch (error) {
+                console.error('Moderation error:', error);
+                alert('⚠️ Video moderation check failed. Post upload cancelled.');
+                return false;
+            }
+        }
+
         async function getPostsFromFirebase(networkId) {
             try {
                 const postsRef = ref(database, `networks/${networkId}/posts`);
@@ -4120,6 +4175,24 @@
                         console.error('Photo upload FAILED:', photoError);
                         alert('Photo upload failed: ' + photoError.message);
                         throw photoError;
+                    }
+                    
+                    // If it's a video, run moderation check
+                    if (selectedMediaType === 'video') {
+                        console.log('🎥 Running video moderation...');
+                        const approved = await moderateVideo(photoURL, postId, currentWiFiNetwork);
+                        if (!approved) {
+                            console.log('❌ Video rejected by moderation - cancelling post');
+                            // Re-enable button and reset
+                            isPostingInProgress = false;
+                            const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
+                            if (submitButton) {
+                                submitButton.disabled = false;
+                                submitButton.style.opacity = '1';
+                                submitButton.style.cursor = 'pointer';
+                            }
+                            return;
+                        }
                     }
                 }
 
