@@ -11,6 +11,11 @@ app.use(express.urlencoded({ limit: '50mb' }));
 // Serve static files (index.html and assets)
 app.use(express.static(path.join(__dirname, '.')));
 
+// Explicitly serve index.html for root path
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 // Database file path
 const dbPath = path.join(__dirname, 'wifi_database.json');
 
