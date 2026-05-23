@@ -2073,75 +2073,93 @@
                 
                 const reports = snapshot.val();
                 
-                // Group reports by post ID and find highest score for each post
+                // Create a map: score -> array of {postId, reports}
+                // This groups posts by their score at time of report
+                const postsByScore = {};
                 const reportsByPost = {};
+                
                 Object.entries(reports).forEach(([reportId, report]) => {
                     const postId = report.postId;
+                    const score = report.postScore || 0;
+                    
+                    // Track all reports for each post
                     if (!reportsByPost[postId]) {
-                        reportsByPost[postId] = {
-                            reports: [],
-                            maxScore: report.postScore || 0 // Use score from time of report
+                        reportsByPost[postId] = [];
+                    }
+                    reportsByPost[postId].push(report);
+                    
+                    // Group by score (for position stacking)
+                    if (!postsByScore[score]) {
+                        postsByScore[score] = [];
+                    }
+                    
+                    // Add post to score group (avoid duplicates)
+                    if (!postsByScore[score].some(p => p.postId === postId)) {
+                        postsByScore[score].push({ postId });
+                    }
+                });
+                
+                // Sort scores in descending order (highest scores first = best rankings first)
+                const sortedScores = Object.keys(postsByScore)
+                    .map(Number)
+                    .sort((a, b) => b - a);
+                
+                // Display posts grouped by score (position), highest to lowest
+                sortedScores.forEach(score => {
+                    const postsWithThisScore = postsByScore[score];
+                    
+                    postsWithThisScore.forEach(({ postId }) => {
+                        const post = (gridContent[currentUserId] || []).find(p => p.id === postId);
+                        if (!post) return;
+                        
+                        const postReports = reportsByPost[postId] || [];
+                        
+                        const postDiv = document.createElement('div');
+                        postDiv.style.cssText = 'position: relative; cursor: pointer; border: 2px solid transparent;';
+                        
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.style.cssText = 'position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; cursor: pointer; z-index: 10;';
+                        checkbox.onchange = (e) => {
+                            if (e.target.checked) {
+                                selectedReportedPosts.add(postId);
+                                postDiv.style.borderColor = '#4ade80';
+                            } else {
+                                selectedReportedPosts.delete(postId);
+                                postDiv.style.borderColor = 'transparent';
+                            }
                         };
-                    }
-                    reportsByPost[postId].reports.push(report);
-                    // Keep track of the highest score (best ranking at time of any report)
-                    if (report.postScore && report.postScore > reportsByPost[postId].maxScore) {
-                        reportsByPost[postId].maxScore = report.postScore;
-                    }
-                });
-                
-                // Sort posts by their score at time of report (highest scores = highest ranking)
-                const sortedReportedPosts = Object.entries(reportsByPost)
-                    .sort(([, a], [, b]) => b.maxScore - a.maxScore)
-                    .map(([postId, data]) => ({ postId, ...data }));
-                
-                // Display each reported post with checkbox, sorted by report-time score
-                sortedReportedPosts.forEach(({ postId, reports: postReports, maxScore }) => {
-                    const post = (gridContent[currentUserId] || []).find(p => p.id === postId);
-                    if (!post) return;
-                    
-                    const postDiv = document.createElement('div');
-                    postDiv.style.cssText = 'position: relative; cursor: pointer; border: 2px solid transparent;';
-                    
-                    const checkbox = document.createElement('input');
-                    checkbox.type = 'checkbox';
-                    checkbox.style.cssText = 'position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; cursor: pointer; z-index: 10;';
-                    checkbox.onchange = (e) => {
-                        if (e.target.checked) {
-                            selectedReportedPosts.add(postId);
-                            postDiv.style.borderColor = '#4ade80';
+                        
+                        const contentDiv = document.createElement('div');
+                        contentDiv.style.cssText = 'width: 100%; height: 100%; background-color: #1a1a1a; border-radius: 6px; overflow: hidden;';
+                        
+                        // Show image if available
+                        if (post.photoURL || post.imageData) {
+                            const img = document.createElement('img');
+                            img.src = post.photoURL || post.imageData;
+                            img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
+                            contentDiv.appendChild(img);
                         } else {
-                            selectedReportedPosts.delete(postId);
-                            postDiv.style.borderColor = 'transparent';
+                            contentDiv.innerHTML = `<div style="padding: 8px; font-size: 11px; color: #fff; overflow: hidden; text-overflow: ellipsis;">${post.content?.substring(0, 30)}</div>`;
                         }
-                    };
-                    
-                    const contentDiv = document.createElement('div');
-                    contentDiv.style.cssText = 'width: 100%; height: 100%; background-color: #1a1a1a; border-radius: 6px; overflow: hidden;';
-                    
-                    // Show image if available
-                    if (post.photoURL || post.imageData) {
-                        const img = document.createElement('img');
-                        img.src = post.photoURL || post.imageData;
-                        img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
-                        contentDiv.appendChild(img);
-                    } else {
-                        contentDiv.innerHTML = `<div style="padding: 8px; font-size: 11px; color: #fff; overflow: hidden; text-overflow: ellipsis;">${post.content?.substring(0, 30)}</div>`;
-                    }
-                    
-                    const reportCountDiv = document.createElement('div');
-                    reportCountDiv.style.cssText = 'position: absolute; bottom: 4px; right: 4px; background-color: #f44336; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;';
-                    reportCountDiv.textContent = `${postReports.length}`;
-                    
-                    // Add tooltip showing report reasons on hover
-                    const reasons = postReports.map(r => r.reason).join(', ');
-                    postDiv.title = `Report Reasons: ${reasons}`;
-                    
-                    postDiv.appendChild(checkbox);
-                    postDiv.appendChild(contentDiv);
-                    postDiv.appendChild(reportCountDiv);
-                    reportsList.appendChild(postDiv);
+                        
+                        const reportCountDiv = document.createElement('div');
+                        reportCountDiv.style.cssText = 'position: absolute; bottom: 4px; right: 4px; background-color: #f44336; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;';
+                        reportCountDiv.textContent = `${postReports.length}`;
+                        
+                        // Add tooltip showing report reasons and score on hover
+                        const reasons = postReports.map(r => r.reason).join(', ');
+                        const scoreLabel = score > 0 ? ` (Score: ${Math.round(score)})` : ' (No score)';
+                        postDiv.title = `Reports: ${reasons}${scoreLabel}`;
+                        
+                        postDiv.appendChild(checkbox);
+                        postDiv.appendChild(contentDiv);
+                        postDiv.appendChild(reportCountDiv);
+                        reportsList.appendChild(postDiv);
+                    });
                 });
+                
+                console.log(`✅ Loaded ${Object.keys(reportsByPost).length} reported posts grouped by position`);
                 
             } catch (error) {
                 console.error('Error loading reported posts:', error);
@@ -2492,14 +2510,17 @@
 
         function submitReport(reason) {
             try {
-                if (!selectedPostId) return;
+                if (!selectedPostId) {
+                    console.warn('⚠️ No post selected for reporting');
+                    return;
+                }
                 
                 // Get the reported post
                 const posts = gridContent[currentUserId] || [];
                 const reportedPost = posts.find(p => p.id === selectedPostId);
                 
                 if (!reportedPost) {
-                    console.error('Post not found for reporting');
+                    console.error('❌ Post not found for reporting');
                     return;
                 }
                 
@@ -2507,6 +2528,7 @@
                 let postScore = 0;
                 try {
                     postScore = calculatePostScore(reportedPost, posts);
+                    console.log(`📊 Post score calculated: ${Math.round(postScore)}`);
                 } catch (scoreError) {
                     console.error('Error calculating post score:', scoreError);
                     postScore = 0; // Fallback to 0 if score calculation fails
@@ -2524,14 +2546,14 @@
                     reportedBy: currentUserId, // Device ID of reporter
                     postScore: postScore // Save score at time of report for sorting
                 }).then(() => {
-                    console.log('Post reported successfully');
+                    console.log(`✅ Report submitted successfully - Reason: ${reason}, Score: ${Math.round(postScore)}`);
                     closeReportModal();
                     closeViewModal();
                 }).catch(error => {
-                    console.error('Failed to report post:', error);
+                    console.error('❌ Failed to report post:', error);
                 });
             } catch (error) {
-                console.error('Error in submitReport:', error);
+                console.error('❌ Error in submitReport:', error);
             }
         }
 
