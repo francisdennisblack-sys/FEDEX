@@ -495,6 +495,83 @@
             text-shadow: 0 0 4px rgba(139, 92, 246, 0.5);
         }
 
+        /* SPOTLIGHT badge - half badge on right side for rotating unpopular posts */
+        .grid-box.badge-spotlight {
+            border-top: 2px solid #ec4899;
+            position: relative;
+        }
+
+        .grid-box.badge-spotlight::before {
+            content: '💥 SPOTLIGHT';
+            position: absolute;
+            top: 4px;
+            right: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #ec4899;
+            letter-spacing: 0.5px;
+            text-shadow: 0 0 4px rgba(236, 72, 153, 0.5);
+        }
+
+        /* Combinations with SPOTLIGHT badge on right half */
+        .grid-box.badge-hot.badge-spotlight {
+            border-top: 2px solid transparent;
+            border-image: linear-gradient(to right, #ef4444 0%, #ef4444 50%, #ec4899 50%, #ec4899 100%) 1;
+        }
+
+        .grid-box.badge-hot.badge-spotlight::before {
+            content: '🔥 HOT';
+            position: absolute;
+            top: 4px;
+            left: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #ef4444;
+            letter-spacing: 0.5px;
+            text-shadow: 0 0 4px rgba(239, 68, 68, 0.5);
+        }
+
+        .grid-box.badge-hot.badge-spotlight::after {
+            content: '💥 SPOTLIGHT';
+            position: absolute;
+            top: 4px;
+            right: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #ec4899;
+            letter-spacing: 0.5px;
+            text-shadow: 0 0 4px rgba(236, 72, 153, 0.5);
+        }
+
+        .grid-box.badge-new.badge-spotlight {
+            border-top: 2px solid transparent;
+            border-image: linear-gradient(to right, #60a5fa 0%, #60a5fa 50%, #ec4899 50%, #ec4899 100%) 1;
+        }
+
+        .grid-box.badge-new.badge-spotlight::before {
+            content: 'NEW';
+            position: absolute;
+            top: 4px;
+            left: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #60a5fa;
+            letter-spacing: 1px;
+            text-shadow: 0 0 4px rgba(96, 165, 250, 0.5);
+        }
+
+        .grid-box.badge-new.badge-spotlight::after {
+            content: '💥 SPOTLIGHT';
+            position: absolute;
+            top: 4px;
+            right: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #ec4899;
+            letter-spacing: 0.5px;
+            text-shadow: 0 0 4px rgba(236, 72, 153, 0.5);
+        }
+
         .upload-panel {
             width: 280px;
             background-color: #1a1a1a;
@@ -1325,6 +1402,11 @@
                 // Initialize online user tracking
                 initializeOnlineTracking();
                 
+                // Start spotlight rotation every 5 minutes (300000 ms)
+                if (spotlightInterval) clearInterval(spotlightInterval);
+                rotateSpotlight(); // Show first spotlight immediately
+                spotlightInterval = setInterval(rotateSpotlight, 5 * 60 * 1000);
+                
             } else {
                 // User is signed out - sign in anonymously
                 console.log('🔐 Signing in anonymously...');
@@ -1350,6 +1432,8 @@
         let refreshInterval = null;
         let firebaseUnsubscribe = null;
         let isPostingInProgress = false; // Prevent duplicate submissions
+        let spotlightPostId = null; // Current post being spotlighted
+        let spotlightInterval = null; // Spotlight rotation timer
         
         // Determine API URL - only used for WiFi network detection
         // All photos and posts are stored in Firebase (Realtime Database + Cloud Storage)
@@ -2358,6 +2442,13 @@
             const likes = post.likes || 0;
             const dislikes = post.dislikes || 0;
             
+            // DISLIKED PENALTY: If post has ANY dislikes, send it to the very bottom
+            if (dislikes > 0) {
+                // Return a very negative score that pushes it below everything
+                // Include some variance based on number of dislikes so worst posts sink fastest
+                return -1000 - (dislikes * 100);
+            }
+            
             // Engagement score: likes minus dislikes heavily penalized
             const engagement = likes - (dislikes * 3);
             
@@ -2369,16 +2460,13 @@
             // Fairness boost: tiny random variance to prevent same posts dominating
             const fairness = Math.random() * 5;
             
-            // Dislike penalty: posts with dislikes get heavily penalized to sink them
-            const dislikePenalty = dislikes > 0 ? Math.pow(0.5, dislikes) : 1;
-            
             // Trending boost: posts with highest engagement get MAJOR boost to stay at top
             // This ensures trending posts appear near the top of the feed
             const isTrending = post.likes > 5;
             const trendingBoost = isTrending ? 2.5 : 1;
             
-            // Final score: weighted combination with strong trending boost and dislike penalty
-            const score = ((engagement * 0.35 + recency * 0.40 + fairness * 0.15) * trendingBoost + (Math.random() * 2)) * dislikePenalty;
+            // Final score: weighted combination with strong trending boost
+            const score = (engagement * 0.35 + recency * 0.40 + fairness * 0.15) * trendingBoost + (Math.random() * 2);
             
             return score;
         }
@@ -2409,7 +2497,7 @@
                     box.classList.remove('filled');
                     box.removeAttribute('data-post-id');
                     // Remove all badge classes
-                    box.classList.remove('badge-new', 'badge-hot', 'badge-rising', 'badge-trending', 'badge-controversial', 'badge-verified', 'badge-disliked', 'badge-media-content');
+                    box.classList.remove('badge-new', 'badge-hot', 'badge-rising', 'badge-trending', 'badge-controversial', 'badge-verified', 'badge-disliked', 'badge-media-content', 'badge-spotlight');
                 }
             }
             
@@ -2455,6 +2543,21 @@
                 }
                 gridPosition++;
             });
+        }
+
+        function rotateSpotlight() {
+            // Find all disliked posts (has dislikes)
+            const allPosts = gridContent[currentUserId] || [];
+            const dislikedPosts = allPosts.filter(p => (p.dislikes || 0) > 0);
+            
+            if (dislikedPosts.length > 0) {
+                // Pick a random disliked post
+                const randomPost = dislikedPosts[Math.floor(Math.random() * dislikedPosts.length)];
+                spotlightPostId = randomPost.id;
+                
+                // Re-render to show new spotlight
+                renderGrid();
+            }
         }
 
         function calculateBadges(post, allPosts) {
@@ -2517,6 +2620,11 @@
             // Add MIXED badge if post has both media and content
             if (hasMixedContent) {
                 badges.push('media-content');
+            }
+            
+            // Add SPOTLIGHT badge if this is the currently spotlighted post
+            if (post.id === spotlightPostId) {
+                badges.push('spotlight');
             }
             
             return badges;
