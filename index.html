@@ -917,6 +917,7 @@
         console.log('  auth:', auth);
 
         let currentUserId = null; // Will store Firebase UID
+        let currentWiFiNetwork = null; // Will store WiFi network identifier
 
         // Set up anonymous authentication
         onAuthStateChanged(auth, (user) => {
@@ -927,6 +928,22 @@
                 console.log('✅ User authenticated anonymously');
                 console.log('  UID:', currentUserId);
                 
+                // Detect WiFi network for post grouping
+                detectWiFiNetwork().then(wifiNetwork => {
+                    currentWiFiNetwork = wifiNetwork;
+                    console.log('📶 WiFi Network:', currentWiFiNetwork);
+                    
+                    // Initialize grid and Firebase subscription with WiFi network
+                    initializeGrid();
+                    subscribeToFirebasePostsWithReconnect();
+                }).catch(error => {
+                    console.error('Error detecting WiFi:', error);
+                    // Fall back to default network
+                    currentWiFiNetwork = 'default-network';
+                    initializeGrid();
+                    subscribeToFirebasePostsWithReconnect();
+                });
+                
                 // Create user profile in database
                 const userRef = ref(database, `users/${currentUserId}`);
                 set(userRef, {
@@ -935,10 +952,6 @@
                     lastSeen: new Date().getTime(),
                     isAnonymous: true
                 }, { merge: true });
-                
-                // Initialize grid with user's posts
-                initializeGrid();
-                subscribeToFirebasePostsWithReconnect();
                 
                 // Initialize online user tracking
                 initializeOnlineTracking();
@@ -1054,37 +1067,30 @@
 
         function subscribeToFirebasePosts(networkId, callback) {
             try {
-                // Listen to ALL networks globally to show posts from all users
-                const networksRef = ref(database, 'networks');
+                // Listen to posts for the current WiFi network only
+                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
+                console.log('📡 Subscribing to posts in network:', currentWiFiNetwork);
                 
-                const unsubscribe = onValue(networksRef, (snapshot) => {
+                const unsubscribe = onValue(postsRef, (snapshot) => {
                     const allPosts = [];
                     
                     if (snapshot.exists()) {
-                        const networksObj = snapshot.val();
-                        console.log('📡 Networks snapshot:', Object.keys(networksObj).length, 'networks found');
+                        const postsObj = snapshot.val();
+                        console.log('📡 Network snapshot - posts count:', Object.keys(postsObj).length);
                         
-                        // Iterate through all networks (users)
-                        Object.keys(networksObj).forEach(uid => {
-                            const userPosts = networksObj[uid].posts;
-                            if (userPosts) {
-                                const postsCount = Object.keys(userPosts).length;
-                                console.log(`  📍 Network ${uid.substring(0, 8)}...: ${postsCount} posts`);
-                                
-                                // Add each post with the uid it came from
-                                Object.keys(userPosts).forEach(postId => {
-                                    const post = userPosts[postId];
-                                    allPosts.push({
-                                        id: postId,
-                                        ...post,
-                                        networkId: uid // Ensure networkId is set to the uid
-                                    });
-                                });
-                            }
+                        // Convert posts object to array
+                        Object.keys(postsObj).forEach(postId => {
+                            const post = postsObj[postId];
+                            allPosts.push({
+                                id: postId,
+                                ...post
+                            });
                         });
+                    } else {
+                        console.log('📡 No posts in network yet');
                     }
                     
-                    console.log('📊 Total posts from all networks:', allPosts.length);
+                    console.log('📊 Total posts in WiFi network:', allPosts.length);
                     callback(allPosts);
                 }, (error) => {
                     console.error('Firebase listener error:', error);
@@ -1120,25 +1126,29 @@
         // Detect WiFi network
         async function detectWiFiNetwork() {
             try {
-                // Generate or retrieve unique device ID for this browser/device
-                let deviceId = localStorage.getItem('wifiGridDeviceId');
+                // For cross-device testing on same "WiFi", use a shared network identifier
+                // In production, this could use actual WiFi SSID detection
                 
-                if (!deviceId) {
-                    // First time visitor - generate new device ID
-                    deviceId = generateDeviceId();
-                    localStorage.setItem('wifiGridDeviceId', deviceId);
-                    console.log('New device ID generated:', deviceId);
-                } else {
-                    console.log('Existing device ID retrieved:', deviceId);
+                // Check if there's a network ID in URL params (for manual testing)
+                const urlParams = new URLSearchParams(window.location.search);
+                const networkFromURL = urlParams.get('network');
+                
+                if (networkFromURL) {
+                    console.log('Using network from URL:', networkFromURL);
+                    return networkFromURL;
                 }
                 
-                // Return device ID as network identifier
-                // This groups posts by device/browser, not actual WiFi
-                console.log('Network ID assigned:', deviceId);
-                return deviceId;
+                // Default: use a fixed identifier for testing (all devices will share posts)
+                // In production, you could:
+                // 1. Use actual WiFi SSID (if available)
+                // 2. Use a room/space ID from your app
+                // 3. Use geolocation to group nearby devices
+                const defaultNetwork = 'shared-network-1';
+                console.log('Using default shared network:', defaultNetwork);
+                return defaultNetwork;
             } catch (error) {
-                console.error('Error generating network ID:', error);
-                throw new Error('Failed to initialize network. Please refresh the page.');
+                console.error('Error detecting network:', error);
+                return 'default-network';
             }
         }
 
@@ -2452,8 +2462,9 @@
                 // Save post to Firebase Realtime Database ONLY
                 console.log('🔥 ABOUT TO SAVE POST TO FIREBASE');
                 console.log('  currentUserId:', currentUserId);
+                console.log('  currentWiFiNetwork:', currentWiFiNetwork);
                 console.log('  postId:', postId);
-                await savePostToFirebase(currentUserId, postId, postData);
+                await savePostToFirebase(currentWiFiNetwork, postId, postData);
 
                 // DO NOT update local grid - let Firebase listener handle it
                 // The listener will fire when post appears in Firebase
