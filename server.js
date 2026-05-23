@@ -8,6 +8,9 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
 
+// Serve static files (index.html and assets)
+app.use(express.static(path.join(__dirname, '.')));
+
 // Database file path
 const dbPath = path.join(__dirname, 'wifi_database.json');
 
@@ -202,6 +205,11 @@ app.delete('/api/admin/network/:networkId', (req, res) => {
     } else {
         res.status(404).json({ error: 'Network not found' });
     }
+});
+
+// Serve index.html for any non-API routes (SPA fallback)
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 const PORT = process.env.PORT || 5001;
