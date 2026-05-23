@@ -2121,18 +2121,30 @@
                 
                 const reports = snapshot.val();
                 
-                // Group reports by post ID
+                // Group reports by post ID and find highest score for each post
                 const reportsByPost = {};
                 Object.entries(reports).forEach(([reportId, report]) => {
                     const postId = report.postId;
                     if (!reportsByPost[postId]) {
-                        reportsByPost[postId] = [];
+                        reportsByPost[postId] = {
+                            reports: [],
+                            maxScore: report.postScore || 0 // Use score from time of report
+                        };
                     }
-                    reportsByPost[postId].push(report);
+                    reportsByPost[postId].reports.push(report);
+                    // Keep track of the highest score (best ranking at time of any report)
+                    if (report.postScore && report.postScore > reportsByPost[postId].maxScore) {
+                        reportsByPost[postId].maxScore = report.postScore;
+                    }
                 });
                 
-                // Display each reported post with checkbox (50% smaller)
-                Object.entries(reportsByPost).forEach(([postId, postReports]) => {
+                // Sort posts by their score at time of report (highest scores = highest ranking)
+                const sortedReportedPosts = Object.entries(reportsByPost)
+                    .sort(([, a], [, b]) => b.maxScore - a.maxScore)
+                    .map(([postId, data]) => ({ postId, ...data }));
+                
+                // Display each reported post with checkbox, sorted by report-time score
+                sortedReportedPosts.forEach(({ postId, reports: postReports, maxScore }) => {
                     const post = (gridContent[currentUserId] || []).find(p => p.id === postId);
                     if (!post) return;
                     
@@ -2578,7 +2590,17 @@
         function submitReport(reason) {
             if (!selectedPostId) return;
             
-            // Save report to Firebase
+            // Get the reported post to calculate its current score
+            const reportedPost = (gridContent[currentUserId] || []).find(p => p.id === selectedPostId);
+            if (!reportedPost) {
+                console.error('Post not found');
+                return;
+            }
+            
+            // Calculate the post's current score/tier (determines ranking on admin page)
+            const postScore = calculatePostScore(reportedPost, gridContent[currentUserId] || []);
+            
+            // Save report to Firebase with the post's current score
             const reportId = 'report-' + new Date().getTime();
             const reportsRef = ref(database, `reports/${reportId}`);
             
@@ -2587,21 +2609,14 @@
                 networkId: currentUserId,
                 reason: reason,
                 reportedAt: new Date().getTime(),
-                reportedBy: currentUserId // Device ID of reporter
+                reportedBy: currentUserId, // Device ID of reporter
+                postScore: postScore // Save score at time of report for sorting
             }).then(() => {
                 console.log('Post reported successfully');
                 closeReportModal();
                 closeViewModal();
-                
-                // Open admin page to show the reported post
-                document.getElementById('adminPage').classList.add('active');
-                switchModTab('reported');
-                
-                // Show success message
-                alert('✅ Post reported successfully. Opening admin dashboard...');
             }).catch(error => {
                 console.error('Failed to report post:', error);
-                alert('❌ Failed to report post. Please try again.');
             });
         }
 
