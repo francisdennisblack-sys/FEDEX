@@ -4,8 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const app = express();
 
-// Google Cloud Video Intelligence
+// Google Cloud Video Intelligence (for videos)
 const video = require('@google-cloud/video-intelligence');
+
+// Google Cloud Vision (for images/photos)
+const vision = require('@google-cloud/vision');
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -293,6 +296,82 @@ app.post('/api/moderate-video', async (req, res) => {
         
     } catch (error) {
         console.error('❌ Moderation error:', error.message);
+        console.error('Full error:', error);
+        
+        // Fail-open: allow upload if moderation service is down
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            failOpen: true // Allow upload on error
+        });
+    }
+});
+
+// Photo/Image Moderation Endpoint
+app.post('/api/moderate-photo', async (req, res) => {
+    try {
+        const { imageUrl, postId, networkId } = req.body;
+        
+        console.log('📸 Starting photo moderation:', imageUrl);
+        
+        // Initialize Vision client
+        const visionClient = new vision.ImageAnnotatorClient();
+        
+        // Request safe search detection (explicit content, violence, etc.)
+        const request = {
+            image: {
+                source: { imageUri: imageUrl }
+            }
+        };
+        
+        console.log('📡 Sending to Google Cloud Vision...');
+        const [result] = await visionClient.safeSearchDetection(request);
+        const safeSearchResult = result.safeSearchAnnotation;
+        
+        console.log('✅ Analysis complete');
+        
+        let isFlagged = false;
+        let moderationReason = '';
+        let confidenceDetails = {
+            adult: safeSearchResult.adult || 'UNKNOWN',
+            violence: safeSearchResult.violence || 'UNKNOWN',
+            racy: safeSearchResult.racy || 'UNKNOWN'
+        };
+        
+        // Likelihood scale: UNKNOWN=0, VERY_UNLIKELY=1, UNLIKELY=2, POSSIBLE=3, LIKELY=4, VERY_LIKELY=5
+        // Flag if adult (explicit/nudity) or violence is POSSIBLE or higher
+        
+        if (safeSearchResult.adult >= 3) { // POSSIBLE or higher
+            isFlagged = true;
+            moderationReason = 'Explicit/Nudity content detected in photo';
+            console.log('🚫 Flagged for adult content:', safeSearchResult.adult);
+        }
+        
+        if (!isFlagged && safeSearchResult.violence >= 3) { // POSSIBLE or higher
+            isFlagged = true;
+            moderationReason = 'Violence detected in photo';
+            console.log('🚫 Flagged for violence:', safeSearchResult.violence);
+        }
+        
+        if (!isFlagged && safeSearchResult.racy >= 4) { // LIKELY or VERY_LIKELY
+            isFlagged = true;
+            moderationReason = 'Racy/Suggestive content detected in photo';
+            console.log('🚫 Flagged for racy content:', safeSearchResult.racy);
+        }
+        
+        console.log(`✅ Photo moderation complete - Flagged: ${isFlagged}, Reason: ${moderationReason}`);
+        
+        res.json({
+            success: true,
+            isFlagged,
+            moderationReason,
+            confidenceDetails,
+            postId,
+            networkId
+        });
+        
+    } catch (error) {
+        console.error('❌ Photo moderation error:', error.message);
         console.error('Full error:', error);
         
         // Fail-open: allow upload if moderation service is down
