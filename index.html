@@ -2950,108 +2950,56 @@
             const postAge = now - (post.timestamp || 0);
             const likes = post.likes || 0;
             const dislikes = post.dislikes || 0;
+            const ONE_HOUR = 60 * 60 * 1000;
             
-            // Get badges for this post to make scoring decisions
-            const badges = calculateBadges(post, allPosts);
+            // Recency and fairness for tie-breaking within tiers
+            const recency = Math.max(0, 100 - Math.log(Math.max(1, postAge / ONE_HOUR)) * 20);
+            const fairness = Math.random() * 5;
             
-            // CROWN, RUNNER-UP, PODIUM BADGES: Top 3 posts by TOTAL LIKES (highest like count)
+            // TIER 1: TOP 3 POSITIONS (CROWNED, RUNNER-UP, PODIUM)
             if (allPosts && allPosts.length > 0) {
-                // Get sorted likes array to find top 3
                 const likesArray = [...allPosts.map(p => p.likes || 0)].sort((a, b) => b - a);
-                const topLikes = [...new Set(likesArray)].slice(0, 3); // Unique top 3 like counts
+                const topLikes = [...new Set(likesArray)].slice(0, 3);
                 
-                // CROWNED: Most total likes (position 1)
+                // Position 1: Most liked
                 if (topLikes[0] && likes === topLikes[0] && likes > 0 && post.id !== spotlightPostId) {
                     return 1000000 + likes * 1000;
                 }
                 
-                // RUNNER-UP: 2nd most total likes (position 2)
+                // Position 2: 2nd most liked
                 if (topLikes[1] && likes === topLikes[1] && likes > 0) {
                     return 900000 + likes * 1000;
                 }
                 
-                // PODIUM: 3rd most total likes (position 3)
+                // Position 3: 3rd most liked
                 if (topLikes[2] && likes === topLikes[2] && likes > 0) {
                     return 800000 + likes * 1000;
                 }
             }
             
-            // DISLIKED PENALTY: If post has more dislikes than likes, send it to the ABSOLUTE bottom
-            if (dislikes > likes) {
-                // DISLIKED posts: Give them a visible score at the bottom
-                // They appear in grid after other posts but are still visible
-                const ONE_HOUR = 60 * 60 * 1000;
-                const recency = Math.max(0, 100 - Math.log(Math.max(1, postAge / ONE_HOUR)) * 20);
-                const fairness = Math.random() * 5;
-                // Give DISLIKED posts a score between 150000-160000 to keep them visible but at bottom
-                let score = 150000 + (recency * 0.60 + fairness * 0.40) * 100;
-                return Math.min(score, 160000);
-            }
-            
-            // BALANCED BADGE PENALTY: Posts with equal likes and dislikes should appear lower than LIKED posts
-            // Even if balanced is a half-badge or liked is a half-badge, BALANCED always ranks lower
-            if (likes === dislikes && likes > 0) {
-                // Balanced posts get a hard ceiling at 300000 to guarantee they're below any LIKED post
-                const engagement = likes - (dislikes * 3);
-                const ONE_HOUR = 60 * 60 * 1000;
-                const recency = Math.max(0, 100 - Math.log(Math.max(1, postAge / ONE_HOUR)) * 20);
-                const fairness = Math.random() * 5;
-                const isTrending = likes > 5;
-                const trendingBoost = isTrending ? 2.5 : 1;
-                let score = (engagement * 0.35 + recency * 0.40 + fairness * 0.15) * trendingBoost + (Math.random() * 2);
-                // Cap balanced posts at 300000 - this ensures they ALWAYS appear below LIKED posts
-                return Math.min(score, 300000);
-            }
-            
-            // Recency decay: newer posts rank higher, but logarithmically
-            // Posts from 1 hour ago: high score, posts from 24 hours ago: much lower
-            const ONE_HOUR = 60 * 60 * 1000;
-            const recency = Math.max(0, 100 - Math.log(Math.max(1, postAge / ONE_HOUR)) * 20);
-            
-            // Fairness boost: tiny random variance to prevent same posts dominating
-            const fairness = Math.random() * 5;
-            
-            // Final score: based on recency and fairness only (no engagement ratio)
-            let score = (recency * 0.60 + fairness * 0.40) + (Math.random() * 2);
-            
-            // BADGE HIERARCHY ENFORCEMENT
-            // Priority order: CROWNED/RUNNER-UP/PODIUM (handled above) > TRENDING > SPOTLIGHT > LIKED > MIXED-ONLY > other badges
-            
-            // TRENDING badge boost: ensure trending posts rank well (below top 3 positions)
-            if (badges.includes('trending')) {
-                score = Math.max(score, 750000);
-            }
-            
-            // SPOTLIGHT badge boost: ensure spotlight posts rank below trending but above liked
-            if (badges.includes('spotlight')) {
-                score = Math.max(score, 450000);
-            }
-            
-            // LIKED BADGE: Posts with more likes than dislikes get a floor to ensure they rank above MIXED-ONLY
-            // LIKED posts should appear below top 3 and TRENDING/SPOTLIGHT, but above MIXED-ONLY
+            // TIER 2: LIKED POSTS (more likes than dislikes, but not in top 3)
             if (likes > dislikes && likes > 0) {
-                // Check if this is MIXED-CONTENT only (has media+content but is NOT a LIKED badge post)
-                const hasMedia = post.photoURL || post.imageData;
-                const hasContent = post.content && post.content.trim().length > 0;
-                const hasMixedContent = hasMedia && hasContent;
-                
-                // If this post has LIKED badge, give it higher floor
-                if (badges.includes('liked')) {
-                    // LIKED posts get a minimum floor of 400000, ensuring they beat MIXED-only (250000 max)
-                    score = Math.max(score, 400000);
-                } else if (hasMixedContent && !badges.includes('liked')) {
-                    // MIXED-ONLY posts (no LIKED badge): cap at 250000 to ensure they appear below LIKED
-                    score = Math.min(score, 250000);
-                }
+                // LIKED posts score: 500000-599999
+                let score = 500000 + (recency * 0.60 + fairness * 0.40) * 1000;
+                return Math.min(score, 599999);
             }
             
-            // NEW POST PENALTY: Posts younger than 1 hour but not in top 3 should appear after PODIUM (800000)
-            if (postAge < ONE_HOUR && score > 500000) {
-                // Cap NEW posts at 500000 so they appear after PODIUM (800000) if not top 3
-                score = Math.min(score, 500000);
+            // TIER 3: NEUTRAL/NO BADGE POSTS (equal votes or very new posts)
+            if (likes === dislikes || (likes === 0 && dislikes === 0)) {
+                // Neutral posts score: 300000-399999
+                let score = 300000 + (recency * 0.60 + fairness * 0.40) * 1000;
+                return Math.min(score, 399999);
             }
             
-            return score;
+            // TIER 4: DISLIKED POSTS (more dislikes than likes) - BOTTOM
+            if (dislikes > likes) {
+                // DISLIKED posts score: 100000-199999 (visible but at bottom)
+                let score = 100000 + (recency * 0.60 + fairness * 0.40) * 1000;
+                return Math.min(score, 199999);
+            }
+            
+            // Default fallback (shouldn't reach here)
+            return 300000 + Math.random() * 1000;
         }
 
         function renderGrid() {
