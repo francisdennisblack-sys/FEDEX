@@ -1760,6 +1760,9 @@
                     currentWiFiNetwork = wifiNetwork;
                     console.log('📶 WiFi Network:', currentWiFiNetwork);
                     
+                    // Load user's previous votes from Firebase
+                    loadUserVotesFromFirebase(currentUserId);
+                    
                     // Initialize grid and Firebase subscription with WiFi network
                     initializeGrid();
                     subscribeToFirebasePostsWithReconnect();
@@ -1773,6 +1776,10 @@
                     console.error('Error detecting WiFi:', error);
                     // Fall back to default network
                     currentWiFiNetwork = 'default-network';
+                    
+                    // Load user's previous votes from Firebase
+                    loadUserVotesFromFirebase(currentUserId);
+                    
                     initializeGrid();
                     subscribeToFirebasePostsWithReconnect();
                     
@@ -1957,6 +1964,46 @@
                 console.log('Post deleted from Firebase:', postId);
             } catch (error) {
                 console.error('Error deleting post:', error);
+            }
+        }
+
+        // Load user votes from Firebase
+        async function loadUserVotesFromFirebase(userId) {
+            try {
+                const votesRef = ref(database, `user-votes/${userId}`);
+                const snapshot = await get(votesRef);
+                
+                if (snapshot.exists()) {
+                    const votes = snapshot.val();
+                    userVotes = votes;
+                    console.log(`✅ Loaded ${Object.keys(votes).length} user votes from Firebase`);
+                } else {
+                    userVotes = {};
+                    console.log('📝 No previous votes found - starting fresh');
+                }
+            } catch (error) {
+                console.error('Error loading user votes:', error);
+                userVotes = {};
+            }
+        }
+
+        // Save a single vote to Firebase
+        async function saveVoteToFirebase(userId, postId, voteType) {
+            try {
+                const voteKey = `${currentWiFiNetwork}_${postId}`;
+                const voteRef = ref(database, `user-votes/${userId}/${voteKey}`);
+                
+                if (voteType === null) {
+                    // Remove vote
+                    await remove(voteRef);
+                    console.log(`🗑️  Removed vote for post ${postId}`);
+                } else {
+                    // Save vote (like or dislike)
+                    await set(voteRef, voteType);
+                    console.log(`💾 Saved ${voteType} vote for post ${postId}`);
+                }
+            } catch (error) {
+                console.error('Error saving vote to Firebase:', error);
             }
         }
 
@@ -3913,11 +3960,14 @@
                 }
             }
             
-            // Update Firebase
+            // Update Firebase with vote counts
             updatePostVotesFirebase(currentWiFiNetwork, postId, {
                 likes: newLikes,
                 dislikes: newDislikes
             });
+            
+            // Save the user's vote preference to Firebase
+            saveVoteToFirebase(currentUserId, postId, userVotes[voteKey]);
         }
 
         // Comments functionality
