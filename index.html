@@ -937,12 +937,22 @@
                     // Initialize grid and Firebase subscription with WiFi network
                     initializeGrid();
                     subscribeToFirebasePostsWithReconnect();
+                    
+                    // Clean up old posts on startup
+                    cleanupOldPosts();
+                    
+                    // Set up periodic cleanup (every 6 hours)
+                    setInterval(cleanupOldPosts, 6 * 60 * 60 * 1000);
                 }).catch(error => {
                     console.error('Error detecting WiFi:', error);
                     // Fall back to default network
                     currentWiFiNetwork = 'default-network';
                     initializeGrid();
                     subscribeToFirebasePostsWithReconnect();
+                    
+                    // Clean up old posts
+                    cleanupOldPosts();
+                    setInterval(cleanupOldPosts, 6 * 60 * 60 * 1000);
                 });
                 
                 // Create user profile in database
@@ -1945,6 +1955,43 @@
             // Firebase listener will handle updates automatically
             // This function is kept for compatibility but Firebase handles refresh now
             console.log('Firebase real-time sync active - no manual refresh needed');
+        }
+
+        // Clean up posts older than 72 hours
+        async function cleanupOldPosts() {
+            if (!currentWiFiNetwork) return;
+            
+            const SEVENTY_TWO_HOURS = 72 * 60 * 60 * 1000; // 72 hours in milliseconds
+            const now = new Date().getTime();
+            
+            try {
+                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
+                const snapshot = await get(postsRef);
+                
+                if (!snapshot.exists()) return;
+                
+                const posts = snapshot.val();
+                let deletedCount = 0;
+                
+                // Check each post's age
+                Object.keys(posts).forEach(postId => {
+                    const post = posts[postId];
+                    const postAge = now - (post.timestamp || 0);
+                    
+                    // If post is older than 72 hours, delete it
+                    if (postAge > SEVENTY_TWO_HOURS) {
+                        console.log(`🗑️  Deleting old post (${Math.round(postAge / (60 * 60 * 1000))}h old): ${postId}`);
+                        deletePostFromFirebase(currentWiFiNetwork, postId);
+                        deletedCount++;
+                    }
+                });
+                
+                if (deletedCount > 0) {
+                    console.log(`✅ Cleaned up ${deletedCount} posts older than 72 hours`);
+                }
+            } catch (error) {
+                console.error('Error cleaning up old posts:', error);
+            }
         }
 
         function renderGrid() {
