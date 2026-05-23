@@ -1571,6 +1571,7 @@
         let isConnected = false;
         let gridContent = {}; // Store posts by user ID instead of WiFi
         let selectedFile = null;
+        let selectedMediaType = null; // Track if media is 'video' or 'image'
         let selectedBoxIndex = -1;
         let userPostBoxes = []; // Array to track up to 5 user posts
         let userVotes = {};
@@ -2323,8 +2324,13 @@
             let viewHTML = '';
             // Check for Firebase Storage URL or legacy base64
             const imageSource = targetPost.photoURL || targetPost.imageData;
+            const isVideo = targetPost.mediaType === 'video';
             if (imageSource) {
-                viewHTML += `<div style="width: 100%; background-color: #000; display: flex; align-items: center; justify-content: center; border-radius: 8px; overflow: hidden; margin-bottom: 24px;"><img src="${imageSource}" style="max-width: 100%; max-height: 500px; object-fit: contain;"></div>`;
+                if (isVideo) {
+                    viewHTML += `<div style="width: 100%; background-color: #000; display: flex; align-items: center; justify-content: center; border-radius: 8px; overflow: hidden; margin-bottom: 24px;"><video src="${imageSource}" style="max-width: 100%; max-height: 500px; object-fit: contain;" autoplay muted loop playsinline controls></video></div>`;
+                } else {
+                    viewHTML += `<div style="width: 100%; background-color: #000; display: flex; align-items: center; justify-content: center; border-radius: 8px; overflow: hidden; margin-bottom: 24px;"><img src="${imageSource}" style="max-width: 100%; max-height: 500px; object-fit: contain;"></div>`;
+                }
             }
             viewHTML += `<div style="color: #fff; white-space: pre-wrap; word-break: break-word;">${targetPost.content || '(No content)'}</div>`;
             
@@ -2694,12 +2700,25 @@
                     // Check for Firebase Storage URL (photoURL) or legacy base64 (imageData)
                     if (post.photoURL || post.imageData) {
                         const imageSource = post.photoURL || post.imageData;
+                        const isVideo = post.mediaType === 'video';
                         
-                        // Posts with photos: show photo with vote badge at bottom matching text post style
+                        // Posts with photos/videos: show media with vote badge at bottom
+                        let mediaHTML = isVideo 
+                            ? `<video style="max-width: 100%; max-height: 100%; object-fit: contain;" autoplay muted loop playsinline></video>`
+                            : `<img src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
+                        
                         const voteBadge = `<div style="position: absolute; bottom: 0; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>`;
                         
-                        // Image container with padding to leave room for vote badge
-                        box.innerHTML = `<div style="width: 100%; height: calc(100% - 50px); background-color: #000; display: flex; align-items: center; justify-content: center; overflow: hidden;"><img src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;"></div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; top: 0;">${voteBadge}</div>`;
+                        // Media container with padding to leave room for vote badge
+                        box.innerHTML = `<div style="width: 100%; height: calc(100% - 50px); background-color: #000; display: flex; align-items: center; justify-content: center; overflow: hidden;">${mediaHTML}</div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; top: 0;">${voteBadge}</div>`;
+                        
+                        // Set video source after HTML is added
+                        if (isVideo) {
+                            const videoElement = box.querySelector('video');
+                            if (videoElement) {
+                                videoElement.src = imageSource;
+                            }
+                        }
                         box.style.position = 'relative';
                     } else {
                         // Text-only posts - show text centered with prominent vote badge styled like modal
@@ -3231,11 +3250,13 @@
                 
                 // Process video before accepting
                 if (isVideo) {
+                    selectedMediaType = 'video';
                     uploadArea.innerHTML = `<div style="text-align: center;"><div class="upload-icon">⏳</div><div class="upload-text">Processing video...</div></div>`;
                     
                     processVideo(file).then((processedBlob) => {
                         if (processedBlob) {
                             selectedFile = processedBlob;
+                            selectedMediaType = 'video';
                             const originalSize = (file.size / 1024 / 1024).toFixed(1);
                             const newSize = (processedBlob.size / 1024 / 1024).toFixed(1);
                             const compression = ((1 - processedBlob.size / file.size) * 100).toFixed(0);
@@ -3243,6 +3264,7 @@
                             console.log(`Video processed and ready: original ${originalSize}MB → ${newSize}MB`);
                         } else {
                             selectedFile = null;
+                            selectedMediaType = null;
                             uploadArea.innerHTML = '<div class="upload-icon">📸</div><div class="upload-text">Drag photo, video, or post</div>';
                             fileInput.value = '';
                         }
@@ -3252,6 +3274,7 @@
                 
                 // For images - check moderation first
                 if (isImage) {
+                    selectedMediaType = 'image';
                     uploadArea.innerHTML = `<div style="text-align: center;"><div class="upload-icon">🔍</div><div class="upload-text">Checking content...</div></div>`;
                     
                     const reader = new FileReader();
@@ -3423,6 +3446,7 @@
                     networkId: currentUserId,
                     content: postText,
                     photoURL: photoURL,
+                    mediaType: selectedMediaType, // Track if 'video' or 'image'
                     timestamp: new Date().getTime(),
                     likes: 0,
                     dislikes: 0,
@@ -3454,8 +3478,9 @@
                 console.error('Error stack:', error.stack);
                 alert('Failed to publish post: ' + error.message);
             } finally {
-                // Always reset the posting flag
+                // Always reset the posting flag and media type
                 isPostingInProgress = false;
+                selectedMediaType = null;
                 
                 // Re-enable the submit button
                 const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
