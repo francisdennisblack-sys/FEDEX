@@ -2011,6 +2011,44 @@
             }
         }
 
+        // Photo Moderation - checks images for nudity, violence, racy content
+        async function moderatePhoto(imageUrl, postId, networkId) {
+            try {
+                console.log('📸 Submitting photo for moderation:', imageUrl);
+                
+                const response = await fetch('/api/moderate-photo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ imageUrl, postId, networkId })
+                });
+                
+                const result = await response.json();
+                
+                if (result.failOpen) {
+                    console.warn('⚠️ Moderation service unavailable - allowing upload');
+                    return true;
+                }
+                
+                if (result.isFlagged) {
+                    console.log('🚫 Photo flagged:', result.moderationReason);
+                    console.log('Confidence details:', result.confidenceDetails);
+                    
+                    // Delete the post from Firebase
+                    await deletePostFromFirebase(networkId, postId);
+                    alert('❌ Photo rejected: ' + result.moderationReason + '\n\nPost has been removed.');
+                    return false;
+                }
+                
+                console.log('✅ Photo approved by moderation');
+                return true;
+                
+            } catch (error) {
+                console.error('Photo moderation error:', error);
+                alert('⚠️ Photo moderation check failed. Post upload cancelled.');
+                return false;
+            }
+        }
+
         async function getPostsFromFirebase(networkId) {
             try {
                 const postsRef = ref(database, `networks/${networkId}/posts`);
@@ -4183,6 +4221,22 @@
                         const approved = await moderateVideo(photoURL, postId, currentWiFiNetwork);
                         if (!approved) {
                             console.log('❌ Video rejected by moderation - cancelling post');
+                            // Re-enable button and reset
+                            isPostingInProgress = false;
+                            const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
+                            if (submitButton) {
+                                submitButton.disabled = false;
+                                submitButton.style.opacity = '1';
+                                submitButton.style.cursor = 'pointer';
+                            }
+                            return;
+                        }
+                    } else if (selectedMediaType === 'image') {
+                        // If it's an image, run moderation check
+                        console.log('📸 Running photo moderation...');
+                        const approved = await moderatePhoto(photoURL, postId, currentWiFiNetwork);
+                        if (!approved) {
+                            console.log('❌ Photo rejected by moderation - cancelling post');
                             // Re-enable button and reset
                             isPostingInProgress = false;
                             const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
