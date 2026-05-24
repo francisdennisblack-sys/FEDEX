@@ -1990,12 +1990,12 @@
         <div class="wifi-info" id="wifiInfo">
             <div class="wifi-name" id="wifiName"></div>
             <div id="zoneInfo" style="font-size: 12px; color: #4ade80; margin-top: 4px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px;" onclick="showZoneSelector()">
-                <span id="zoneLabel">Zone: Loading...</span>
+                <span id="zoneLabel">POI: Loading...</span>
                 <span style="font-size: 10px;">▼</span>
             </div>
-            <div id="zoneDropdown" style="display: none; position: absolute; top: 60px; left: 12px; background: #222; border: 1px solid #4ade80; border-radius: 6px; padding: 8px 0; min-width: 200px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
-                <div style="padding: 8px 12px; color: #888; font-size: 11px; border-bottom: 1px solid #333;">📍 Switch Zone (Testing)</div>
-                <div id="zoneList"></div>
+            <div id="zoneDropdown" style="display: none; position: absolute; top: 60px; left: 12px; background: #222; border: 1px solid #4ade80; border-radius: 6px; padding: 8px 0; min-width: 240px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+                <div style="padding: 8px 12px; color: #888; font-size: 11px; border-bottom: 1px solid #333;">📍 POI Grid Status</div>
+                <div id="zoneList" style="padding: 8px 12px; color: #ccc; font-size: 10px; line-height: 1.6;"></div>
                 <div style="padding: 8px 12px; color: #888; font-size: 11px; border-top: 1px solid #333; cursor: pointer;" onclick="closeZoneSelector()">Close</div>
             </div>
         </div>
@@ -2588,20 +2588,20 @@
         // ============================================
 
         // Sample WiFi Networks (ZERO COST - embedded data)
-        const sampleWiFiNetworks = [
-            { ssid: 'HomeRouter', lat: 40.7150, lon: -74.0070, signalStrength: -40 },
-            { ssid: 'Starbucks_5th', lat: 40.7165, lon: -74.0050, signalStrength: -55 },
-            { ssid: 'CafeNet', lat: 40.7140, lon: -74.0085, signalStrength: -60 },
-            { ssid: 'OfficeBuilding', lat: 40.7180, lon: -74.0100, signalStrength: -50 },
-            { ssid: 'Park_WiFi', lat: 40.7120, lon: -74.0040, signalStrength: -70 }
-        ];
+        // POI SYSTEM: Grid-based content visibility
+        // Instead of WiFi networks, we use Points of Interest (cafes, parks, schools, libraries)
+        // Grid radius is determined by city population density
+        
+        let poiDatabase = [];
+        let cityDensityData = {};
 
         // User location state
         let userLocation = null;
-        let nearbyNetworks = [];
-        let currentZoneTag = 'No zone';
-        let currentZoneDistance = Infinity;
-        let currentGeographicLocation = 'Unknown Location'; // Real geographic location (county/city)
+        let currentNearestPOI = null;
+        let currentGrid = null;
+        let currentZoneTag = 'Loading...';
+        let currentGridRadius = 0;
+        let currentContentScope = 'CITY';
 
         // ============================================
         // LOCATION NAME MAPPING SYSTEM
@@ -2733,94 +2733,184 @@
         }
 
         // Find nearby networks and assign zone
-        function detectNearbyNetworks() {
-            if (!userLocation) {
-                console.warn('⚠️ User location not available');
-                return;
+        // ============================================
+        // LOAD POI AND DENSITY DATA
+        // ============================================
+        async function loadPOIData() {
+            try {
+                const poiResponse = await fetch('poi_database.json');
+                const poiData = await poiResponse.json();
+                poiDatabase = poiData.pois || [];
+                console.log(`✅ Loaded ${poiDatabase.length} POIs`);
+
+                const densityResponse = await fetch('city_density.json');
+                const densityData = await densityResponse.json();
+                cityDensityData = densityData.cityDensity || {};
+                console.log(`✅ Loaded city density data for ${Object.keys(cityDensityData).length} cities`);
+            } catch (error) {
+                console.error('❌ Error loading POI/density data:', error);
+                poiDatabase = [];
+                cityDensityData = {};
             }
+        }
 
-            nearbyNetworks = sampleWiFiNetworks.map(network => {
-                const distance = calculateDistance(
-                    userLocation.lat, userLocation.lon,
-                    network.lat, network.lon
-                );
-                return { ...network, distance };
-            }).sort((a, b) => a.distance - b.distance);
+        // ============================================
+        // FIND NEAREST POI
+        // ============================================
+        function findNearestPOI(userLat, userLon) {
+            if (poiDatabase.length === 0) return null;
 
-            const closest = nearbyNetworks[0];
-            currentZoneDistance = closest.distance;
-            const zone = assignZone(closest.distance);
-            currentZoneTag = `#${closest.ssid}`;
+            let nearest = null;
+            let minDistance = Infinity;
 
-            console.log('📡 Nearby Networks (sorted by distance):');
-            nearbyNetworks.forEach((net, idx) => {
-                console.log(`  ${idx + 1}. ${net.ssid}: ${net.distance} feet`);
+            poiDatabase.forEach(poi => {
+                const distance = calculateDistance(userLat, userLon, poi.lat, poi.lon);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    nearest = { poi, distance };
+                }
             });
-            console.log(`🗺️  Current Zone: ${zone.name}`);
-            console.log(`🏷️  Zone Tag: ${currentZoneTag}`);
+
+            return nearest;
+        }
+
+        // ============================================
+        // GET GRID FOR USER
+        // ============================================
+        function getGridForUser(userLat, userLon) {
+            const nearestPOIData = findNearestPOI(userLat, userLon);
+            if (!nearestPOIData) return null;
+
+            const { poi, distance } = nearestPOIData;
+            const cityName = poi.city;
+
+            // Get city density (default to USA average if not found)
+            const cityData = cityDensityData[cityName] || cityDensityData['USA_Average'] || {
+                density: 87,
+                gridRadius: 10.0,
+                contentScope: 'REGION'
+            };
+
+            return {
+                poi: poi,
+                distance: distance,
+                city: cityName,
+                density: cityData.density,
+                gridRadius: cityData.gridRadius,
+                contentScope: cityData.contentScope,
+                boundary: calculateCircleBoundary(poi.lat, poi.lon, cityData.gridRadius)
+            };
+        }
+
+        // ============================================
+        // CALCULATE CIRCLE BOUNDARY
+        // ============================================
+        function calculateCircleBoundary(lat, lon, radiusKm) {
+            // Convert km to degrees (approximately)
+            // 1 km = 0.00901 degrees latitude
+            // 1 km = 0.00901 * cos(lat) degrees longitude
+            const latDelta = radiusKm * 0.00901;
+            const lonDelta = radiusKm * 0.00901 / Math.cos(lat * Math.PI / 180);
+
+            return {
+                north: lat + latDelta,
+                south: lat - latDelta,
+                east: lon + lonDelta,
+                west: lon - lonDelta,
+                center: { lat, lon },
+                radiusKm: radiusKm
+            };
+        }
+
+        // ============================================
+        // CHECK IF POST IS VISIBLE TO USER
+        // ============================================
+        function isPostVisibleInUserGrid(postLat, postLon, userGrid) {
+            if (!userGrid) return true; // Show all if no grid
+
+            const distance = calculateDistance(
+                postLat, postLon,
+                userGrid.poi.lat, userGrid.poi.lon
+            );
+
+            // Post visible if within grid radius (convert km to miles for display, store as km)
+            return distance <= userGrid.gridRadius;
+        }
+
+        // ============================================
+        // DETECT AND UPDATE USER POI/GRID
+        // ============================================
+        function detectUserGrid() {
+            if (!userLocation) return;
+
+            const grid = getGridForUser(userLocation.lat, userLocation.lon);
+            if (!grid) return;
+
+            currentGrid = grid;
+            currentNearestPOI = grid.poi;
+            currentGridRadius = grid.gridRadius;
+            currentContentScope = grid.contentScope;
+            currentZoneTag = `${grid.poi.name} (${grid.city})`;
+
+            console.log(`📍 POI: ${grid.poi.name}`);
+            console.log(`🏙️  City: ${grid.city} (density: ${grid.density}/sq km)`);
+            console.log(`📏 Grid radius: ${grid.gridRadius} km (${(grid.gridRadius * 0.621371).toFixed(2)} miles)`);
+            console.log(`🎯 Content scope: ${grid.contentScope}`);
         }
 
         // Initialize location detection and fetch county from WiGLE API
         async function initializePhase0() {
-            console.log('\n🚀 PHASE 0: Foundation Layer Starting...\n');
+            console.log('\n🚀 PHASE 0: POI Grid Foundation Layer Starting...\n');
             try {
+                // Step 1: Load geolocation
                 await requestGeolocation();
+                console.log(`📍 User location: ${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
                 
-                // Get real location name from reverse geocoding using OpenStreetMap Nominatim
-                console.log('🌍 Reverse geocoding your location...');
-                try {
-                    // Use Nominatim (OpenStreetMap) for free reverse geocoding - no auth needed
-                    const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${userLocation.lat}&lon=${userLocation.lon}`;
-                    const response = await fetch(nominatimUrl);
-                    
-                    if (!response.ok) {
-                        throw new Error(`Nominatim API error: ${response.status}`);
-                    }
-                    
-                    const data = await response.json();
-                    console.log('📥 Nominatim response:', data);
-                    
-                    if (data.address) {
-                        // Extract city, town, or county - in order of preference
-                        const locationName = data.address.city || data.address.town || data.address.county || data.address.region || 'Unknown Location';
-                        currentZoneTag = locationName;
-                        currentGeographicLocation = locationName;
-                        console.log(`✅ Location: ${locationName}`);
-                        console.log(`📍 Full address: ${data.display_name}`);
-                    } else {
-                        throw new Error('No address data in response');
-                    }
-                } catch (apiError) {
-                    console.error('❌ Reverse geocoding fetch failed:', apiError.message);
-                    console.error('Stack:', apiError.stack);
-                    // Fallback: use coordinate-based region name
-                    currentZoneTag = `Region (${userLocation.lat.toFixed(2)}, ${userLocation.lon.toFixed(2)})`;
-                    currentGeographicLocation = currentZoneTag;
-                    console.log(`📍 Using coordinate fallback: ${currentZoneTag}`);
-                }
+                // Step 2: Load POI and density data
+                console.log('📥 Loading POI database and city density data...');
+                await loadPOIData();
                 
-                detectNearbyNetworks();
+                // Step 3: Detect user's grid
+                console.log('🔍 Finding nearest POI and calculating grid...');
+                detectUserGrid();
                 
-                // Update zone display in header
+                // Step 4: Update zone display in header
                 const zoneDisplay = document.getElementById('zoneInfo');
                 if (zoneDisplay) {
-                    zoneDisplay.textContent = `Zone: ${currentZoneTag}`;
-                    zoneDisplay.style.color = '#4ade80';
+                    const label = document.getElementById('zoneLabel');
+                    if (label) {
+                        label.textContent = `📍 ${currentZoneTag}`;
+                    }
                 }
                 
-                // Mark Phase 0 as complete - NOW safe to filter posts by zone
+                // Update zone dropdown
+                const zoneList = document.getElementById('zoneList');
+                if (zoneList && currentGrid) {
+                    zoneList.innerHTML = `
+                        <strong>POI:</strong> ${currentGrid.poi.name}<br>
+                        <strong>City:</strong> ${currentGrid.city}<br>
+                        <strong>Density:</strong> ${currentGrid.density}/sq km<br>
+                        <strong>Grid Radius:</strong> ${currentGrid.gridRadius} km<br>
+                        <strong>Content Scope:</strong> ${currentGrid.contentScope}<br>
+                        <strong>Nearest POI Distance:</strong> ${(currentGrid.distance * 0.621371).toFixed(2)} mi
+                    `;
+                }
+                
+                // Mark Phase 0 as complete - NOW safe to filter posts by grid
                 isPhase0Complete = true;
-                console.log('✅ Phase 0 COMPLETE - Zone is ready:', currentZoneTag);
+                console.log('✅ Phase 0 COMPLETE - POI Grid is ready:', currentZoneTag);
                 console.log('\n✅ Phase 0 Initialization Complete\n');
             } catch (error) {
                 console.error('❌ Phase 0 Error:', error);
-                currentZoneTag = 'Location Unavailable';
-                currentGeographicLocation = 'Location Unavailable'; // Store geographic location
+                currentZoneTag = 'POI Grid Unavailable';
                 isPhase0Complete = true; // Mark complete even on error
                 const zoneDisplay = document.getElementById('zoneInfo');
                 if (zoneDisplay) {
-                    zoneDisplay.textContent = `Zone: ${currentZoneTag}`;
-                    zoneDisplay.style.color = '#ff6b6b';
+                    const label = document.getElementById('zoneLabel');
+                    if (label) {
+                        label.textContent = `⚠️ POI Grid Unavailable`;
+                        label.style.color = '#ff6b6b';
+                    }
                 }
             }
         }
@@ -2828,88 +2918,91 @@
         // Start Phase 0 immediately
         initializePhase0();
 
-        // Periodic zone check: detect if user has moved to a new zone (REAL-TIME - every 1 second)
-        async function checkZoneUpdate() {
+        // Periodic grid check: detect if user has moved to a different POI/grid
+        async function checkGridUpdate() {
             // Only run if we have valid location
             if (!userLocation || typeof userLocation.lat !== 'number' || typeof userLocation.lon !== 'number') {
                 return;
             }
             
             try {
-                // Use Nominatim (OpenStreetMap) for free reverse geocoding
-                const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${userLocation.lat}&lon=${userLocation.lon}`;
-                const response = await fetch(nominatimUrl);
+                // Check if user has moved to a different POI
+                const newGrid = getGridForUser(userLocation.lat, userLocation.lon);
                 
-                if (!response.ok) {
-                    throw new Error(`Nominatim API error: ${response.status}`);
+                if (!newGrid) {
+                    return; // No POI data available
                 }
                 
-                const data = await response.json();
-                
-                if (data.address) {
-                    const locationName = data.address.city || data.address.town || data.address.county || data.address.region || 'Unknown Location';
+                // Check if POI has changed
+                if (currentGrid && currentGrid.poi.id !== newGrid.poi.id) {
+                    console.log(`🔄 User moved to different POI: ${newGrid.poi.name}`);
                     
-                    if (locationName !== currentZoneTag) {
-                        console.log(`\n🚶 ⚡ ZONE CHANGED DETECTED!`);
-                        console.log(`   OLD Zone: ${currentZoneTag}`);
-                        console.log(`   NEW Zone: ${locationName}`);
-                        
-                        currentZoneTag = locationName;
-                        currentGeographicLocation = locationName;
-                        
-                        // Update zone display with pulse animation
-                        const zoneDisplay = document.getElementById('zoneInfo');
-                        if (zoneDisplay) {
-                            zoneDisplay.textContent = `Zone: ${currentZoneTag}`;
-                            zoneDisplay.style.color = '#ffd700'; // Flash yellow
-                            setTimeout(() => {
-                                zoneDisplay.style.color = '#4ade80'; // Back to green
-                            }, 1000);
-                        }
-                        
-                        // Re-render grid with new zone filter
-                        console.log(`   → Grid re-rendering with new zone posts only\n`);
-                        renderGrid();
+                    // Update grid
+                    currentGrid = newGrid;
+                    currentNearestPOI = newGrid.poi;
+                    currentGridRadius = newGrid.gridRadius;
+                    currentContentScope = newGrid.contentScope;
+                    currentZoneTag = `${newGrid.poi.name} (${newGrid.city})`;
+                    
+                    // Update display
+                    const label = document.getElementById('zoneLabel');
+                    if (label) {
+                        label.textContent = `📍 ${currentZoneTag}`;
+                    }
+                    
+                    // Update dropdown
+                    const zoneList = document.getElementById('zoneList');
+                    if (zoneList) {
+                        zoneList.innerHTML = `
+                            <strong>POI:</strong> ${currentGrid.poi.name}<br>
+                            <strong>City:</strong> ${currentGrid.city}<br>
+                            <strong>Density:</strong> ${currentGrid.density}/sq km<br>
+                            <strong>Grid Radius:</strong> ${currentGrid.gridRadius} km<br>
+                            <strong>Content Scope:</strong> ${currentGrid.contentScope}
+                        `;
                     }
                 }
             } catch (error) {
-                console.warn('Zone update check failed:', error.message);
+                console.error('Grid update error:', error);
             }
         }
 
         // Display all 5 WiFi networks with real-time proximity data
-        function displayWiFiNetworkStatus() {
-            if (!userLocation || !nearbyNetworks || nearbyNetworks.length === 0) {
+        function displayPOIGridStatus() {
+            if (!userLocation || !currentGrid) {
                 return;
             }
-            
-            // Create or update WiFi status display
-            let wifiStatusDiv = document.getElementById('wifiNetworkStatus');
-            if (!wifiStatusDiv) {
-                wifiStatusDiv = document.createElement('div');
-                wifiStatusDiv.id = 'wifiNetworkStatus';
-                wifiStatusDiv.style.cssText = 'position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.9); color: #4ade80; padding: 12px; border-radius: 8px; font-size: 11px; font-family: monospace; max-width: 300px; z-index: 100; max-height: 200px; overflow-y: auto;';
-                document.body.appendChild(wifiStatusDiv);
+
+            // Create or update POI status display
+            let poiStatusDiv = document.getElementById('poiGridStatus');
+            if (!poiStatusDiv) {
+                poiStatusDiv = document.createElement('div');
+                poiStatusDiv.id = 'poiGridStatus';
+                poiStatusDiv.style.cssText = 'position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.9); color: #4ade80; padding: 12px; border-radius: 8px; font-size: 11px; font-family: monospace; max-width: 350px; z-index: 100; max-height: 250px; overflow-y: auto;';
+                document.body.appendChild(poiStatusDiv);
             }
-            
-            // Build WiFi status text
-            let statusText = '📡 WiFi NETWORKS (Real-Time)\n';
-            statusText += '─────────────────────────\n';
-            
-            if (nearbyNetworks && nearbyNetworks.length > 0) {
-                nearbyNetworks.forEach((network, index) => {
-                    const distanceMiles = (network.distance / 5280).toFixed(2);
-                    const signalStr = '📶 '.repeat(Math.ceil((100 + network.signalStrength) / 20));
-                    const marker = index === 0 ? '★ ' : '  ';
-                    statusText += `${marker}${network.ssid}\n`;
-                    statusText += `   ${distanceMiles} mi ${signalStr}\n`;
-                });
-            }
-            
-            statusText += '─────────────────────────\n';
-            statusText += `Zone: ${currentZoneTag}`;
-            
-            wifiStatusDiv.textContent = statusText;
+
+            // Build POI status text
+            let statusText = '📍 NEAREST POI (Grid Center)\n';
+            statusText += '─────────────────────────────\n';
+            statusText += `Name: ${currentGrid.poi.name}\n`;
+            statusText += `Type: ${currentGrid.poi.type.toUpperCase()}\n`;
+            statusText += `Distance: ${(currentGrid.distance * 0.621371).toFixed(2)} mi\n`;
+            statusText += `\n`;
+            statusText += '📏 GRID RADIUS\n';
+            statusText += '─────────────────────────────\n';
+            statusText += `City: ${currentGrid.city}\n`;
+            statusText += `Density: ${currentGrid.density}/sq km\n`;
+            statusText += `Grid Radius: ${currentGrid.gridRadius} km\n`;
+            statusText += `           (${(currentGrid.gridRadius * 0.621371).toFixed(2)} miles)\n`;
+            statusText += `\n`;
+            statusText += '🎯 CONTENT SCOPE\n';
+            statusText += '─────────────────────────────\n';
+            statusText += `Scope: ${currentGrid.contentScope}\n`;
+            statusText += `Posts visible within:\n`;
+            statusText += `${currentGrid.gridRadius} km radius`;
+
+            poiStatusDiv.textContent = statusText;
         }
 
         // Zone selector for testing (manual zone switching)
@@ -3135,12 +3228,12 @@
                     // Set up periodic cleanup (every 6 hours)
                     setInterval(cleanupOldPosts, 6 * 60 * 60 * 1000);
                     
-                    // Set up REAL-TIME zone checking (every 500ms = 5Hz) - detect when user moves
-                    // Increased from 1000ms for more responsive WiFi proximity detection
-                    setInterval(checkZoneUpdate, 500);
+                    // Set up REAL-TIME grid checking (every 500ms = 5Hz) - detect when user moves to different POI
+                    // Increased frequency for more responsive POI/grid detection
+                    setInterval(checkGridUpdate, 500);
                     
-                    // Display all 5 WiFi networks in real-time
-                    setInterval(displayWiFiNetworkStatus, 500);
+                    // Display POI grid status in real-time
+                    setInterval(displayPOIGridStatus, 500);
                 }).catch(error => {
                     console.error('Error detecting WiFi:', error);
                     // Fall back to default network
@@ -3156,11 +3249,11 @@
                     cleanupOldPosts();
                     setInterval(cleanupOldPosts, 6 * 60 * 60 * 1000);
                     
-                    // Real-time zone checking (every 500ms = 5Hz for responsive WiFi detection)
-                    setInterval(checkZoneUpdate, 500);
+                    // Real-time grid checking (every 500ms = 5Hz for responsive POI detection)
+                    setInterval(checkGridUpdate, 500);
                     
-                    // Display all 5 WiFi networks in real-time
-                    setInterval(displayWiFiNetworkStatus, 500);
+                    // Display POI grid status in real-time
+                    setInterval(displayPOIGridStatus, 500);
                 });
                 
                 // Create user profile in database
