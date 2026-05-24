@@ -2022,20 +2022,13 @@
 
         // Periodic zone check: detect if user has moved to a new zone (REAL-TIME - every 1 second)
         async function checkZoneUpdate() {
-            if (!userLocation || !userLocation.lat || !userLocation.lon) {
+            // Only run if we have valid location
+            if (!userLocation || typeof userLocation.lat !== 'number' || typeof userLocation.lon !== 'number') {
                 return;
             }
             
             try {
-                const lat = parseFloat(userLocation.lat);
-                const lon = parseFloat(userLocation.lon);
-                
-                if (isNaN(lat) || isNaN(lon)) {
-                    console.warn('⚠️ Invalid coordinates:', { lat, lon });
-                    return;
-                }
-                
-                const response = await fetch(`/api/fetch-wifi?lat=${lat}&lon=${lon}`);
+                const response = await fetch(`/api/fetch-wifi?lat=${userLocation.lat}&lon=${userLocation.lon}`);
                 const data = await response.json();
                 
                 if (data.county && data.county !== currentZoneTag) {
@@ -2391,14 +2384,17 @@
                 // networkId comes from subscribeToFirebasePostsWithReconnect(currentUserId)
                 const actualNetworkId = networkId || currentWiFiNetwork || currentUserId;
                 const postsRef = ref(database, `networks/${actualNetworkId}/posts`);
-                console.log('📡 Subscribing to posts in network:', actualNetworkId);
+                console.log('📡 Setting up Firebase listener');
+                console.log('  networkId param:', networkId);
+                console.log('  actualNetworkId:', actualNetworkId);
+                console.log('  postsRef path:', `networks/${actualNetworkId}/posts`);
                 
                 const unsubscribe = onValue(postsRef, (snapshot) => {
                     const allPosts = [];
                     
                     if (snapshot.exists()) {
                         const postsObj = snapshot.val();
-                        console.log('📡 Network snapshot - posts count:', Object.keys(postsObj).length);
+                        console.log('📡 FIREBASE LISTENER TRIGGERED - Network snapshot - posts count:', Object.keys(postsObj).length);
                         
                         // Convert posts object to array
                         Object.keys(postsObj).forEach(postId => {
@@ -2409,15 +2405,16 @@
                             });
                         });
                     } else {
-                        console.log('📡 No posts in network yet');
+                        console.log('📡 FIREBASE LISTENER TRIGGERED - No posts in network yet');
                     }
                     
-                    console.log('📊 Total posts in WiFi network:', allPosts.length);
+                    console.log('📊 Calling callback with', allPosts.length, 'posts');
                     callback(allPosts);
                 }, (error) => {
                     console.error('Firebase listener error:', error);
                 });
                 
+                console.log('✅ Firebase listener set up successfully');
                 return unsubscribe;
             } catch (error) {
                 console.error('Error subscribing to Firebase posts:', error);
@@ -3571,10 +3568,12 @@
 
         function subscribeToFirebasePostsWithReconnect(networkId) {
             try {
+                console.log('🔗 subscribeToFirebasePostsWithReconnect called with networkId:', networkId);
                 firebaseUnsubscribe = subscribeToFirebasePosts(networkId, (posts) => {
                     console.log('====== FIREBASE LISTENER FIRED ======');
                     console.log('Posts updated from Firebase:', posts.length);
                     console.log('Posts data:', posts);
+                    console.log('currentZoneTag:', currentZoneTag);
                     
                     // Clear the mobile slow-load timeout since data arrived
                     if (window.firebaseLoadTimeoutId) {
