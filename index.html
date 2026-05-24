@@ -2069,28 +2069,29 @@
             try {
                 await requestGeolocation();
                 
-                // Get real location name from reverse geocoding API
+                // Get real location name from reverse geocoding using OpenStreetMap Nominatim
                 console.log('🌍 Reverse geocoding your location...');
                 try {
-                    const response = await fetch(`/api/reverse-geocode?lat=${userLocation.lat}&lon=${userLocation.lon}`);
+                    // Use Nominatim (OpenStreetMap) for free reverse geocoding - no auth needed
+                    const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${userLocation.lat}&lon=${userLocation.lon}`;
+                    const response = await fetch(nominatimUrl);
                     
                     if (!response.ok) {
-                        throw new Error(`API error: ${response.status}`);
+                        throw new Error(`Nominatim API error: ${response.status}`);
                     }
                     
                     const data = await response.json();
-                    console.log('📥 Geocoding response:', data);
+                    console.log('📥 Nominatim response:', data);
                     
-                    if (data.success !== false && data.name) {
-                        currentZoneTag = data.name;
-                        currentGeographicLocation = data.name;
-                        console.log(`✅ Location: ${data.name}`);
-                        console.log(`📌 Full name: ${data.displayName}`);
-                        console.log(`ℹ️  Source: ${data.source}`);
+                    if (data.address) {
+                        // Extract city, town, or county - in order of preference
+                        const locationName = data.address.city || data.address.town || data.address.county || data.address.region || 'Unknown Location';
+                        currentZoneTag = locationName;
+                        currentGeographicLocation = locationName;
+                        console.log(`✅ Location: ${locationName}`);
+                        console.log(`📍 Full address: ${data.display_name}`);
                     } else {
-                        currentZoneTag = data.name || 'Unable to detect location';
-                        currentGeographicLocation = currentZoneTag;
-                        console.warn('⚠️ Geocoding response:', data);
+                        throw new Error('No address data in response');
                     }
                 } catch (apiError) {
                     console.error('❌ Reverse geocoding fetch failed:', apiError.message);
@@ -2138,30 +2139,41 @@
             }
             
             try {
-                const response = await fetch(`/api/reverse-geocode?lat=${userLocation.lat}&lon=${userLocation.lon}`);
+                // Use Nominatim (OpenStreetMap) for free reverse geocoding
+                const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${userLocation.lat}&lon=${userLocation.lon}`;
+                const response = await fetch(nominatimUrl);
+                
+                if (!response.ok) {
+                    throw new Error(`Nominatim API error: ${response.status}`);
+                }
+                
                 const data = await response.json();
                 
-                if (data.name && data.name !== currentZoneTag) {
-                    console.log(`\n🚶 ⚡ ZONE CHANGED DETECTED!`);
-                    console.log(`   OLD Zone: ${currentZoneTag}`);
-                    console.log(`   NEW Zone: ${data.name}`);
+                if (data.address) {
+                    const locationName = data.address.city || data.address.town || data.address.county || data.address.region || 'Unknown Location';
                     
-                    currentZoneTag = data.name;
-                    currentGeographicLocation = data.name; // Update real geographic location
-                    
-                    // Update zone display with pulse animation
-                    const zoneDisplay = document.getElementById('zoneInfo');
-                    if (zoneDisplay) {
-                        zoneDisplay.textContent = `Zone: ${currentZoneTag}`;
-                        zoneDisplay.style.color = '#ffd700'; // Flash yellow
-                        setTimeout(() => {
-                            zoneDisplay.style.color = '#4ade80'; // Back to green
-                        }, 1000);
+                    if (locationName !== currentZoneTag) {
+                        console.log(`\n🚶 ⚡ ZONE CHANGED DETECTED!`);
+                        console.log(`   OLD Zone: ${currentZoneTag}`);
+                        console.log(`   NEW Zone: ${locationName}`);
+                        
+                        currentZoneTag = locationName;
+                        currentGeographicLocation = locationName;
+                        
+                        // Update zone display with pulse animation
+                        const zoneDisplay = document.getElementById('zoneInfo');
+                        if (zoneDisplay) {
+                            zoneDisplay.textContent = `Zone: ${currentZoneTag}`;
+                            zoneDisplay.style.color = '#ffd700'; // Flash yellow
+                            setTimeout(() => {
+                                zoneDisplay.style.color = '#4ade80'; // Back to green
+                            }, 1000);
+                        }
+                        
+                        // Re-render grid with new zone filter
+                        console.log(`   → Grid re-rendering with new zone posts only\n`);
+                        renderGrid();
                     }
-                    
-                    // Re-render grid with new zone filter
-                    console.log(`   → Grid re-rendering with new zone posts only\n`);
-                    renderGrid();
                 }
             } catch (error) {
                 console.warn('Zone update check failed:', error.message);
@@ -2605,6 +2617,7 @@
                 
                 const unsubscribe = onValue(postsRef, (snapshot) => {
                     const allPosts = [];
+                    const seenPostIds = new Set(); // Track unique post IDs to prevent duplicates
                     
                     if (snapshot.exists()) {
                         const postsObj = snapshot.val();
@@ -2612,6 +2625,13 @@
                         
                         // Convert posts object to array
                         Object.keys(postsObj).forEach(postId => {
+                            // CRITICAL: De-duplicate - only keep first instance of each post ID
+                            if (seenPostIds.has(postId)) {
+                                console.log(`  ⚠️ DUPLICATE DETECTED: post ID ${postId.substring(0, 8)}... appears multiple times in Firebase snapshot - SKIPPING duplicate`);
+                                return; // Skip this duplicate
+                            }
+                            
+                            seenPostIds.add(postId);
                             const post = postsObj[postId];
                             allPosts.push({
                                 id: postId,
@@ -2622,7 +2642,7 @@
                         console.log('📡 FIREBASE LISTENER TRIGGERED - No posts in network yet');
                     }
                     
-                    console.log('📊 Calling callback with', allPosts.length, 'posts');
+                    console.log('📊 Calling callback with', allPosts.length, 'posts (after de-duplication)');
                     callback(allPosts);
                 }, (error) => {
                     console.error('Firebase listener error:', error);
@@ -3125,33 +3145,6 @@
                 box.id = `box-${i}`;
                 box.style.flex = '1';
                 
-                // Create zone tag area (responsive sizing)
-                const zoneTag = document.createElement('div');
-                zoneTag.className = 'zone-tag';
-                zoneTag.id = `zone-${i}`;
-                
-                // Responsive height based on screen width
-                const windowWidth = window.innerWidth;
-                const zoneHeight = windowWidth < 600 ? '16px' : '24px';
-                const zoneFontSize = windowWidth < 600 ? '13px' : '15px';
-                const zonePadding = windowWidth < 600 ? '2px' : '4px';
-                
-                zoneTag.style.cssText = `
-                    flex-shrink: 0;
-                    height: ${zoneHeight};
-                    background-color: #1a1a1a;
-                    border-top: none;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    font-size: ${zoneFontSize};
-                    font-weight: 700;
-                    color: #fff;
-                    padding: ${zonePadding};
-                    box-sizing: border-box;
-                    min-height: ${zoneHeight};
-                `;
-                
                 // First box is always the add content button
                 if (i === 0) {
                     box.innerHTML = '<div style="text-align: center; line-height: 1.2;"><div style="font-size: 48px; margin-bottom: 8px; font-weight: 700;">+</div><div style="font-size: 13px; color: #4ade80; font-weight: 600;">Add content to grid</div></div>';
@@ -3160,7 +3153,6 @@
                     box.style.borderColor = '#4ade80';
                     box.style.borderWidth = '2px';
                     box.style.transition = 'all 0.3s ease';
-                    zoneTag.style.display = 'none'; // Hide zone tag for add button
                     box.onmouseover = () => {
                         box.style.background = 'linear-gradient(135deg, #2d5a2d 0%, #1a3a1a 100%)';
                         box.style.boxShadow = '0 0 20px rgba(74, 222, 128, 0.3)';
@@ -3177,7 +3169,6 @@
                         }
                     };
                 } else {
-                    zoneTag.textContent = 'No zone'; // Default placeholder
                     box.onclick = (e) => {
                         // Check if this is a filled box
                         if (box.classList.contains('filled')) {
@@ -3193,9 +3184,8 @@
                     };
                 }
                 
-                // Add box and zone tag to wrapper
+                // Add box to wrapper (zone tags now created dynamically in renderGrid)
                 wrapper.appendChild(box);
-                wrapper.appendChild(zoneTag);
                 grid.appendChild(wrapper);
             }
             
@@ -3800,6 +3790,22 @@
                     console.log('Posts data:', posts);
                     console.log('currentZoneTag:', currentZoneTag);
                     
+                    // CRITICAL: De-duplicate posts by ID (can happen if Firebase has duplicate keys)
+                    const seenIds = new Set();
+                    const uniquePosts = [];
+                    posts.forEach(post => {
+                        if (!seenIds.has(post.id)) {
+                            seenIds.add(post.id);
+                            uniquePosts.push(post);
+                        } else {
+                            console.log(`  ⚠️ De-duplicated post in Firebase listener: ${post.id.substring(0, 8)}... (zone: ${post.county})`);
+                        }
+                    });
+                    
+                    if (uniquePosts.length < posts.length) {
+                        console.log(`🧹 Removed ${posts.length - uniquePosts.length} duplicate posts`);
+                    }
+                    
                     // Clear the mobile slow-load timeout since data arrived
                     if (window.firebaseLoadTimeoutId) {
                         clearTimeout(window.firebaseLoadTimeoutId);
@@ -3807,7 +3813,7 @@
                         console.log('✅ Firebase loaded in time - timeout cleared');
                     }
                     
-                    gridContent[currentUserId] = posts;
+                    gridContent[currentUserId] = uniquePosts;
                     console.log('gridContent updated:', gridContent);
                     console.log('About to call renderGrid()');
                     renderGrid();
@@ -3954,18 +3960,35 @@
             const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
             
             // Get all posts for the network
-            const allPosts = gridContent[currentUserId] || [];
+            let allPosts = gridContent[currentUserId] || [];
+            
+            // CRITICAL: De-duplicate posts by ID to prevent ghost posts
+            // This can happen if Firebase snapshot has duplicate entries
+            const seenIds = new Set();
+            const uniquePosts = [];
+            allPosts.forEach(post => {
+                if (!seenIds.has(post.id)) {
+                    seenIds.add(post.id);
+                    uniquePosts.push(post);
+                } else {
+                    console.log(`  ⚠️ SKIPPED DUPLICATE in renderGrid: post ${post.id.substring(0, 8)}... with zone "${post.county}"`);
+                }
+            });
+            allPosts = uniquePosts;
             
             // DEBUG: Show what zone we're filtering by
             console.log(`🔍 DEBUG renderGrid():`, {
                 currentZoneTag: currentZoneTag,
                 allPosts: allPosts.length,
-                userLocation: userLocation
+                userLocation: userLocation,
+                hiddenForThisWiFi: hiddenForThisWiFi.length,
+                hiddenReported: hiddenReported.length,
+                deletedOwnPosts: deletedOwnPosts.length
             });
             
             // Show each post's zone
             allPosts.forEach(p => {
-                console.log(`  Post ${p.id.substring(0, 8)}: zone="${p.county || 'Unknown County'}"`);
+                console.log(`  Post ${p.id.substring(0, 8)}: zone="${p.county || 'Unknown County'}" likes=${p.likes} dislikes=${p.dislikes}`);
             });
             
             // ZONE FILTERING: Only show posts from the same zone as current user
@@ -3993,11 +4016,21 @@
             });
             
             // CRITICAL: First reset ALL boxes to empty state (up to maxGridSize)
+            console.log(`🧹 RESET PHASE: Clearing all ${maxGridSize} grid boxes before rendering new posts`);
             for (let i = 1; i < maxGridSize; i++) {
                 const box = document.getElementById(`box-${i}`);
                 const zoneTag = document.getElementById(`zone-${i}`);
                 if (box) {
+                    const oldPostId = box.getAttribute('data-post-id');
+                    if (oldPostId) {
+                        console.log(`  🗑️ Clearing box-${i} (was showing post: ${oldPostId.substring(0, 8)}...)`);
+                    }
+                    // CRITICAL: Complete DOM wipe - remove ALL child elements
                     box.innerHTML = '';
+                    // Reset ALL styles that might be cached
+                    box.style.cssText = '';
+                    // Reset ALL classes  
+                    box.className = 'grid-box';
                     box.classList.remove('filled');
                     box.removeAttribute('data-post-id');
                     // Remove all badge classes
@@ -4008,15 +4041,19 @@
                     zoneTag.style.display = 'none';
                 }
             }
+            console.log(`✅ RESET PHASE COMPLETE: All boxes cleared`);
             
             // Render posts to grid
             let gridPosition = 1;
-            sortedPosts.forEach(post => {
+            console.log(`📝 RENDER PHASE: Rendering ${sortedPosts.length} sorted posts to grid`);
+            sortedPosts.forEach((post, index) => {
                 // Skip if hidden by user (manually hidden, reported, or deleted own posts)
                 if (hiddenForThisWiFi.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) {
+                    console.log(`  ⏭️ SKIPPED post ${post.id.substring(0, 8)}... (hidden/reported/deleted)`);
                     return;
                 }
                 
+                console.log(`  ✏️ Rendering post ${post.id.substring(0, 8)}... to box-${gridPosition} (zone: ${post.county})`);
                 const box = document.getElementById(`box-${gridPosition}`);
                 if (box) {
                     // Get vote counts
@@ -4036,14 +4073,25 @@
                             : `<img src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
                         
                         const voteBadge = `<div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>`;
-                        const zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 24px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #fff; padding: 2px; box-sizing: border-box;">${post.county || 'No zone'}</div>`;
+                        const zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 900; color: #fff; padding: 0 2px 6px 2px; box-sizing: border-box;">${post.county || 'No zone'}</div>`;
+                        
+                        console.log(`    📸 MEDIA POST - Rendering zone tag with styling:`);
+                        console.log(`       🏷️ Zone text: "${post.county || 'No zone'}"`);
+                        console.log(`       📏 Font-size: 18px, font-weight: 900`);
+                        console.log(`       📍 Position: absolute bottom: 0`);
                         
                         // Media container with padding to leave room for vote badge and zone tag
                         box.innerHTML = `<div style="width: 100%; height: calc(100% - 50px); background-color: #000; display: flex; align-items: center; justify-content: center; overflow: hidden;">${mediaHTML}</div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; top: 0;">${voteBadge}${zoneTagHTML}</div>`;
                         box.style.position = 'relative';
                     } else {
                         // Text-only posts - show text centered with prominent vote badge styled like modal
-                        const zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 24px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #fff; padding: 2px; box-sizing: border-box;">${post.county || 'No zone'}</div>`;
+                        const zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 900; color: #fff; padding: 0 2px 6px 2px; box-sizing: border-box;">${post.county || 'No zone'}</div>`;
+                        
+                        console.log(`    📝 TEXT POST - Rendering zone tag with styling:`);
+                        console.log(`       🏷️ Zone text: "${post.county || 'No zone'}"`);
+                        console.log(`       📏 Font-size: 18px, font-weight: 900`);
+                        console.log(`       📍 Position: absolute bottom: 0`);
+                        
                         box.innerHTML = `<div style="font-size: 18px; color: #fff; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; text-align: center; padding: 12px; word-wrap: break-word; padding-bottom: 70px; display: flex; align-items: center; justify-content: center; height: 100%;">${post.content}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>${zoneTagHTML}`;
                         box.style.position = 'relative';
                     }
@@ -4065,6 +4113,7 @@
                 }
                 gridPosition++;
             });
+            console.log(`✅ RENDER PHASE COMPLETE: Rendered ${gridPosition - 1} posts, ${maxGridSize - gridPosition} empty boxes remain`);
         }
 
         function getNewBadgeDurationMs() {
