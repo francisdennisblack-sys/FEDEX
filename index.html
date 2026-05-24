@@ -2201,9 +2201,9 @@
                     </div>
                 </div>
                 <div style="margin-top: 8px;">
-                    <label style="font-size: 11px; color: #888; display: block; margin-bottom: 4px; font-weight: 500;">Move post to...</label>
+                    <label style="font-size: 11px; color: #888; display: block; margin-bottom: 4px; font-weight: 500;">Find & select a zone...</label>
                     <div style="position: relative;">
-                        <input type="text" id="customZoneTag" placeholder="Type location, venue, or category (e.g., Starbucks, Central Park, Coffee Shops)" style="
+                        <input type="text" id="customZoneTag" placeholder="Search POI database or city (e.g., Starbucks, New York, Paris)" style="
                             width: 100%;
                             padding: 8px 12px;
                             background-color: #222;
@@ -6588,72 +6588,66 @@
         
         // Build autocomplete suggestions from POI database (ENHANCED for 200K+ POIs)
         function getAutocompleteSuggestions(query) {
-            if (!query || query.length < 1 || !window.poiDatabase) return [];
+            if (!query || query.length < 1) return [];
             
             const q = query.toLowerCase();
-            const results = {
-                cityPrefix: [],     // Cities that start with query
-                cityContains: [],   // Cities that contain query
-                poiPrefix: [],      // POIs starting with query
-                poiContains: [],    // POIs containing query
-                categories: []      // Category matches
-            };
+            const results = [];
             
-            // Search through all cities and POIs
-            for (const cityName in window.poiDatabase.cities) {
-                const city = window.poiDatabase.cities[cityName];
-                const cityLower = cityName.toLowerCase();
+            // Search through POI database
+            if (window.poiDatabase && Array.isArray(window.poiDatabase)) {
+                const poiMatches = {};
                 
-                // Smart city matching (prefix > contains)
-                if (cityLower.startsWith(q)) {
-                    results.cityPrefix.push({ display: `📍 ${cityName}, ${city.country}`, type: 'city', value: cityName });
-                } else if (cityLower.includes(q)) {
-                    results.cityContains.push({ display: `📍 ${cityName}, ${city.country}`, type: 'city', value: cityName });
-                }
-                
-                // POI search (limit to first 30 POIs per city for performance)
-                if (city.pois && Array.isArray(city.pois)) {
-                    for (let i = 0; i < Math.min(city.pois.length, 30); i++) {
-                        const poi = city.pois[i];
-                        const poiLower = poi.name.toLowerCase();
-                        const categoryLower = poi.category.toLowerCase();
-                        
-                        if (poiLower.startsWith(q)) {
-                            results.poiPrefix.push({ 
-                                display: `${poi.emoji} ${poi.name} (${cityName})`,
-                                type: 'poi', 
-                                value: poi.name
-                            });
-                        } else if (poiLower.includes(q)) {
-                            results.poiContains.push({ 
-                                display: `${poi.emoji} ${poi.name} (${cityName})`,
-                                type: 'poi', 
-                                value: poi.name
-                            });
-                        } else if (categoryLower.startsWith(q)) {
-                            const found = results.categories.find(c => c.display === `🏷️ ${poi.category}`);
-                            if (!found) results.categories.push({ display: `🏷️ ${poi.category}`, type: 'category', value: poi.category });
+                window.poiDatabase.forEach(poi => {
+                    const poiName = (poi.name || '').toLowerCase();
+                    const category = (poi.category || '').toLowerCase();
+                    const cityName = (poi.city || '').toLowerCase();
+                    
+                    // Prefix match (highest priority)
+                    if (poiName.startsWith(q)) {
+                        const key = `${poi.emoji} ${poi.name}`;
+                        poiMatches[key] = { display: key, type: 'poi', value: poi.name, priority: 1 };
+                    } 
+                    // Contains match (medium priority)
+                    else if (poiName.includes(q) || category.includes(q)) {
+                        const key = `${poi.emoji} ${poi.name}`;
+                        if (!poiMatches[key]) {
+                            poiMatches[key] = { display: key, type: 'poi', value: poi.name, priority: 2 };
                         }
                     }
-                }
+                });
+                
+                // Add POI matches
+                Object.values(poiMatches).slice(0, 15).forEach(item => results.push(item));
             }
             
-            // Merge results in priority order: exact prefix > category > contains
-            const merged = [
-                ...results.cityPrefix.slice(0, 3),
-                ...results.categories.slice(0, 2),
-                ...results.poiPrefix.slice(0, 3),
-                ...results.cityContains.slice(0, 2),
-                ...results.poiContains.slice(0, 4)
-            ];
+            // Search through cities (from globalDensityData)
+            if (globalDensityData && Array.isArray(globalDensityData)) {
+                const cityMatches = {};
+                
+                globalDensityData.forEach(city => {
+                    const cityName = (city.name || '').toLowerCase();
+                    const countryName = (city.country || '').toLowerCase();
+                    
+                    // Prefix match (highest priority)
+                    if (cityName.startsWith(q)) {
+                        const key = `📍 ${city.name}, ${city.country}`;
+                        cityMatches[key] = { display: key, type: 'city', value: city.name, priority: 1 };
+                    }
+                    // Contains match (medium priority)
+                    else if (cityName.includes(q) || countryName.includes(q)) {
+                        const key = `📍 ${city.name}, ${city.country}`;
+                        if (!cityMatches[key]) {
+                            cityMatches[key] = { display: key, type: 'city', value: city.name, priority: 2 };
+                        }
+                    }
+                });
+                
+                // Add city matches
+                Object.values(cityMatches).slice(0, 10).forEach(item => results.push(item));
+            }
             
-            // Deduplicate by display text
-            const seen = new Set();
-            return merged.filter(item => {
-                if (seen.has(item.display)) return false;
-                seen.add(item.display);
-                return true;
-            }).slice(0, 10);
+            // Return top 15 results
+            return results.slice(0, 15);
         }
         
         // Update autocomplete dropdown with styling
