@@ -1376,6 +1376,7 @@
         </div>
         <div class="wifi-info" id="wifiInfo">
             <div class="wifi-name" id="wifiName"></div>
+            <div id="zoneInfo" style="font-size: 12px; color: #4ade80; margin-top: 4px; font-weight: 600;">Zone: Loading...</div>
         </div>
     </div>
 
@@ -1996,15 +1997,55 @@
                 }
                 
                 detectNearbyNetworks();
+                
+                // Update zone display in header
+                const zoneDisplay = document.getElementById('zoneInfo');
+                if (zoneDisplay) {
+                    zoneDisplay.textContent = `Zone: ${currentZoneTag}`;
+                    zoneDisplay.style.color = '#4ade80';
+                }
+                
                 console.log('\n✅ Phase 0 Initialization Complete\n');
             } catch (error) {
                 console.error('❌ Phase 0 Error:', error);
                 currentZoneTag = 'Location Unavailable';
+                const zoneDisplay = document.getElementById('zoneInfo');
+                if (zoneDisplay) {
+                    zoneDisplay.textContent = `Zone: ${currentZoneTag}`;
+                    zoneDisplay.style.color = '#ff6b6b';
+                }
             }
         }
 
         // Start Phase 0 immediately
         initializePhase0();
+
+        // Periodic zone check: detect if user has moved to a new zone
+        async function checkZoneUpdate() {
+            if (!userLocation) return;
+            
+            try {
+                const response = await fetch(`/api/fetch-wifi?lat=${userLocation.lat}&lon=${userLocation.lon}`);
+                const data = await response.json();
+                
+                if (data.county && data.county !== currentZoneTag) {
+                    console.log(`🚶 ZONE CHANGED: ${currentZoneTag} → ${data.county}`);
+                    currentZoneTag = data.county;
+                    
+                    // Update zone display
+                    const zoneDisplay = document.getElementById('zoneInfo');
+                    if (zoneDisplay) {
+                        zoneDisplay.textContent = `Zone: ${currentZoneTag}`;
+                        zoneDisplay.style.animation = 'pulse 0.5s ease-in-out';
+                    }
+                    
+                    // Re-render grid with new zone filter
+                    renderGrid();
+                }
+            } catch (error) {
+                console.warn('Zone update check failed:', error.message);
+            }
+        }
 
         let currentUserId = null; // Will store Firebase UID
         let currentWiFiNetwork = null; // Will store WiFi network identifier
@@ -2035,6 +2076,9 @@
                     
                     // Set up periodic cleanup (every 6 hours)
                     setInterval(cleanupOldPosts, 6 * 60 * 60 * 1000);
+                    
+                    // Set up periodic zone checking (every 30 seconds) - re-fetch zone if user moved
+                    setInterval(checkZoneUpdate, 30 * 1000);
                 }).catch(error => {
                     console.error('Error detecting WiFi:', error);
                     // Fall back to default network
@@ -2049,6 +2093,9 @@
                     // Clean up old posts
                     cleanupOldPosts();
                     setInterval(cleanupOldPosts, 6 * 60 * 60 * 1000);
+                    
+                    // Zone checking interval
+                    setInterval(checkZoneUpdate, 30 * 1000);
                 });
                 
                 // Create user profile in database
@@ -3663,15 +3710,24 @@
             // Get posts deleted by this user (own posts deleted permanently)
             const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
             
-            // Get all posts for the network - NO SEPARATION
+            // Get all posts for the network
             const allPosts = gridContent[currentUserId] || [];
             
-            // Sort ALL posts together by score (engagement, recency, fairness, trending, position locks)
-            const sortedPosts = [...allPosts].sort((a, b) => calculatePostScore(b, allPosts) - calculatePostScore(a, allPosts));
+            // ZONE FILTERING: Only show posts from the same zone as current user
+            const zonePosts = allPosts.filter(post => {
+                const postZone = post.county || 'Unknown County';
+                const currentZone = currentZoneTag || 'Unknown County';
+                return postZone === currentZone;
+            });
+            
+            console.log(`📍 Zone Filter: User in "${currentZoneTag}", Showing ${zonePosts.length}/${allPosts.length} posts from same zone`);
+            
+            // Sort zone-filtered posts by score (engagement, recency, fairness, trending, position locks)
+            const sortedPosts = [...zonePosts].sort((a, b) => calculatePostScore(b, zonePosts) - calculatePostScore(a, zonePosts));
             
             // Count disliked posts
             const dislikedPosts = sortedPosts.filter(p => (p.dislikes || 0) > (p.likes || 0));
-            console.log(`📊 Rendering grid with ${sortedPosts.length} posts for network: ${currentUserId}`);
+            console.log(`📊 Rendering grid with ${sortedPosts.length} zone-filtered posts for network: ${currentUserId}`);
             console.log(`🔴 Found ${dislikedPosts.length} posts with more dislikes than likes`);
             dislikedPosts.forEach(p => {
                 console.log(`   - Post ${p.id.substring(0, 8)}...: ${p.likes || 0}L / ${p.dislikes || 0}D`);
