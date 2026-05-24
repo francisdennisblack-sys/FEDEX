@@ -4159,7 +4159,8 @@
         }
 
         // ============================================
-        // SMART ZONE DETECTION: USER LOCATION → POI or NEIGHBORHOOD
+        // SMART ZONE DETECTION: USER LOCATION → CLOSEST LOCATION or POI
+        // PRIORITY: Closest location from 5,478+ database, then POI, then fallback
         // ============================================
         function detectUserGrid() {
             console.log('\n🚀 ZONE DETECTION STARTING...');
@@ -4174,8 +4175,36 @@
             }
 
             try {
-                // STEP 1: Try to find nearest POI
-                console.log('🔍 Step 1: Searching for nearest POI from 38,260+ POI database...');
+                // STEP 1: FIND CLOSEST LOCATION FROM DATABASE (PRIMARY)
+                console.log('🔍 Step 1: Searching for CLOSEST location from 5,478+ location database...');
+                const closestLocationData = findClosestLocation(userLocation.lat, userLocation.lon);
+                
+                if (closestLocationData && closestLocationData.location) {
+                    const distanceToLocKm = closestLocationData.distance;
+                    const distanceToLocMiles = distanceToLocKm * 0.621371;
+                    const distanceToLocFeet = distanceToLocKm * 3280.84;
+                    
+                    console.log(`   ✅ Closest location found: ${closestLocationData.location.name}`);
+                    console.log(`   📏 Distance: ${distanceToLocKm.toFixed(4)} km (${distanceToLocFeet.toFixed(0)} ft / ${distanceToLocMiles.toFixed(2)} mi)`);
+                    console.log(`   📍 State: ${closestLocationData.location.state}`);
+                    
+                    // Use location if within reasonable distance (< 100 km / 62 miles for coverage)
+                    if (distanceToLocKm < 100) {
+                        console.log(`   ✅ USING LOCATION: ${closestLocationData.location.name} is closest match`);
+                        currentZoneTag = `${getLocationEmoji(closestLocationData.location.type)} ${closestLocationData.location.name}`;
+                        currentGridRadius = getLocationRadius(closestLocationData.location.type);
+                        currentContentScope = closestLocationData.location.type;
+                        currentGeographicLocation = closestLocationData.location.name;
+                        console.log(`\n✅ ZONE SELECTED: ${currentZoneTag}`);
+                        console.log(`   Type: ${closestLocationData.location.type} (Closest Location)`);
+                        console.log(`   State: ${closestLocationData.location.state}`);
+                        console.log(`   Radius: ${currentGridRadius.toFixed(4)} km`);
+                        return;
+                    }
+                }
+                
+                // STEP 2: Try to find nearest POI (SECONDARY)
+                console.log('\n🔍 Step 2: Searching for nearest POI from 38,260+ POI database...');
                 const nearestPOIData = findNearestPOI(userLocation.lat, userLocation.lon);
                 
                 if (nearestPOIData && nearestPOIData.poi) {
@@ -4206,27 +4235,7 @@
                         }
                     } else {
                         console.log(`   ⚠️ POI too far (${distanceToPoiKm.toFixed(2)} km > 0.5 km threshold)`);
-                        console.log(`   → Switching to neighborhood detection for better local match...`);
                     }
-                } else {
-                    console.log(`   ⚠️ No POI found in database`);
-                }
-                
-                // STEP 2: Fallback to REAL neighborhood/area based on nearest city in database
-                console.log('\n🔍 Step 2: Detecting REAL local neighborhood from database...');
-                const neighborhood = detectNeighborhood(userLocation.lat, userLocation.lon);
-                
-                if (neighborhood) {
-                    currentZoneTag = `${neighborhood.emoji} ${neighborhood.name}`;
-                    currentGridRadius = neighborhood.radius || 0.025; // ~82 feet default
-                    currentContentScope = neighborhood.type;
-                    currentGeographicLocation = neighborhood.name;
-                    
-                    console.log(`\n✅ ZONE SELECTED: ${currentZoneTag}`);
-                    console.log(`   Type: ${neighborhood.type} (Real City/Area from Database)`);
-                    console.log(`   Country: ${neighborhood.country || 'Unknown'}`);
-                    console.log(`   Radius: ${currentGridRadius.toFixed(4)} km`);
-                    return;
                 }
                 
                 // STEP 3: Final fallback - use raw coordinates
@@ -4245,6 +4254,32 @@
                 currentGridRadius = 0.02;
                 currentContentScope = 'LOCAL';
             }
+        }
+        
+        // Helper function: Find the absolute closest location from the entire database
+        function findClosestLocation(userLat, userLon) {
+            if (!globalLocationDatabase || globalLocationDatabase.length === 0) {
+                console.warn('⚠️ Location database empty');
+                return null;
+            }
+            
+            let closestLoc = null;
+            let minDistance = Infinity;
+            
+            globalLocationDatabase.forEach(loc => {
+                const distance = calculateDistance(userLat, userLon, loc.lat, loc.lon);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    closestLoc = loc;
+                }
+            });
+            
+            if (!closestLoc) {
+                console.warn('⚠️ No closest location found');
+                return null;
+            }
+            
+            return { location: closestLoc, distance: minDistance };
         }
         
         // Helper function: Detect local neighborhood from coordinates using REAL city data
