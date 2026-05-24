@@ -2915,26 +2915,42 @@
         // ============================================
         async function loadPOIData() {
             try {
-                // Load top 50 cities POI data
-                const poiResponse = await fetch('poi_database_top50.json');
+                // Load worldwide POI database (15 major cities, 50+ categories)
+                const poiResponse = await fetch('poi_database_worldwide.json');
                 const poiData = await poiResponse.json();
                 
                 // Flatten the cities structure into a single array of POIs for easier lookup
                 const allPOIs = [];
+                const cityList = [];
+                
                 for (const cityKey in poiData.cities) {
                     const city = poiData.cities[cityKey];
-                    if (city.pois) {
-                        allPOIs.push(...city.pois);
+                    cityList.push({
+                        name: city.name || cityKey,
+                        country: city.country,
+                        lat: city.lat,
+                        lon: city.lon,
+                        poiCount: city.poiCount || 0
+                    });
+                    
+                    if (city.pois && Array.isArray(city.pois)) {
+                        city.pois.forEach((poi, index) => {
+                            allPOIs.push({
+                                ...poi,
+                                id: `${cityKey}_${index}`,
+                                city: cityKey,
+                                country: city.country
+                            });
+                        });
                     }
                 }
+                
                 poiDatabase = allPOIs;
-                console.log(`✅ Loaded ${poiDatabase.length} POIs from top 50 cities`);
-
-                // Load global density data (all populated places)
-                const densityResponse = await fetch('global_density.json');
-                const densityData = await densityResponse.json();
-                globalDensityData = densityData.cities || [];
-                console.log(`✅ Loaded global density data for ${globalDensityData.length} settlements`);
+                globalDensityData = cityList;
+                
+                console.log(`✅ Loaded ${poiDatabase.length} POIs from worldwide database`);
+                console.log(`✅ Coverage: ${cityList.length} major cities across 5 continents`);
+                console.log(`📊 POI Categories: Cafe, Restaurant, Retail, Entertainment, Services, Museums, Parks, Hotels, Landmarks, Markets, Banks, Hospitals, Libraries, Schools, Transportation`);
             } catch (error) {
                 console.error('❌ Error loading POI/density data:', error);
                 poiDatabase = [];
@@ -2966,52 +2982,78 @@
         // CALCULATE GRID RADIUS BY POI TYPE & DENSITY
         // ============================================
         function calculateGridRadiusByPOI(poi, allPOIs) {
-            // Convert 30 feet to km: 30 ft = 0.00914 km
-            const COFFEE_SHOP_RADIUS_KM = 0.00914;
-            
-            // POI type-specific radii (in km)
+            // Grid radius mapping by POI type (in km)
+            // All distances optimized for local micro-community engagement
             const POI_RADII = {
-                'FOOD': 0.02, // 65 ft - just the shop
-                'TRANSPORT': 0.05, // 164 ft - station area
-                'RECREATION': 0.08, // 262 ft - playground/park area
-                'CULTURE': 0.06, // 197 ft - museum/library area
-                'EDUCATION': null // Schools: special handling below
+                // Micro-size grids (intimate spaces)
+                'cafe': 0.008,              // ~26 ft - coffee shop boundary
+                'coffee_shop': 0.008,       // ~26 ft - intimate cafe
+                'fast_food': 0.010,         // ~33 ft - quick service area
+                'bakery': 0.010,            // ~33 ft - pastry shop area
+                
+                // Small-size grids (shop level)
+                'restaurant': 0.02,         // ~66 ft - dining room boundary
+                'bar': 0.015,               // ~49 ft - bar seating
+                'electronics': 0.015,       // ~49 ft - retail counter
+                'retail': 0.012,            // ~39 ft - store front
+                'supermarket': 0.025,       // ~82 ft - supermarket section
+                'bookstore': 0.014,         // ~46 ft - book section
+                'library': 0.04,            // ~131 ft - library wing
+                'bank': 0.012,              // ~39 ft - teller area
+                
+                // Medium-size grids (venue level)
+                'hotel': 0.035,             // ~115 ft - hotel lobby/floor
+                'museum': 0.06,             // ~197 ft - museum gallery
+                'entertainment': 0.08,      // ~262 ft - theater/venue
+                'temple': 0.05,             // ~164 ft - temple grounds
+                'church': 0.05,             // ~164 ft - church grounds
+                'park': 0.15,               // ~492 ft - park section
+                'school': 0.12,             // ~394 ft - school campus
+                'hospital': 0.10,           // ~328 ft - hospital wing
+                
+                // Large-size grids (district level)
+                'landmark': 0.25,           // ~820 ft - landmark area
+                'mall': 0.20,               // ~656 ft - mall complex
+                'market': 0.18,             // ~591 ft - market area
+                'beach': 0.30,              // ~984 ft - beach section
+                'district': 0.35,           // ~1148 ft - neighborhood district
+                'shopping_mall': 0.20,      // ~656 ft - mall complex
+                'department_store': 0.18,   // ~591 ft - store complex
+                'historic': 0.25,           // ~820 ft - historic area
+                
+                // Default
+                'default': 0.03             // ~98 ft - generic POI
             };
             
-            // For schools, count nearby POIs and scale radius
-            if (poi.category === 'EDUCATION') {
-                const SCHOOL_CHECK_RADIUS = 0.5; // km - check within 500m
-                const nearbyPOIs = allPOIs.filter(p => {
-                    if (p.id === poi.id) return false; // exclude self
-                    const dist = calculateDistance(poi.lat, poi.lon, p.lat, p.lon);
-                    return dist <= SCHOOL_CHECK_RADIUS;
-                });
-                
-                const poiCount = nearbyPOIs.length;
-                let schoolRadius;
-                
-                if (poiCount >= 16) {
-                    schoolRadius = 0.03; // 98 ft - very tight, reserved for school
-                } else if (poiCount >= 6) {
-                    schoolRadius = 0.075; // 246 ft - medium density area
-                } else {
-                    schoolRadius = 0.15; // 492 ft - sparse area, larger grid
-                }
-                
-                return {
-                    gridRadius: schoolRadius,
-                    contentScope: `SCHOOL(${poiCount}POIs)`,
-                    nearbyPOIs: poiCount
-                };
-            }
+            // Get category from poi.category or poi.type
+            let category = (poi.category || poi.type || 'default').toLowerCase();
             
-            // For other POI types, use predefined radii
-            const radius = POI_RADII[poi.category] || 0.04; // 131 ft default
-            let scope = poi.category || 'LOCAL';
+            // Map category to grid radius
+            let radius = POI_RADII[category] || POI_RADII['default'];
+            
+            // Density-based scaling for high-traffic areas
+            if (allPOIs && allPOIs.length > 0) {
+                const nearbyPOIs = allPOIs.filter(p => {
+                    if (p.id === poi.id) return false;
+                    const dist = calculateDistance(poi.lat, poi.lon, p.lat, p.lon);
+                    return dist <= 1.0; // Check within 1 km
+                }).length;
+                
+                // Scale radius based on nearby POI density
+                if (nearbyPOIs > 50) {
+                    radius *= 0.8; // Very dense area - shrink grid
+                } else if (nearbyPOIs > 30) {
+                    radius *= 0.9; // Dense area - slightly shrink
+                } else if (nearbyPOIs > 100) {
+                    radius *= 1.2; // Ultra-dense downtown - expand slightly for coverage
+                } else if (nearbyPOIs < 3) {
+                    radius *= 1.3; // Sparse area - expand grid
+                }
+            }
             
             return {
                 gridRadius: radius,
-                contentScope: scope,
+                contentScope: category.toUpperCase(),
                 nearbyPOIs: 0
             };
         }
@@ -3025,12 +3067,10 @@
 
             const { poi, distance } = nearestPOIData;
             
-            // Get all POIs for context (needed for school density check)
+            // Get all POIs for context (needed for density-based scaling)
             let allPOIs = [];
-            if (window.poiDatabase && window.poiDatabase.cities) {
-                Object.values(window.poiDatabase.cities).forEach(city => {
-                    if (city.pois) allPOIs.push(...city.pois);
-                });
+            if (poiDatabase && Array.isArray(poiDatabase)) {
+                allPOIs = poiDatabase;
             }
             
             // Calculate grid based on POI type
