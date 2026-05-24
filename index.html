@@ -9355,6 +9355,158 @@
         styleObserver.observe(document.body, { attributes: true, attributeFilter: ['style'] });
         
         console.log('✅ All debug monitors active + dimension locking enabled + style mutation guard active');
+        
+        // =================== COMPREHENSIVE ZOOM TIMING & DETECTION ===================
+        console.log('📊 ZOOM TIMING DEBUG: Initializing detailed tracking...');
+        
+        // Record page load time
+        const pageLoadTime = performance.now();
+        let zoomEventCount = 0;
+        let firstZoomTime = null;
+        let zoomTimings = [];
+        
+        // Monitor every container dimension change with high precision
+        const containerMonitor = setInterval(() => {
+            const container = document.querySelector('.container');
+            const uploadPanel = document.querySelector('.upload-panel');
+            const grid = document.getElementById('grid');
+            
+            if (container && uploadPanel && grid) {
+                const containerHeight = container.offsetHeight || container.clientHeight;
+                const containerWidth = container.offsetWidth || container.clientWidth;
+                const panelHeight = uploadPanel.offsetHeight || uploadPanel.clientHeight;
+                const gridHeight = grid.offsetHeight || grid.clientHeight;
+                
+                // Store dimensions for comparison
+                if (!window._containerDims) {
+                    window._containerDims = { height: containerHeight, width: containerWidth, panelHeight, gridHeight };
+                    console.log('📏 BASELINE DIMENSIONS SET:', window._containerDims);
+                } else {
+                    const oldDims = window._containerDims;
+                    if (Math.abs(containerHeight - oldDims.height) > 2 || 
+                        Math.abs(containerWidth - oldDims.width) > 2 ||
+                        Math.abs(panelHeight - oldDims.panelHeight) > 2 ||
+                        Math.abs(gridHeight - oldDims.gridHeight) > 2) {
+                        
+                        const timeSinceLoad = (performance.now() - pageLoadTime).toFixed(0);
+                        console.error(`🔴 DIMENSION CHANGE DETECTED at ${timeSinceLoad}ms:`, {
+                            containerHeight: `${oldDims.height}px → ${containerHeight}px (Δ ${containerHeight - oldDims.height}px)`,
+                            containerWidth: `${oldDims.width}px → ${containerWidth}px (Δ ${containerWidth - oldDims.width}px)`,
+                            panelHeight: `${oldDims.panelHeight}px → ${panelHeight}px (Δ ${panelHeight - oldDims.panelHeight}px)`,
+                            gridHeight: `${oldDims.gridHeight}px → ${gridHeight}px (Δ ${gridHeight - oldDims.gridHeight}px)`,
+                            windowInnerHeight: window.innerHeight,
+                            visualScale: window.visualViewport?.scale || 'N/A'
+                        });
+                        
+                        window._containerDims = { height: containerHeight, width: containerWidth, panelHeight, gridHeight };
+                    }
+                }
+            }
+        }, 25); // Very frequent checking to catch timing
+        
+        // Monitor visual viewport scale changes (this IS the zoom)
+        if (window.visualViewport) {
+            let lastScale = window.visualViewport.scale;
+            
+            const scaleMonitor = setInterval(() => {
+                const currentScale = window.visualViewport.scale;
+                
+                if (Math.abs(currentScale - lastScale) > 0.01) { // Significant scale change
+                    zoomEventCount++;
+                    const timeSinceLoad = (performance.now() - pageLoadTime).toFixed(0);
+                    
+                    if (!firstZoomTime) {
+                        firstZoomTime = timeSinceLoad;
+                        console.error(`🚨🚨🚨 FIRST ZOOM DETECTED at ${timeSinceLoad}ms! 🚨🚨🚨`);
+                    }
+                    
+                    const zoomEvent = {
+                        eventNumber: zoomEventCount,
+                        timeMs: parseInt(timeSinceLoad),
+                        oldScale: lastScale.toFixed(3),
+                        newScale: currentScale.toFixed(3),
+                        scaleDelta: (currentScale - lastScale).toFixed(3),
+                        windowInnerHeight: window.innerHeight,
+                        visualViewportHeight: window.visualViewport.height.toFixed(0),
+                        visualViewportWidth: window.visualViewport.width.toFixed(0),
+                        offsetLeft: window.visualViewport.offsetLeft.toFixed(0),
+                        offsetTop: window.visualViewport.offsetTop.toFixed(0),
+                        containerHeight: document.querySelector('.container')?.clientHeight || 0
+                    };
+                    
+                    zoomTimings.push(zoomEvent);
+                    console.error(`🔴 ZOOM EVENT #${zoomEventCount} at ${timeSinceLoad}ms:`, zoomEvent);
+                    
+                    lastScale = currentScale;
+                }
+            }, 10); // Ultra-frequent scale monitoring
+        }
+        
+        // Monitor element appearances/disappearances that could trigger zoom
+        const gridObserver = new MutationObserver(() => {
+            const timeSinceLoad = (performance.now() - pageLoadTime).toFixed(0);
+            console.log(`⚠️ GRID CONTENT CHANGED at ${timeSinceLoad}ms`);
+        });
+        
+        const gridElement = document.getElementById('grid');
+        if (gridElement) {
+            gridObserver.observe(gridElement, { childList: true, subtree: true });
+        }
+        
+        // Periodic state dump for analysis
+        setInterval(() => {
+            const timeSinceLoad = (performance.now() - pageLoadTime).toFixed(0);
+            
+            if (parseInt(timeSinceLoad) % 1000 === 0 || parseInt(timeSinceLoad) % 1000 < 50) { // Every 1 second
+                const state = {
+                    timeMs: parseInt(timeSinceLoad),
+                    zoomEventsDetected: zoomEventCount,
+                    firstZoomAtMs: firstZoomTime,
+                    windowInnerHeight: window.innerHeight,
+                    windowInnerWidth: window.innerWidth,
+                    visualScale: window.visualViewport?.scale.toFixed(3) || 'N/A',
+                    scrollX: window.scrollX,
+                    scrollY: window.scrollY,
+                    containerHeight: document.querySelector('.container')?.clientHeight || 0,
+                    containerWidth: document.querySelector('.container')?.clientWidth || 0,
+                    devicePixelRatio: window.devicePixelRatio,
+                    orientation: window.orientation
+                };
+                
+                if (zoomEventCount > 0) {
+                    console.error(`📊 STATE DUMP [${timeSinceLoad}ms]: ${JSON.stringify(state)}`);
+                } else {
+                    console.log(`📊 STATE DUMP [${timeSinceLoad}ms]: ${JSON.stringify(state)}`);
+                }
+            }
+        }, 100);
+        
+        // Expose timing data globally for user analysis
+        window.zoomDebugData = {
+            get timeSinceLoad() { return (performance.now() - pageLoadTime).toFixed(0); },
+            get zoomEventCount() { return zoomEventCount; },
+            get firstZoomTime() { return firstZoomTime; },
+            get zoomTimings() { return zoomTimings; },
+            get currentScale() { return window.visualViewport?.scale.toFixed(3) || 'N/A'; },
+            dumpState() {
+                return {
+                    zoomEventCount,
+                    firstZoomTime,
+                    totalZoomTimings: zoomTimings.length,
+                    timings: zoomTimings,
+                    currentState: {
+                        windowInnerHeight: window.innerHeight,
+                        windowInnerWidth: window.innerWidth,
+                        visualScale: window.visualViewport?.scale,
+                        containerHeight: document.querySelector('.container')?.clientHeight,
+                        scrollX: window.scrollX,
+                        scrollY: window.scrollY
+                    }
+                };
+            }
+        };
+        
+        console.log('📡 ZOOM TIMING DEBUG ACTIVE - call window.zoomDebugData.dumpState() to see full analysis');
 
         // Comments functionality
         function addComment() {
