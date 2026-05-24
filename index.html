@@ -2456,66 +2456,22 @@
          * @param {number} tier - User's tier (1, 2, or 3)
          * @returns {number} - Relevance score
          */
-        function scorePost(post, userZone, tier, allPosts = []) {
+        function scorePost(post, userZone, tier) {
             let score = 0;
             const isLocalPost = post.county === userZone;
             const likes = post.likes || 0;
-            const dislikes = post.dislikes || 0;
             const hasEngagement = (post.likes || 0) > 0 || (post.dislikes || 0) > 0;
             const isMajorZonePost = identifyMajorZones().includes(post.county);
             
-            // ========================================================================
-            // BADGE POSITION ENFORCEMENT: 2nd and 3rd badge posts ALWAYS stay in position
-            // This overrides like count to maintain strict badge ordering
-            // ========================================================================
-            if (allPosts && allPosts.length > 0) {
-                // Sort to find top 3 most-liked posts
-                const sortedByLikes = [...allPosts]
-                    .filter(p => (p.likes || 0) > 0)
-                    .sort((a, b) => {
-                        const likeDiff = (b.likes || 0) - (a.likes || 0);
-                        if (likeDiff !== 0) return likeDiff;
-                        return (b.timestamp || 0) - (a.timestamp || 0);
-                    });
-                
-                const topPost = sortedByLikes[0];
-                const secondPost = sortedByLikes[1];
-                const thirdPost = sortedByLikes[2];
-                
-                // POSITION 1: Top post (CROWNED badge) - give it highest score
-                if (topPost && post.id === topPost.id) {
-                    return 10000000; // Far above everything else
-                }
-                
-                // POSITION 2: Second post (RUNNER-UP badge) - keep it in 2nd tier
-                if (secondPost && post.id === secondPost.id) {
-                    return 9000000; // High score, but lower than #1
-                }
-                
-                // POSITION 3: Third post (PODIUM badge) - keep it in 3rd tier
-                if (thirdPost && post.id === thirdPost.id) {
-                    return 8000000; // High score, but lower than #2
-                }
-            }
-            
-            // MINIMUM BASE SCORE: Ensure all posts get at least this score
-            // New posts with 0 likes still need to appear
-            score = 500; // Everyone starts at 500
-            
-            // Boost by likes count
+            // Base score: likes count
             score += likes * 10;
-            
-            // Penalize disliked posts
-            if (dislikes > likes) {
-                score -= 300; // Disliked posts go lower
-            }
             
             // Local posts get priority boost
             if (isLocalPost) {
-                score += 500; // Strong boost for local (more than likes multiplier)
+                score += 100; // Strong boost for local
                 
                 // New local posts get extra boost
-                if (post.isNew) score += 200;
+                if (post.isNew) score += 50;
             }
             
             // Out-of-area posts from major zones get consideration
@@ -2547,7 +2503,7 @@
                     break;
             }
             
-            return Math.max(score, 100); // Never return 0 or negative - all posts visible
+            return score;
         }
         
         /**
@@ -2670,10 +2626,10 @@
             };
             const targetCount = tierRequirement[tier] || 400;
             
-            // Sort local posts by score - pass allPosts to enforce badge positions
+            // Sort local posts by score
             const scoredLocalPosts = localPosts.map(post => ({
                 ...post,
-                score: scorePost(post, userZone, tier, localPosts),
+                score: scorePost(post, userZone, tier),
                 isLocal: true
             }));
             
@@ -2684,7 +2640,7 @@
             const outOfAreaPosts = getOutOfAreaPosts(userZone, tier, outOfAreaCount)
                 .map(post => ({
                     ...post,
-                    score: scorePost(post, userZone, tier, localPosts),
+                    score: scorePost(post, userZone, tier),
                     isLocal: false,
                     outOfAreaBadge: createOutOfAreaBadge(post.badge, post.county)
                 }));
@@ -2702,8 +2658,20 @@
                 });
             }
             
+            // Random new post placement - sometimes at top, sometimes at bottom
+            const newPosts = gridPosts.filter(p => p.isNew);
+            const nonNewPosts = gridPosts.filter(p => !p.isNew);
+            
+            newPosts.forEach(newPost => {
+                const randomPos = Math.random() < 0.4 
+                    ? Math.floor(nonNewPosts.length * Math.random() * 0.2) // Top 20%
+                    : Math.floor(nonNewPosts.length * (0.7 + Math.random() * 0.3)); // Bottom 30%
+                nonNewPosts.splice(randomPos, 0, newPost);
+            });
+            
+            gridPosts = nonNewPosts;
+            
             console.log(`📱 Tier ${tier} Grid: ${gridPosts.length} posts (${scoredLocalPosts.length} local, ${outOfAreaPosts.length} out-of-area)`);
-            console.log(`📌 Badge Positions Locked: 1st place = ${scoredLocalPosts[0]?.id?.substring(0, 8)}, 2nd place = ${scoredLocalPosts[1]?.id?.substring(0, 8)}, 3rd place = ${scoredLocalPosts[2]?.id?.substring(0, 8)}`);
             
             return gridPosts.slice(0, targetCount);
         }
@@ -4451,7 +4419,6 @@
             const fairness = Math.random() * 5;
             
             // TIER 1: TOP 3 POSITIONS (CROWNED, RUNNER-UP, PODIUM)
-            // Badge positions ALWAYS override like count - maintain strict ordering
             if (allPosts && allPosts.length > 0) {
                 // Sort posts by likes (descending), then by timestamp (newer first) for tiebreaker
                 const sortedByLikes = [...allPosts]
@@ -4467,19 +4434,19 @@
                 const secondPost = sortedByLikes[1];
                 const thirdPost = sortedByLikes[2];
                 
-                // Position 1: Most liked (CROWNED badge) - ALWAYS goes first
+                // Position 1: Most liked (with recency tiebreaker)
                 if (topPost && post.id === topPost.id && likes > 0 && post.id !== spotlightPostId) {
-                    return 1000000 + recency + fairness;
+                    return 1000000 + likes * 10000 + recency;
                 }
                 
-                // Position 2: 2nd most liked (RUNNER-UP badge) - ALWAYS goes second
+                // Position 2: 2nd most liked (with recency tiebreaker)
                 if (secondPost && post.id === secondPost.id && likes > 0) {
-                    return 900000 + recency + fairness;
+                    return 900000 + likes * 10000 + recency;
                 }
                 
-                // Position 3: 3rd most liked (PODIUM badge) - ALWAYS goes third
+                // Position 3: 3rd most liked (with recency tiebreaker)
                 if (thirdPost && post.id === thirdPost.id && likes > 0) {
-                    return 800000 + recency + fairness;
+                    return 800000 + likes * 10000 + recency;
                 }
             }
             
@@ -4845,15 +4812,15 @@
                 applicableBadges.push('verified');
             }
             
-            // LIKED badge: more likes than dislikes and not one of the better badge posts
-            // Only excluded by TOP TIER badges: CROWNED, RUNNER-UP, PODIUM, SPOTLIGHT, DISLIKED, TRENDING
+            // LIKED badge: more likes than dislikes and not one of the podium/runner-up posts
+            // Only excluded by: CROWNED (gets trending instead), RUNNER-UP (2nd place), PODIUM (3rd place), DISLIKED
+            // Badge hierarchy: NEW/HOT/RISING → LIKED/TRENDING → 2ND (RUNNER-UP) → SPOTLIGHT → 3RD (PODIUM)
             // LIKED can coexist with: NEW, RISING, HOT, CONTROVERSIAL, MEDIA-CONTENT
             if (likes > dislikes && 
                 likes > 0 &&
-                !applicableBadges.includes('crowned') && 
+                !applicableBadges.includes('crowned') &&
                 !applicableBadges.includes('runner-up') && 
                 !applicableBadges.includes('podium') && 
-                !applicableBadges.includes('trending') && 
                 !applicableBadges.includes('disliked') &&
                 post.id !== spotlightPostId) {
                 applicableBadges.push('liked');
