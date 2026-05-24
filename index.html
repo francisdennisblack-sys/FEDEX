@@ -6747,33 +6747,81 @@
             const q = query.toLowerCase();
             const results = [];
             
-            // FIRST PRIORITY: Search through US locations database (cities, towns, neighborhoods)
+            // FIRST PRIORITY: Search through US locations database (NEW STRUCTURE: state -> regions -> areas)
             if (globalLocationDatabase && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
                 const locationMatches = {};
                 
-                globalLocationDatabase.forEach(loc => {
-                    const locName = (loc.name || '').toLowerCase();
-                    const state = (loc.state || '').toLowerCase();
-                    
-                    // Prefix match (highest priority)
-                    if (locName.startsWith(q)) {
-                        const key = `${getLocationEmoji(loc.type)} ${loc.name}, ${loc.state}`;
-                        locationMatches[key] = { display: key, type: 'location', value: loc.name, priority: 1, data: loc };
-                    }
-                    // Contains match (medium priority)
-                    else if (locName.includes(q) || state.includes(q)) {
-                        const key = `${getLocationEmoji(loc.type)} ${loc.name}, ${loc.state}`;
-                        if (!locationMatches[key]) {
-                            locationMatches[key] = { display: key, type: 'location', value: loc.name, priority: 2, data: loc };
-                        }
+                // Flatten and search all locations from the new database structure
+                globalLocationDatabase.forEach(stateData => {
+                    if (stateData.regions && Array.isArray(stateData.regions)) {
+                        stateData.regions.forEach(region => {
+                            if (region.areas && Array.isArray(region.areas)) {
+                                region.areas.forEach(area => {
+                                    const locName = (area.name || '').toLowerCase();
+                                    const state = (stateData.state || '').toLowerCase();
+                                    const stateCode = (stateData.stateCode || '').toLowerCase();
+                                    
+                                    // Prefix match (highest priority - most relevant)
+                                    if (locName.startsWith(q)) {
+                                        const key = `${getLocationEmoji(area.type)} ${area.name}, ${stateData.state}`;
+                                        locationMatches[key] = { 
+                                            display: key, 
+                                            type: 'location', 
+                                            value: area.name, 
+                                            priority: 1, 
+                                            data: area,
+                                            state: stateData.state
+                                        };
+                                    }
+                                    // Contains match (high priority)
+                                    else if (locName.includes(q)) {
+                                        const key = `${getLocationEmoji(area.type)} ${area.name}, ${stateData.state}`;
+                                        if (!locationMatches[key]) {
+                                            locationMatches[key] = { 
+                                                display: key, 
+                                                type: 'location', 
+                                                value: area.name, 
+                                                priority: 2, 
+                                                data: area,
+                                                state: stateData.state
+                                            };
+                                        }
+                                    }
+                                    // State name match (medium priority)
+                                    else if (state.includes(q) || stateCode.includes(q)) {
+                                        const key = `${getLocationEmoji(area.type)} ${area.name}, ${stateData.state}`;
+                                        if (!locationMatches[key]) {
+                                            locationMatches[key] = { 
+                                                display: key, 
+                                                type: 'location', 
+                                                value: area.name, 
+                                                priority: 3, 
+                                                data: area,
+                                                state: stateData.state
+                                            };
+                                        }
+                                    }
+                                });
+                            }
+                        });
                     }
                 });
                 
-                // Add location matches (prioritize US locations)
-                Object.values(locationMatches).slice(0, 20).forEach(item => results.push(item));
+                // Sort by priority and add location matches - RETURN ALL MATCHES, not just top 20
+                const sortedMatches = Object.values(locationMatches)
+                    .sort((a, b) => {
+                        if (a.priority !== b.priority) return a.priority - b.priority;
+                        // Secondary sort by name length (shorter names first for better UX)
+                        return a.data.name.length - b.data.name.length;
+                    });
+                
+                // Add all location matches (up to 100 to allow comprehensive search)
+                sortedMatches.slice(0, 100).forEach(item => results.push(item));
+                
+                console.log(`🔍 Found ${sortedMatches.length} location matches for "${query}"`);
             }
             
-            // SECOND PRIORITY: Search through POI database
+            // SECOND PRIORITY: Search through POI database (if available)
             if (window.poiDatabase && Array.isArray(window.poiDatabase)) {
                 const poiMatches = {};
                 
@@ -6795,8 +6843,8 @@
                     }
                 });
                 
-                // Add POI matches
-                Object.values(poiMatches).slice(0, 10).forEach(item => results.push(item));
+                // Add POI matches (up to 20)
+                Object.values(poiMatches).slice(0, 20).forEach(item => results.push(item));
             }
             
             // THIRD PRIORITY: Search through cities (from globalDensityData)
@@ -6821,12 +6869,12 @@
                     }
                 });
                 
-                // Add city matches
-                Object.values(cityMatches).slice(0, 5).forEach(item => results.push(item));
+                // Add city matches (up to 10)
+                Object.values(cityMatches).slice(0, 10).forEach(item => results.push(item));
             }
             
-            // Return top 25 results
-            return results.slice(0, 25);
+            // Return comprehensive results (up to 130 total - all locations + POIs + cities)
+            return results.slice(0, 130);
         }
         
         // Update autocomplete dropdown with styling
@@ -6965,19 +7013,46 @@
         
         // Get popular cities for initial recommendations
         function getPopularCitiesSuggestions() {
-            if (!window.poiDatabase || !window.poiDatabase.cities) return [];
+            // Show popular locations from database as recommendations when field is empty
+            const suggestions = [];
             
-            // Show top cities as recommendations
-            const cities = Object.entries(window.poiDatabase.cities)
-                .sort((a, b) => (b[1].poiCount || 0) - (a[1].poiCount || 0))
-                .slice(0, 8)
-                .map(([name, city]) => ({
-                    display: `📍 ${name}, ${city.country}`,
-                    type: 'city',
-                    value: name
-                }));
+            if (globalLocationDatabase && Array.isArray(globalLocationDatabase)) {
+                // Get first major location from each state (popular cities)
+                const popularLocations = globalLocationDatabase
+                    .slice(0, 20) // First 20 states
+                    .map(stateData => {
+                        if (stateData.regions && stateData.regions[0] && stateData.regions[0].areas) {
+                            const firstArea = stateData.regions[0].areas[0]; // First location is usually major city
+                            return {
+                                display: `${getLocationEmoji(firstArea.type)} ${firstArea.name}, ${stateData.state}`,
+                                type: 'location',
+                                value: firstArea.name,
+                                data: firstArea,
+                                state: stateData.state
+                            };
+                        }
+                        return null;
+                    })
+                    .filter(item => item !== null);
+                
+                suggestions.push(...popularLocations);
+            }
             
-            return cities;
+            // Fallback to POI cities if available
+            if (window.poiDatabase && window.poiDatabase.cities && suggestions.length < 5) {
+                const cities = Object.entries(window.poiDatabase.cities)
+                    .sort((a, b) => (b[1].poiCount || 0) - (a[1].poiCount || 0))
+                    .slice(0, 8)
+                    .map(([name, city]) => ({
+                        display: `📍 ${name}, ${city.country}`,
+                        type: 'city',
+                        value: name
+                    }));
+                
+                suggestions.push(...cities);
+            }
+            
+            return suggestions.slice(0, 15);
         }
         
         function updateZonePredictorWithCustom(value) {
@@ -6991,13 +7066,26 @@
                 
                 // Try to extract location from database if it's a formatted location
                 if (globalLocationDatabase && Array.isArray(globalLocationDatabase)) {
-                    const locationMatch = globalLocationDatabase.find(loc => {
-                        const locDisplay = `${getLocationEmoji(loc.type)} ${loc.name}, ${loc.state}`;
-                        return locDisplay === value || loc.name === value;
-                    });
+                    // Search through the new database structure (state -> regions -> areas)
+                    let foundLocation = null;
                     
-                    if (locationMatch) {
-                        displayText = `${getLocationEmoji(locationMatch.type)} ${locationMatch.name}, ${locationMatch.state}`;
+                    for (const stateData of globalLocationDatabase) {
+                        if (stateData.regions && Array.isArray(stateData.regions)) {
+                            for (const region of stateData.regions) {
+                                if (region.areas && Array.isArray(region.areas)) {
+                                    foundLocation = region.areas.find(area => {
+                                        const locDisplay = `${getLocationEmoji(area.type)} ${area.name}, ${stateData.state}`;
+                                        return locDisplay === value || area.name === value;
+                                    });
+                                    
+                                    if (foundLocation) {
+                                        displayText = `${getLocationEmoji(foundLocation.type)} ${foundLocation.name}, ${stateData.state}`;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (foundLocation) break;
                     }
                 }
                 
