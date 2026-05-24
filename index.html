@@ -1594,7 +1594,9 @@
             </div>
             
             <div id="deleteSection" style="display: none; margin-top: 24px;">
-                <button onclick="deleteAndHidePost()" style="
+                <!-- Delete Post button (for post owner) -->
+                <button id="deleteOwnPostBtn" onclick="deleteOwnPost()" style="
+                    display: none;
                     width: 100%;
                     padding: 12px 16px;
                     background-color: #ff4444;
@@ -1605,7 +1607,22 @@
                     font-size: 14px;
                     cursor: pointer;
                     transition: all 0.2s ease;
-                " onmouseover="this.style.backgroundColor='#ff2222'" onmouseout="this.style.backgroundColor='#ff4444'">Delete Post</button>
+                " onmouseover="this.style.backgroundColor='#ff2222'" onmouseout="this.style.backgroundColor='#ff4444'">🗑️ Delete Post</button>
+                
+                <!-- Hide Post button (for non-owner) -->
+                <button id="hideOtherPostBtn" onclick="hidePost()" style="
+                    display: none;
+                    width: 100%;
+                    padding: 12px 16px;
+                    background-color: #ff8800;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    font-weight: 600;
+                    font-size: 14px;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                " onmouseover="this.style.backgroundColor='#ff6600'" onmouseout="this.style.backgroundColor='#ff8800'">👁️ Hide from My View</button>
             </div>
         </div>
     </div>
@@ -4011,38 +4028,52 @@
                 voteSection.style.display = 'none';
             }
             
-            // Show delete button only for current user's posts
+            // Show appropriate button based on post ownership
             const deleteSection = document.getElementById('deleteSection');
+            const deleteOwnPostBtn = document.getElementById('deleteOwnPostBtn');
+            const hideOtherPostBtn = document.getElementById('hideOtherPostBtn');
+            
             if (targetPost.networkId === currentUserId) {
+                // User is the post owner - show Delete button
                 deleteSection.style.display = 'block';
+                deleteOwnPostBtn.style.display = 'block';
+                hideOtherPostBtn.style.display = 'none';
             } else {
-                deleteSection.style.display = 'none';
+                // User is not the post owner - show Hide button
+                deleteSection.style.display = 'block';
+                deleteOwnPostBtn.style.display = 'none';
+                hideOtherPostBtn.style.display = 'block';
             }
             
             document.getElementById('viewModal').classList.add('active');
         }
 
-        function deleteAndHidePost() {
+        /**
+         * Delete own post - Removes from Firebase permanently and hides from all users
+         * Called when post owner deletes their own post
+         */
+        function deleteOwnPost() {
             if (!selectedPostId) return;
 
-            console.log('🗑️ DELETE POST - MATCHING REPORT SYSTEM PATTERN:');
+            console.log('🗑️ DELETE OWN POST - PERMANENT REMOVAL:');
             console.log('  selectedPostId:', selectedPostId);
             console.log('  currentWiFiNetwork:', currentWiFiNetwork);
             console.log('  currentUserId:', currentUserId);
+            
+            if (!confirm('Are you sure you want to delete your post? This cannot be undone.')) {
+                return;
+            }
 
-            // Delete from Firebase (removes for everyone)
-            // CRITICAL: Use currentWiFiNetwork (the actual network identifier) not currentUserId
+            // Delete from Firebase permanently (removes for everyone)
             deletePostFromFirebase(currentWiFiNetwork, selectedPostId).then(() => {
-                console.log('✅ Post deleted from Firebase successfully');
+                console.log('✅ Post permanently deleted from Firebase');
                 
-                // CRITICAL FIX: Use localStorage (like report system) to persist deletion across refreshes
-                // When user deletes their own post, we hide it from their view with localStorage persistence
-                console.log('🙈 Hiding deleted post from this user\'s view (using localStorage like report system)');
-                let deletedPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
-                if (!deletedPosts.includes(selectedPostId)) {
-                    deletedPosts.push(selectedPostId);
-                    localStorage.setItem('deletedOwnPosts', JSON.stringify(deletedPosts));
-                    console.log(`✅ Post added to user's deleted list. Total deleted: ${deletedPosts.length}`);
+                // Track deletion in localStorage for record keeping
+                let deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
+                if (!deletedOwnPosts.includes(selectedPostId)) {
+                    deletedOwnPosts.push(selectedPostId);
+                    localStorage.setItem('deletedOwnPosts', JSON.stringify(deletedOwnPosts));
+                    console.log(`✅ Own post deletion recorded. Total deleted: ${deletedOwnPosts.length}`);
                 }
                 
                 // Also hide from memory for immediate UI update
@@ -4058,17 +4089,27 @@
                 if (deleteIndex > -1) {
                     userPostBoxes.splice(deleteIndex, 1);
                 }
+                
                 closeViewModal();
                 renderGrid();
+                alert('Your post has been deleted permanently');
             }).catch(error => {
                 console.error('Failed to delete from Firebase:', error);
                 alert('Failed to delete post');
             });
         }
-
-        function hidePost() {
+        
+        /**
+         * Hide post from own view - Only hides for current user, keeps post visible to others
+         * Called when user hides someone else's post from their grid
+         */
+        function hidePostFromMyView() {
             if (!selectedPostId) return;
             
+            console.log('👁️ HIDE POST FROM MY VIEW - USER-SPECIFIC ONLY:');
+            console.log('  selectedPostId:', selectedPostId);
+            console.log('  Will only hide for:', currentUserId);
+
             if (!hiddenPosts[currentUserId]) {
                 hiddenPosts[currentUserId] = [];
             }
@@ -4076,11 +4117,28 @@
             // Add to hidden list if not already there
             if (!hiddenPosts[currentUserId].includes(selectedPostId)) {
                 hiddenPosts[currentUserId].push(selectedPostId);
+                console.log(`✅ Post hidden from user's view. Total hidden: ${hiddenPosts[currentUserId].length}`);
+            }
+            
+            // Track in localStorage for persistence
+            let hiddenPostsList = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
+            if (!hiddenPostsList.includes(selectedPostId)) {
+                hiddenPostsList.push(selectedPostId);
+                localStorage.setItem('hiddenPosts', JSON.stringify(hiddenPostsList));
             }
             
             closeViewModal();
             renderGrid();
             alert('Post removed from your view');
+        }
+
+        /**
+         * Generic hidePost function for backward compatibility
+         * Routes to appropriate hide function
+         */
+        function hidePost() {
+            if (!selectedPostId) return;
+            hidePostFromMyView();
         }
 
         function closeViewModal() {
