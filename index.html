@@ -2786,7 +2786,61 @@
         }
 
         // ============================================
-        // GET GRID FOR USER (using global density data)
+        // CALCULATE GRID RADIUS BY POI TYPE & DENSITY
+        // ============================================
+        function calculateGridRadiusByPOI(poi, allPOIs) {
+            // Convert 30 feet to km: 30 ft = 0.00914 km
+            const COFFEE_SHOP_RADIUS_KM = 0.00914;
+            
+            // POI type-specific radii (in km)
+            const POI_RADII = {
+                'FOOD': 0.02, // 65 ft - just the shop
+                'TRANSPORT': 0.05, // 164 ft - station area
+                'RECREATION': 0.08, // 262 ft - playground/park area
+                'CULTURE': 0.06, // 197 ft - museum/library area
+                'EDUCATION': null // Schools: special handling below
+            };
+            
+            // For schools, count nearby POIs and scale radius
+            if (poi.category === 'EDUCATION') {
+                const SCHOOL_CHECK_RADIUS = 0.5; // km - check within 500m
+                const nearbyPOIs = allPOIs.filter(p => {
+                    if (p.id === poi.id) return false; // exclude self
+                    const dist = calculateDistance(poi.lat, poi.lon, p.lat, p.lon);
+                    return dist <= SCHOOL_CHECK_RADIUS;
+                });
+                
+                const poiCount = nearbyPOIs.length;
+                let schoolRadius;
+                
+                if (poiCount >= 16) {
+                    schoolRadius = 0.03; // 98 ft - very tight, reserved for school
+                } else if (poiCount >= 6) {
+                    schoolRadius = 0.075; // 246 ft - medium density area
+                } else {
+                    schoolRadius = 0.15; // 492 ft - sparse area, larger grid
+                }
+                
+                return {
+                    gridRadius: schoolRadius,
+                    contentScope: `SCHOOL(${poiCount}POIs)`,
+                    nearbyPOIs: poiCount
+                };
+            }
+            
+            // For other POI types, use predefined radii
+            const radius = POI_RADII[poi.category] || 0.04; // 131 ft default
+            let scope = poi.category || 'LOCAL';
+            
+            return {
+                gridRadius: radius,
+                contentScope: scope,
+                nearbyPOIs: 0
+            };
+        }
+
+        // ============================================
+        // GET GRID FOR USER (using POI keyword-based sizing)
         // ============================================
         function getGridForUser(userLat, userLon) {
             const nearestPOIData = findNearestPOI(userLat, userLon);
@@ -2794,83 +2848,25 @@
 
             const { poi, distance } = nearestPOIData;
             
-            // Find nearest city in globalDensityData
-            let nearestCity = null;
-            let minCityDistance = Infinity;
-            
-            globalDensityData.forEach(city => {
-                const cityDist = calculateDistance(userLat, userLon, city.lat, city.lon);
-                if (cityDist < minCityDistance) {
-                    minCityDistance = cityDist;
-                    nearestCity = city;
-                }
-            });
-            
-            // If no city found, use POI location to estimate grid
-            if (!nearestCity) {
-                // Default based on density ranges
-                let gridRadius = 10.0;
-                let contentScope = 'REGION';
-                if (distance < 0.5) {
-                    gridRadius = 0.4;
-                    contentScope = 'HOUSEHOLD';
-                } else if (distance < 1) {
-                    gridRadius = 0.8;
-                    contentScope = 'LOCAL';
-                } else if (distance < 2) {
-                    gridRadius = 1.2;
-                    contentScope = 'DISTRICT';
-                }
-                
-                return {
-                    poi: poi,
-                    distance: distance,
-                    city: poi.city || 'Unknown',
-                    density: 0,
-                    gridRadius: gridRadius,
-                    contentScope: contentScope,
-                    boundary: calculateCircleBoundary(poi.lat, poi.lon, gridRadius)
-                };
+            // Get all POIs for context (needed for school density check)
+            let allPOIs = [];
+            if (window.poiDatabase && window.poiDatabase.cities) {
+                Object.values(window.poiDatabase.cities).forEach(city => {
+                    if (city.pois) allPOIs.push(...city.pois);
+                });
             }
-
-            // Calculate grid radius based on city density
-            let gridRadius = 10.0;
-            let contentScope = 'REGION';
             
-            if (nearestCity.density >= 5000) {
-                gridRadius = 0.4;
-                contentScope = 'HOUSEHOLD';
-            } else if (nearestCity.density >= 2000) {
-                gridRadius = 0.8;
-                contentScope = 'LOCAL';
-            } else if (nearestCity.density >= 800) {
-                gridRadius = 1.2;
-                contentScope = 'DISTRICT';
-            } else if (nearestCity.density >= 300) {
-                gridRadius = 2.0;
-                contentScope = 'CITY';
-            } else if (nearestCity.density >= 100) {
-                gridRadius = 3.0;
-                contentScope = 'CITY';
-            } else if (nearestCity.density >= 50) {
-                gridRadius = 4.0;
-                contentScope = 'CITY';
-            } else if (nearestCity.density >= 20) {
-                gridRadius = 5.0;
-                contentScope = 'REGION';
-            } else if (nearestCity.density >= 5) {
-                gridRadius = 8.0;
-                contentScope = 'REGION';
-            }
-
+            // Calculate grid based on POI type
+            const gridData = calculateGridRadiusByPOI(poi, allPOIs);
+            
             return {
                 poi: poi,
                 distance: distance,
-                city: nearestCity.name,
-                density: nearestCity.density,
-                gridRadius: gridRadius,
-                contentScope: contentScope,
-                boundary: calculateCircleBoundary(poi.lat, poi.lon, gridRadius)
+                city: poi.city || 'Unknown',
+                gridRadius: gridData.gridRadius,
+                contentScope: gridData.contentScope,
+                nearbyPOIs: gridData.nearbyPOIs,
+                boundary: calculateCircleBoundary(poi.lat, poi.lon, gridData.gridRadius)
             };
         }
 
@@ -3054,25 +3050,30 @@
                 document.body.appendChild(poiStatusDiv);
             }
 
-            // Build POI status text
+            // Build POI status text with keyword-based sizing
             let statusText = '📍 NEAREST POI (Grid Center)\n';
             statusText += '─────────────────────────────\n';
             statusText += `Name: ${currentGrid.poi.name}\n`;
-            statusText += `Type: ${currentGrid.poi.type.toUpperCase()}\n`;
-            statusText += `Distance: ${(currentGrid.distance * 0.621371).toFixed(2)} mi\n`;
-            statusText += `\n`;
-            statusText += '📏 GRID RADIUS\n';
+            statusText += `Type: ${currentGrid.poi.category}\n`;
+            statusText += `Distance: ${(currentGrid.distance * 3280.84).toFixed(0)} ft\n`;
+            statusText += '\n';
+            statusText += '📏 GRID RADIUS (POI-Based)\n';
             statusText += '─────────────────────────────\n';
-            statusText += `City: ${currentGrid.city}\n`;
-            statusText += `Density: ${currentGrid.density}/sq km\n`;
-            statusText += `Grid Radius: ${currentGrid.gridRadius} km\n`;
-            statusText += `           (${(currentGrid.gridRadius * 0.621371).toFixed(2)} miles)\n`;
-            statusText += `\n`;
+            statusText += `Grid Radius: ${(currentGrid.gridRadius * 3280.84).toFixed(0)} ft\n`;
+            statusText += `           (${(currentGrid.gridRadius * 0.621371).toFixed(3)} miles)\n`;
+            statusText += '\n';
             statusText += '🎯 CONTENT SCOPE\n';
             statusText += '─────────────────────────────\n';
             statusText += `Scope: ${currentGrid.contentScope}\n`;
-            statusText += `Posts visible within:\n`;
-            statusText += `${currentGrid.gridRadius} km radius`;
+            
+            // Show nearby POI count for schools
+            if (currentGrid.poi.category === 'EDUCATION' && currentGrid.nearbyPOIs !== undefined) {
+                statusText += `Nearby POIs: ${currentGrid.nearbyPOIs}\n`;
+                statusText += '(Affects grid size)\n';
+            }
+            
+            statusText += '\nPosts visible within:\n';
+            statusText += `${(currentGrid.gridRadius * 3280.84).toFixed(0)} ft radius`;
 
             poiStatusDiv.textContent = statusText;
         }
