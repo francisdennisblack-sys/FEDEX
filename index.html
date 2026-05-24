@@ -2980,7 +2980,11 @@
         // FIND NEAREST POI
         // ============================================
         function findNearestPOI(userLat, userLon) {
-            if (poiDatabase.length === 0) return null;
+            // Ensure we have POI data
+            if (!poiDatabase || poiDatabase.length === 0) {
+                console.warn('⚠️ POI database empty - using fallback');
+                return createFallbackPOI(userLat, userLon);
+            }
 
             let nearest = null;
             let minDistance = Infinity;
@@ -2993,7 +2997,31 @@
                 }
             });
 
+            // Fallback if no nearest found
+            if (!nearest) {
+                console.warn('⚠️ No nearest POI found - using fallback');
+                return createFallbackPOI(userLat, userLon);
+            }
+
             return nearest;
+        }
+        
+        function createFallbackPOI(userLat, userLon) {
+            // Create a fallback POI when database is empty or unavailable
+            return {
+                poi: {
+                    id: 'fallback_' + Date.now(),
+                    name: `Local Area (${userLat.toFixed(3)}, ${userLon.toFixed(3)})`,
+                    lat: userLat,
+                    lon: userLon,
+                    category: 'local_area',
+                    type: 'local',
+                    emoji: '📍',
+                    city: 'Unknown',
+                    country: 'Unknown'
+                },
+                distance: 0
+            };
         }
 
         // ============================================
@@ -4090,44 +4118,67 @@
         // ============================================
         function detectUserGrid() {
             if (!userLocation) {
-                currentZoneTag = 'Location unavailable';
+                currentZoneTag = '📍 Detecting location...';
+                console.warn('⚠️ No user location available');
                 return;
             }
 
-            const grid = getGridForUser(userLocation.lat, userLocation.lon);
-            if (!grid) {
-                currentZoneTag = `${userLocation.lat.toFixed(2)}, ${userLocation.lon.toFixed(2)}`;
-                console.warn('⚠️ POI grid detection failed, using coordinates');
-                return;
+            try {
+                const grid = getGridForUser(userLocation.lat, userLocation.lon);
+                
+                if (!grid) {
+                    // Fallback to coordinates if grid creation fails
+                    currentZoneTag = `📍 ${userLocation.lat.toFixed(3)}, ${userLocation.lon.toFixed(3)}`;
+                    currentGridRadius = 0.02; // ~65 feet default
+                    currentContentScope = 'LOCAL_AREA';
+                    console.warn('⚠️ POI grid detection failed, using coordinate fallback');
+                    return;
+                }
+
+                currentGrid = grid;
+                currentNearestPOI = grid.poi;
+                currentGridRadius = grid.gridRadius;
+                currentContentScope = grid.contentScope;
+                currentGeographicLocation = grid.city || grid.country || 'Unknown';
+                currentZoneTag = `${grid.poi.emoji || '📍'} ${grid.poi.name}`;
+
+                console.log(`✅ Zone tag detected - hyper-local at POI: ${grid.poi.name}`);
+                console.log(`📍 POI: ${grid.poi.name}`);
+                console.log(`🏙️  City: ${grid.city}`);
+                console.log(`📏 Grid radius: ${grid.gridRadius.toFixed(4)} km`);
+                console.log(`🎯 Content scope: ${grid.contentScope}`);
+            } catch (error) {
+                console.error('❌ Error in detectUserGrid:', error);
+                // Absolute fallback - use user coordinates
+                currentZoneTag = `📍 ${userLocation.lat.toFixed(3)}, ${userLocation.lon.toFixed(3)}`;
+                currentGridRadius = 0.02;
+                currentContentScope = 'LOCAL';
             }
-
-            currentGrid = grid;
-            currentNearestPOI = grid.poi;
-            currentGridRadius = grid.gridRadius;
-            currentContentScope = grid.contentScope;
-            currentGeographicLocation = grid.city || grid.country || 'Unknown';
-            currentZoneTag = `${grid.poi.emoji || '📍'} ${grid.poi.name}`;
-
-            console.log(`📍 POI: ${grid.poi.name}`);
-            console.log(`🏙️  City: ${grid.city} (density: ${grid.density}/sq km)`);
-            console.log(`📏 Grid radius: ${grid.gridRadius} km (${(grid.gridRadius * 0.621371).toFixed(2)} miles)`);
-            console.log(`🎯 Content scope: ${grid.contentScope}`);
         }
 
         // Initialize location detection and fetch county from WiGLE API
         async function initializePhase0() {
             console.log('\n🚀 PHASE 0: POI Grid Foundation Layer Starting...\n');
             try {
-                // Step 1: Load geolocation
+                // Step 1: Load geolocation immediately
+                console.log('📍 Requesting geolocation...');
                 await requestGeolocation();
-                console.log(`📍 User location: ${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
+                console.log(`✅ User location acquired: ${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
                 
-                // Step 2: Load POI and density data
-                console.log('📥 Loading POI database and city density data...');
-                await loadPOIData();
+                // Step 2: Load POI data (with timeout fallback)
+                console.log('📥 Loading POI database...');
+                const poiLoadTimeout = new Promise((resolve) => {
+                    setTimeout(() => {
+                        console.warn('⚠️ POI database load timeout - continuing with fallback');
+                        resolve();
+                    }, 3000);
+                });
                 
-                // Step 3: Detect user's grid
-                console.log('🔍 Finding nearest POI and calculating grid...');
+                await Promise.race([loadPOIData(), poiLoadTimeout]);
+                console.log(`✅ POI database ready: ${poiDatabase.length} POIs loaded`);
+                
+                // Step 3: Detect user's grid (ALWAYS runs - even if POI data failed)
+                console.log('🔍 Detecting hyper-local zone...');
                 detectUserGrid();
                 
                 // Step 4: Update zone display in header
@@ -4136,6 +4187,7 @@
                     const label = document.getElementById('zoneLabel');
                     if (label) {
                         label.textContent = `📍 ${currentZoneTag}`;
+                        label.style.color = '#4ade80';
                     }
                 }
                 
@@ -4144,9 +4196,8 @@
                 if (zoneList && currentGrid) {
                     zoneList.innerHTML = `
                         <strong>POI:</strong> ${currentGrid.poi.name}<br>
-                        <strong>City:</strong> ${currentGrid.city}<br>
-                        <strong>Density:</strong> ${currentGrid.density}/sq km<br>
-                        <strong>Grid Radius:</strong> ${currentGrid.gridRadius} km<br>
+                        <strong>City:</strong> ${currentGrid.city || 'Auto-detected'}<br>
+                        <strong>Grid Radius:</strong> ${currentGrid.gridRadius.toFixed(4)} km (~${(currentGrid.gridRadius * 0.621371 * 3280).toFixed(0)} feet)<br>
                         <strong>Content Scope:</strong> ${currentGrid.contentScope}<br>
                         <strong>Nearest POI Distance:</strong> ${(currentGrid.distance * 0.621371).toFixed(2)} mi
                     `;
@@ -4154,25 +4205,45 @@
                 
                 // Mark Phase 0 as complete - NOW safe to filter posts by grid
                 isPhase0Complete = true;
-                console.log('✅ Phase 0 COMPLETE - POI Grid is ready:', currentZoneTag);
-                console.log('\n✅ Phase 0 Initialization Complete\n');
+                console.log('✅ Phase 0 COMPLETE - POI Grid is ready at:', currentZoneTag);
+                console.log('\n🎯 Users will post hyper-locally and can change location in "Move post to" field\n');
             } catch (error) {
                 console.error('❌ Phase 0 Error:', error);
-                currentZoneTag = 'POI Grid Unavailable';
+                
+                // Fallback: detect grid even on error
+                try {
+                    detectUserGrid();
+                } catch (gridError) {
+                    console.error('❌ Grid detection also failed:', gridError);
+                    currentZoneTag = '📍 Local Zone';
+                }
+                
                 isPhase0Complete = true; // Mark complete even on error
                 const zoneDisplay = document.getElementById('zoneInfo');
                 if (zoneDisplay) {
                     const label = document.getElementById('zoneLabel');
                     if (label) {
-                        label.textContent = `⚠️ POI Grid Unavailable`;
-                        label.style.color = '#ff6b6b';
+                        label.textContent = `📍 ${currentZoneTag}`;
+                        label.style.color = '#fbbf24';
                     }
                 }
             }
         }
 
-        // Start Phase 0 immediately
-        initializePhase0();
+        // Start Phase 0 immediately when DOM is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initializePhase0);
+        } else {
+            initializePhase0();
+        }
+        
+        // Fallback: ensure Phase 0 runs after short delay
+        setTimeout(() => {
+            if (!isPhase0Complete) {
+                console.log('⏰ Timeout triggered - starting Phase 0 as fallback...');
+                initializePhase0();
+            }
+        }, 2000);
 
         // Periodic grid check: detect if user has moved to a different POI/grid
         async function checkGridUpdate() {
@@ -4297,11 +4368,16 @@
             const zonePredictorElement = document.getElementById('zonePredictor');
             if (zonePredictorElement) {
                 // Display zone tag with POI info
-                let displayZone = currentZoneTag || 'Select location';
+                let displayZone = currentZoneTag || '📍 Local Zone';
                 
-                // Verify displayZone is valid
-                if (!displayZone || displayZone === 'Loading...') {
-                    displayZone = 'Select location';
+                // Verify displayZone is valid - never show "Loading..." to user
+                if (!displayZone || displayZone === 'Loading...' || displayZone.includes('Loading')) {
+                    // Use fallback based on what we know
+                    if (userLocation) {
+                        displayZone = `📍 ${userLocation.lat.toFixed(3)}, ${userLocation.lon.toFixed(3)}`;
+                    } else {
+                        displayZone = '📍 Select location';
+                    }
                 }
                 
                 zonePredictorElement.textContent = displayZone;
@@ -4317,7 +4393,7 @@
                     zonePredictorElement.style.fontWeight = '600';
                 }, 300);
                 
-                console.log(`📍 Zone predictor updated: User will post to zone "${displayZone}"`);
+                console.log(`✅ Hyper-local zone: "${displayZone}" (Users can change in "Move post to" field)`);
             }
         }
 
