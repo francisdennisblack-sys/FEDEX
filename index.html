@@ -6339,38 +6339,77 @@
         }
 
         // ============================================
-        // CUSTOM TAG MANAGEMENT WITH AUTOCOMPLETE
+        // CUSTOM TAG MANAGEMENT WITH ADVANCED AUTOCOMPLETE
         // ============================================
         
-        // Build autocomplete suggestions from POI database
+        // Build autocomplete suggestions from POI database (ENHANCED for 200K+ POIs)
         function getAutocompleteSuggestions(query) {
             if (!query || query.length < 1 || !window.poiDatabase) return [];
             
             const q = query.toLowerCase();
-            const suggestions = new Map(); // Use map to deduplicate
+            const results = {
+                cityPrefix: [],     // Cities that start with query
+                cityContains: [],   // Cities that contain query
+                poiPrefix: [],      // POIs starting with query
+                poiContains: [],    // POIs containing query
+                categories: []      // Category matches
+            };
             
             // Search through all cities and POIs
             for (const cityName in window.poiDatabase.cities) {
                 const city = window.poiDatabase.cities[cityName];
+                const cityLower = cityName.toLowerCase();
                 
-                // Add city name if matches
-                if (cityName.toLowerCase().includes(q)) {
-                    const key = `📍 ${cityName}, ${city.country}`;
-                    if (!suggestions.has(key)) suggestions.set(key, { type: 'city', value: cityName });
+                // Smart city matching (prefix > contains)
+                if (cityLower.startsWith(q)) {
+                    results.cityPrefix.push({ display: `📍 ${cityName}, ${city.country}`, type: 'city', value: cityName });
+                } else if (cityLower.includes(q)) {
+                    results.cityContains.push({ display: `📍 ${cityName}, ${city.country}`, type: 'city', value: cityName });
                 }
                 
-                // Add POIs from this city
+                // POI search (limit to first 30 POIs per city for performance)
                 if (city.pois && Array.isArray(city.pois)) {
-                    city.pois.forEach(poi => {
-                        if (poi.name.toLowerCase().includes(q) || poi.category.toLowerCase().includes(q)) {
-                            const key = `${poi.emoji} ${poi.name}`;
-                            if (!suggestions.has(key)) suggestions.set(key, { type: 'poi', value: poi.name, city: cityName });
+                    for (let i = 0; i < Math.min(city.pois.length, 30); i++) {
+                        const poi = city.pois[i];
+                        const poiLower = poi.name.toLowerCase();
+                        const categoryLower = poi.category.toLowerCase();
+                        
+                        if (poiLower.startsWith(q)) {
+                            results.poiPrefix.push({ 
+                                display: `${poi.emoji} ${poi.name} (${cityName})`,
+                                type: 'poi', 
+                                value: poi.name
+                            });
+                        } else if (poiLower.includes(q)) {
+                            results.poiContains.push({ 
+                                display: `${poi.emoji} ${poi.name} (${cityName})`,
+                                type: 'poi', 
+                                value: poi.name
+                            });
+                        } else if (categoryLower.startsWith(q)) {
+                            const found = results.categories.find(c => c.display === `🏷️ ${poi.category}`);
+                            if (!found) results.categories.push({ display: `🏷️ ${poi.category}`, type: 'category', value: poi.category });
                         }
-                    });
+                    }
                 }
             }
             
-            return Array.from(suggestions.entries()).slice(0, 8).map(([display, data]) => ({ display, ...data }));
+            // Merge results in priority order: exact prefix > category > contains
+            const merged = [
+                ...results.cityPrefix.slice(0, 3),
+                ...results.categories.slice(0, 2),
+                ...results.poiPrefix.slice(0, 3),
+                ...results.cityContains.slice(0, 2),
+                ...results.poiContains.slice(0, 4)
+            ];
+            
+            // Deduplicate by display text
+            const seen = new Set();
+            return merged.filter(item => {
+                if (seen.has(item.display)) return false;
+                seen.add(item.display);
+                return true;
+            }).slice(0, 10);
         }
         
         // Update autocomplete dropdown
