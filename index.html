@@ -947,6 +947,34 @@
             text-shadow: 0 0 2px rgba(156, 163, 175, 0.4);
         }
 
+        /* NEW - Boosted visibility for user growth (fresh posts get prominent display) */
+        .grid-box.badge-new {
+            border: 2px solid #60a5fa;
+            box-shadow: 0 0 15px rgba(96, 165, 250, 0.6), inset 0 0 8px rgba(96, 165, 250, 0.2);
+            animation: newPostPulse 2s ease-in-out infinite;
+        }
+
+        @keyframes newPostPulse {
+            0%, 100% {
+                box-shadow: 0 0 15px rgba(96, 165, 250, 0.6), inset 0 0 8px rgba(96, 165, 250, 0.2);
+            }
+            50% {
+                box-shadow: 0 0 25px rgba(96, 165, 250, 0.9), inset 0 0 12px rgba(96, 165, 250, 0.4);
+            }
+        }
+
+        .grid-box.badge-new::before {
+            content: '✨ NEW';
+            position: absolute;
+            top: 4px;
+            left: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #60a5fa;
+            text-shadow: 0 0 4px rgba(96, 165, 250, 0.8);
+            letter-spacing: 0.5px;
+        }
+
         .grid-box.badge-crowned {
             border-top: 4px solid #fbbf24;
             box-shadow: inset 0 0 10px rgba(251, 191, 36, 0.3), 0 0 15px rgba(251, 191, 36, 0.5);
@@ -3047,6 +3075,15 @@
             const likes = post.likes || 0;
             const dislikes = post.dislikes || 0;
             const likeRatio = likes - dislikes;
+            
+            // Check if post is NEW (less than 1 hour old)
+            const postAge = Date.now() - (post.timestamp || 0);
+            const isNew = postAge < (60 * 60 * 1000); // 1 hour
+            
+            // NEW POSTS: Highest priority for cross-geographic visibility
+            if (isNew && likes === 0 && dislikes === 0) {
+                return { tier: 'NEW', priority: 0, label: '✨ NEW', isNew: true };
+            }
 
             // PODIUM: Top tier (50+ likes, or 10+ more likes than dislikes)
             if (likes >= 50 || likeRatio >= 10) {
@@ -3063,9 +3100,9 @@
                 return { tier: 'LIKED', priority: 3, label: '👍 LIKED' };
             }
 
-            // NORMAL: Balanced or new posts
+            // NORMAL: Balanced or aging posts
             if (Math.abs(likeRatio) <= 2) {
-                return { tier: 'NORMAL', priority: 4, label: '📝 NEW' };
+                return { tier: 'NORMAL', priority: 4, label: '📝 NORMAL' };
             }
 
             // DISLIKED: More dislikes than likes (lowest priority)
@@ -3073,7 +3110,7 @@
                 return { tier: 'DISLIKED', priority: 5, label: '👎 REVIEW' };
             }
 
-            return { tier: 'NORMAL', priority: 4, label: '📝 NEW' };
+            return { tier: 'NORMAL', priority: 4, label: '📝 NORMAL' };
         }
 
         // ============================================
@@ -3144,12 +3181,12 @@
 
             // Categorize by both geographic AND engagement tiers
             const tieredByGeoAndEngagement = {
-                LOCAL: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
-                TOWN: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
-                CITY: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
-                REGION: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
-                STATE: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
-                COUNTRY: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] }
+                LOCAL: { NEW: [], PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                TOWN: { NEW: [], PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                CITY: { NEW: [], PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                REGION: { NEW: [], PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                STATE: { NEW: [], PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                COUNTRY: { NEW: [], PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] }
             };
 
             allPosts.forEach(post => {
@@ -3183,18 +3220,29 @@
 
             if (localCount >= 50) {
                 // Dense: All local posts
-                ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
+                ['NEW', 'PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
                     displayPosts.push(...tieredByGeoAndEngagement.LOCAL[tier]);
                 });
                 console.log(`🟢 DENSE: ${displayPosts.length} local posts`);
             } else if (localCount >= 20) {
-                // Moderate: Local + top engagement TOWN
-                ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
+                // Moderate: Local + top engagement TOWN, but NEW posts get boosted across tiers
+                ['NEW', 'PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
                     displayPosts.push(...tieredByGeoAndEngagement.LOCAL[tier]);
                 });
 
                 let backfillNeeded = targetCount - displayPosts.length;
-                // Prioritize engagement tiers from TOWN
+                
+                // NEW posts from TOWN get high priority (to help them get their first likes)
+                const townNewCount = Math.min(Math.ceil(backfillNeeded * 0.3), tieredByGeoAndEngagement.TOWN.NEW.length);
+                tieredByGeoAndEngagement.TOWN.NEW.slice(0, townNewCount).forEach(post => {
+                    post.isBackfilled = true;
+                    post.cascadeTier = 'TOWN_BACKFILL';
+                    post.boostedForNewPosts = true;
+                    displayPosts.push(post);
+                });
+                backfillNeeded -= townNewCount;
+                
+                // Then fill with other engagement tiers
                 ['PODIUM', 'HOT', 'LIKED', 'NORMAL'].forEach(tier => {
                     const needed = Math.min(backfillNeeded, tieredByGeoAndEngagement.TOWN[tier].length);
                     tieredByGeoAndEngagement.TOWN[tier].slice(0, needed).forEach(post => {
@@ -3204,19 +3252,34 @@
                     });
                     backfillNeeded -= needed;
                 });
-                console.log(`🟡 MODERATE: ${localCount} local + engagement backfill`);
+                console.log(`🟡 MODERATE: ${localCount} local + engagement backfill (${townNewCount} NEW posts boosted)`);
             } else if (localCount >= 5) {
-                // Sparse: Local + all engagement tiers cascading
-                ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
+                // Sparse: Local + all engagement tiers cascading, NEW posts get maximum boost
+                ['NEW', 'PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
                     displayPosts.push(...tieredByGeoAndEngagement.LOCAL[tier]);
                 });
 
                 let backfillNeeded = targetCount - displayPosts.length;
                 const geoTiers = ['TOWN', 'CITY', 'REGION', 'STATE'];
                 
+                // First pass: Collect all NEW posts from all geographic tiers
+                const allNewPosts = [];
+                geoTiers.forEach(geoTier => {
+                    allNewPosts.push(...tieredByGeoAndEngagement[geoTier].NEW);
+                });
+                
+                // Show NEW posts first (help them get initial likes)
+                const newPostsToShow = Math.min(Math.ceil(backfillNeeded * 0.4), allNewPosts.length);
+                allNewPosts.slice(0, newPostsToShow).forEach(post => {
+                    post.isBackfilled = true;
+                    post.boostedForNewPosts = true;
+                    displayPosts.push(post);
+                });
+                backfillNeeded -= newPostsToShow;
+                
+                // Then fill with other engagement tiers by geo tier
                 for (const geoTier of geoTiers) {
                     if (backfillNeeded <= 0) break;
-                    // Prioritize higher engagement posts
                     ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(engageTier => {
                         const needed = Math.min(backfillNeeded, tieredByGeoAndEngagement[geoTier][engageTier].length);
                         tieredByGeoAndEngagement[geoTier][engageTier].slice(0, needed).forEach(post => {
@@ -3227,19 +3290,34 @@
                         backfillNeeded -= needed;
                     });
                 }
-                console.log(`🟠 SPARSE: ${localCount} local + cascading engagement tiers`);
+                console.log(`🟠 SPARSE: ${localCount} local + cascading engagement tiers (${newPostsToShow} NEW posts boosted)`);
             } else {
-                // Rural: Full cascade with all engagement tiers
-                ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
+                // Rural: Full cascade with all engagement tiers, NEW posts get maximum exposure
+                ['NEW', 'PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
                     displayPosts.push(...tieredByGeoAndEngagement.LOCAL[tier]);
                 });
 
                 let backfillNeeded = targetCount - displayPosts.length;
                 const geoTiers = ['TOWN', 'CITY', 'REGION', 'STATE', 'COUNTRY'];
                 
+                // First pass: Collect all NEW posts from all geographic tiers for maximum exposure
+                const allNewPosts = [];
+                geoTiers.forEach(geoTier => {
+                    allNewPosts.push(...tieredByGeoAndEngagement[geoTier].NEW);
+                });
+                
+                // Show NEW posts prominently (help them get initial likes from any distance)
+                const newPostsToShow = Math.min(Math.ceil(backfillNeeded * 0.5), allNewPosts.length);
+                allNewPosts.slice(0, newPostsToShow).forEach(post => {
+                    post.isBackfilled = true;
+                    post.boostedForNewPosts = true;
+                    displayPosts.push(post);
+                });
+                backfillNeeded -= newPostsToShow;
+                
+                // Then fill with other engagement tiers
                 for (const geoTier of geoTiers) {
                     if (backfillNeeded <= 0) break;
-                    // Show engagement tiers in order
                     ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(engageTier => {
                         const needed = Math.min(backfillNeeded, tieredByGeoAndEngagement[geoTier][engageTier].length);
                         tieredByGeoAndEngagement[geoTier][engageTier].slice(0, needed).forEach(post => {
@@ -3250,7 +3328,7 @@
                         backfillNeeded -= needed;
                     });
                 }
-                console.log(`🔴 RURAL: ${localCount} local + full cascade with engagement tiers`);
+                console.log(`🔴 RURAL: ${localCount} local + full cascade (${newPostsToShow} NEW posts boosted for maximum exposure)`);
             }
 
             return displayPosts;
@@ -6275,7 +6353,7 @@
                         box.classList.add(`badge-${post.proximityClass}`);
                     }
 
-                    // Apply engagement tier badge (HOT, PODIUM, DISLIKED)
+                    // Apply engagement tier badge (HOT, PODIUM, DISLIKED, NEW)
                     if (post.engagementTier && post.engagementTier !== 'NORMAL' && post.engagementTier !== 'LIKED') {
                         box.classList.add(`badge-${post.engagementTier.toLowerCase()}`);
                     }
@@ -6343,7 +6421,7 @@
                                 box.classList.add(`badge-${post.proximityClass}`);
                             }
 
-                            // Apply engagement tier badge (HOT, PODIUM, DISLIKED)
+                            // Apply engagement tier badge (HOT, PODIUM, DISLIKED, NEW)
                             if (post.engagementTier && post.engagementTier !== 'NORMAL' && post.engagementTier !== 'LIKED') {
                                 box.classList.add(`badge-${post.engagementTier.toLowerCase()}`);
                             }
