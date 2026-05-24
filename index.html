@@ -2984,39 +2984,76 @@
         // Load comprehensive US locations database (3000+ cities, towns, neighborhoods)
         async function loadUSLocationDatabase() {
             try {
+                console.log('🔄 Starting to load US locations database...');
                 const response = await fetch('/us_locations_database.json');
                 if (!response.ok) throw new Error('Failed to load US locations database');
                 
                 const data = await response.json();
+                console.log(`📊 Database version: ${data.version}, Total in file: ${data.totalLocations}`);
                 
                 // Flatten all locations from all states and regions
                 const allLocations = [];
+                let stateCount = 0;
+                let regionCount = 0;
+                
                 if (data.locations && Array.isArray(data.locations)) {
-                    data.locations.forEach(state => {
+                    console.log(`🗺️  Processing ${data.locations.length} states...`);
+                    
+                    data.locations.forEach((state, stateIdx) => {
+                        stateCount++;
                         if (state.regions && Array.isArray(state.regions)) {
                             state.regions.forEach(region => {
+                                regionCount++;
                                 if (region.areas && Array.isArray(region.areas)) {
-                                    region.areas.forEach(area => {
+                                    console.log(`   State ${stateIdx + 1}: ${state.state} (${state.stateCode}) - Region "${region.name}" has ${region.areas.length} areas`);
+                                    
+                                    region.areas.forEach((area, areaIdx) => {
+                                        if (!area.name || !area.lat || !area.lon) {
+                                            console.warn(`   ⚠️  Invalid area in ${state.state} region ${region.name}: missing name/coords`, area);
+                                        }
+                                        
                                         allLocations.push({
                                             name: area.name,
-                                            state: state.stateCode,
+                                            state: state.state,
+                                            stateCode: state.stateCode,
                                             lat: area.lat,
                                             lon: area.lon,
-                                            type: area.type || 'City',
+                                            type: area.type || 'city',
                                             population: area.population,
                                             region: region.name
                                         });
                                     });
+                                } else {
+                                    console.warn(`   ⚠️  Region "${region.name}" in ${state.state} has no areas array`);
                                 }
                             });
+                        } else {
+                            console.warn(`   ⚠️  State ${state.state} has no regions array`);
                         }
                     });
                 }
                 
                 globalLocationDatabase = allLocations;
-                console.log(`✅ Loaded ${allLocations.length} US locations (cities, towns, neighborhoods)`);
+                console.log(`✅ Successfully loaded database!`);
+                console.log(`   📍 Total locations flattened: ${allLocations.length}`);
+                console.log(`   🗺️  States: ${stateCount}`);
+                console.log(`   📍 Regions: ${regionCount}`);
+                
+                // Verify some key locations
+                const huntington = allLocations.find(l => l.name === 'Huntington Beach');
+                if (huntington) {
+                    console.log(`✅ Huntington Beach found: ${huntington.name}, ${huntington.state} @ ${huntington.lat}, ${huntington.lon}`);
+                } else {
+                    console.warn(`❌ Huntington Beach NOT FOUND in database`);
+                }
+                
+                // Sample check
+                const caLocations = allLocations.filter(l => l.state === 'California');
+                console.log(`📍 California locations: ${caLocations.length} (sample: ${caLocations.slice(0, 3).map(l => l.name).join(', ')})`);
+                
             } catch (error) {
-                console.error('⚠️  Could not load US locations database:', error);
+                console.error('❌ CRITICAL: Could not load US locations database:', error);
+                console.error('   Stack:', error.stack);
                 globalLocationDatabase = [];
             }
         }
@@ -4406,34 +4443,54 @@
         
         // Helper: Get emoji based on location type
         function getLocationEmoji(type) {
+            if (!type) {
+                console.warn(`⚠️  getLocationEmoji called with null/undefined type`);
+                type = 'city';
+            }
+            
+            const typeNormalized = (type || 'city').toLowerCase();
+            
             const emojiMap = {
-                'Major City': '🏙️',
-                'City': '🏘️',
-                'Town': '🏞️',
-                'Neighborhood': '🏠',
-                'CDP': '📍',
-                'Village': '🏘️',
-                'Census Designated Place': '📍',
-                'Regional Area': '🗺️',
-                'Default': '📍'
+                'major city': '🏙️',
+                'city': '🏘️',
+                'town': '🏞️',
+                'neighborhood': '🏠',
+                'cdp': '📍',
+                'village': '🏘️',
+                'census designated place': '📍',
+                'regional area': '🗺️',
+                'default': '📍'
             };
-            return emojiMap[type] || emojiMap['Default'];
+            
+            const emoji = emojiMap[typeNormalized] || emojiMap['default'];
+            console.debug(`🎨 getLocationEmoji(${type}) → ${emoji}`);
+            return emoji;
         }
         
         // Helper: Get radius based on location type
         function getLocationRadius(type) {
+            if (!type) {
+                console.warn(`⚠️  getLocationRadius called with null/undefined type`);
+                type = 'city';
+            }
+            
+            const typeNormalized = (type || 'city').toLowerCase();
+            
             const radiusMap = {
-                'Major City': 0.025,       // ~82 ft - city center
-                'City': 0.022,             // ~72 ft - city
-                'Town': 0.020,             // ~66 ft - town center
-                'Neighborhood': 0.018,     // ~59 ft - neighborhood
-                'CDP': 0.015,              // ~49 ft - CDP
-                'Village': 0.015,          // ~49 ft - village
-                'Census Designated Place': 0.015,
-                'Regional Area': 0.04,     // ~131 ft - regional
-                'Default': 0.025
+                'major city': 0.025,       // ~82 ft - city center
+                'city': 0.022,             // ~72 ft - city
+                'town': 0.020,             // ~66 ft - town center
+                'neighborhood': 0.018,     // ~59 ft - neighborhood
+                'cdp': 0.015,              // ~49 ft - CDP
+                'village': 0.015,          // ~49 ft - village
+                'census designated place': 0.015,
+                'regional area': 0.04,     // ~131 ft - regional
+                'default': 0.025
             };
-            return radiusMap[type] || radiusMap['Default'];
+            
+            const radius = radiusMap[typeNormalized] || radiusMap['default'];
+            console.debug(`📏 getLocationRadius(${type}) → ${radius}km`);
+            return radius;
         }
         
         // Helper: Get nearby POI category types to enhance neighborhood descriptions
@@ -6742,17 +6799,25 @@
         
         // Build autocomplete suggestions from POI database (ENHANCED for 200K+ POIs)
         function getAutocompleteSuggestions(query) {
-            if (!query || query.length < 1) return [];
+            if (!query || query.length < 1) {
+                console.log('🔍 Empty query - skipping search');
+                return [];
+            }
             
+            console.log(`🔍 SEARCH START: Query="${query}"`);
             const q = query.toLowerCase();
             const results = [];
             
             // FIRST PRIORITY: Search through US locations database (NEW STRUCTURE: state -> regions -> areas)
             if (globalLocationDatabase && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
+                console.log(`   📍 Searching through ${globalLocationDatabase.length} locations...`);
                 const locationMatches = {};
+                let prefixMatches = 0;
+                let containsMatches = 0;
+                let stateMatches = 0;
                 
                 // Flatten and search all locations from the new database structure
-                globalLocationDatabase.forEach(stateData => {
+                globalLocationDatabase.forEach((stateData, stateIdx) => {
                     if (stateData.regions && Array.isArray(stateData.regions)) {
                         stateData.regions.forEach(region => {
                             if (region.areas && Array.isArray(region.areas)) {
@@ -6772,6 +6837,7 @@
                                             data: area,
                                             state: stateData.state
                                         };
+                                        prefixMatches++;
                                     }
                                     // Contains match (high priority)
                                     else if (locName.includes(q)) {
@@ -6785,6 +6851,7 @@
                                                 data: area,
                                                 state: stateData.state
                                             };
+                                            containsMatches++;
                                         }
                                     }
                                     // State name match (medium priority)
@@ -6799,6 +6866,7 @@
                                                 data: area,
                                                 state: stateData.state
                                             };
+                                            stateMatches++;
                                         }
                                     }
                                 });
@@ -6806,6 +6874,8 @@
                         });
                     }
                 });
+                
+                console.log(`   ✅ Location matches: ${prefixMatches} prefix + ${containsMatches} contains + ${stateMatches} state = ${Object.keys(locationMatches).length} total`);
                 
                 // Sort by priority and add location matches - RETURN ALL MATCHES, not just top 20
                 const sortedMatches = Object.values(locationMatches)
@@ -6816,14 +6886,19 @@
                     });
                 
                 // Add all location matches (up to 100 to allow comprehensive search)
-                sortedMatches.slice(0, 100).forEach(item => results.push(item));
+                const locationsToAdd = sortedMatches.slice(0, 100);
+                locationsToAdd.forEach(item => results.push(item));
                 
-                console.log(`🔍 Found ${sortedMatches.length} location matches for "${query}"`);
+                console.log(`   🎯 Adding ${locationsToAdd.length} location suggestions`);
+            } else {
+                console.warn(`   ❌ globalLocationDatabase not available or empty`);
             }
             
             // SECOND PRIORITY: Search through POI database (if available)
             if (window.poiDatabase && Array.isArray(window.poiDatabase)) {
+                console.log(`   🍽️  Searching through ${window.poiDatabase.length} POIs...`);
                 const poiMatches = {};
+                let poiCount = 0;
                 
                 window.poiDatabase.forEach(poi => {
                     const poiName = (poi.name || '').toLowerCase();
@@ -6833,23 +6908,30 @@
                     if (poiName.startsWith(q)) {
                         const key = `${poi.emoji} ${poi.name}`;
                         poiMatches[key] = { display: key, type: 'poi', value: poi.name, priority: 1 };
+                        poiCount++;
                     } 
                     // Contains match (medium priority)
                     else if (poiName.includes(q) || category.includes(q)) {
                         const key = `${poi.emoji} ${poi.name}`;
                         if (!poiMatches[key]) {
                             poiMatches[key] = { display: key, type: 'poi', value: poi.name, priority: 2 };
+                            poiCount++;
                         }
                     }
                 });
                 
+                console.log(`   ✅ Found ${poiCount} POI matches`);
+                
                 // Add POI matches (up to 20)
-                Object.values(poiMatches).slice(0, 20).forEach(item => results.push(item));
+                const poisToAdd = Object.values(poiMatches).slice(0, 20);
+                poisToAdd.forEach(item => results.push(item));
             }
             
             // THIRD PRIORITY: Search through cities (from globalDensityData)
             if (globalDensityData && Array.isArray(globalDensityData)) {
+                console.log(`   🌍 Searching through ${globalDensityData.length} cities...`);
                 const cityMatches = {};
+                let cityCount = 0;
                 
                 globalDensityData.forEach(city => {
                     const cityName = (city.name || '').toLowerCase();
@@ -6859,22 +6941,32 @@
                     if (cityName.startsWith(q)) {
                         const key = `📍 ${city.name}, ${city.country}`;
                         cityMatches[key] = { display: key, type: 'city', value: city.name, priority: 1 };
+                        cityCount++;
                     }
                     // Contains match (medium priority)
                     else if (cityName.includes(q) || countryName.includes(q)) {
                         const key = `📍 ${city.name}, ${city.country}`;
                         if (!cityMatches[key]) {
                             cityMatches[key] = { display: key, type: 'city', value: city.name, priority: 2 };
+                            cityCount++;
                         }
                     }
                 });
                 
+                console.log(`   ✅ Found ${cityCount} city matches`);
+                
                 // Add city matches (up to 10)
-                Object.values(cityMatches).slice(0, 10).forEach(item => results.push(item));
+                const citiesToAdd = Object.values(cityMatches).slice(0, 10);
+                citiesToAdd.forEach(item => results.push(item));
+            } else {
+                console.warn(`   ⚠️  globalDensityData not available`);
             }
             
             // Return comprehensive results (up to 130 total - all locations + POIs + cities)
-            return results.slice(0, 130);
+            const finalResults = results.slice(0, 130);
+            console.log(`🔍 SEARCH END: Returning ${finalResults.length} total suggestions`);
+            
+            return finalResults;
         }
         
         // Update autocomplete dropdown with styling
@@ -6921,13 +7013,24 @@
         }
         
         function selectAutocomplete(value) {
+            console.log(`✅ AUTOCOMPLETE SELECT: User selected "${value}"`);
             const customTagInput = document.getElementById('customZoneTag');
             const dropdown = document.getElementById('autocompleteDropdown');
+            
             if (customTagInput) {
+                console.log(`   Updating input field...`);
                 customTagInput.value = value;
                 customTagInput.focus();
+            } else {
+                console.warn(`   ❌ customZoneTag input not found`);
             }
-            if (dropdown) dropdown.style.display = 'none';
+            
+            if (dropdown) {
+                dropdown.style.display = 'none';
+                console.log(`   Hiding dropdown`);
+            }
+            
+            console.log(`   Calling updateZonePredictorWithCustom...`);
             updateZonePredictorWithCustom(value);
         }
         
@@ -7056,44 +7159,78 @@
         }
         
         function updateZonePredictorWithCustom(value) {
+            console.log(`🎯 UPDATE ZONE PREDICTOR: Processing value="${value}"`);
             const zonePredictor = document.getElementById('zonePredictor');
             const clearZoneBtn = document.getElementById('clearZoneBtn');
+            
+            if (!zonePredictor) {
+                console.error(`   ❌ zonePredictor element not found!`);
+                return;
+            }
+            
+            if (!clearZoneBtn) {
+                console.warn(`   ⚠️  clearZoneBtn element not found!`);
+            }
             
             if (value && value.trim()) {
                 // Parse the display value to extract and properly format the location
                 // Format: "🏙️ Huntington Beach, California" or "☕ Starbucks" etc
                 let displayText = value;
+                let found = false;
+                
+                console.log(`   Searching database for match...`);
                 
                 // Try to extract location from database if it's a formatted location
                 if (globalLocationDatabase && Array.isArray(globalLocationDatabase)) {
+                    console.log(`   🔍 Searching through ${globalLocationDatabase.length} locations...`);
+                    
                     // Search through the new database structure (state -> regions -> areas)
                     let foundLocation = null;
+                    let searchCount = 0;
                     
-                    for (const stateData of globalLocationDatabase) {
-                        if (stateData.regions && Array.isArray(stateData.regions)) {
-                            for (const region of stateData.regions) {
-                                if (region.areas && Array.isArray(region.areas)) {
-                                    foundLocation = region.areas.find(area => {
-                                        const locDisplay = `${getLocationEmoji(area.type)} ${area.name}, ${stateData.state}`;
-                                        return locDisplay === value || area.name === value;
-                                    });
-                                    
-                                    if (foundLocation) {
-                                        displayText = `${getLocationEmoji(foundLocation.type)} ${foundLocation.name}, ${stateData.state}`;
-                                        break;
-                                    }
-                                }
-                            }
+                    for (const locData of globalLocationDatabase) {
+                        searchCount++;
+                        const locName = locData.name;
+                        const locState = locData.state;
+                        
+                        // Try exact match on location name or formatted display
+                        const locDisplay = `${getLocationEmoji(locData.type)} ${locName}, ${locState}`;
+                        
+                        if (locDisplay === value) {
+                            console.log(`   ✅ FOUND EXACT MATCH (by display): ${locDisplay}`);
+                            displayText = locDisplay;
+                            foundLocation = locData;
+                            found = true;
+                            break;
+                        } else if (locName === value) {
+                            console.log(`   ✅ FOUND EXACT MATCH (by name): ${locName}`);
+                            displayText = locDisplay;
+                            foundLocation = locData;
+                            found = true;
+                            break;
                         }
-                        if (foundLocation) break;
                     }
+                    
+                    if (!found) {
+                        console.warn(`   ⚠️  No location found in database for "${value}"`);
+                        console.log(`      Searched ${searchCount} locations`);
+                    }
+                } else {
+                    console.error(`   ❌ globalLocationDatabase not available or empty!`);
                 }
                 
+                console.log(`   Setting display text: "${displayText}"`);
                 zonePredictor.textContent = displayText;
                 zonePredictor.style.color = '#fbbf24'; // Amber for custom selection
-                if (clearZoneBtn) clearZoneBtn.style.display = 'inline-block';
                 
-                console.log('🎯 Zone selected:', displayText);
+                if (clearZoneBtn) {
+                    clearZoneBtn.style.display = 'inline-block';
+                    console.log(`   ✅ Clear button shown`);
+                }
+                
+                console.log(`✅ ZONE PREDICTOR UPDATED: ${displayText}`);
+            } else {
+                console.log(`   Empty value - not updating`);
             }
         }
 
