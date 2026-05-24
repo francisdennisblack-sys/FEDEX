@@ -2682,6 +2682,234 @@
             ? 'http://localhost:5001' 
             : 'https://fedex-backend.vercel.app'; // Production backend URL for WiFi detection only
 
+        // ============================================================================
+        // POST VALIDATION & CLEANUP SYSTEM - Detect and remove phantom/corrupted posts
+        // ============================================================================
+        
+        let phantomPostLog = []; // Track detected phantom posts
+        const PHANTOM_POST_THRESHOLD = 10; // Log after this many found
+        
+        /**
+         * Validate a post for data integrity
+         * Returns {isValid: boolean, errors: string[]}
+         */
+        function validatePost(post) {
+            const errors = [];
+            
+            // Critical fields
+            if (!post.id) errors.push('Missing post ID');
+            if (!post.userId) errors.push('Missing user ID');
+            if (post.userId === 'undefined' || post.userId === '') errors.push('Invalid user ID (undefined/empty)');
+            
+            // Content validation
+            if (!post.content && !post.imageUrl) errors.push('Missing content and image');
+            if (post.content && typeof post.content !== 'string') errors.push('Content not a string');
+            
+            // Zone validation
+            if (!post.county || post.county === 'undefined' || post.county === 'Unknown County') {
+                errors.push('Missing or invalid zone');
+            }
+            
+            // Vote counts
+            if (post.likes && typeof post.likes !== 'number') errors.push('Likes not a number');
+            if (post.dislikes && typeof post.dislikes !== 'number') errors.push('Dislikes not a number');
+            
+            // Timestamp
+            if (!post.timestamp && !post.createdAt) errors.push('Missing timestamp');
+            
+            // Check for impossible values
+            if (post.likes && post.likes < 0) errors.push('Negative likes');
+            if (post.dislikes && post.dislikes < 0) errors.push('Negative dislikes');
+            if (post.likes && post.likes > 1000000) errors.push('Suspiciously high likes');
+            
+            return {
+                isValid: errors.length === 0,
+                errors,
+                severity: errors.length > 2 ? 'critical' : (errors.length > 0 ? 'warning' : 'ok')
+            };
+        }
+        
+        /**
+         * Detect duplicate posts (same content + same user + similar timestamp)
+         */
+        function findDuplicates(allPosts) {
+            const duplicates = [];
+            const seen = {};
+            
+            allPosts.forEach(post => {
+                // Create signature: content hash + userId + approximate time (within 1 hour)
+                const contentHash = (post.content || post.imageUrl || '').substring(0, 50);
+                const timeWindow = Math.floor((post.timestamp || post.createdAt || 0) / 3600000); // Hour precision
+                const signature = `${post.userId}|${contentHash}|${timeWindow}`;
+                
+                if (seen[signature]) {
+                    // Found duplicate!
+                    duplicates.push({
+                        original: seen[signature],
+                        duplicate: post,
+                        signature
+                    });
+                } else {
+                    seen[signature] = post;
+                }
+            });
+            
+            return duplicates;
+        }
+        
+        /**
+         * Detect posts from old duplicate-ID era
+         * (When all users had same ID before fix)
+         */
+        function detectOldDuplicateIDPostsEra(allPosts) {
+            // Look for patterns: multiple posts with same ID but different content
+            const byId = {};
+            
+            allPosts.forEach(post => {
+                if (!byId[post.id]) byId[post.id] = [];
+                byId[post.id].push(post);
+            });
+            
+            const problematic = [];
+            Object.entries(byId).forEach(([postId, posts]) => {
+                if (posts.length > 1) {
+                    // Same ID, multiple posts - indicates old duplicate ID era
+                    problematic.push({
+                        postId,
+                        count: posts.length,
+                        posts,
+                        issue: 'Duplicate post IDs (old era bug)'
+                    });
+                }
+            });
+            
+            return problematic;
+        }
+        
+        /**
+         * Full post validation and cleanup
+         */
+        function validateAndCleanPosts(allPosts) {
+            console.log(`\n🔍 POST VALIDATION STARTING - Analyzing ${allPosts.length} posts`);
+            
+            const validation = {
+                totalPosts: allPosts.length,
+                validPosts: [],
+                invalidPosts: [],
+                duplicates: [],
+                suspiciousPosts: [],
+                oldEraIssues: [],
+                summary: {}
+            };
+            
+            // 1. Validate each post
+            allPosts.forEach(post => {
+                const check = validatePost(post);
+                if (check.isValid) {
+                    validation.validPosts.push(post);
+                } else {
+                    validation.invalidPosts.push({
+                        post,
+                        errors: check.errors,
+                        severity: check.severity
+                    });
+                }
+            });
+            
+            // 2. Find duplicates
+            validation.duplicates = findDuplicates(validation.validPosts);
+            
+            // 3. Detect old era issues
+            validation.oldEraIssues = detectOldDuplicateIDPostsEra(allPosts);
+            
+            // 4. Find suspiciously similar posts
+            validation.validPosts.forEach(post => {
+                // Check for common phantom indicators
+                if (post.county === 'Santa Ana, CA' && !post.content && !post.imageUrl) {
+                    validation.suspiciousPosts.push({
+                        post,
+                        reason: 'Default zone with no content'
+                    });
+                }
+                if (post.userId === 'default' || post.userId === 'admin' || post.userId === 'test') {
+                    validation.suspiciousPosts.push({
+                        post,
+                        reason: 'Suspicious user ID (default/admin/test)'
+                    });
+                }
+            });
+            
+            // Summary
+            validation.summary = {
+                valid: validation.validPosts.length,
+                invalid: validation.invalidPosts.length,
+                duplicateFound: validation.duplicates.length,
+                oldEraProblems: validation.oldEraIssues.length,
+                suspicious: validation.suspiciousPosts.length
+            };
+            
+            // Log results
+            console.log('✅ Validation Results:');
+            console.log(`   Valid: ${validation.summary.valid}`);
+            console.log(`   Invalid: ${validation.summary.invalid}`);
+            console.log(`   Duplicates: ${validation.summary.duplicateFound}`);
+            console.log(`   Old Era Issues: ${validation.summary.oldEraProblems}`);
+            console.log(`   Suspicious: ${validation.summary.suspicious}`);
+            
+            if (validation.invalidPosts.length > 0) {
+                console.log('\n⚠️ INVALID POSTS DETECTED:');
+                validation.invalidPosts.forEach(item => {
+                    console.log(`   Post ${item.post.id.substring(0, 8)}... [${item.severity}]:`);
+                    item.errors.forEach(err => console.log(`     - ${err}`));
+                });
+            }
+            
+            if (validation.duplicates.length > 0) {
+                console.log('\n🔄 DUPLICATES DETECTED:');
+                validation.duplicates.forEach(dup => {
+                    console.log(`   Original: ${dup.original.id.substring(0, 8)}...`);
+                    console.log(`   Duplicate: ${dup.duplicate.id.substring(0, 8)}...`);
+                });
+            }
+            
+            if (validation.oldEraIssues.length > 0) {
+                console.log('\n🐛 OLD ERA DUPLICATE ID ISSUES:');
+                validation.oldEraIssues.forEach(issue => {
+                    console.log(`   Post ID ${issue.postId.substring(0, 8)}... appears ${issue.count} times`);
+                });
+            }
+            
+            return validation;
+        }
+        
+        /**
+         * Remove invalid posts from display (don't delete from Firebase yet, just hide)
+         */
+        function filterInvalidPosts(allPosts) {
+            console.log(`\n🧹 POST FILTERING - Removing invalid posts from display`);
+            
+            const validation = validateAndCleanPosts(allPosts);
+            const filtered = validation.validPosts;
+            
+            if (validation.summary.invalid > 0) {
+                console.log(`   Removed ${validation.summary.invalid} invalid posts from grid`);
+                
+                // Log to localStorage for manual review
+                const invalidLog = JSON.parse(localStorage.getItem('invalidPostsLog') || '[]');
+                validation.invalidPosts.forEach(item => {
+                    invalidLog.push({
+                        postId: item.post.id,
+                        errors: item.errors,
+                        timestamp: Date.now(),
+                        post: item.post
+                    });
+                });
+                localStorage.setItem('invalidPostsLog', JSON.stringify(invalidLog.slice(-100))); // Keep last 100
+            }
+            
+            return filtered;
+        }
+        
         // Firebase Database Functions
         async function savePostToFirebase(networkId, postId, postData) {
             try {
@@ -4286,6 +4514,16 @@
             allPosts = uniquePosts;
             
             // ========================================================================
+            // POST VALIDATION: Filter out phantom/corrupted posts
+            // ========================================================================
+            const preValidationCount = allPosts.length;
+            allPosts = filterInvalidPosts(allPosts);
+            
+            if (allPosts.length < preValidationCount) {
+                console.log(`⚠️ PHANTOM POST CLEANUP: Removed ${preValidationCount - allPosts.length} invalid posts`);
+            }
+            
+            // ========================================================================
             // FEDEX v3: UPDATE ZONE STATS AND APPLY TIER-BASED CONTENT MIXING
             // ========================================================================
             updateZoneStats(allPosts); // Track statistics for all posts
@@ -5235,6 +5473,51 @@
                 postTextElement.value = postTextElement.value.substring(0, maxChars);
             }
         }
+
+        /**
+         * ADMIN FUNCTION: Manually trigger post cleanup and validation
+         * Can be called from DevTools console or admin panel
+         */
+        window.runPostCleanup = async function() {
+            console.log('\n' + '='.repeat(60));
+            console.log('🧹 MANUAL POST CLEANUP INITIATED');
+            console.log('='.repeat(60));
+            
+            const allPosts = gridContent[currentUserId] || [];
+            console.log(`\nTotal posts in grid: ${allPosts.length}`);
+            
+            const validation = validateAndCleanPosts(allPosts);
+            
+            console.log('\n📊 CLEANUP REPORT:');
+            console.log(`   ✅ Valid posts: ${validation.summary.valid}`);
+            console.log(`   ❌ Invalid posts: ${validation.summary.invalid}`);
+            console.log(`   🔄 Duplicates: ${validation.summary.duplicateFound}`);
+            console.log(`   🐛 Old era issues: ${validation.summary.oldEraProblems}`);
+            console.log(`   ⚠️ Suspicious posts: ${validation.summary.suspicious}`);
+            
+            if (validation.summary.invalid > 0) {
+                console.log('\n⚠️ INVALID POSTS TO REMOVE:');
+                validation.invalidPosts.forEach(item => {
+                    console.log(`   Post: ${item.post.id}`);
+                    console.log(`   Zone: ${item.post.county}`);
+                    console.log(`   Issues: ${item.errors.join(', ')}`);
+                    console.log('   ---');
+                });
+            }
+            
+            // Save report to localStorage
+            localStorage.setItem('lastCleanupReport', JSON.stringify({
+                timestamp: Date.now(),
+                validation
+            }));
+            
+            console.log('\n✅ Cleanup complete! Report saved to localStorage.');
+            console.log('You can view it with: JSON.parse(localStorage.getItem("lastCleanupReport"))');
+            console.log('='.repeat(60));
+            
+            // Re-render grid to apply filtering
+            renderGrid();
+        };
 
         function uploadPost() {
             // Prevent duplicate submissions
