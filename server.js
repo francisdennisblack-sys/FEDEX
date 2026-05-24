@@ -11,6 +11,47 @@ const video = require('@google-cloud/video-intelligence');
 // Google Cloud Vision (for images/photos)
 const vision = require('@google-cloud/vision');
 
+// ============================================
+// SYSTEM PARAMETERS & CONSTANTS
+// ============================================
+
+const SYSTEM_PARAMS = {
+  // USER VISIBILITY THRESHOLD
+  EVERYONE_SEES_ALL_THRESHOLD: 200,  // At 0-200 users: everyone sees everything
+                                      // At 200+ users: switch to curated grid
+  
+  // BADGE SYSTEM
+  BADGE_TRIGGER: 1,                   // Badges appear on FIRST like (not 5, not 10)
+  FIRST_LIKE_BADGE: true,             // Show badge immediately on first like
+  
+  // POST LIFESPAN
+  POST_LIFESPAN_DAYS: 7,               // Posts live for 7 days, then archived
+  POST_LIFESPAN_MS: 7 * 24 * 60 * 60 * 1000,  // In milliseconds
+  
+  // GRID CURATION (At 200+ users)
+  CURATION_SPLIT: {
+    local: 0.60,                        // 60% of grid: posts from user's zone
+    nearby: 0.25,                       // 25% of grid: posts from nearby zones
+    spotlight: 0.15                     // 15% of grid: out-of-town posts
+  },
+  
+  // SPOTLIGHT REQUIREMENTS
+  SPOTLIGHT_MIN_LIKES: 500,            // Out-of-town posts need 500+ likes to appear
+  SPOTLIGHT_REFRESH_FREQ: 'twice-daily', // Refresh morning & evening
+  
+  // REALISTIC POST RATES
+  AVG_POSTS_PER_USER_PER_DAY: 1,      // Average user posts 1x per day
+  
+  // CALCULATION: At Day 365 with 2K-5K users
+  DAY_365_USERS_MIN: 2000,
+  DAY_365_USERS_MAX: 5000,
+  DAY_365_POSTS_IN_GRID: '14K-35K',   // 7-day window: 14K-35K posts (was 50K-150K)
+  
+  // ARCHIVES
+  ARCHIVE_AFTER_7_DAYS: true,          // Move posts to user profile after 7 days
+  KEEP_IN_DATABASE: true               // Keep in database for analytics
+};
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));

@@ -3,6 +3,33 @@
 
 ---
 
+## 🔴 CRITICAL THRESHOLD: 200 USERS
+
+**Before 200 Users: EVERYONE SEES EVERYTHING**
+- All posts visible to all users
+- Chronological order (newest first)
+- Direct discovery (user sees full grid)
+- No curation needed
+- Authentic, raw social experience
+
+**At 200 Users: SWITCH TO CURATED GRID**
+- Too much content to show everyone everything
+- Grid split: 60% local, 25% nearby, 15% out-of-town spotlight
+- Posts sent TO users (not browsed)
+- Curation system activates:
+  - Top Posts (by engagement)
+  - Spotlight Posts (from far away, 500+ likes minimum)
+  - Personal network posts
+  - Algorithmic recommendations
+
+**Key Features (Day 1 onward):**
+- Badges appear on FIRST like (immediate visibility)
+- Posts live for 7 days exactly (then archived)
+- Realistic post rate: ~1 post per user per day
+- Archive system: Posts older than 7 days moved to user profile
+
+---
+
 ## STAGE 1: DAY 1 (Launch Day)
 ### Estimated Users: 1-5 | Posts: 2-10 | Zones: 1-2
 
@@ -385,7 +412,7 @@ GRID REFRESH RATE:
 ---
 
 ## STAGE 6: DAY 365 (One Year - Established)
-### Estimated Users: 2K-5K | Posts: 50K-150K | Zones: 40-50
+### Estimated Users: 2K-5K | Posts in Grid: 14K-35K (7-day window) | Zones: 40-50
 
 ```
 ┌─────────────────────────────────────────────────────────┐
