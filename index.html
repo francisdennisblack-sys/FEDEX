@@ -831,6 +831,67 @@
             text-shadow: 0 0 4px rgba(6, 182, 212, 0.5);
         }
 
+        /* ========= PROXIMITY BADGE STYLES ========= */
+        /* NEARBY - Local content (within grid) */
+        .grid-box.badge-nearby {
+            border-right: 4px solid #4ade80;
+            box-shadow: 0 0 12px rgba(74, 222, 128, 0.3);
+        }
+
+        .grid-box.badge-nearby::after {
+            content: '📍 NEARBY';
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            font-size: 9px;
+            font-weight: 700;
+            color: #4ade80;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 2px 6px;
+            border-radius: 3px;
+            text-shadow: 0 0 3px rgba(74, 222, 128, 0.6);
+        }
+
+        /* FEATURED - Regional content (backfilled) */
+        .grid-box.badge-featured {
+            border-right: 4px solid #f59e0b;
+            box-shadow: 0 0 12px rgba(245, 158, 11, 0.3);
+        }
+
+        .grid-box.badge-featured::after {
+            content: '⭐ FEATURED';
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            font-size: 9px;
+            font-weight: 700;
+            color: #f59e0b;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 2px 6px;
+            border-radius: 3px;
+            text-shadow: 0 0 3px rgba(245, 158, 11, 0.6);
+        }
+
+        /* COMMUNITY - Distant content (rare feature) */
+        .grid-box.badge-community {
+            border-right: 4px solid #a78bfa;
+            box-shadow: 0 0 12px rgba(167, 139, 250, 0.3);
+        }
+
+        .grid-box.badge-community::after {
+            content: '🌍 COMMUNITY';
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            font-size: 9px;
+            font-weight: 700;
+            color: #a78bfa;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 2px 6px;
+            border-radius: 3px;
+            text-shadow: 0 0 3px rgba(167, 139, 250, 0.6);
+        }
+
         .grid-box.badge-crowned {
             border-top: 4px solid #fbbf24;
             box-shadow: inset 0 0 10px rgba(251, 191, 36, 0.3), 0 0 15px rgba(251, 191, 36, 0.5);
@@ -2903,6 +2964,125 @@
 
             // Post visible if within grid radius (convert km to miles for display, store as km)
             return distance <= userGrid.gridRadius;
+        }
+
+        // ============================================
+        // POST TIER SYSTEM (for backfilling sparse grids)
+        // ============================================
+        function categorizePostByDistance(post, userGrid) {
+            if (!userGrid || !post.lat || !post.lon) {
+                return { tier: 'unknown', distance: Infinity };
+            }
+
+            const distance = calculateDistance(
+                post.lat, post.lon,
+                userGrid.poi.lat, userGrid.poi.lon
+            );
+
+            // Tier 1: Local (within grid radius)
+            if (distance <= userGrid.gridRadius) {
+                return { tier: 'local', distance };
+            }
+
+            // Tier 2: Regional (2-5x grid radius)
+            const regionalMax = userGrid.gridRadius * 5;
+            if (distance <= regionalMax) {
+                return { tier: 'regional', distance };
+            }
+
+            // Tier 3: Distant (beyond)
+            return { tier: 'distant', distance };
+        }
+
+        // ============================================
+        // SMART CONTENT BACKFILL SYSTEM
+        // ============================================
+        function backfillGridWithFeaturedContent(allPosts, userGrid, maxGridSize = 2000) {
+            if (!userGrid || !allPosts || allPosts.length === 0) {
+                return allPosts;
+            }
+
+            // Categorize all posts by distance tier
+            const tieredPosts = {
+                local: [],
+                regional: [],
+                distant: []
+            };
+
+            allPosts.forEach(post => {
+                const { tier, distance } = categorizePostByDistance(post, userGrid);
+                if (tieredPosts[tier]) {
+                    tieredPosts[tier].push({ ...post, tierDistance: distance });
+                }
+            });
+
+            // Sort each tier by recent/popular
+            const sortByQuality = (p1, p2) => {
+                const score1 = (p1.likes || 0) - (p1.dislikes || 0) + (Date.now() - (p1.timestamp || 0)) / (1000 * 60 * 60);
+                const score2 = (p2.likes || 0) - (p2.dislikes || 0) + (Date.now() - (p2.timestamp || 0)) / (1000 * 60 * 60);
+                return score2 - score1;
+            };
+
+            tieredPosts.local.sort(sortByQuality);
+            tieredPosts.regional.sort(sortByQuality);
+            tieredPosts.distant.sort(sortByQuality);
+
+            // Build display posts: prioritize local, backfill with regional
+            const displayPosts = [];
+            const targetCount = Math.min(maxGridSize, allPosts.length);
+
+            // Add local posts (these are always prioritized)
+            displayPosts.push(...tieredPosts.local);
+
+            // If we don't have enough local posts, backfill with regional
+            if (displayPosts.length < targetCount) {
+                const backfillNeeded = targetCount - displayPosts.length;
+                const backfillCount = Math.min(backfillNeeded, tieredPosts.regional.length);
+
+                // Only backfill if local count is low
+                if (tieredPosts.local.length < 50) {
+                    // Tag backfilled posts so we can identify them
+                    tieredPosts.regional.slice(0, backfillCount).forEach(post => {
+                        post.isBackfilled = true;
+                        post.isSpotlight = true; // Show visual indicator
+                        displayPosts.push(post);
+                    });
+                }
+            }
+
+            // If still sparse, add some distant posts as rare features
+            if (displayPosts.length < Math.min(100, targetCount * 0.5)) {
+                const distantBackfill = Math.ceil((targetCount * 0.1) - displayPosts.length);
+                tieredPosts.distant.slice(0, distantBackfill).forEach(post => {
+                    post.isBackfilled = true;
+                    post.isCommunitySpotlight = true;
+                    displayPosts.push(post);
+                });
+            }
+
+            return displayPosts;
+        }
+
+        // ============================================
+        // MARK POSTS WITH PROXIMITY BADGES
+        // ============================================
+        function addProximityBadge(post, userGrid) {
+            if (!userGrid) return post;
+
+            const { tier, distance } = categorizePostByDistance(post, userGrid);
+
+            if (tier === 'local') {
+                post.proximityBadge = `NEARBY - ${(distance * 3280.84).toFixed(0)}ft`;
+                post.proximityClass = 'local';
+            } else if (tier === 'regional') {
+                post.proximityBadge = `FEATURED - ${(distance * 0.621371).toFixed(1)}mi away`;
+                post.proximityClass = 'featured';
+            } else {
+                post.proximityBadge = `COMMUNITY - ${(distance * 0.621371).toFixed(1)}mi away`;
+                post.proximityClass = 'community';
+            }
+
+            return post;
         }
 
         // ============================================
@@ -5557,6 +5737,17 @@
                 console.log(`🎯 Tier ${userTier}: Using tier content mixing. ${displayPosts.length} posts total`);
             }
             
+            // ========================================================================
+            // SMART CONTENT BACKFILL: Fill sparse grids with featured content
+            // ========================================================================
+            if (currentGrid && displayPosts.length < 50) {
+                displayPosts = backfillGridWithFeaturedContent(displayPosts, currentGrid);
+                console.log(`🎯 BACKFILL ACTIVATED: ${displayPosts.length} posts after backfill (was ${allPosts.length})`);
+            }
+            
+            // Add proximity badges to all posts
+            displayPosts = displayPosts.map(post => addProximityBadge(post, currentGrid));
+            
             // Filter hidden/deleted posts from display list
             const sortedPosts = displayPosts.filter(post => {
                 const isHidden = hiddenForThisWiFi.includes(post.id) || 
@@ -5683,6 +5874,11 @@
                     badges.forEach(b => {
                         box.classList.add(`badge-${b}`);
                     });
+
+                    // Apply proximity badge (NEARBY, FEATURED, or COMMUNITY)
+                    if (post.proximityClass) {
+                        box.classList.add(`badge-${post.proximityClass}`);
+                    }
                 }
                 gridPosition++;
             });
@@ -5741,6 +5937,11 @@
                             badges.forEach(b => {
                                 box.classList.add(`badge-${b}`);
                             });
+
+                            // Apply proximity badge (NEARBY, FEATURED, or COMMUNITY)
+                            if (post.proximityClass) {
+                                box.classList.add(`badge-${post.proximityClass}`);
+                            }
                         }
                         lazyGridPosition++;
                     });
