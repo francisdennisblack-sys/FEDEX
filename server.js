@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const app = express();
 
 // Google Cloud Video Intelligence (for videos)
@@ -512,7 +513,7 @@ function setGeocodeCache(lat, lon, data) {
     };
 }
 
-app.get('/api/reverse-geocode', async (req, res) => {
+app.get('/api/reverse-geocode', (req, res) => {
     try {
         const { lat, lon } = req.query;
         
@@ -530,6 +531,7 @@ app.get('/api/reverse-geocode', async (req, res) => {
         // Check cache first
         const cachedResult = getGeocodeCache(latitude, longitude);
         if (cachedResult) {
+            console.log(`[Geocode Cache] HIT: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`);
             return res.json({
                 ...cachedResult,
                 source: 'cache'
@@ -537,49 +539,76 @@ app.get('/api/reverse-geocode', async (req, res) => {
         }
         
         // Call OpenStreetMap Nominatim API (free reverse geocoding)
-        // Rate limit: 1 request per second per user
         const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`;
         
-        const nominatimResponse = await fetch(url, {
+        console.log(`[Geocode Request] Fetching: ${url}`);
+        
+        https.get(url, {
             headers: {
                 'User-Agent': 'FEDEX-WiFi-App/1.0'
             }
-        });
-        
-        if (!nominatimResponse.ok) {
-            throw new Error(`Nominatim API error: ${nominatimResponse.status}`);
-        }
-        
-        const nominatimData = await nominatimResponse.json();
-        
-        // Extract useful location information
-        const address = nominatimData.address || {};
-        const city = address.city || address.town || address.village || address.county || 'Unknown';
-        const state = address.state || '';
-        const country = address.country || '';
-        
-        const locationName = state ? `${city}, ${state}` : city;
-        const fullName = `${locationName}${country && country !== 'United States' ? ', ' + country : ''}`;
-        
-        const result = {
-            name: locationName,
-            city: city,
-            state: state,
-            country: country,
-            displayName: nominatimData.display_name || fullName,
-            neighborhood: address.neighbourhood || address.suburb || null,
-            latitude: latitude,
-            longitude: longitude,
-            success: true
-        };
-        
-        // Cache the result
-        setGeocodeCache(latitude, longitude, result);
-        
-        res.json({
-            ...result,
-            source: 'nominatim',
-            timestamp: Date.now()
+        }, (response) => {
+            let data = '';
+            
+            response.on('data', (chunk) => {
+                data += chunk;
+            });
+            
+            response.on('end', () => {
+                try {
+                    if (response.statusCode !== 200) {
+                        throw new Error(`Nominatim API error: ${response.statusCode}`);
+                    }
+                    
+                    const nominatimData = JSON.parse(data);
+                    
+                    // Extract useful location information
+                    const address = nominatimData.address || {};
+                    const city = address.city || address.town || address.village || address.county || 'Unknown';
+                    const state = address.state || '';
+                    const country = address.country || '';
+                    
+                    const result = {
+                        name: locationName,
+                        city: city,
+                        state: state,
+                        country: country,
+                        displayName: nominatimData.display_name || fullName,
+                        neighborhood: address.neighbourhood || address.suburb || null,
+                        latitude: latitude,
+                        longitude: longitude,
+                        success: true
+                    };
+                    
+                    // Cache the result
+                    setGeocodeCache(latitude, longitude, result);
+                    
+                    console.log(`[Geocode Success] ${locationName} (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`);
+                    
+                    res.json({
+                        ...result,
+                        source: 'nominatim',
+                        timestamp: Date.now()
+                    });
+                    
+                } catch (parseError) {
+                    console.error('[Geocode Parse Error]', parseError.message);
+                    res.status(500).json({
+                        name: `Region (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`,
+                        success: false,
+                        error: parseError.message,
+                        source: 'error'
+                    });
+                }
+            });
+        }).on('error', (error) => {
+            console.error('[Geocode Network Error]', error.message);
+            res.status(500).json({
+                name: `Region (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`,
+                success: false,
+                error: error.message,
+                source: 'error'
+            });
         });
         
     } catch (error) {
@@ -589,7 +618,7 @@ app.get('/api/reverse-geocode', async (req, res) => {
         const lat = parseFloat(req.query.lat);
         const lon = parseFloat(req.query.lon);
         
-        res.json({
+        res.status(500).json({
             name: `Region (${lat.toFixed(2)}, ${lon.toFixed(2)})`,
             displayName: `Region (${lat.toFixed(2)}, ${lon.toFixed(2)})`,
             city: 'Unknown',
