@@ -2971,10 +2971,53 @@
                 console.log(`✅ Loaded ${poiDatabase.length} POIs from worldwide database`);
                 console.log(`✅ Coverage: ${cityList.length} major cities across 5 continents`);
                 console.log(`📊 POI Categories: Cafe, Restaurant, Retail, Entertainment, Services, Museums, Parks, Hotels, Landmarks, Markets, Banks, Hospitals, Libraries, Schools, Transportation`);
+                
+                // Also load US locations database for enhanced zone search
+                loadUSLocationDatabase();
             } catch (error) {
                 console.error('❌ Error loading POI/density data:', error);
                 poiDatabase = [];
                 globalDensityData = [];
+            }
+        }
+        
+        // Load comprehensive US locations database (3000+ cities, towns, neighborhoods)
+        async function loadUSLocationDatabase() {
+            try {
+                const response = await fetch('/us_locations_database.json');
+                if (!response.ok) throw new Error('Failed to load US locations database');
+                
+                const data = await response.json();
+                
+                // Flatten all locations from all states and regions
+                const allLocations = [];
+                if (data.locations && Array.isArray(data.locations)) {
+                    data.locations.forEach(state => {
+                        if (state.regions && Array.isArray(state.regions)) {
+                            state.regions.forEach(region => {
+                                if (region.areas && Array.isArray(region.areas)) {
+                                    region.areas.forEach(area => {
+                                        allLocations.push({
+                                            name: area.name,
+                                            state: state.stateCode,
+                                            lat: area.lat,
+                                            lon: area.lon,
+                                            type: area.type || 'City',
+                                            population: area.population,
+                                            region: region.name
+                                        });
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }
+                
+                globalLocationDatabase = allLocations;
+                console.log(`✅ Loaded ${allLocations.length} US locations (cities, towns, neighborhoods)`);
+            } catch (error) {
+                console.error('⚠️  Could not load US locations database:', error);
+                globalLocationDatabase = [];
             }
         }
 
@@ -4208,9 +4251,57 @@
         function detectNeighborhood(lat, lon) {
             console.log(`   🏘️  Analyzing coordinates for real neighborhood from database...`);
             
-            // REAL NEIGHBORHOOD DETECTION: Use actual cities from POI database
+            // FIRST PRIORITY: Use comprehensive US locations database
+            if (globalLocationDatabase && globalLocationDatabase.length > 0) {
+                let nearestLocation = null;
+                let nearestDistance = Infinity;
+                
+                globalLocationDatabase.forEach(loc => {
+                    const distance = calculateDistance(lat, lon, loc.lat, loc.lon);
+                    if (distance < nearestDistance) {
+                        nearestDistance = distance;
+                        nearestLocation = loc;
+                    }
+                });
+                
+                if (nearestLocation) {
+                    const distanceKm = nearestDistance;
+                    const distanceMiles = distanceKm * 0.621371;
+                    
+                    console.log(`   📍 Nearest location: ${nearestLocation.name}, ${nearestLocation.state}`);
+                    console.log(`   📏 Distance: ${distanceKm.toFixed(2)} km (${distanceMiles.toFixed(2)} miles)`);
+                    console.log(`   🏘️  Type: ${nearestLocation.type}`);
+                    
+                    // If within ~25 km (15 miles), use the location
+                    if (distanceKm < 25) {
+                        console.log(`   ✅ Using real location: ${nearestLocation.name}`);
+                        
+                        return {
+                            name: nearestLocation.name,
+                            emoji: getLocationEmoji(nearestLocation.type),
+                            type: nearestLocation.type,
+                            radius: getLocationRadius(nearestLocation.type),
+                            city: nearestLocation.name,
+                            state: nearestLocation.state,
+                            region: nearestLocation.region
+                        };
+                    } else {
+                        // Still reasonably close - within ~50 km
+                        console.log(`   📌 Using ${nearestLocation.name} as reference area`);
+                        return {
+                            name: `${nearestLocation.name} Area`,
+                            emoji: getLocationEmoji('Regional Area'),
+                            type: 'REGIONAL',
+                            radius: 0.04,
+                            city: nearestLocation.name,
+                            state: nearestLocation.state
+                        };
+                    }
+                }
+            }
+            
+            // SECOND PRIORITY: Use POI database cities
             if (globalDensityData && globalDensityData.length > 0) {
-                // Find nearest city in the database
                 let nearestCity = null;
                 let nearestDistance = Infinity;
                 
@@ -4226,20 +4317,16 @@
                     const distanceKm = nearestDistance;
                     const distanceMiles = distanceKm * 0.621371;
                     
-                    console.log(`   📍 Nearest city: ${nearestCity.name}, ${nearestCity.country}`);
+                    console.log(`   📍 Nearest city (POI DB): ${nearestCity.name}, ${nearestCity.country}`);
                     console.log(`   📏 Distance: ${distanceKm.toFixed(2)} km (${distanceMiles.toFixed(2)} miles)`);
                     
                     // If within ~16 km (10 miles) of a major city, use it
                     if (distanceKm < 16) {
                         console.log(`   ✅ Using real neighborhood: ${nearestCity.name}`);
                         
-                        // Look at what types of POIs are near user to enhance the name
-                        const nearbyPOITypes = getNearbyCategoryTypes(lat, lon, 5); // 5 km radius
-                        const categoryTag = nearbyPOITypes.length > 0 ? ` - ${nearbyPOITypes[0]}` : '';
-                        
                         return {
-                            name: `${nearestCity.name}${categoryTag}`,
-                            emoji: '🏙️',  // Real city emoji instead of generic zone
+                            name: nearestCity.name,
+                            emoji: '🏙️',
                             type: 'NEIGHBORHOOD',
                             radius: 0.025,
                             city: nearestCity.name,
@@ -4260,8 +4347,8 @@
                 }
             }
             
-            // FALLBACK: Use quadrant system only if no cities found
-            console.log(`   ⚠️  No nearby cities found - using quadrant fallback`);
+            // FALLBACK: Use quadrant system only if no locations found
+            console.log(`   ⚠️  No nearby locations found - using quadrant fallback`);
             const quadrants = [
                 { name: 'Northeast', emoji: '↗️' },
                 { name: 'Northwest', emoji: '↖️' },
@@ -4280,6 +4367,38 @@
                 type: 'ZONE',
                 radius: 0.03
             };
+        }
+        
+        // Helper: Get emoji based on location type
+        function getLocationEmoji(type) {
+            const emojiMap = {
+                'Major City': '🏙️',
+                'City': '🏘️',
+                'Town': '🏞️',
+                'Neighborhood': '🏠',
+                'CDP': '📍',
+                'Village': '🏘️',
+                'Census Designated Place': '📍',
+                'Regional Area': '🗺️',
+                'Default': '📍'
+            };
+            return emojiMap[type] || emojiMap['Default'];
+        }
+        
+        // Helper: Get radius based on location type
+        function getLocationRadius(type) {
+            const radiusMap = {
+                'Major City': 0.025,       // ~82 ft - city center
+                'City': 0.022,             // ~72 ft - city
+                'Town': 0.020,             // ~66 ft - town center
+                'Neighborhood': 0.018,     // ~59 ft - neighborhood
+                'CDP': 0.015,              // ~49 ft - CDP
+                'Village': 0.015,          // ~49 ft - village
+                'Census Designated Place': 0.015,
+                'Regional Area': 0.04,     // ~131 ft - regional
+                'Default': 0.025
+            };
+            return radiusMap[type] || radiusMap['Default'];
         }
         
         // Helper: Get nearby POI category types to enhance neighborhood descriptions
@@ -6593,14 +6712,39 @@
             const q = query.toLowerCase();
             const results = [];
             
-            // Search through POI database
+            // FIRST PRIORITY: Search through US locations database (cities, towns, neighborhoods)
+            if (globalLocationDatabase && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
+                const locationMatches = {};
+                
+                globalLocationDatabase.forEach(loc => {
+                    const locName = (loc.name || '').toLowerCase();
+                    const state = (loc.state || '').toLowerCase();
+                    
+                    // Prefix match (highest priority)
+                    if (locName.startsWith(q)) {
+                        const key = `${getLocationEmoji(loc.type)} ${loc.name}, ${loc.state}`;
+                        locationMatches[key] = { display: key, type: 'location', value: loc.name, priority: 1, data: loc };
+                    }
+                    // Contains match (medium priority)
+                    else if (locName.includes(q) || state.includes(q)) {
+                        const key = `${getLocationEmoji(loc.type)} ${loc.name}, ${loc.state}`;
+                        if (!locationMatches[key]) {
+                            locationMatches[key] = { display: key, type: 'location', value: loc.name, priority: 2, data: loc };
+                        }
+                    }
+                });
+                
+                // Add location matches (prioritize US locations)
+                Object.values(locationMatches).slice(0, 20).forEach(item => results.push(item));
+            }
+            
+            // SECOND PRIORITY: Search through POI database
             if (window.poiDatabase && Array.isArray(window.poiDatabase)) {
                 const poiMatches = {};
                 
                 window.poiDatabase.forEach(poi => {
                     const poiName = (poi.name || '').toLowerCase();
                     const category = (poi.category || '').toLowerCase();
-                    const cityName = (poi.city || '').toLowerCase();
                     
                     // Prefix match (highest priority)
                     if (poiName.startsWith(q)) {
@@ -6617,10 +6761,10 @@
                 });
                 
                 // Add POI matches
-                Object.values(poiMatches).slice(0, 15).forEach(item => results.push(item));
+                Object.values(poiMatches).slice(0, 10).forEach(item => results.push(item));
             }
             
-            // Search through cities (from globalDensityData)
+            // THIRD PRIORITY: Search through cities (from globalDensityData)
             if (globalDensityData && Array.isArray(globalDensityData)) {
                 const cityMatches = {};
                 
@@ -6643,11 +6787,11 @@
                 });
                 
                 // Add city matches
-                Object.values(cityMatches).slice(0, 10).forEach(item => results.push(item));
+                Object.values(cityMatches).slice(0, 5).forEach(item => results.push(item));
             }
             
-            // Return top 15 results
-            return results.slice(0, 15);
+            // Return top 25 results
+            return results.slice(0, 25);
         }
         
         // Update autocomplete dropdown with styling
