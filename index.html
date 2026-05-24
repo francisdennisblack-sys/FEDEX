@@ -3101,7 +3101,7 @@
             return { name: 'Regional', tier: 5 };
         }
 
-        // Request geolocation permission (one-time)
+        // Request geolocation permission (one-time, with persistent caching)
         function requestGeolocation() {
             return new Promise((resolve, reject) => {
                 // CRITICAL: Only request geolocation ONCE
@@ -3119,6 +3119,21 @@
                 
                 geolocationRequested = true;
                 
+                // CHECK LOCALSTORAGE FIRST - If user previously granted permission, use cached location
+                const cachedLocation = localStorage.getItem('userLocationCache');
+                if (cachedLocation) {
+                    try {
+                        userLocation = JSON.parse(cachedLocation);
+                        console.log('📍 Using cached location from localStorage (previously granted permission)');
+                        console.log(`  Lat: ${userLocation.lat.toFixed(4)}`);
+                        console.log(`  Lon: ${userLocation.lon.toFixed(4)}`);
+                        resolve(userLocation);
+                        return;
+                    } catch (e) {
+                        console.log('⚠️ Cached location invalid, requesting fresh location');
+                    }
+                }
+                
                 if (!navigator.geolocation) {
                     console.warn('⚠️ Geolocation not supported');
                     userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
@@ -3133,7 +3148,13 @@
                             lon: position.coords.longitude,
                             accuracy: position.coords.accuracy
                         };
-                        console.log('📍 User Location Acquired (ONCE)');
+                        
+                        // CACHE LOCATION IN LOCALSTORAGE FOR PERMANENT PERMISSION
+                        // User won't be asked again on future page loads
+                        localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+                        console.log('💾 Location cached in localStorage (permission granted permanently)');
+                        
+                        console.log('📍 User Location Acquired (ONCE - cached permanently)');
                         console.log(`  Lat: ${userLocation.lat.toFixed(4)}`);
                         console.log(`  Lon: ${userLocation.lon.toFixed(4)}`);
                         console.log(`  Accuracy: ${userLocation.accuracy.toFixed(0)} meters`);
@@ -3143,10 +3164,11 @@
                         console.warn('⚠️ Geolocation error:', error.message);
                         // Use default NYC location for demo
                         userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
-                        console.log('📍 Using demo location (NYC)');
+                        console.log('📍 Using demo location (NYC) - no permission granted');
                         resolve(userLocation);
                     },
-                    { enableHighAccuracy: false, timeout: 5000, maximumAge: 300000 }
+                    // Cache location for 1 year, request high accuracy less often
+                    { enableHighAccuracy: false, timeout: 5000, maximumAge: 31536000000 }
                 );
             });
         }
