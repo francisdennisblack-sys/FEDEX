@@ -4132,7 +4132,7 @@
 
             try {
                 // STEP 1: Try to find nearest POI
-                console.log('🔍 Step 1: Searching for nearest POI...');
+                console.log('🔍 Step 1: Searching for nearest POI from 38,260+ POI database...');
                 const nearestPOIData = findNearestPOI(userLocation.lat, userLocation.lon);
                 
                 if (nearestPOIData && nearestPOIData.poi) {
@@ -4142,6 +4142,7 @@
                     
                     console.log(`   ✅ Nearest POI found: ${nearestPOIData.poi.name}`);
                     console.log(`   📏 Distance: ${distanceToPoiKm.toFixed(4)} km (${distanceToPoiFeet.toFixed(0)} ft / ${distanceToPoimiles.toFixed(2)} mi)`);
+                    console.log(`   📍 City: ${nearestPOIData.poi.city || 'Unknown'}`);
                     
                     // DECISION: Use POI if within reasonable distance (< 500 meters / 0.31 miles)
                     if (distanceToPoiKm < 0.5) {
@@ -4155,20 +4156,21 @@
                             currentGeographicLocation = grid.city || grid.country || 'Unknown';
                             currentZoneTag = `${grid.poi.emoji || '📍'} ${grid.poi.name}`;
                             console.log(`\n✅ ZONE SELECTED: ${currentZoneTag}`);
-                            console.log(`   Type: POI (Point of Interest)`);
-                            console.log(`   Radius: ${grid.gridRadius.toFixed(4)} km`);
+                            console.log(`   Type: POI (Point of Interest) - MICRO-LOCAL`);
+                            console.log(`   Radius: ${grid.gridRadius.toFixed(4)} km (~26 feet)`);
                             console.log(`   City: ${grid.city}`);
                             return;
                         }
                     } else {
-                        console.log(`   ⚠️ POI too far (${distanceToPoiKm.toFixed(2)} km > 0.5 km threshold) - trying neighborhood instead`);
+                        console.log(`   ⚠️ POI too far (${distanceToPoiKm.toFixed(2)} km > 0.5 km threshold)`);
+                        console.log(`   → Switching to neighborhood detection for better local match...`);
                     }
                 } else {
                     console.log(`   ⚠️ No POI found in database`);
                 }
                 
-                // STEP 2: Fallback to neighborhood/area based on user coordinates
-                console.log('🔍 Step 2: Detecting local neighborhood...');
+                // STEP 2: Fallback to REAL neighborhood/area based on nearest city in database
+                console.log('\n🔍 Step 2: Detecting REAL local neighborhood from database...');
                 const neighborhood = detectNeighborhood(userLocation.lat, userLocation.lon);
                 
                 if (neighborhood) {
@@ -4178,13 +4180,14 @@
                     currentGeographicLocation = neighborhood.name;
                     
                     console.log(`\n✅ ZONE SELECTED: ${currentZoneTag}`);
-                    console.log(`   Type: Neighborhood/Area`);
+                    console.log(`   Type: ${neighborhood.type} (Real City/Area from Database)`);
+                    console.log(`   Country: ${neighborhood.country || 'Unknown'}`);
                     console.log(`   Radius: ${currentGridRadius.toFixed(4)} km`);
                     return;
                 }
                 
                 // STEP 3: Final fallback - use raw coordinates
-                console.log('🔍 Step 3: Using raw coordinates...');
+                console.log('\n🔍 Step 3: Using raw coordinates...');
                 currentZoneTag = `📍 ${userLocation.lat.toFixed(3)}, ${userLocation.lon.toFixed(3)}`;
                 currentGridRadius = 0.02;
                 currentContentScope = 'LOCAL';
@@ -4201,49 +4204,103 @@
             }
         }
         
-        // Helper function: Detect local neighborhood from coordinates
+        // Helper function: Detect local neighborhood from coordinates using REAL city data
         function detectNeighborhood(lat, lon) {
-            console.log(`   🏘️  Analyzing coordinates for neighborhood...`);
+            console.log(`   🏘️  Analyzing coordinates for real neighborhood from database...`);
             
-            // Define neighborhood grid (simple quadrant system)
+            // REAL NEIGHBORHOOD DETECTION: Use actual cities from POI database
+            if (globalDensityData && globalDensityData.length > 0) {
+                // Find nearest city in the database
+                let nearestCity = null;
+                let nearestDistance = Infinity;
+                
+                globalDensityData.forEach(city => {
+                    const distance = calculateDistance(lat, lon, city.lat, city.lon);
+                    if (distance < nearestDistance) {
+                        nearestDistance = distance;
+                        nearestCity = city;
+                    }
+                });
+                
+                if (nearestCity) {
+                    const distanceKm = nearestDistance;
+                    const distanceMiles = distanceKm * 0.621371;
+                    
+                    console.log(`   📍 Nearest city: ${nearestCity.name}, ${nearestCity.country}`);
+                    console.log(`   📏 Distance: ${distanceKm.toFixed(2)} km (${distanceMiles.toFixed(2)} miles)`);
+                    
+                    // If within ~16 km (10 miles) of a major city, use it
+                    if (distanceKm < 16) {
+                        console.log(`   ✅ Using real neighborhood: ${nearestCity.name}`);
+                        
+                        // Look at what types of POIs are near user to enhance the name
+                        const nearbyPOITypes = getNearbyCategoryTypes(lat, lon, 5); // 5 km radius
+                        const categoryTag = nearbyPOITypes.length > 0 ? ` - ${nearbyPOITypes[0]}` : '';
+                        
+                        return {
+                            name: `${nearestCity.name}${categoryTag}`,
+                            emoji: '🏙️',  // Real city emoji instead of generic zone
+                            type: 'NEIGHBORHOOD',
+                            radius: 0.025,
+                            city: nearestCity.name,
+                            country: nearestCity.country
+                        };
+                    } else {
+                        // Still reasonably close - within ~50 km
+                        console.log(`   📌 Using regional neighborhood: ${nearestCity.name} Area`);
+                        return {
+                            name: `${nearestCity.name} Area`,
+                            emoji: '🗺️',
+                            type: 'REGIONAL',
+                            radius: 0.04,
+                            city: nearestCity.name,
+                            country: nearestCity.country
+                        };
+                    }
+                }
+            }
+            
+            // FALLBACK: Use quadrant system only if no cities found
+            console.log(`   ⚠️  No nearby cities found - using quadrant fallback`);
             const quadrants = [
-                { name: 'Northeast', emoji: '↗️', minLat: 0, minLon: 0 },
-                { name: 'Northwest', emoji: '↖️', minLat: 0, maxLon: 0 },
-                { name: 'Southeast', emoji: '↘️', maxLat: 0, minLon: 0 },
-                { name: 'Southwest', emoji: '↙️', maxLat: 0, maxLon: 0 }
+                { name: 'Northeast', emoji: '↗️' },
+                { name: 'Northwest', emoji: '↖️' },
+                { name: 'Southeast', emoji: '↘️' },
+                { name: 'Southwest', emoji: '↙️' }
             ];
             
             const quad = lat >= 0 && lon >= 0 ? quadrants[0] : 
                          lat >= 0 && lon < 0 ? quadrants[1] :
                          lat < 0 && lon >= 0 ? quadrants[2] : quadrants[3];
             
-            // Try to match against known cities
-            if (globalDensityData && globalDensityData.length > 0) {
-                const nearest = globalDensityData.reduce((prev, curr) => {
-                    const prevDist = calculateDistance(lat, lon, prev.lat, prev.lon);
-                    const currDist = calculateDistance(lat, lon, curr.lat, curr.lon);
-                    return currDist < prevDist ? curr : prev;
-                });
-                
-                if (nearest && calculateDistance(lat, lon, nearest.lat, nearest.lon) < 0.1) {
-                    console.log(`   ✅ Neighborhood: ${nearest.name}, ${nearest.country}`);
-                    return {
-                        name: `${nearest.name} Area`,
-                        emoji: '🏘️',
-                        type: 'NEIGHBORHOOD',
-                        radius: 0.025,
-                        city: nearest.name
-                    };
-                }
-            }
-            
-            console.log(`   ℹ️  Generic neighborhood: ${quad.name}`);
+            console.log(`   ℹ️  Using quadrant: ${quad.name}`);
             return {
                 name: `${quad.name} Zone`,
                 emoji: quad.emoji,
                 type: 'ZONE',
                 radius: 0.03
             };
+        }
+        
+        // Helper: Get nearby POI category types to enhance neighborhood descriptions
+        function getNearbyCategoryTypes(lat, lon, radiusKm = 5) {
+            if (!poiDatabase || poiDatabase.length === 0) return [];
+            
+            const nearbyCategories = {};
+            
+            poiDatabase.forEach(poi => {
+                const distance = calculateDistance(lat, lon, poi.lat, poi.lon);
+                if (distance <= radiusKm) {
+                    const category = poi.category || poi.type || 'Other';
+                    nearbyCategories[category] = (nearbyCategories[category] || 0) + 1;
+                }
+            });
+            
+            // Return categories sorted by frequency
+            return Object.entries(nearbyCategories)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3)
+                .map(([cat]) => cat);
         }
 
         // Initialize location detection and fetch county from WiGLE API
