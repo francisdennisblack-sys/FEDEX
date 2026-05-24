@@ -2590,10 +2590,10 @@
         // Sample WiFi Networks (ZERO COST - embedded data)
         // POI SYSTEM: Grid-based content visibility
         // Instead of WiFi networks, we use Points of Interest (cafes, parks, schools, libraries)
-        // Grid radius is determined by city population density
+        // Grid radius is determined by city population density (GLOBAL COVERAGE)
         
         let poiDatabase = [];
-        let cityDensityData = {};
+        let globalDensityData = {};
 
         // User location state
         let userLocation = null;
@@ -2734,23 +2734,34 @@
 
         // Find nearby networks and assign zone
         // ============================================
-        // LOAD POI AND DENSITY DATA
+        // LOAD POI AND GLOBAL DENSITY DATA
         // ============================================
         async function loadPOIData() {
             try {
-                const poiResponse = await fetch('poi_database.json');
+                // Load top 50 cities POI data
+                const poiResponse = await fetch('poi_database_top50.json');
                 const poiData = await poiResponse.json();
-                poiDatabase = poiData.pois || [];
-                console.log(`✅ Loaded ${poiDatabase.length} POIs`);
+                
+                // Flatten the cities structure into a single array of POIs for easier lookup
+                const allPOIs = [];
+                for (const cityKey in poiData.cities) {
+                    const city = poiData.cities[cityKey];
+                    if (city.pois) {
+                        allPOIs.push(...city.pois);
+                    }
+                }
+                poiDatabase = allPOIs;
+                console.log(`✅ Loaded ${poiDatabase.length} POIs from top 50 cities`);
 
-                const densityResponse = await fetch('city_density.json');
+                // Load global density data (all populated places)
+                const densityResponse = await fetch('global_density.json');
                 const densityData = await densityResponse.json();
-                cityDensityData = densityData.cityDensity || {};
-                console.log(`✅ Loaded city density data for ${Object.keys(cityDensityData).length} cities`);
+                globalDensityData = densityData.cities || [];
+                console.log(`✅ Loaded global density data for ${globalDensityData.length} settlements`);
             } catch (error) {
                 console.error('❌ Error loading POI/density data:', error);
                 poiDatabase = [];
-                cityDensityData = {};
+                globalDensityData = [];
             }
         }
 
@@ -2775,30 +2786,91 @@
         }
 
         // ============================================
-        // GET GRID FOR USER
+        // GET GRID FOR USER (using global density data)
         // ============================================
         function getGridForUser(userLat, userLon) {
             const nearestPOIData = findNearestPOI(userLat, userLon);
             if (!nearestPOIData) return null;
 
             const { poi, distance } = nearestPOIData;
-            const cityName = poi.city;
+            
+            // Find nearest city in globalDensityData
+            let nearestCity = null;
+            let minCityDistance = Infinity;
+            
+            globalDensityData.forEach(city => {
+                const cityDist = calculateDistance(userLat, userLon, city.lat, city.lon);
+                if (cityDist < minCityDistance) {
+                    minCityDistance = cityDist;
+                    nearestCity = city;
+                }
+            });
+            
+            // If no city found, use POI location to estimate grid
+            if (!nearestCity) {
+                // Default based on density ranges
+                let gridRadius = 10.0;
+                let contentScope = 'REGION';
+                if (distance < 0.5) {
+                    gridRadius = 0.4;
+                    contentScope = 'HOUSEHOLD';
+                } else if (distance < 1) {
+                    gridRadius = 0.8;
+                    contentScope = 'LOCAL';
+                } else if (distance < 2) {
+                    gridRadius = 1.2;
+                    contentScope = 'DISTRICT';
+                }
+                
+                return {
+                    poi: poi,
+                    distance: distance,
+                    city: poi.city || 'Unknown',
+                    density: 0,
+                    gridRadius: gridRadius,
+                    contentScope: contentScope,
+                    boundary: calculateCircleBoundary(poi.lat, poi.lon, gridRadius)
+                };
+            }
 
-            // Get city density (default to USA average if not found)
-            const cityData = cityDensityData[cityName] || cityDensityData['USA_Average'] || {
-                density: 87,
-                gridRadius: 10.0,
-                contentScope: 'REGION'
-            };
+            // Calculate grid radius based on city density
+            let gridRadius = 10.0;
+            let contentScope = 'REGION';
+            
+            if (nearestCity.density >= 5000) {
+                gridRadius = 0.4;
+                contentScope = 'HOUSEHOLD';
+            } else if (nearestCity.density >= 2000) {
+                gridRadius = 0.8;
+                contentScope = 'LOCAL';
+            } else if (nearestCity.density >= 800) {
+                gridRadius = 1.2;
+                contentScope = 'DISTRICT';
+            } else if (nearestCity.density >= 300) {
+                gridRadius = 2.0;
+                contentScope = 'CITY';
+            } else if (nearestCity.density >= 100) {
+                gridRadius = 3.0;
+                contentScope = 'CITY';
+            } else if (nearestCity.density >= 50) {
+                gridRadius = 4.0;
+                contentScope = 'CITY';
+            } else if (nearestCity.density >= 20) {
+                gridRadius = 5.0;
+                contentScope = 'REGION';
+            } else if (nearestCity.density >= 5) {
+                gridRadius = 8.0;
+                contentScope = 'REGION';
+            }
 
             return {
                 poi: poi,
                 distance: distance,
-                city: cityName,
-                density: cityData.density,
-                gridRadius: cityData.gridRadius,
-                contentScope: cityData.contentScope,
-                boundary: calculateCircleBoundary(poi.lat, poi.lon, cityData.gridRadius)
+                city: nearestCity.name,
+                density: nearestCity.density,
+                gridRadius: gridRadius,
+                contentScope: contentScope,
+                boundary: calculateCircleBoundary(poi.lat, poi.lon, gridRadius)
             };
         }
 
