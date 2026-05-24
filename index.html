@@ -3360,7 +3360,31 @@
             };
         }
 
+        // Get more granular geographic context based on distance
+        function getGeographicGranularity(distanceKm, post) {
+            if (distanceKm < 0.5) {
+                return { level: 'POI', label: post.poiName || 'Local', emoji: '📍' };
+            }
+            if (distanceKm < 2) {
+                return { level: 'NEIGHBORHOOD', label: `${post.neighborhood || post.poiName || 'Your neighborhood'}`, emoji: '🏘️' };
+            }
+            if (distanceKm < 10) {
+                return { level: 'DISTRICT', label: `${post.district || post.city} District`, emoji: '🏙️' };
+            }
+            if (distanceKm < 50) {
+                return { level: 'CITY', label: post.city || 'Your City', emoji: '🏙️' };
+            }
+            if (distanceKm < 200) {
+                return { level: 'METRO', label: `${post.city} Metro Area`, emoji: '🌆' };
+            }
+            if (distanceKm < 500) {
+                return { level: 'REGION', label: post.state || 'This Region', emoji: '🗺️' };
+            }
+            return { level: 'COUNTRY', label: 'America', emoji: '🇺🇸' };
+        }
+
         // Determine what geographic context to show based on engagement & viewer distance
+        // This is PER-VIEWER - same post shows different tags to different viewers
         function getContextualZoneTag(post, userLocation) {
             if (!post) return { display: 'Unknown', emoji: '🌍', scale: 'unknown' };
 
@@ -3380,7 +3404,7 @@
                 );
             }
 
-            // ========== ENGAGEMENT-BASED SCALING ==========
+            // ========== ENGAGEMENT-BASED SCALING WITH GEOGRAPHIC CONTEXT ==========
             
             // Very low engagement: Show POI details
             if (likes < thresholds.low) {
@@ -3388,113 +3412,155 @@
                     display: post.poiName || post.county || 'Local Post',
                     emoji: post.poiEmoji || '📍',
                     scale: 'POI',
-                    context: 'specific'
+                    context: 'specific',
+                    reach: 'local'
                 };
             }
 
             // Low engagement: Show neighborhood/area
             if (likes < thresholds.medium) {
-                // If viewer is very close, still show POI
+                // If viewer is very close, still show POI/neighborhood
                 if (viewerDistance < 2) {
                     return {
-                        display: post.poiName || post.county || 'Local Area',
+                        display: post.poiName || post.neighborhood || post.county || 'Local Area',
                         emoji: '🏘️',
                         scale: 'NEIGHBORHOOD',
-                        context: 'specific'
+                        context: 'specific',
+                        reach: 'neighborhood'
+                    };
+                }
+                // If close but not super close, show district
+                if (viewerDistance < 10) {
+                    return {
+                        display: `${post.district || post.city || 'Area'} Area`,
+                        emoji: '🏙️',
+                        scale: 'DISTRICT',
+                        context: 'area',
+                        reach: 'district'
                     };
                 }
                 // Otherwise show city/area
                 return {
-                    display: post.city || post.county || 'Area',
+                    display: post.city || post.county || 'City Area',
                     emoji: '🏙️',
                     scale: 'CITY',
-                    context: 'area'
+                    context: 'area',
+                    reach: 'city'
                 };
             }
 
-            // Medium engagement: Show city/area prominently
+            // Medium engagement: Show city/area prominently as TRENDING
             if (likes < thresholds.high) {
-                // Very close viewers still see POI
+                // Very close viewers still see specific location
                 if (viewerDistance < 5) {
                     return {
-                        display: post.poiName || post.city || 'Trending Locally',
+                        display: `🔥 Trending ${post.poiName ? 'at ' + post.poiName : 'Nearby'}`,
                         emoji: '🔥',
                         scale: 'LOCAL_TRENDING',
-                        context: 'trending'
+                        context: 'trending',
+                        reach: 'neighborhood'
                     };
                 }
-                // Close viewers see neighborhood
-                if (viewerDistance < 30) {
+                // Close viewers see neighborhood trending
+                if (viewerDistance < 10) {
                     return {
-                        display: post.city || 'Trending Area',
+                        display: `🔥 Trending in ${post.neighborhood || post.district || 'your area'}`,
+                        emoji: '🔥',
+                        scale: 'NEIGHBORHOOD_TRENDING',
+                        context: 'trending',
+                        reach: 'district'
+                    };
+                }
+                // Moderate distance: See city trending
+                if (viewerDistance < 50) {
+                    return {
+                        display: `🔥 Trending in ${post.city}`,
                         emoji: '🔥',
                         scale: 'CITY_TRENDING',
-                        context: 'trending'
+                        context: 'trending',
+                        reach: 'city'
                     };
                 }
-                // Distant viewers see city
+                // Far distance: See metropolitan trending
                 return {
-                    display: `Trending in ${post.city || 'this area'}`,
+                    display: `🔥 Trending in ${post.city} Area`,
                     emoji: '🔥',
-                    scale: 'CITY_TRENDING',
-                    context: 'trending'
+                    scale: 'METRO_TRENDING',
+                    context: 'trending',
+                    reach: 'metro'
                 };
             }
 
-            // High engagement: Show state/region
+            // High engagement: Show state/region as POPULAR
             if (likes < thresholds.veryHigh) {
-                // Close viewers: Still show city
+                // Close viewers: Show city popular
                 if (viewerDistance < 30) {
                     return {
-                        display: `Popular in ${post.city || 'your area'}`,
+                        display: `⭐ Popular in ${post.city}`,
                         emoji: '⭐',
                         scale: 'CITY_POPULAR',
-                        context: 'popular'
+                        context: 'popular',
+                        reach: 'city'
                     };
                 }
-                // Medium distance: Show state
+                // Medium distance: Show metro/region
+                if (viewerDistance < 200) {
+                    return {
+                        display: `⭐ Popular in ${post.city} Metro`,
+                        emoji: '⭐',
+                        scale: 'METRO_POPULAR',
+                        context: 'popular',
+                        reach: 'metro'
+                    };
+                }
+                // Far distance: Show state/region
                 if (viewerDistance < 500) {
                     return {
-                        display: `Popular in ${post.state || 'this region'}`,
+                        display: `⭐ Popular in ${post.state || 'this region'}`,
                         emoji: '⭐',
                         scale: 'REGION_POPULAR',
-                        context: 'popular'
+                        context: 'popular',
+                        reach: 'region'
                     };
                 }
-                // Far distance: Show country
+                // Very far: Show country
                 return {
-                    display: `Popular in America`,
+                    display: `⭐ Popular Across America`,
                     emoji: '⭐',
                     scale: 'COUNTRY_POPULAR',
-                    context: 'popular'
+                    context: 'popular',
+                    reach: 'country'
                 };
             }
 
-            // Very high engagement: Show country/viral
-            // Close viewers: Show city
+            // Very high engagement: VIRAL - Show country/global
+            // Close viewers: Show city viral
             if (viewerDistance < 30) {
                 return {
-                    display: `Viral in ${post.city}`,
+                    display: `🌟 VIRAL in ${post.city}`,
                     emoji: '🌟',
                     scale: 'CITY_VIRAL',
-                    context: 'viral'
+                    context: 'viral',
+                    reach: 'city'
                 };
             }
-            // Medium distance: Show region
+            // Medium distance: Show region viral
             if (viewerDistance < 500) {
                 return {
-                    display: `Viral in ${post.state || 'America'}`,
+                    display: `🌟 VIRAL in ${post.state || 'America'}`,
                     emoji: '🌟',
                     scale: 'REGION_VIRAL',
-                    context: 'viral'
+                    context: 'viral',
+                    reach: 'region'
                 };
             }
-            // Far distance: Show country/global
+            // Far distance: Show country/global viral
             return {
-                display: `Viral in America`,
+                display: `🌟 VIRAL Nationwide`,
                 emoji: '🌟',
                 scale: 'COUNTRY_VIRAL',
-                context: 'viral'
+                context: 'viral',
+                reach: 'country'
             };
         }
 
@@ -3502,38 +3568,149 @@
         function enrichPostWithLocationData(post) {
             if (!post) return post;
 
-            // Get city/state info from coordinates if not set
-            if (!post.city && post.lat && post.lon) {
-                // Map coordinates to approximate city
-                // Using simple approximations for now
-                const lat = post.lat;
-                const lon = post.lon;
+            const lat = post.lat;
+            const lon = post.lon;
 
-                // NYC area
-                if (lat > 40.5 && lat < 40.9 && lon > -74.3 && lon < -73.7) {
-                    post.city = 'New York';
-                    post.state = 'NY';
-                }
-                // LA area
-                else if (lat > 33.9 && lat < 34.2 && lon > -118.5 && lon < -117.9) {
-                    post.city = 'Los Angeles';
-                    post.state = 'CA';
-                }
-                // Seattle area
-                else if (lat > 47.4 && lat < 47.8 && lon > -122.5 && lon < -122.0) {
-                    post.city = 'Seattle';
-                    post.state = 'WA';
-                }
-                // Chicago area
-                else if (lat > 41.7 && lat < 42.0 && lon > -87.8 && lon < -87.4) {
-                    post.city = 'Chicago';
-                    post.state = 'IL';
-                }
-                // Default
-                else {
-                    post.city = post.county || 'Local Area';
-                    post.state = 'USA';
-                }
+            // NYC Area (Manhattan, Brooklyn, Queens, Bronx, Staten Island)
+            if (lat > 40.5 && lat < 40.95 && lon > -74.3 && lon < -73.7) {
+                let neighborhood = post.poiName || 'New York';
+                
+                // Manhattan
+                if (lon < -73.98 && lat > 40.7 && lat < 40.85) neighborhood = 'Manhattan';
+                // Brooklyn
+                else if (lon < -73.95 && lat < 40.7) neighborhood = 'Brooklyn';
+                // Queens
+                else if (lon > -73.85 && lat < 40.8) neighborhood = 'Queens';
+                // Bronx
+                else if (lat > 40.84) neighborhood = 'Bronx';
+                
+                post.city = 'New York';
+                post.district = 'NYC';
+                post.neighborhood = neighborhood;
+                post.state = 'NY';
+                post.region = 'Northeast';
+            }
+            // LA Area (Downtown, West LA, Long Beach, Santa Monica)
+            else if (lat > 33.7 && lat < 34.15 && lon > -118.7 && lon < -117.8) {
+                let neighborhood = post.poiName || 'Los Angeles';
+                
+                // Downtown LA
+                if (lat > 34.05 && lon > -118.25 && lon < -118.2) neighborhood = 'Downtown LA';
+                // West LA
+                else if (lon < -118.25 && lat > 33.95) neighborhood = 'West LA';
+                // Long Beach
+                else if (lat < 33.85 && lon < -118.15) neighborhood = 'Long Beach';
+                // Santa Monica
+                else if (lat > 34.01 && lon < -118.48) neighborhood = 'Santa Monica';
+                
+                post.city = 'Los Angeles';
+                post.district = 'LA';
+                post.neighborhood = neighborhood;
+                post.state = 'CA';
+                post.region = 'West Coast';
+            }
+            // Seattle Area (Capitol Hill, Downtown, Queen Anne, Ballard)
+            else if (lat > 47.5 && lat < 47.75 && lon > -122.4 && lon < -122.2) {
+                let neighborhood = post.poiName || 'Seattle';
+                
+                // Capitol Hill
+                if (lat > 47.62 && lat < 47.65 && lon < -122.31 && lon > -122.32) neighborhood = 'Capitol Hill';
+                // Downtown
+                else if (lat > 47.6 && lat < 47.62 && lon < -122.33 && lon > -122.335) neighborhood = 'Downtown';
+                // Queen Anne
+                else if (lat > 47.65 && lon < -122.36) neighborhood = 'Queen Anne';
+                // Ballard
+                else if (lat > 47.67 && lon < -122.38) neighborhood = 'Ballard';
+                
+                post.city = 'Seattle';
+                post.district = 'Seattle Metro';
+                post.neighborhood = neighborhood;
+                post.state = 'WA';
+                post.region = 'West Coast';
+            }
+            // Chicago Area (Downtown, North Side, South Side, West Side)
+            else if (lat > 41.6 && lat < 42.0 && lon > -87.9 && lon < -87.5) {
+                let neighborhood = post.poiName || 'Chicago';
+                
+                // Downtown
+                if (lat > 41.88 && lat < 41.9 && lon > -87.63 && lon < -87.61) neighborhood = 'Downtown';
+                // North Side
+                else if (lat > 41.95 && lon > -87.75) neighborhood = 'North Side';
+                // South Side
+                else if (lat < 41.8 && lon > -87.7) neighborhood = 'South Side';
+                // West Side
+                else if (lon < -87.7 && lat > 41.8 && lat < 41.9) neighborhood = 'West Side';
+                
+                post.city = 'Chicago';
+                post.district = 'Chicago';
+                post.neighborhood = neighborhood;
+                post.state = 'IL';
+                post.region = 'Midwest';
+            }
+            // Boston Area (Back Bay, Downtown, Cambridge, Allston)
+            else if (lat > 42.3 && lat < 42.4 && lon > -71.15 && lon < -71.0) {
+                let neighborhood = post.poiName || 'Boston';
+                
+                // Back Bay
+                if (lat > 42.35 && lat < 42.37 && lon > -71.08 && lon < -71.065) neighborhood = 'Back Bay';
+                // Downtown
+                else if (lat > 42.36 && lon < -71.06) neighborhood = 'Downtown Boston';
+                // Cambridge
+                else if (lat < 42.36 && lon < -71.1) neighborhood = 'Cambridge';
+                // Allston
+                else if (lat > 42.33 && lon < -71.12) neighborhood = 'Allston';
+                
+                post.city = 'Boston';
+                post.district = 'Boston';
+                post.neighborhood = neighborhood;
+                post.state = 'MA';
+                post.region = 'Northeast';
+            }
+            // Miami Area (Miami Beach, Wynwood, Brickell, Coral Gables)
+            else if (lat > 25.7 && lat < 25.95 && lon > -80.25 && lon < -80.1) {
+                let neighborhood = post.poiName || 'Miami';
+                
+                // Miami Beach
+                if (lat > 25.82 && lon > -80.15) neighborhood = 'Miami Beach';
+                // Wynwood
+                else if (lat > 25.8 && lon > -80.2 && lon < -80.18) neighborhood = 'Wynwood';
+                // Brickell
+                else if (lat < 25.76 && lon > -80.19 && lon < -80.185) neighborhood = 'Brickell';
+                // Coral Gables
+                else if (lat > 25.74 && lon < -80.27) neighborhood = 'Coral Gables';
+                
+                post.city = 'Miami';
+                post.district = 'Miami Metro';
+                post.neighborhood = neighborhood;
+                post.state = 'FL';
+                post.region = 'Southeast';
+            }
+            // Austin Area (Downtown, South Austin, North Austin, East Austin)
+            else if (lat > 30.2 && lat < 30.5 && lon > -97.8 && lon < -97.6) {
+                let neighborhood = post.poiName || 'Austin';
+                
+                // Downtown
+                if (lat > 30.27 && lat < 30.29 && lon > -97.75 && lon < -97.73) neighborhood = 'Downtown';
+                // South Austin
+                else if (lat < 30.3 && lon > -97.75) neighborhood = 'South Austin';
+                // North Austin
+                else if (lat > 30.4 && lon > -97.75) neighborhood = 'North Austin';
+                // East Austin
+                else if (lon > -97.7) neighborhood = 'East Austin';
+                
+                post.city = 'Austin';
+                post.district = 'Austin';
+                post.neighborhood = neighborhood;
+                post.state = 'TX';
+                post.region = 'South';
+            }
+            // Default fallback
+            else {
+                post.city = post.city || post.county || 'Local Area';
+                post.district = post.city || 'Area';
+                post.neighborhood = post.poiName || post.county || 'Area';
+                post.state = post.state || 'USA';
+                post.region = post.region || 'Region';
             }
 
             return post;
