@@ -3335,6 +3335,211 @@
         }
 
         // ============================================
+        // DYNAMIC ZONE TAG CONVERSION SYSTEM
+        // ============================================
+        
+        // Calculate adaptive engagement thresholds based on user activity
+        function getAdaptiveEngagementThresholds() {
+            const baseThresholds = {
+                veryLow: 1,      // < this = POI details
+                low: 5,          // < this = neighborhood
+                medium: 20,      // < this = city
+                high: 50,        // < this = region
+                veryHigh: 100    // >= this = viral/country
+            };
+
+            // Adjust thresholds based on online user count
+            const userMultiplier = Math.max(0.5, Math.log10(onlineUserCount || 1) / 2);
+            
+            return {
+                veryLow: Math.ceil(baseThresholds.veryLow * userMultiplier),
+                low: Math.ceil(baseThresholds.low * userMultiplier),
+                medium: Math.ceil(baseThresholds.medium * userMultiplier),
+                high: Math.ceil(baseThresholds.high * userMultiplier),
+                veryHigh: Math.ceil(baseThresholds.veryHigh * userMultiplier)
+            };
+        }
+
+        // Determine what geographic context to show based on engagement & viewer distance
+        function getContextualZoneTag(post, userLocation) {
+            if (!post) return { display: 'Unknown', emoji: '🌍', scale: 'unknown' };
+
+            const likes = post.likes || 0;
+            const dislikes = post.dislikes || 0;
+            const engagement = likes - dislikes;
+            
+            // Get adaptive thresholds
+            const thresholds = getAdaptiveEngagementThresholds();
+
+            // Get viewer's distance from post
+            let viewerDistance = Infinity;
+            if (userLocation && post.lat && post.lon) {
+                viewerDistance = calculateDistance(
+                    userLocation.latitude, userLocation.longitude,
+                    post.lat, post.lon
+                );
+            }
+
+            // ========== ENGAGEMENT-BASED SCALING ==========
+            
+            // Very low engagement: Show POI details
+            if (likes < thresholds.low) {
+                return {
+                    display: post.poiName || post.county || 'Local Post',
+                    emoji: post.poiEmoji || '📍',
+                    scale: 'POI',
+                    context: 'specific'
+                };
+            }
+
+            // Low engagement: Show neighborhood/area
+            if (likes < thresholds.medium) {
+                // If viewer is very close, still show POI
+                if (viewerDistance < 2) {
+                    return {
+                        display: post.poiName || post.county || 'Local Area',
+                        emoji: '🏘️',
+                        scale: 'NEIGHBORHOOD',
+                        context: 'specific'
+                    };
+                }
+                // Otherwise show city/area
+                return {
+                    display: post.city || post.county || 'Area',
+                    emoji: '🏙️',
+                    scale: 'CITY',
+                    context: 'area'
+                };
+            }
+
+            // Medium engagement: Show city/area prominently
+            if (likes < thresholds.high) {
+                // Very close viewers still see POI
+                if (viewerDistance < 5) {
+                    return {
+                        display: post.poiName || post.city || 'Trending Locally',
+                        emoji: '🔥',
+                        scale: 'LOCAL_TRENDING',
+                        context: 'trending'
+                    };
+                }
+                // Close viewers see neighborhood
+                if (viewerDistance < 30) {
+                    return {
+                        display: post.city || 'Trending Area',
+                        emoji: '🔥',
+                        scale: 'CITY_TRENDING',
+                        context: 'trending'
+                    };
+                }
+                // Distant viewers see city
+                return {
+                    display: `Trending in ${post.city || 'this area'}`,
+                    emoji: '🔥',
+                    scale: 'CITY_TRENDING',
+                    context: 'trending'
+                };
+            }
+
+            // High engagement: Show state/region
+            if (likes < thresholds.veryHigh) {
+                // Close viewers: Still show city
+                if (viewerDistance < 30) {
+                    return {
+                        display: `Popular in ${post.city || 'your area'}`,
+                        emoji: '⭐',
+                        scale: 'CITY_POPULAR',
+                        context: 'popular'
+                    };
+                }
+                // Medium distance: Show state
+                if (viewerDistance < 500) {
+                    return {
+                        display: `Popular in ${post.state || 'this region'}`,
+                        emoji: '⭐',
+                        scale: 'REGION_POPULAR',
+                        context: 'popular'
+                    };
+                }
+                // Far distance: Show country
+                return {
+                    display: `Popular in America`,
+                    emoji: '⭐',
+                    scale: 'COUNTRY_POPULAR',
+                    context: 'popular'
+                };
+            }
+
+            // Very high engagement: Show country/viral
+            // Close viewers: Show city
+            if (viewerDistance < 30) {
+                return {
+                    display: `Viral in ${post.city}`,
+                    emoji: '🌟',
+                    scale: 'CITY_VIRAL',
+                    context: 'viral'
+                };
+            }
+            // Medium distance: Show region
+            if (viewerDistance < 500) {
+                return {
+                    display: `Viral in ${post.state || 'America'}`,
+                    emoji: '🌟',
+                    scale: 'REGION_VIRAL',
+                    context: 'viral'
+                };
+            }
+            // Far distance: Show country/global
+            return {
+                display: `Viral in America`,
+                emoji: '🌟',
+                scale: 'COUNTRY_VIRAL',
+                context: 'viral'
+            };
+        }
+
+        // Get location data needed for zone conversion
+        function enrichPostWithLocationData(post) {
+            if (!post) return post;
+
+            // Get city/state info from coordinates if not set
+            if (!post.city && post.lat && post.lon) {
+                // Map coordinates to approximate city
+                // Using simple approximations for now
+                const lat = post.lat;
+                const lon = post.lon;
+
+                // NYC area
+                if (lat > 40.5 && lat < 40.9 && lon > -74.3 && lon < -73.7) {
+                    post.city = 'New York';
+                    post.state = 'NY';
+                }
+                // LA area
+                else if (lat > 33.9 && lat < 34.2 && lon > -118.5 && lon < -117.9) {
+                    post.city = 'Los Angeles';
+                    post.state = 'CA';
+                }
+                // Seattle area
+                else if (lat > 47.4 && lat < 47.8 && lon > -122.5 && lon < -122.0) {
+                    post.city = 'Seattle';
+                    post.state = 'WA';
+                }
+                // Chicago area
+                else if (lat > 41.7 && lat < 42.0 && lon > -87.8 && lon < -87.4) {
+                    post.city = 'Chicago';
+                    post.state = 'IL';
+                }
+                // Default
+                else {
+                    post.city = post.county || 'Local Area';
+                    post.state = 'USA';
+                }
+            }
+
+            return post;
+        }
+
+        // ============================================
         // CASCADING GEOGRAPHIC FALLBACK SYSTEM (Legacy)
         // ============================================
         
@@ -6298,17 +6503,24 @@
                         
                         const voteBadge = `<div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>`;
                         
-                        // FEDEX v3: Handle out-of-area badge rendering
+                        // FEDEX v3: Handle out-of-area badge rendering with dynamic zone tags
                         let zoneTagHTML = '';
+                        
+                        // Enrich post with location data
+                        const enrichedPost = enrichPostWithLocationData(post);
+                        
+                        // Get contextual zone tag based on engagement & distance
+                        const zoneContext = getContextualZoneTag(enrichedPost, userLocation);
+                        
                         if (post.outOfAreaBadge) {
                             // Out-of-area post with muted badge
                             const badge = post.outOfAreaBadge;
                             zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${badge.emoji} ${badge.text} - Out of Area</div>`;
                             console.log(`    📸 MEDIA POST (OUT-OF-AREA) - Zone: ${badge.zone}, Badge: ${badge.emoji} ${badge.text}`);
                         } else {
-                            // Regular local post
-                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${post.county || 'No zone'}</div>`;
-                            console.log(`    📸 MEDIA POST - Rendering zone tag: 🌍 ${post.county || 'No zone'}`);
+                            // Dynamic zone tag based on engagement
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${zoneContext.emoji} ${zoneContext.display}</div>`;
+                            console.log(`    📸 MEDIA POST - Dynamic zone: ${zoneContext.emoji} ${zoneContext.display} (scale: ${zoneContext.scale})`);
                         }
                         
                         // Media container with padding to leave room for vote badge and zone tag
@@ -6317,17 +6529,24 @@
                     } else {
                         // Text-only posts - show text centered with prominent vote badge styled like modal
                         
-                        // FEDEX v3: Handle out-of-area badge rendering for text posts
+                        // Dynamic zone tag rendering with engagement-based context
                         let zoneTagHTML = '';
+                        
+                        // Enrich post with location data
+                        const enrichedPost = enrichPostWithLocationData(post);
+                        
+                        // Get contextual zone tag based on engagement & distance
+                        const zoneContext = getContextualZoneTag(enrichedPost, userLocation);
+                        
                         if (post.outOfAreaBadge) {
                             // Out-of-area post with muted badge
                             const badge = post.outOfAreaBadge;
                             zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${badge.emoji} ${badge.text} - Out of Area</div>`;
                             console.log(`    📝 TEXT POST (OUT-OF-AREA) - Zone: ${badge.zone}, Badge: ${badge.emoji} ${badge.text}`);
                         } else {
-                            // Regular local post
-                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${post.county || 'No zone'}</div>`;
-                            console.log(`    📝 TEXT POST - Rendering zone tag: 🌍 ${post.county || 'No zone'}`);
+                            // Dynamic zone tag based on engagement
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${zoneContext.emoji} ${zoneContext.display}</div>`;
+                            console.log(`    📝 TEXT POST - Dynamic zone: ${zoneContext.emoji} ${zoneContext.display} (scale: ${zoneContext.scale})`);
                         }
                         
                         box.innerHTML = `<div style="font-size: 21px; color: #fff; overflow: auto; line-height: 1.4; text-align: center; padding: 12px; word-wrap: break-word; padding-bottom: 70px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; height: 100%; max-height: 200px; background-color: #1a1a1a;">${post.content}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>${zoneTagHTML}`;
@@ -6385,22 +6604,31 @@
                                     ? `<video src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;" autoplay muted loop playsinline></video>`
                                     : `<img src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
                                 const voteBadge = `<div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>`;
+                                
+                                // Dynamic zone tag for media posts
                                 let zoneTagHTML = '';
+                                const enrichedPost = enrichPostWithLocationData(post);
+                                const zoneContext = getContextualZoneTag(enrichedPost, userLocation);
+                                
                                 if (post.outOfAreaBadge) {
                                     const badge = post.outOfAreaBadge;
                                     zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${badge.emoji} ${badge.text} - Out of Area</div>`;
                                 } else {
-                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${post.county || 'No zone'}</div>`;
+                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${zoneContext.emoji} ${zoneContext.display}</div>`;
                                 }
                                 box.innerHTML = `<div style="width: 100%; height: calc(100% - 50px); background-color: #000; display: flex; align-items: center; justify-content: center; overflow: hidden;">${mediaHTML}</div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; top: 0;">${voteBadge}${zoneTagHTML}</div>`;
                                 box.style.position = 'relative';
                             } else {
+                                // Dynamic zone tag for text posts
                                 let zoneTagHTML = '';
+                                const enrichedPost = enrichPostWithLocationData(post);
+                                const zoneContext = getContextualZoneTag(enrichedPost, userLocation);
+                                
                                 if (post.outOfAreaBadge) {
                                     const badge = post.outOfAreaBadge;
                                     zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${badge.emoji} ${badge.text} - Out of Area</div>`;
                                 } else {
-                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${post.county || 'No zone'}</div>`;
+                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${zoneContext.emoji} ${zoneContext.display}</div>`;
                                 }
                                 box.innerHTML = `<div style="font-size: 21px; color: #fff; overflow: auto; line-height: 1.4; text-align: center; padding: 12px; word-wrap: break-word; padding-bottom: 70px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; height: 100%; max-height: 200px; background-color: #1a1a1a;">${post.content}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>${zoneTagHTML}`;
                                 box.style.position = 'relative';
