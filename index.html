@@ -892,6 +892,61 @@
             text-shadow: 0 0 3px rgba(167, 139, 250, 0.6);
         }
 
+        /* ========= ENGAGEMENT TIER BADGES (HOT, PODIUM, etc.) ========= */
+        /* HOT - Trending/Popular content (backfilled) */
+        .grid-box.badge-hot {
+            border-top: 3px solid #ef4444;
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+        }
+
+        .grid-box.badge-hot::before {
+            content: '🔥 HOT';
+            position: absolute;
+            top: 4px;
+            left: 8px;
+            font-size: 9px;
+            font-weight: 700;
+            color: #ef4444;
+            text-shadow: 0 0 3px rgba(239, 68, 68, 0.6);
+        }
+
+        /* PODIUM - Top engagement (50+ likes) */
+        .grid-box.badge-podium {
+            border-top: 4px solid #fbbf24;
+            box-shadow: 0 0 12px rgba(251, 191, 36, 0.5);
+            background-clip: padding-box;
+        }
+
+        .grid-box.badge-podium::before {
+            content: '🏆 PODIUM';
+            position: absolute;
+            top: 4px;
+            left: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #fbbf24;
+            text-shadow: 0 0 4px rgba(251, 191, 36, 0.7);
+            letter-spacing: 0.5px;
+        }
+
+        /* DISLIKED - Lower priority (more dislikes) - shown in sparse areas only */
+        .grid-box.badge-disliked {
+            border-left: 3px solid #9ca3af;
+            box-shadow: 0 0 8px rgba(156, 163, 175, 0.2);
+            opacity: 0.85;
+        }
+
+        .grid-box.badge-disliked::before {
+            content: '👎 REVIEW';
+            position: absolute;
+            top: 4px;
+            left: 8px;
+            font-size: 9px;
+            font-weight: 600;
+            color: #9ca3af;
+            text-shadow: 0 0 2px rgba(156, 163, 175, 0.4);
+        }
+
         .grid-box.badge-crowned {
             border-top: 4px solid #fbbf24;
             box-shadow: inset 0 0 10px rgba(251, 191, 36, 0.3), 0 0 15px rgba(251, 191, 36, 0.5);
@@ -2955,18 +3010,256 @@
         // CHECK IF POST IS VISIBLE TO USER
         // ============================================
         // ============================================
-        // CASCADING GEOGRAPHIC FALLBACK SYSTEM
+        // USER POST CONTRIBUTION TRACKING
+        // ============================================
+        let userHasPostedLocally = false;
+        let userLocalPostCount = 0;
+
+        function checkUserPostContribution(allPosts, userGrid) {
+            if (!userGrid) {
+                userHasPostedLocally = false;
+                userLocalPostCount = 0;
+                return;
+            }
+
+            // Count how many posts this user has made locally
+            const userLocalPosts = (allPosts || []).filter(post => {
+                if (post.userId !== currentUserId) return false;
+
+                const distance = calculateDistance(
+                    post.lat, post.lon,
+                    userGrid.poi.lat, userGrid.poi.lon
+                );
+
+                return distance <= userGrid.gridRadius;
+            });
+
+            userLocalPostCount = userLocalPosts.length;
+            userHasPostedLocally = userLocalPostCount > 0;
+
+            console.log(`👤 User contribution: ${userLocalPostCount} posts locally`);
+        }
+
+        // ============================================
+        // POST ENGAGEMENT TIER SYSTEM
+        // ============================================
+        function getPostEngagementTier(post) {
+            const likes = post.likes || 0;
+            const dislikes = post.dislikes || 0;
+            const likeRatio = likes - dislikes;
+
+            // PODIUM: Top tier (50+ likes, or 10+ more likes than dislikes)
+            if (likes >= 50 || likeRatio >= 10) {
+                return { tier: 'PODIUM', priority: 1, label: '🏆 PODIUM' };
+            }
+
+            // HOT: Trending (5-50 likes, positive ratio)
+            if (likes >= 5 && likeRatio > 0) {
+                return { tier: 'HOT', priority: 2, label: '🔥 HOT' };
+            }
+
+            // LIKED: More likes than dislikes
+            if (likes > 0 && likeRatio > 0) {
+                return { tier: 'LIKED', priority: 3, label: '👍 LIKED' };
+            }
+
+            // NORMAL: Balanced or new posts
+            if (Math.abs(likeRatio) <= 2) {
+                return { tier: 'NORMAL', priority: 4, label: '📝 NEW' };
+            }
+
+            // DISLIKED: More dislikes than likes (lowest priority)
+            if (dislikes > likes) {
+                return { tier: 'DISLIKED', priority: 5, label: '👎 REVIEW' };
+            }
+
+            return { tier: 'NORMAL', priority: 4, label: '📝 NEW' };
+        }
+
+        // ============================================
+        // ENHANCED CASCADING BACKFILL WITH ENGAGEMENT TIERS
+        // ============================================
+        function backfillWithCascadingFallbackAndEngagement(allPosts, userGrid, maxGridSize = 2000) {
+            if (!userGrid || !allPosts || allPosts.length === 0) {
+                return allPosts;
+            }
+
+            checkUserPostContribution(allPosts, userGrid);
+
+            // If user has posted locally, minimize backfill greatly
+            if (userHasPostedLocally) {
+                console.log(`✅ User has contributed locally - MINIMIZING backfill`);
+                
+                // Get geographic tier
+                const tieredByGeo = {
+                    LOCAL: [],
+                    TOWN: [],
+                    CITY: [],
+                    REGION: [],
+                    STATE: [],
+                    COUNTRY: []
+                };
+
+                allPosts.forEach(post => {
+                    const { tier, distance } = getPostGeographicTier(post, userGrid);
+                    if (tieredByGeo[tier]) {
+                        tieredByGeo[tier].push({ ...post, cascadeTier: tier, cascadeDistance: distance });
+                    }
+                });
+
+                const sortByQuality = (p1, p2) => {
+                    const score1 = ((p1.likes || 0) - (p1.dislikes || 0)) * 100 + 
+                                   ((Date.now() - (p1.timestamp || 0)) / (1000 * 60 * 60)) * -1;
+                    const score2 = ((p2.likes || 0) - (p2.dislikes || 0)) * 100 + 
+                                   ((Date.now() - (p2.timestamp || 0)) / (1000 * 60 * 60)) * -1;
+                    return score2 - score1;
+                };
+
+                Object.keys(tieredByGeo).forEach(tier => {
+                    tieredByGeo[tier].sort(sortByQuality);
+                });
+
+                const displayPosts = [];
+                
+                // Show local content (priority)
+                displayPosts.push(...tieredByGeo.LOCAL);
+                
+                // Only minimal backfill (10% of grid)
+                const minimalBackfill = Math.ceil(maxGridSize * 0.10);
+                if (displayPosts.length < minimalBackfill) {
+                    const townNeeded = Math.min(minimalBackfill - displayPosts.length, tieredByGeo.TOWN.length);
+                    tieredByGeo.TOWN.slice(0, townNeeded).forEach(post => {
+                        post.isBackfilled = true;
+                        post.cascadeTier = 'TOWN_BACKFILL';
+                        displayPosts.push(post);
+                    });
+                }
+
+                console.log(`📊 Contributor mode: ${displayPosts.length} posts (minimal backfill)`);
+                return displayPosts;
+            }
+
+            // USER HAS NOT POSTED - Full cascading backfill with engagement tiers
+            console.log(`🔄 Non-contributor mode - Full cascading backfill WITH engagement tiers`);
+
+            // Categorize by both geographic AND engagement tiers
+            const tieredByGeoAndEngagement = {
+                LOCAL: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                TOWN: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                CITY: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                REGION: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                STATE: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] },
+                COUNTRY: { PODIUM: [], HOT: [], LIKED: [], NORMAL: [], DISLIKED: [] }
+            };
+
+            allPosts.forEach(post => {
+                const { tier: geoTier, distance } = getPostGeographicTier(post, userGrid);
+                const { tier: engagementTier } = getPostEngagementTier(post);
+
+                if (tieredByGeoAndEngagement[geoTier] && tieredByGeoAndEngagement[geoTier][engagementTier]) {
+                    tieredByGeoAndEngagement[geoTier][engagementTier].push({
+                        ...post,
+                        cascadeTier: geoTier,
+                        cascadeDistance: distance,
+                        engagementTier: engagementTier
+                    });
+                }
+            });
+
+            // Sort each engagement tier by recency
+            const sortByRecency = (p1, p2) => {
+                return (p2.timestamp || 0) - (p1.timestamp || 0);
+            };
+
+            Object.keys(tieredByGeoAndEngagement).forEach(geoTier => {
+                Object.keys(tieredByGeoAndEngagement[geoTier]).forEach(engageTier => {
+                    tieredByGeoAndEngagement[geoTier][engageTier].sort(sortByRecency);
+                });
+            });
+
+            const displayPosts = [];
+            const targetCount = Math.min(maxGridSize, allPosts.length);
+            const localCount = Object.values(tieredByGeoAndEngagement.LOCAL).reduce((sum, arr) => sum + arr.length, 0);
+
+            if (localCount >= 50) {
+                // Dense: All local posts
+                ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
+                    displayPosts.push(...tieredByGeoAndEngagement.LOCAL[tier]);
+                });
+                console.log(`🟢 DENSE: ${displayPosts.length} local posts`);
+            } else if (localCount >= 20) {
+                // Moderate: Local + top engagement TOWN
+                ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
+                    displayPosts.push(...tieredByGeoAndEngagement.LOCAL[tier]);
+                });
+
+                let backfillNeeded = targetCount - displayPosts.length;
+                // Prioritize engagement tiers from TOWN
+                ['PODIUM', 'HOT', 'LIKED', 'NORMAL'].forEach(tier => {
+                    const needed = Math.min(backfillNeeded, tieredByGeoAndEngagement.TOWN[tier].length);
+                    tieredByGeoAndEngagement.TOWN[tier].slice(0, needed).forEach(post => {
+                        post.isBackfilled = true;
+                        post.cascadeTier = 'TOWN_BACKFILL';
+                        displayPosts.push(post);
+                    });
+                    backfillNeeded -= needed;
+                });
+                console.log(`🟡 MODERATE: ${localCount} local + engagement backfill`);
+            } else if (localCount >= 5) {
+                // Sparse: Local + all engagement tiers cascading
+                ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
+                    displayPosts.push(...tieredByGeoAndEngagement.LOCAL[tier]);
+                });
+
+                let backfillNeeded = targetCount - displayPosts.length;
+                const geoTiers = ['TOWN', 'CITY', 'REGION', 'STATE'];
+                
+                for (const geoTier of geoTiers) {
+                    if (backfillNeeded <= 0) break;
+                    // Prioritize higher engagement posts
+                    ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(engageTier => {
+                        const needed = Math.min(backfillNeeded, tieredByGeoAndEngagement[geoTier][engageTier].length);
+                        tieredByGeoAndEngagement[geoTier][engageTier].slice(0, needed).forEach(post => {
+                            post.isBackfilled = true;
+                            post.cascadeTier = `${geoTier}_BACKFILL`;
+                            displayPosts.push(post);
+                        });
+                        backfillNeeded -= needed;
+                    });
+                }
+                console.log(`🟠 SPARSE: ${localCount} local + cascading engagement tiers`);
+            } else {
+                // Rural: Full cascade with all engagement tiers
+                ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(tier => {
+                    displayPosts.push(...tieredByGeoAndEngagement.LOCAL[tier]);
+                });
+
+                let backfillNeeded = targetCount - displayPosts.length;
+                const geoTiers = ['TOWN', 'CITY', 'REGION', 'STATE', 'COUNTRY'];
+                
+                for (const geoTier of geoTiers) {
+                    if (backfillNeeded <= 0) break;
+                    // Show engagement tiers in order
+                    ['PODIUM', 'HOT', 'LIKED', 'NORMAL', 'DISLIKED'].forEach(engageTier => {
+                        const needed = Math.min(backfillNeeded, tieredByGeoAndEngagement[geoTier][engageTier].length);
+                        tieredByGeoAndEngagement[geoTier][engageTier].slice(0, needed).forEach(post => {
+                            post.isBackfilled = true;
+                            post.cascadeTier = `${geoTier}_BACKFILL`;
+                            displayPosts.push(post);
+                        });
+                        backfillNeeded -= needed;
+                    });
+                }
+                console.log(`🔴 RURAL: ${localCount} local + full cascade with engagement tiers`);
+            }
+
+            return displayPosts;
+        }
+
+        // ============================================
+        // CASCADING GEOGRAPHIC FALLBACK SYSTEM (Legacy)
         // ============================================
         
-        // Define geographic hierarchy for backfilling
-        const GEOGRAPHIC_TIERS = {
-            LOCAL: { radius_km: 0.5, label: 'LOCAL', priority: 1 },
-            TOWN: { radius_km: 5, label: 'TOWN', priority: 2 },
-            CITY: { radius_km: 30, label: 'CITY', priority: 3 },
-            REGION: { radius_km: 100, label: 'REGION', priority: 4 },
-            STATE: { radius_km: 500, label: 'STATE', priority: 5 },
-            COUNTRY: { radius_km: 5000, label: 'COUNTRY', priority: 6 }
-        };
 
         // Categorize post by geographic tier
         function getPostGeographicTier(post, userGrid) {
@@ -5840,11 +6133,11 @@
             }
             
             // ========================================================================
-            // SMART CONTENT BACKFILL: Fill sparse grids with cascading geographic content
+            // SMART CONTENT BACKFILL: Fill sparse grids with cascading geographic + engagement content
             // ========================================================================
             if (currentGrid && displayPosts.length < 50) {
-                displayPosts = backfillWithCascadingFallback(displayPosts, currentGrid);
-                console.log(`🎯 CASCADE BACKFILL: ${displayPosts.length} posts (was ${allPosts.length})`);
+                displayPosts = backfillWithCascadingFallbackAndEngagement(displayPosts, currentGrid);
+                console.log(`🎯 ENHANCED CASCADE: ${displayPosts.length} posts (local user contribution: ${userHasPostedLocally ? 'YES' : 'NO'})`);
             }
             
             // Add proximity badges to all posts
@@ -5981,6 +6274,11 @@
                     if (post.proximityClass) {
                         box.classList.add(`badge-${post.proximityClass}`);
                     }
+
+                    // Apply engagement tier badge (HOT, PODIUM, DISLIKED)
+                    if (post.engagementTier && post.engagementTier !== 'NORMAL' && post.engagementTier !== 'LIKED') {
+                        box.classList.add(`badge-${post.engagementTier.toLowerCase()}`);
+                    }
                 }
                 gridPosition++;
             });
@@ -6043,6 +6341,11 @@
                             // Apply proximity badge (NEARBY, FEATURED, or COMMUNITY)
                             if (post.proximityClass) {
                                 box.classList.add(`badge-${post.proximityClass}`);
+                            }
+
+                            // Apply engagement tier badge (HOT, PODIUM, DISLIKED)
+                            if (post.engagementTier && post.engagementTier !== 'NORMAL' && post.engagementTier !== 'LIKED') {
+                                box.classList.add(`badge-${post.engagementTier.toLowerCase()}`);
                             }
                         }
                         lazyGridPosition++;
