@@ -3189,6 +3189,12 @@
                 console.log(`   📍 Total locations flattened: ${allLocations.length}`);
                 console.log(`   🗺️  States: ${stateCount}`);
                 console.log(`   📍 Regions: ${regionCount}`);
+                console.log(`📊 globalLocationDatabase assigned:`, {
+                    type: typeof globalLocationDatabase,
+                    isArray: Array.isArray(globalLocationDatabase),
+                    length: globalLocationDatabase?.length,
+                    firstItem: globalLocationDatabase?.[0]
+                });
                 
                 // Verify some key locations
                 const huntington = allLocations.find(l => l.name === 'Huntington Beach');
@@ -3206,6 +3212,7 @@
                 console.error('❌ CRITICAL: Could not load US locations database:', error);
                 console.error('   Stack:', error.stack);
                 globalLocationDatabase = [];
+                console.log('🔴 Fallback: globalLocationDatabase set to empty array');
             }
         }
 
@@ -5133,6 +5140,7 @@
         let spotlightPostId = null; // Current post being spotlighted
         let spotlightInterval = null; // Spotlight rotation timer
         let onlineUserCount = 0; // Track current online user count for dynamic NEW badge duration
+        let globalLocationDatabase = []; // CRITICAL: Initialize location database array
         
         // ============================================================================
         // FEDEX v3: TIER SYSTEM FOR CONTENT DISTRIBUTION
@@ -9104,15 +9112,34 @@
         // =================== DEBUG: ZOOM & RESIZE MONITORING ===================
         console.log('📡 Setting up zoom/resize monitoring...');
         
+        // Track initial dimensions for comparison
+        let lastInnerWidth = window.innerWidth;
+        let lastInnerHeight = window.innerHeight;
+        let lastClientWidth = document.documentElement.clientWidth;
+        
         // Track window resize events
         window.addEventListener('resize', () => {
+            const newInnerWidth = window.innerWidth;
+            const newInnerHeight = window.innerHeight;
+            const newClientWidth = document.documentElement.clientWidth;
+            
+            const widthDelta = newInnerWidth - lastInnerWidth;
+            const heightDelta = newInnerHeight - lastInnerHeight;
+            
             console.warn('⚠️ RESIZE EVENT FIRED:', {
-                windowInnerWidth: window.innerWidth,
-                windowInnerHeight: window.innerHeight,
+                windowInnerWidth: newInnerWidth,
+                windowInnerHeight: newInnerHeight,
+                clientWidth: newClientWidth,
+                widthChange: widthDelta,
+                heightChange: heightDelta,
                 scrollX: window.scrollX,
                 scrollY: window.scrollY,
                 timestamp: new Date().toLocaleTimeString()
             });
+            
+            lastInnerWidth = newInnerWidth;
+            lastInnerHeight = newInnerHeight;
+            lastClientWidth = newClientWidth;
         });
         
         // Track scroll events (which could indicate zoom)
@@ -9138,17 +9165,21 @@
             });
         });
         
-        // Monitor visual viewport changes (mobile zoom)
+        // Monitor visual viewport changes (mobile zoom) - THE KEY TO FINDING THE BUG
         if (window.visualViewport) {
             window.visualViewport.addEventListener('resize', () => {
-                console.warn('⚠️ VISUAL VIEWPORT RESIZE:', {
+                console.error('🚨 VISUAL VIEWPORT RESIZE - ZOOM DETECTED:', {
                     scale: window.visualViewport.scale,
                     width: window.visualViewport.width,
                     height: window.visualViewport.height,
                     offsetLeft: window.visualViewport.offsetLeft,
                     offsetTop: window.visualViewport.offsetTop,
+                    clientWidth: document.documentElement.clientWidth,
+                    windowInnerWidth: window.innerWidth,
                     timestamp: new Date().toLocaleTimeString()
                 });
+                // Force viewport reset
+                window.scrollTo(0, 0);
             });
             
             window.visualViewport.addEventListener('scroll', () => {
@@ -9158,17 +9189,21 @@
                     scale: window.visualViewport.scale,
                     timestamp: new Date().toLocaleTimeString()
                 });
+                window.scrollTo(0, 0);
             });
         }
         
         // Monitor input focus (could trigger auto-zoom)
         document.addEventListener('focus', (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+                const fontSize = window.getComputedStyle(e.target).fontSize;
                 console.log('🎯 INPUT FOCUS:', {
                     tagName: e.target.tagName,
-                    fontSize: window.getComputedStyle(e.target).fontSize,
+                    id: e.target.id,
+                    fontSize: fontSize,
                     windowInnerWidth: window.innerWidth,
                     windowInnerHeight: window.innerHeight,
+                    visualViewportScale: window.visualViewport?.scale || 'N/A',
                     timestamp: new Date().toLocaleTimeString()
                 });
             }
@@ -9177,13 +9212,32 @@
         // Monitor touch events for pinch detection
         document.addEventListener('touchstart', (e) => {
             if (e.touches.length > 1) {
-                console.log('👆 TOUCH MULTI-FINGER:', {
+                console.log('👆 TOUCH MULTI-FINGER (POTENTIAL PINCH):', {
                     touchCount: e.touches.length,
                     scale: window.visualViewport?.scale || 'N/A',
                     timestamp: new Date().toLocaleTimeString()
                 });
             }
         });
+        
+        // Monitor body dimension changes (critical for zoom detection)
+        const bodyObserver = new ResizeObserver(() => {
+            console.warn('⚠️ BODY ELEMENT RESIZED:', {
+                offsetWidth: document.body.offsetWidth,
+                offsetHeight: document.body.offsetHeight,
+                clientWidth: document.body.clientWidth,
+                clientHeight: document.body.clientHeight,
+                windowInnerWidth: window.innerWidth,
+                timestamp: new Date().toLocaleTimeString()
+            });
+        });
+        
+        try {
+            bodyObserver.observe(document.body);
+            console.log('✅ Body resize observer active');
+        } catch (e) {
+            console.log('⚠️ ResizeObserver not available');
+        }
         
         console.log('✅ All debug monitors active');
 
