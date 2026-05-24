@@ -2954,16 +2954,153 @@
         // ============================================
         // CHECK IF POST IS VISIBLE TO USER
         // ============================================
-        function isPostVisibleInUserGrid(postLat, postLon, userGrid) {
-            if (!userGrid) return true; // Show all if no grid
+        // ============================================
+        // CASCADING GEOGRAPHIC FALLBACK SYSTEM
+        // ============================================
+        
+        // Define geographic hierarchy for backfilling
+        const GEOGRAPHIC_TIERS = {
+            LOCAL: { radius_km: 0.5, label: 'LOCAL', priority: 1 },
+            TOWN: { radius_km: 5, label: 'TOWN', priority: 2 },
+            CITY: { radius_km: 30, label: 'CITY', priority: 3 },
+            REGION: { radius_km: 100, label: 'REGION', priority: 4 },
+            STATE: { radius_km: 500, label: 'STATE', priority: 5 },
+            COUNTRY: { radius_km: 5000, label: 'COUNTRY', priority: 6 }
+        };
+
+        // Categorize post by geographic tier
+        function getPostGeographicTier(post, userGrid) {
+            if (!userGrid || !post.lat || !post.lon) {
+                return { tier: 'unknown', distance: Infinity, priority: 999 };
+            }
 
             const distance = calculateDistance(
-                postLat, postLon,
+                post.lat, post.lon,
                 userGrid.poi.lat, userGrid.poi.lon
             );
 
-            // Post visible if within grid radius (convert km to miles for display, store as km)
-            return distance <= userGrid.gridRadius;
+            // Adjust LOCAL radius based on POI type/grid size
+            let localRadius = userGrid.gridRadius || 0.3;
+
+            if (distance <= localRadius) {
+                return { tier: 'LOCAL', distance, priority: 1 };
+            }
+            if (distance <= 5) {
+                return { tier: 'TOWN', distance, priority: 2 };
+            }
+            if (distance <= 30) {
+                return { tier: 'CITY', distance, priority: 3 };
+            }
+            if (distance <= 100) {
+                return { tier: 'REGION', distance, priority: 4 };
+            }
+            if (distance <= 500) {
+                return { tier: 'STATE', distance, priority: 5 };
+            }
+            return { tier: 'COUNTRY', distance, priority: 6 };
+        }
+
+        // ============================================
+        // SMART CASCADING BACKFILL SYSTEM
+        // ============================================
+        function backfillWithCascadingFallback(allPosts, userGrid, maxGridSize = 2000) {
+            if (!userGrid || !allPosts || allPosts.length === 0) {
+                return allPosts;
+            }
+
+            // Categorize all posts by geographic tier
+            const tieredPosts = {
+                LOCAL: [],
+                TOWN: [],
+                CITY: [],
+                REGION: [],
+                STATE: [],
+                COUNTRY: []
+            };
+
+            allPosts.forEach(post => {
+                const { tier, distance } = getPostGeographicTier(post, userGrid);
+                if (tieredPosts[tier]) {
+                    tieredPosts[tier].push({ ...post, cascadeTier: tier, cascadeDistance: distance });
+                }
+            });
+
+            // Sort each tier by quality (likes - dislikes + recency)
+            const sortByQuality = (p1, p2) => {
+                const score1 = ((p1.likes || 0) - (p1.dislikes || 0)) * 100 + 
+                               ((Date.now() - (p1.timestamp || 0)) / (1000 * 60 * 60)) * -1;
+                const score2 = ((p2.likes || 0) - (p2.dislikes || 0)) * 100 + 
+                               ((Date.now() - (p2.timestamp || 0)) / (1000 * 60 * 60)) * -1;
+                return score2 - score1;
+            };
+
+            Object.keys(tieredPosts).forEach(tier => {
+                tieredPosts[tier].sort(sortByQuality);
+            });
+
+            // Cascade filling: Start with LOCAL, then fallback to TOWN, CITY, etc.
+            const displayPosts = [];
+            const targetCount = Math.min(maxGridSize, allPosts.length);
+
+            // Determine cascading strategy based on local post count
+            const localCount = tieredPosts.LOCAL.length;
+
+            if (localCount >= 50) {
+                // Dense area: Only use local content
+                console.log(`🟢 DENSE AREA: ${localCount} local posts - No backfill needed`);
+                displayPosts.push(...tieredPosts.LOCAL);
+            } else if (localCount >= 20) {
+                // Moderate area: Local primary, TOWN secondary
+                console.log(`🟡 MODERATE AREA: ${localCount} local posts - Backfilling from TOWN`);
+                displayPosts.push(...tieredPosts.LOCAL);
+                
+                const backfillNeeded = targetCount - displayPosts.length;
+                const townBackfill = Math.min(backfillNeeded, tieredPosts.TOWN.length);
+                tieredPosts.TOWN.slice(0, townBackfill).forEach(post => {
+                    post.isBackfilled = true;
+                    post.cascadeTier = 'TOWN_BACKFILL';
+                    displayPosts.push(post);
+                });
+            } else if (localCount >= 5) {
+                // Sparse area: Local, TOWN, then CITY
+                console.log(`🟠 SPARSE AREA: ${localCount} local posts - Cascading TOWN → CITY`);
+                displayPosts.push(...tieredPosts.LOCAL);
+                
+                let backfillNeeded = targetCount - displayPosts.length;
+                const townBackfill = Math.min(backfillNeeded, tieredPosts.TOWN.length);
+                tieredPosts.TOWN.slice(0, townBackfill).forEach(post => {
+                    post.isBackfilled = true;
+                    post.cascadeTier = 'TOWN_BACKFILL';
+                    displayPosts.push(post);
+                });
+                
+                backfillNeeded = targetCount - displayPosts.length;
+                const cityBackfill = Math.min(backfillNeeded, tieredPosts.CITY.length);
+                tieredPosts.CITY.slice(0, cityBackfill).forEach(post => {
+                    post.isBackfilled = true;
+                    post.cascadeTier = 'CITY_BACKFILL';
+                    displayPosts.push(post);
+                });
+            } else {
+                // Very sparse/rural: Full cascade LOCAL → TOWN → CITY → REGION → STATE → COUNTRY
+                console.log(`🔴 RURAL AREA: ${localCount} local posts - Full cascade to COUNTRY`);
+                displayPosts.push(...tieredPosts.LOCAL);
+                
+                const cascadeTiers = ['TOWN', 'CITY', 'REGION', 'STATE', 'COUNTRY'];
+                for (const cascadeTier of cascadeTiers) {
+                    let backfillNeeded = targetCount - displayPosts.length;
+                    if (backfillNeeded <= 0) break;
+                    
+                    const backfillCount = Math.min(backfillNeeded, tieredPosts[cascadeTier].length);
+                    tieredPosts[cascadeTier].slice(0, backfillCount).forEach(post => {
+                        post.isBackfilled = true;
+                        post.cascadeTier = `${cascadeTier}_BACKFILL`;
+                        displayPosts.push(post);
+                    });
+                }
+            }
+
+            return displayPosts;
         }
 
         // ============================================
@@ -2995,72 +3132,15 @@
         }
 
         // ============================================
-        // SMART CONTENT BACKFILL SYSTEM
+        // SMART CONTENT BACKFILL SYSTEM (Legacy - kept for compatibility)
         // ============================================
         function backfillGridWithFeaturedContent(allPosts, userGrid, maxGridSize = 2000) {
             if (!userGrid || !allPosts || allPosts.length === 0) {
                 return allPosts;
             }
 
-            // Categorize all posts by distance tier
-            const tieredPosts = {
-                local: [],
-                regional: [],
-                distant: []
-            };
-
-            allPosts.forEach(post => {
-                const { tier, distance } = categorizePostByDistance(post, userGrid);
-                if (tieredPosts[tier]) {
-                    tieredPosts[tier].push({ ...post, tierDistance: distance });
-                }
-            });
-
-            // Sort each tier by recent/popular
-            const sortByQuality = (p1, p2) => {
-                const score1 = (p1.likes || 0) - (p1.dislikes || 0) + (Date.now() - (p1.timestamp || 0)) / (1000 * 60 * 60);
-                const score2 = (p2.likes || 0) - (p2.dislikes || 0) + (Date.now() - (p2.timestamp || 0)) / (1000 * 60 * 60);
-                return score2 - score1;
-            };
-
-            tieredPosts.local.sort(sortByQuality);
-            tieredPosts.regional.sort(sortByQuality);
-            tieredPosts.distant.sort(sortByQuality);
-
-            // Build display posts: prioritize local, backfill with regional
-            const displayPosts = [];
-            const targetCount = Math.min(maxGridSize, allPosts.length);
-
-            // Add local posts (these are always prioritized)
-            displayPosts.push(...tieredPosts.local);
-
-            // If we don't have enough local posts, backfill with regional
-            if (displayPosts.length < targetCount) {
-                const backfillNeeded = targetCount - displayPosts.length;
-                const backfillCount = Math.min(backfillNeeded, tieredPosts.regional.length);
-
-                // Only backfill if local count is low
-                if (tieredPosts.local.length < 50) {
-                    // Tag backfilled posts so we can identify them
-                    tieredPosts.regional.slice(0, backfillCount).forEach(post => {
-                        post.isBackfilled = true;
-                        post.isSpotlight = true; // Show visual indicator
-                        displayPosts.push(post);
-                    });
-                }
-            }
-
-            // If still sparse, add some distant posts as rare features
-            if (displayPosts.length < Math.min(100, targetCount * 0.5)) {
-                const distantBackfill = Math.ceil((targetCount * 0.1) - displayPosts.length);
-                tieredPosts.distant.slice(0, distantBackfill).forEach(post => {
-                    post.isBackfilled = true;
-                    post.isCommunitySpotlight = true;
-                    displayPosts.push(post);
-                });
-            }
-
-            return displayPosts;
+            // Use cascading backfill instead
+            return backfillWithCascadingFallback(allPosts, userGrid, maxGridSize);
         }
 
         // ============================================
@@ -3069,11 +3149,33 @@
         function addProximityBadge(post, userGrid) {
             if (!userGrid) return post;
 
+            // Use cascade tier if available
+            if (post.cascadeTier) {
+                if (post.cascadeTier === 'LOCAL' || post.cascadeTier.includes('LOCAL')) {
+                    post.proximityBadge = `NEARBY - ${(post.cascadeDistance * 3280.84).toFixed(0)}ft`;
+                    post.proximityClass = 'nearby';
+                } else if (post.cascadeTier.includes('TOWN')) {
+                    post.proximityBadge = `TOWN - ${(post.cascadeDistance * 0.621371).toFixed(1)}mi`;
+                    post.proximityClass = 'featured';
+                } else if (post.cascadeTier.includes('CITY')) {
+                    post.proximityBadge = `CITY - ${(post.cascadeDistance * 0.621371).toFixed(1)}mi`;
+                    post.proximityClass = 'featured';
+                } else if (post.cascadeTier.includes('REGION')) {
+                    post.proximityBadge = `REGION - ${(post.cascadeDistance * 0.621371).toFixed(1)}mi`;
+                    post.proximityClass = 'community';
+                } else {
+                    post.proximityBadge = `FAR - ${(post.cascadeDistance * 0.621371).toFixed(1)}mi`;
+                    post.proximityClass = 'community';
+                }
+                return post;
+            }
+
+            // Fallback to old system if no cascade tier
             const { tier, distance } = categorizePostByDistance(post, userGrid);
 
             if (tier === 'local') {
                 post.proximityBadge = `NEARBY - ${(distance * 3280.84).toFixed(0)}ft`;
-                post.proximityClass = 'local';
+                post.proximityClass = 'nearby';
             } else if (tier === 'regional') {
                 post.proximityBadge = `FEATURED - ${(distance * 0.621371).toFixed(1)}mi away`;
                 post.proximityClass = 'featured';
@@ -5738,11 +5840,11 @@
             }
             
             // ========================================================================
-            // SMART CONTENT BACKFILL: Fill sparse grids with featured content
+            // SMART CONTENT BACKFILL: Fill sparse grids with cascading geographic content
             // ========================================================================
             if (currentGrid && displayPosts.length < 50) {
-                displayPosts = backfillGridWithFeaturedContent(displayPosts, currentGrid);
-                console.log(`🎯 BACKFILL ACTIVATED: ${displayPosts.length} posts after backfill (was ${allPosts.length})`);
+                displayPosts = backfillWithCascadingFallback(displayPosts, currentGrid);
+                console.log(`🎯 CASCADE BACKFILL: ${displayPosts.length} posts (was ${allPosts.length})`);
             }
             
             // Add proximity badges to all posts
