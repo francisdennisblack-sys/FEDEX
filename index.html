@@ -2456,12 +2456,46 @@
          * @param {number} tier - User's tier (1, 2, or 3)
          * @returns {number} - Relevance score
          */
-        function scorePost(post, userZone, tier) {
+        function scorePost(post, userZone, tier, allPosts = []) {
             let score = 0;
             const isLocalPost = post.county === userZone;
             const likes = post.likes || 0;
             const hasEngagement = (post.likes || 0) > 0 || (post.dislikes || 0) > 0;
             const isMajorZonePost = identifyMajorZones().includes(post.county);
+            
+            // ========================================================================
+            // BADGE POSITION ENFORCEMENT: 2nd and 3rd badge posts ALWAYS stay in position
+            // This overrides like count to maintain strict badge ordering
+            // ========================================================================
+            if (allPosts && allPosts.length > 0) {
+                // Sort to find top 3 most-liked posts
+                const sortedByLikes = [...allPosts]
+                    .filter(p => (p.likes || 0) > 0)
+                    .sort((a, b) => {
+                        const likeDiff = (b.likes || 0) - (a.likes || 0);
+                        if (likeDiff !== 0) return likeDiff;
+                        return (b.timestamp || 0) - (a.timestamp || 0);
+                    });
+                
+                const topPost = sortedByLikes[0];
+                const secondPost = sortedByLikes[1];
+                const thirdPost = sortedByLikes[2];
+                
+                // POSITION 1: Top post (CROWNED badge) - give it highest score
+                if (topPost && post.id === topPost.id) {
+                    return 10000000; // Far above everything else
+                }
+                
+                // POSITION 2: Second post (RUNNER-UP badge) - keep it in 2nd tier
+                if (secondPost && post.id === secondPost.id) {
+                    return 9000000; // High score, but lower than #1
+                }
+                
+                // POSITION 3: Third post (PODIUM badge) - keep it in 3rd tier
+                if (thirdPost && post.id === thirdPost.id) {
+                    return 8000000; // High score, but lower than #2
+                }
+            }
             
             // Base score: likes count
             score += likes * 10;
@@ -2626,10 +2660,10 @@
             };
             const targetCount = tierRequirement[tier] || 400;
             
-            // Sort local posts by score
+            // Sort local posts by score - pass allPosts to enforce badge positions
             const scoredLocalPosts = localPosts.map(post => ({
                 ...post,
-                score: scorePost(post, userZone, tier),
+                score: scorePost(post, userZone, tier, localPosts),
                 isLocal: true
             }));
             
@@ -2640,7 +2674,7 @@
             const outOfAreaPosts = getOutOfAreaPosts(userZone, tier, outOfAreaCount)
                 .map(post => ({
                     ...post,
-                    score: scorePost(post, userZone, tier),
+                    score: scorePost(post, userZone, tier, localPosts),
                     isLocal: false,
                     outOfAreaBadge: createOutOfAreaBadge(post.badge, post.county)
                 }));
@@ -2672,6 +2706,7 @@
             gridPosts = nonNewPosts;
             
             console.log(`📱 Tier ${tier} Grid: ${gridPosts.length} posts (${scoredLocalPosts.length} local, ${outOfAreaPosts.length} out-of-area)`);
+            console.log(`📌 Badge Positions Locked: 1st place = ${scoredLocalPosts[0]?.id?.substring(0, 8)}, 2nd place = ${scoredLocalPosts[1]?.id?.substring(0, 8)}, 3rd place = ${scoredLocalPosts[2]?.id?.substring(0, 8)}`);
             
             return gridPosts.slice(0, targetCount);
         }
@@ -4419,6 +4454,7 @@
             const fairness = Math.random() * 5;
             
             // TIER 1: TOP 3 POSITIONS (CROWNED, RUNNER-UP, PODIUM)
+            // Badge positions ALWAYS override like count - maintain strict ordering
             if (allPosts && allPosts.length > 0) {
                 // Sort posts by likes (descending), then by timestamp (newer first) for tiebreaker
                 const sortedByLikes = [...allPosts]
@@ -4434,19 +4470,19 @@
                 const secondPost = sortedByLikes[1];
                 const thirdPost = sortedByLikes[2];
                 
-                // Position 1: Most liked (with recency tiebreaker)
+                // Position 1: Most liked (CROWNED badge) - ALWAYS goes first
                 if (topPost && post.id === topPost.id && likes > 0 && post.id !== spotlightPostId) {
-                    return 1000000 + likes * 10000 + recency;
+                    return 1000000 + recency + fairness;
                 }
                 
-                // Position 2: 2nd most liked (with recency tiebreaker)
+                // Position 2: 2nd most liked (RUNNER-UP badge) - ALWAYS goes second
                 if (secondPost && post.id === secondPost.id && likes > 0) {
-                    return 900000 + likes * 10000 + recency;
+                    return 900000 + recency + fairness;
                 }
                 
-                // Position 3: 3rd most liked (with recency tiebreaker)
+                // Position 3: 3rd most liked (PODIUM badge) - ALWAYS goes third
                 if (thirdPost && post.id === thirdPost.id && likes > 0) {
-                    return 800000 + likes * 10000 + recency;
+                    return 800000 + recency + fairness;
                 }
             }
             
