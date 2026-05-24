@@ -1899,6 +1899,78 @@
         let currentZoneDistance = Infinity;
         let currentGeographicLocation = 'Unknown Location'; // Real geographic location (county/city)
 
+        // ============================================
+        // LOCATION NAME MAPPING SYSTEM
+        // Maps coordinates to friendly region names
+        // ============================================
+        const locationNameMap = {
+            // New York Area (40.71xx, -74.00xx)
+            '40.71,-74.00': { name: 'Manhattan', city: 'New York', state: 'NY', region: 'Downtown' },
+            '40.72,-74.00': { name: 'Midtown', city: 'New York', state: 'NY', region: 'Manhattan' },
+            '40.71,-74.01': { name: 'East Village', city: 'New York', state: 'NY', region: 'LES' },
+            '40.70,-74.00': { name: 'South Street', city: 'New York', state: 'NY', region: 'Lower East Side' },
+            
+            // San Francisco Area (37.77xx, -122.41xx)
+            '37.77,-122.41': { name: 'SOMA', city: 'San Francisco', state: 'CA', region: 'South of Market' },
+            '37.78,-122.40': { name: 'Downtown SF', city: 'San Francisco', state: 'CA', region: 'Financial District' },
+            '37.77,-122.39': { name: 'Embarcadero', city: 'San Francisco', state: 'CA', region: 'Waterfront' },
+            
+            // Santa Clara Valley (37.35xx, -121.89xx)
+            '37.33,-121.89': { name: 'San Jose', city: 'San Jose', state: 'CA', region: 'Downtown' },
+            '37.34,-121.88': { name: 'Santa Clara', city: 'Santa Clara', state: 'CA', region: 'Central' },
+            
+            // Los Angeles Area (34.07xx, -118.24xx)
+            '34.07,-118.24': { name: 'Downtown LA', city: 'Los Angeles', state: 'CA', region: 'DTLA' },
+            '34.06,-118.25': { name: 'Arts District', city: 'Los Angeles', state: 'CA', region: 'Downtown' },
+            
+            // Denver Area (39.74xx, -104.99xx)
+            '39.74,-104.99': { name: 'Downtown Denver', city: 'Denver', state: 'CO', region: 'Central' },
+            '39.75,-104.99': { name: 'LoDo', city: 'Denver', state: 'CO', region: 'Lower Downtown' },
+            
+            // Seattle Area (47.60xx, -122.33xx)
+            '47.60,-122.33': { name: 'Pike Place', city: 'Seattle', state: 'WA', region: 'Downtown' },
+            '47.61,-122.33': { name: 'Capitol Hill', city: 'Seattle', state: 'WA', region: 'East Seattle' },
+            
+            // Boston Area (42.35xx, -71.06xx)
+            '42.35,-71.06': { name: 'Back Bay', city: 'Boston', state: 'MA', region: 'Downtown' },
+            '42.36,-71.06': { name: 'Beacon Hill', city: 'Boston', state: 'MA', region: 'Historic' },
+            
+            // Miami Area (25.76xx, -80.19xx)
+            '25.76,-80.19': { name: 'Brickell', city: 'Miami', state: 'FL', region: 'Downtown' },
+            '25.77,-80.19': { name: 'Wynwood', city: 'Miami', state: 'FL', region: 'Arts District' },
+            
+            // Chicago Area (41.88xx, -87.62xx)
+            '41.88,-87.62': { name: 'Loop', city: 'Chicago', state: 'IL', region: 'Downtown' },
+            '41.89,-87.62': { name: 'Near North', city: 'Chicago', state: 'IL', region: 'Gold Coast' }
+        };
+
+        // Function to get friendly location name from coordinates
+        function getLocationName(lat, lon) {
+            if (!lat || !lon) return 'Unknown Location';
+            
+            // Round to 2 decimal places for lookup (covers ~0.7 mile radius)
+            const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+            
+            if (locationNameMap[key]) {
+                const loc = locationNameMap[key];
+                return `${loc.name}, ${loc.city}`;
+            }
+            
+            // If exact match not found, try to find closest area (within 0.05 degrees ~3.5 miles)
+            for (const [mapKey, locData] of Object.entries(locationNameMap)) {
+                const [mapLat, mapLon] = mapKey.split(',').map(parseFloat);
+                const latDiff = Math.abs(lat - mapLat);
+                const lonDiff = Math.abs(lon - mapLon);
+                
+                if (latDiff < 0.05 && lonDiff < 0.05) {
+                    return `${locData.name}, ${locData.city}`;
+                }
+            }
+            
+            // Fallback to coordinate-based region
+            return `Region (${lat.toFixed(2)}, ${lon.toFixed(2)})`;
+        }
+
         // Haversine formula: calculate distance between two lat/lon points
         function calculateDistance(lat1, lon1, lat2, lon2) {
             const R = 3959; // Earth radius in miles
@@ -2013,10 +2085,11 @@
                     }
                 } catch (apiError) {
                     console.error('⚠️ WiGLE API fetch failed:', apiError.message);
-                    // Fallback: use a simple region name based on coordinates
-                    currentZoneTag = `Region (${userLocation.lat.toFixed(2)}, ${userLocation.lon.toFixed(2)})`;
-                    currentGeographicLocation = currentZoneTag; // Store geographic location
-                    console.log(`📍 Using coordinate-based region: ${currentZoneTag}`);
+                    // Fallback: use friendly location name based on coordinates
+                    const friendlyName = getLocationName(userLocation.lat, userLocation.lon);
+                    currentZoneTag = friendlyName;
+                    currentGeographicLocation = friendlyName; // Store geographic location
+                    console.log(`📍 Using friendly region name: ${currentZoneTag}`);
                 }
                 
                 detectNearbyNetworks();
@@ -2088,14 +2161,16 @@
 
         // Zone selector for testing (manual zone switching)
         const availableZones = [
-            'Region (33.70, -117.88)',  // Current home location
-            '#OfficeBuilding',
-            '#Starbucks_5th',
-            '#CafeNet',
-            '#HomeRouter',
-            '#Park_WiFi',
-            'Unknown County',
-            'Error loading county'
+            'Santa Ana, CA',          // Southern California
+            'Downtown SF, CA',        // San Francisco
+            'San Jose, CA',           // Santa Clara Valley
+            'Downtown Denver, CO',    // Colorado
+            'Downtown LA, CA',        // Los Angeles
+            'Manhattan, NY',          // New York
+            'Downtown Seattle, WA',   // Washington
+            'Back Bay, Boston, MA',   // Massachusetts
+            'LoDo, Denver, CO',       // Lower Downtown Denver
+            'Brickell, Miami, FL'     // Miami
         ];
 
         function showZoneSelector() {
