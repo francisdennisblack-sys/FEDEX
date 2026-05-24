@@ -3131,6 +3131,7 @@
                         return;
                     } catch (e) {
                         console.log('⚠️ Cached location invalid, requesting fresh location');
+                        localStorage.removeItem('userLocationCache');
                     }
                 }
                 
@@ -3141,35 +3142,82 @@
                     return;
                 }
                 
-                navigator.geolocation.getCurrentPosition(
-                    (position) => {
-                        userLocation = {
-                            lat: position.coords.latitude,
-                            lon: position.coords.longitude,
-                            accuracy: position.coords.accuracy
-                        };
-                        
-                        // CACHE LOCATION IN LOCALSTORAGE FOR PERMANENT PERMISSION
-                        // User won't be asked again on future page loads
-                        localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
-                        console.log('💾 Location cached in localStorage (permission granted permanently)');
-                        
-                        console.log('📍 User Location Acquired (ONCE - cached permanently)');
-                        console.log(`  Lat: ${userLocation.lat.toFixed(4)}`);
-                        console.log(`  Lon: ${userLocation.lon.toFixed(4)}`);
-                        console.log(`  Accuracy: ${userLocation.accuracy.toFixed(0)} meters`);
-                        resolve(userLocation);
-                    },
-                    (error) => {
-                        console.warn('⚠️ Geolocation error:', error.message);
-                        // Use default NYC location for demo
-                        userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
-                        console.log('📍 Using demo location (NYC) - no permission granted');
-                        resolve(userLocation);
-                    },
-                    // Cache location for 1 year, request high accuracy less often
-                    { enableHighAccuracy: false, timeout: 5000, maximumAge: 31536000000 }
-                );
+                // CHECK PERMISSIONS API to see if user already granted permission before
+                if (navigator.permissions && navigator.permissions.query) {
+                    navigator.permissions.query({ name: 'geolocation' }).then((result) => {
+                        if (result.state === 'granted') {
+                            console.log('✅ Permission already granted in browser settings - using geolocation');
+                            // Permission already granted, just get location
+                            navigator.geolocation.getCurrentPosition(
+                                (position) => {
+                                    userLocation = {
+                                        lat: position.coords.latitude,
+                                        lon: position.coords.longitude,
+                                        accuracy: position.coords.accuracy
+                                    };
+                                    localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+                                    console.log('💾 Location cached in localStorage');
+                                    console.log('📍 User Location Acquired');
+                                    resolve(userLocation);
+                                },
+                                () => {
+                                    console.log('⚠️ Location access failed');
+                                    userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
+                                    resolve(userLocation);
+                                },
+                                { enableHighAccuracy: false, timeout: 5000, maximumAge: 31536000000 }
+                            );
+                        } else if (result.state === 'denied') {
+                            console.log('🚫 User denied location permission - using fallback');
+                            userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
+                            resolve(userLocation);
+                        } else {
+                            // Permission is 'prompt' - we need to ask
+                            console.log('❓ Location permission not yet decided - asking user (browser will show dialog once)');
+                            navigator.geolocation.getCurrentPosition(
+                                (position) => {
+                                    userLocation = {
+                                        lat: position.coords.latitude,
+                                        lon: position.coords.longitude,
+                                        accuracy: position.coords.accuracy
+                                    };
+                                    localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+                                    console.log('💾 Location cached in localStorage');
+                                    console.log('📍 User Location Acquired & Cached');
+                                    resolve(userLocation);
+                                },
+                                () => {
+                                    console.log('⚠️ User denied or location access failed');
+                                    userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
+                                    resolve(userLocation);
+                                },
+                                { enableHighAccuracy: false, timeout: 5000, maximumAge: 31536000000 }
+                            );
+                        }
+                    });
+                } else {
+                    // Fallback for browsers without Permissions API
+                    console.log('❓ Permissions API not available - requesting geolocation');
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            userLocation = {
+                                lat: position.coords.latitude,
+                                lon: position.coords.longitude,
+                                accuracy: position.coords.accuracy
+                            };
+                            localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+                            console.log('💾 Location cached in localStorage');
+                            console.log('📍 User Location Acquired');
+                            resolve(userLocation);
+                        },
+                        () => {
+                            console.log('⚠️ Location access failed or denied');
+                            userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
+                            resolve(userLocation);
+                        },
+                        { enableHighAccuracy: false, timeout: 5000, maximumAge: 31536000000 }
+                    );
+                }
             });
         }
 
