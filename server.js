@@ -485,6 +485,123 @@ app.get('/api/fetch-wifi', async (req, res) => {
     }
 });
 
+// ============================================
+// REVERSE GEOCODING API
+// Converts lat/lon to real city/neighborhood names
+// Uses OpenStreetMap Nominatim (free, no API key needed)
+// ============================================
+
+// In-memory cache for geocoding results (24 hour expiry)
+let geocodeCache = {};
+
+function getGeocodeCache(lat, lon) {
+    const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    const cached = geocodeCache[key];
+    
+    if (cached && Date.now() - cached.timestamp < 24 * 60 * 60 * 1000) {
+        return cached.data;
+    }
+    return null;
+}
+
+function setGeocodeCache(lat, lon, data) {
+    const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    geocodeCache[key] = {
+        data: data,
+        timestamp: Date.now()
+    };
+}
+
+app.get('/api/reverse-geocode', async (req, res) => {
+    try {
+        const { lat, lon } = req.query;
+        
+        if (!lat || !lon) {
+            return res.status(400).json({ error: 'Missing lat or lon' });
+        }
+        
+        const latitude = parseFloat(lat);
+        const longitude = parseFloat(lon);
+        
+        if (isNaN(latitude) || isNaN(longitude)) {
+            return res.status(400).json({ error: 'Invalid coordinates' });
+        }
+        
+        // Check cache first
+        const cachedResult = getGeocodeCache(latitude, longitude);
+        if (cachedResult) {
+            return res.json({
+                ...cachedResult,
+                source: 'cache'
+            });
+        }
+        
+        // Call OpenStreetMap Nominatim API (free reverse geocoding)
+        // Rate limit: 1 request per second per user
+        const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`;
+        
+        const nominatimResponse = await fetch(url, {
+            headers: {
+                'User-Agent': 'FEDEX-WiFi-App/1.0'
+            }
+        });
+        
+        if (!nominatimResponse.ok) {
+            throw new Error(`Nominatim API error: ${nominatimResponse.status}`);
+        }
+        
+        const nominatimData = await nominatimResponse.json();
+        
+        // Extract useful location information
+        const address = nominatimData.address || {};
+        const city = address.city || address.town || address.village || address.county || 'Unknown';
+        const state = address.state || '';
+        const country = address.country || '';
+        
+        const locationName = state ? `${city}, ${state}` : city;
+        const fullName = `${locationName}${country && country !== 'United States' ? ', ' + country : ''}`;
+        
+        const result = {
+            name: locationName,
+            city: city,
+            state: state,
+            country: country,
+            displayName: nominatimData.display_name || fullName,
+            neighborhood: address.neighbourhood || address.suburb || null,
+            latitude: latitude,
+            longitude: longitude,
+            success: true
+        };
+        
+        // Cache the result
+        setGeocodeCache(latitude, longitude, result);
+        
+        res.json({
+            ...result,
+            source: 'nominatim',
+            timestamp: Date.now()
+        });
+        
+    } catch (error) {
+        console.error('[Reverse Geocoding Error]', error.message);
+        
+        // Fallback: return generic region name
+        const lat = parseFloat(req.query.lat);
+        const lon = parseFloat(req.query.lon);
+        
+        res.json({
+            name: `Region (${lat.toFixed(2)}, ${lon.toFixed(2)})`,
+            displayName: `Region (${lat.toFixed(2)}, ${lon.toFixed(2)})`,
+            city: 'Unknown',
+            state: 'Unknown',
+            country: 'Unknown',
+            success: false,
+            error: error.message,
+            source: 'fallback'
+        });
+    }
+});
+
 // Serve index.html for any non-API routes (SPA fallback)
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
