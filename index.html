@@ -2199,17 +2199,34 @@
                     </div>
                 </div>
                 <div style="margin-top: 8px;">
-                    <input type="text" id="customZoneTag" placeholder="Enter custom tag (e.g., 'Starbucks Times Sq', 'Downtown Brooklyn', 'Coffee Lovers Club')" style="
-                        width: 100%;
-                        padding: 8px 12px;
-                        background-color: #222;
-                        border: 1px solid #444;
-                        border-radius: 4px;
-                        color: #fff;
-                        font-size: 12px;
-                        box-sizing: border-box;
-                        transition: border-color 0.2s;
-                    " onfocus="this.style.borderColor='#667eea'" onblur="this.style.borderColor='#444'" maxlength="50">
+                    <label style="font-size: 11px; color: #888; display: block; margin-bottom: 4px; font-weight: 500;">Move post to...</label>
+                    <div style="position: relative;">
+                        <input type="text" id="customZoneTag" placeholder="Type location, venue, or category (e.g., Starbucks, Central Park, Coffee Shops)" style="
+                            width: 100%;
+                            padding: 8px 12px;
+                            background-color: #222;
+                            border: 1px solid #444;
+                            border-radius: 4px;
+                            color: #fff;
+                            font-size: 12px;
+                            box-sizing: border-box;
+                            transition: border-color 0.2s;
+                        " onfocus="this.style.borderColor='#667eea'" onblur="this.style.borderColor='#444'" maxlength="100" autocomplete="off">
+                        <div id="autocompleteDropdown" style="
+                            position: absolute;
+                            top: 100%;
+                            left: 0;
+                            right: 0;
+                            background-color: #1a1a1a;
+                            border: 1px solid #444;
+                            border-top: none;
+                            border-radius: 0 0 4px 4px;
+                            max-height: 200px;
+                            overflow-y: auto;
+                            z-index: 1000;
+                            display: none;
+                        "></div>
+                    </div>
                 </div>
             </div>
 
@@ -6322,18 +6339,86 @@
         }
 
         // ============================================
-        // CUSTOM TAG MANAGEMENT
+        // CUSTOM TAG MANAGEMENT WITH AUTOCOMPLETE
         // ============================================
+        
+        // Build autocomplete suggestions from POI database
+        function getAutocompleteSuggestions(query) {
+            if (!query || query.length < 1 || !window.poiDatabase) return [];
+            
+            const q = query.toLowerCase();
+            const suggestions = new Map(); // Use map to deduplicate
+            
+            // Search through all cities and POIs
+            for (const cityName in window.poiDatabase.cities) {
+                const city = window.poiDatabase.cities[cityName];
+                
+                // Add city name if matches
+                if (cityName.toLowerCase().includes(q)) {
+                    const key = `📍 ${cityName}, ${city.country}`;
+                    if (!suggestions.has(key)) suggestions.set(key, { type: 'city', value: cityName });
+                }
+                
+                // Add POIs from this city
+                if (city.pois && Array.isArray(city.pois)) {
+                    city.pois.forEach(poi => {
+                        if (poi.name.toLowerCase().includes(q) || poi.category.toLowerCase().includes(q)) {
+                            const key = `${poi.emoji} ${poi.name}`;
+                            if (!suggestions.has(key)) suggestions.set(key, { type: 'poi', value: poi.name, city: cityName });
+                        }
+                    });
+                }
+            }
+            
+            return Array.from(suggestions.entries()).slice(0, 8).map(([display, data]) => ({ display, ...data }));
+        }
+        
+        // Update autocomplete dropdown
+        function updateAutocompleteDropdown(suggestions) {
+            const dropdown = document.getElementById('autocompleteDropdown');
+            if (!dropdown) return;
+            
+            if (suggestions.length === 0) {
+                dropdown.style.display = 'none';
+                return;
+            }
+            
+            dropdown.innerHTML = suggestions.map((s, idx) => `
+                <div style="
+                    padding: 8px 12px;
+                    border-bottom: 1px solid #333;
+                    cursor: pointer;
+                    color: #ddd;
+                    font-size: 12px;
+                    transition: background-color 0.15s;
+                " onmouseover="this.style.backgroundColor='#333'" onmouseout="this.style.backgroundColor='transparent'" onclick="selectAutocomplete('${s.display.replace(/'/g, "\\'")}')"
+                >${s.display}</div>
+            `).join('');
+            dropdown.style.display = 'block';
+        }
+        
+        function selectAutocomplete(value) {
+            const customTagInput = document.getElementById('customZoneTag');
+            const dropdown = document.getElementById('autocompleteDropdown');
+            if (customTagInput) {
+                customTagInput.value = value;
+                customTagInput.focus();
+            }
+            if (dropdown) dropdown.style.display = 'none';
+            updateZonePredictorWithCustom(value);
+        }
         
         // Clear the custom location tag
         function clearLocationTag() {
             const customTagInput = document.getElementById('customZoneTag');
             const clearZoneBtn = document.getElementById('clearZoneBtn');
+            const dropdown = document.getElementById('autocompleteDropdown');
             if (customTagInput) {
                 customTagInput.value = '';
                 customTagInput.focus();
                 console.log('🗑️ Location tag cleared - will use auto-detected zone');
             }
+            if (dropdown) dropdown.style.display = 'none';
             // Hide the X button and reset zone display
             if (clearZoneBtn) {
                 clearZoneBtn.style.display = 'none';
@@ -6346,10 +6431,14 @@
             const customTagInput = document.getElementById('customZoneTag');
             if (customTagInput) {
                 customTagInput.addEventListener('input', (e) => {
+                    const val = e.target.value.trim();
+                    const suggestions = getAutocompleteSuggestions(val);
+                    updateAutocompleteDropdown(suggestions);
+                    
                     const zonePredictor = document.getElementById('zonePredictor');
                     const clearZoneBtn = document.getElementById('clearZoneBtn');
-                    if (e.target.value.trim()) {
-                        zonePredictor.textContent = `✏️ Custom: ${e.target.value}`;
+                    if (val) {
+                        zonePredictor.textContent = `✏️ Custom: ${val}`;
                         zonePredictor.style.color = '#fbbf24'; // Amber for custom
                         if (clearZoneBtn) clearZoneBtn.style.display = 'inline-block';
                     } else {
@@ -6358,8 +6447,26 @@
                         updateZonePredictor();
                     }
                 });
+                
+                // Hide dropdown when clicking outside
+                customTagInput.addEventListener('blur', () => {
+                    setTimeout(() => {
+                        const dropdown = document.getElementById('autocompleteDropdown');
+                        if (dropdown) dropdown.style.display = 'none';
+                    }, 100);
+                });
             }
         });
+        
+        function updateZonePredictorWithCustom(value) {
+            const zonePredictor = document.getElementById('zonePredictor');
+            const clearZoneBtn = document.getElementById('clearZoneBtn');
+            if (value && value.trim()) {
+                zonePredictor.textContent = `✏️ Custom: ${value}`;
+                zonePredictor.style.color = '#fbbf24';
+                if (clearZoneBtn) clearZoneBtn.style.display = 'inline-block';
+            }
+        }
 
         function closeModal() {
             document.getElementById('uploadModal').classList.remove('active');
