@@ -2399,6 +2399,283 @@
         let spotlightInterval = null; // Spotlight rotation timer
         let onlineUserCount = 0; // Track current online user count for dynamic NEW badge duration
         
+        // ============================================================================
+        // FEDEX v3: TIER SYSTEM FOR CONTENT DISTRIBUTION
+        // ============================================================================
+        // Tier 1 (1-100 users): Mixed local + major zone best posts
+        // Tier 2 (100-1M users): Mostly local + sprinkled major zone posts
+        // Tier 3 (1M+ users): Mostly local + rare major zone featured posts
+        // ============================================================================
+        
+        let zoneStats = {}; // Track per-zone: {zoneName: {postCount, activeUsers, bestPosts: []}}
+        let outOfAreaPostCache = {}; // Cache rotated out-of-area posts per zone
+        let lastOutOfAreaRotation = {}; // Track last rotation time per zone
+        const OUT_OF_AREA_ROTATION_INTERVAL = 60000; // 1 minute in milliseconds
+        
+        // Define muted badge colors for out-of-area posts
+        const MUTED_BADGE_COLORS = {
+            'new': '#666666',        // Muted gray instead of bright green
+            'liked': '#999999',      // Muted gray instead of gold
+            'trending': '#777777',   // Muted gray instead of orange
+            'featured': '#888888',   // Muted gray instead of purple
+        };
+        
+        /**
+         * FedEx v3: Calculate user tier based on global online user count
+         * @param {number} userCount - Current global online user count
+         * @returns {number} - Tier 1, 2, or 3
+         */
+        function calculateTier(userCount) {
+            if (userCount <= 100) return 1;
+            if (userCount <= 1000000) return 2;
+            return 3;
+        }
+        
+        /**
+         * FedEx v3: Identify major zones (top zones by post count + active users)
+         * @returns {Array} - Array of zone names sorted by importance
+         */
+        function identifyMajorZones() {
+            // Score zones by: (postCount * 0.6) + (activeUsers * 0.4)
+            const zonedScores = Object.entries(zoneStats).map(([zone, stats]) => ({
+                zone,
+                score: (stats.postCount || 0) * 0.6 + (stats.activeUsers || 0) * 0.4
+            }));
+            
+            // Return top 10 zones as "major zones"
+            return zonedScores
+                .sort((a, b) => b.score - a.score)
+                .slice(0, 10)
+                .map(z => z.zone);
+        }
+        
+        /**
+         * FedEx v3: Score a post for relevance to user's tier and zone
+         * @param {Object} post - Post object
+         * @param {string} userZone - User's zone
+         * @param {number} tier - User's tier (1, 2, or 3)
+         * @returns {number} - Relevance score
+         */
+        function scorePost(post, userZone, tier) {
+            let score = 0;
+            const isLocalPost = post.county === userZone;
+            const likes = post.likes || 0;
+            const hasEngagement = (post.likes || 0) > 0 || (post.dislikes || 0) > 0;
+            const isMajorZonePost = identifyMajorZones().includes(post.county);
+            
+            // Base score: likes count
+            score += likes * 10;
+            
+            // Local posts get priority boost
+            if (isLocalPost) {
+                score += 100; // Strong boost for local
+                
+                // New local posts get extra boost
+                if (post.isNew) score += 50;
+            }
+            
+            // Out-of-area posts from major zones get consideration
+            if (!isLocalPost && isMajorZonePost) {
+                // Major zone posts get boost based on likes
+                score += (likes * 5);
+                
+                // Very well-liked posts from major zones get high priority
+                if (likes > 50) score += 150;
+                if (likes > 100) score += 300;
+            }
+            
+            // Badge bonus (posts with badges are higher quality)
+            if (post.badge) score += 30;
+            
+            // Tier-specific scoring
+            switch (tier) {
+                case 1:
+                    // Tier 1: More out-of-area content to fill grid
+                    if (!isLocalPost && isMajorZonePost) score += 50;
+                    break;
+                case 2:
+                    // Tier 2: Less out-of-area, mostly local
+                    if (!isLocalPost && isMajorZonePost) score += 20;
+                    break;
+                case 3:
+                    // Tier 3: Rarely show out-of-area unless extremely well-liked
+                    if (!isLocalPost && isMajorZonePost && likes < 100) score -= 100;
+                    break;
+            }
+            
+            return score;
+        }
+        
+        /**
+         * FedEx v3: Track zone statistics from all posts
+         * Called whenever posts are loaded/updated
+         */
+        function updateZoneStats(allPosts) {
+            zoneStats = {};
+            
+            allPosts.forEach(post => {
+                const zone = post.county || 'Unknown';
+                
+                if (!zoneStats[zone]) {
+                    zoneStats[zone] = {
+                        postCount: 0,
+                        activeUsers: new Set(),
+                        bestPosts: [],
+                        allPosts: []
+                    };
+                }
+                
+                zoneStats[zone].postCount++;
+                zoneStats[zone].activeUsers.add(post.userId);
+                zoneStats[zone].allPosts.push(post);
+                
+                // Track top 20 posts per zone
+                zoneStats[zone].bestPosts = zoneStats[zone].allPosts
+                    .sort((a, b) => (b.likes || 0) - (a.likes || 0))
+                    .slice(0, 20);
+            });
+            
+            // Convert Sets to counts
+            Object.keys(zoneStats).forEach(zone => {
+                zoneStats[zone].activeUsers = zoneStats[zone].activeUsers.size;
+            });
+            
+            console.log('📊 Zone Stats Updated:', Object.keys(zoneStats).length, 'zones tracked');
+        }
+        
+        /**
+         * FedEx v3: Get out-of-area posts for grid mixing
+         * Rotates every 1 minute based on server time
+         */
+        function getOutOfAreaPosts(userZone, tier, neededCount) {
+            const now = Date.now();
+            const majorZones = identifyMajorZones();
+            const outOfAreaPosts = [];
+            
+            // Check if rotation needed (1 min = 60000ms)
+            const shouldRotate = !lastOutOfAreaRotation[userZone] || 
+                                (now - lastOutOfAreaRotation[userZone]) > OUT_OF_AREA_ROTATION_INTERVAL;
+            
+            if (shouldRotate) {
+                lastOutOfAreaRotation[userZone] = now;
+                
+                // Build pool of best posts from major zones
+                const candidatePosts = [];
+                
+                majorZones.forEach(majorZone => {
+                    if (majorZone !== userZone && zoneStats[majorZone]) {
+                        // Get best posts from this major zone
+                        const zonePosts = zoneStats[majorZone].bestPosts || [];
+                        candidatePosts.push(...zonePosts.slice(0, 10));
+                    }
+                });
+                
+                // Shuffle and select random sample (provides rotation effect)
+                const rotatedPosts = candidatePosts
+                    .sort(() => Math.random() - 0.5)
+                    .slice(0, neededCount);
+                
+                outOfAreaPostCache[userZone] = rotatedPosts;
+                console.log(`🔄 Rotated out-of-area posts for ${userZone}: ${rotatedPosts.length} posts`);
+            }
+            
+            return outOfAreaPostCache[userZone] || [];
+        }
+        
+        /**
+         * FedEx v3: Create muted badge for out-of-area posts
+         */
+        function createOutOfAreaBadge(originalBadge, zone) {
+            if (!originalBadge) return null;
+            
+            // Extract badge type and create muted version
+            let badgeType = 'featured';
+            let badgeText = originalBadge;
+            let emoji = '📌';
+            
+            if (originalBadge.includes('🆕')) { badgeType = 'new'; emoji = '🆕'; }
+            else if (originalBadge.includes('❤️')) { badgeType = 'liked'; emoji = '❤️'; }
+            else if (originalBadge.includes('🔥')) { badgeType = 'trending'; emoji = '🔥'; }
+            
+            const muteColor = MUTED_BADGE_COLORS[badgeType] || '#888888';
+            
+            return {
+                type: 'outOfArea',
+                emoji,
+                text: badgeText.replace(/\s*\(\w+\)/g, ''), // Remove zone from original
+                zone,
+                color: muteColor
+            };
+        }
+        
+        /**
+         * FedEx v3: Get grid content with tier-aware content mixing
+         * Returns hundreds of posts mixed by tier strategy
+         */
+        function getGridContent(userZone, tier) {
+            if (!zoneStats[userZone]) {
+                console.warn(`⚠️ No posts found for zone: ${userZone}`);
+                return [];
+            }
+            
+            const localPosts = zoneStats[userZone].allPosts || [];
+            const tierRequirement = {
+                1: 500,  // Try to get 500 posts for tier 1
+                2: 400,  // 400 for tier 2
+                3: 350   // 350 for tier 3
+            };
+            const targetCount = tierRequirement[tier] || 400;
+            
+            // Sort local posts by score
+            const scoredLocalPosts = localPosts.map(post => ({
+                ...post,
+                score: scorePost(post, userZone, tier),
+                isLocal: true
+            }));
+            
+            scoredLocalPosts.sort((a, b) => b.score - a.score);
+            
+            // Calculate how many out-of-area posts we need
+            const outOfAreaCount = Math.ceil(targetCount * {1: 0.3, 2: 0.15, 3: 0.05}[tier]);
+            const outOfAreaPosts = getOutOfAreaPosts(userZone, tier, outOfAreaCount)
+                .map(post => ({
+                    ...post,
+                    score: scorePost(post, userZone, tier),
+                    isLocal: false,
+                    outOfAreaBadge: createOutOfAreaBadge(post.badge, post.county)
+                }));
+            
+            // Combine and shuffle to get natural feel
+            let gridPosts = [...scoredLocalPosts];
+            
+            // Inject out-of-area posts throughout the grid (not all at bottom)
+            if (outOfAreaPosts.length > 0) {
+                // Insert every Nth position
+                const insertInterval = Math.ceil(gridPosts.length / outOfAreaPosts.length);
+                outOfAreaPosts.forEach((post, idx) => {
+                    const insertPos = Math.min((idx + 1) * insertInterval, gridPosts.length);
+                    gridPosts.splice(insertPos, 0, post);
+                });
+            }
+            
+            // Random new post placement - sometimes at top, sometimes at bottom
+            const newPosts = gridPosts.filter(p => p.isNew);
+            const nonNewPosts = gridPosts.filter(p => !p.isNew);
+            
+            newPosts.forEach(newPost => {
+                const randomPos = Math.random() < 0.4 
+                    ? Math.floor(nonNewPosts.length * Math.random() * 0.2) // Top 20%
+                    : Math.floor(nonNewPosts.length * (0.7 + Math.random() * 0.3)); // Bottom 30%
+                nonNewPosts.splice(randomPos, 0, newPost);
+            });
+            
+            gridPosts = nonNewPosts;
+            
+            console.log(`📱 Tier ${tier} Grid: ${gridPosts.length} posts (${scoredLocalPosts.length} local, ${outOfAreaPosts.length} out-of-area)`);
+            
+            return gridPosts.slice(0, targetCount);
+        }
+        
         // Determine API URL - only used for WiFi network detection
         // All photos and posts are stored in Firebase (Realtime Database + Cloud Storage)
         const apiUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
@@ -4008,6 +4285,14 @@
             });
             allPosts = uniquePosts;
             
+            // ========================================================================
+            // FEDEX v3: UPDATE ZONE STATS AND APPLY TIER-BASED CONTENT MIXING
+            // ========================================================================
+            updateZoneStats(allPosts); // Track statistics for all posts
+            
+            const userTier = calculateTier(onlineUserCount); // Determine tier
+            console.log(`📊 FedEx v3: Online users = ${onlineUserCount}, User Tier = ${userTier}`);
+            
             // DEBUG: Show what zone we're filtering by
             console.log(`🔍 DEBUG renderGrid():`, {
                 currentZoneTag: currentZoneTag,
@@ -4023,21 +4308,33 @@
                 console.log(`  Post ${p.id.substring(0, 8)}: zone="${p.county || 'Unknown County'}" likes=${p.likes} dislikes=${p.dislikes}`);
             });
             
-            // ZONE FILTERING: Only show posts from the same zone as current user
-            const zonePosts = allPosts.filter(post => {
-                const postZone = post.county || 'Unknown County';
-                const currentZone = currentZoneTag || 'Unknown County';
-                const matches = postZone === currentZone;
-                if (!matches) {
-                    console.log(`  ❌ FILTERED OUT: "${postZone}" !== "${currentZone}"`);
-                }
-                return matches;
+            // FEDEX v3: Get tier-aware grid content instead of simple zone filtering
+            let displayPosts = [];
+            if (userTier === 1 && allPosts.length < 100) {
+                // Tier 1 with low post count: show all available + some from major zones
+                displayPosts = getGridContent(currentZoneTag, userTier);
+                console.log(`🎯 Tier 1 (Low Volume): Mixing local + major zone content. ${displayPosts.length} posts total`);
+            } else if (userTier === 1) {
+                // Tier 1 with enough posts: use tier system
+                displayPosts = getGridContent(currentZoneTag, userTier);
+                console.log(`🎯 Tier 1 (High Volume): Using tier content mixing. ${displayPosts.length} posts total`);
+            } else {
+                // Tier 2+: Use tier-aware content system
+                displayPosts = getGridContent(currentZoneTag, userTier);
+                console.log(`🎯 Tier ${userTier}: Using tier content mixing. ${displayPosts.length} posts total`);
+            }
+            
+            // Filter hidden/deleted posts from display list
+            const sortedPosts = displayPosts.filter(post => {
+                const isHidden = hiddenForThisWiFi.includes(post.id) || 
+                                hiddenReported.includes(post.id) ||
+                                deletedOwnPosts.includes(post.id);
+                return !isHidden;
             });
             
-            console.log(`📍 Zone Filter: User in "${currentZoneTag}", Showing ${zonePosts.length}/${allPosts.length} posts from same zone`);
-            
-            // Sort zone-filtered posts by score (engagement, recency, fairness, trending, position locks)
-            const sortedPosts = [...zonePosts].sort((a, b) => calculatePostScore(b, zonePosts) - calculatePostScore(a, zonePosts));
+            // ========================================================================
+            // LEGACY CODE BELOW (For compatibility, some filtering remains)
+            // ========================================================================
             
             // Count disliked posts
             const dislikedPosts = sortedPosts.filter(p => (p.dislikes || 0) > (p.likes || 0));
@@ -4105,24 +4402,38 @@
                             : `<img src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
                         
                         const voteBadge = `<div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>`;
-                        const zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${post.county || 'No zone'}</div>`;
                         
-                        console.log(`    📸 MEDIA POST - Rendering zone tag with styling:`);
-                        console.log(`       🏷️ Zone text: "${post.county || 'No zone'}"`);
-                        console.log(`       📏 Font-size: 12px, font-weight: 900, Courier New`);
-                        console.log(`       📍 Position: absolute bottom: 0, left-aligned`);
+                        // FEDEX v3: Handle out-of-area badge rendering
+                        let zoneTagHTML = '';
+                        if (post.outOfAreaBadge) {
+                            // Out-of-area post with muted badge
+                            const badge = post.outOfAreaBadge;
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${badge.emoji} ${badge.text} - Out of Area</div>`;
+                            console.log(`    📸 MEDIA POST (OUT-OF-AREA) - Zone: ${badge.zone}, Badge: ${badge.emoji} ${badge.text}`);
+                        } else {
+                            // Regular local post
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${post.county || 'No zone'}</div>`;
+                            console.log(`    📸 MEDIA POST - Rendering zone tag: 🌍 ${post.county || 'No zone'}`);
+                        }
                         
                         // Media container with padding to leave room for vote badge and zone tag
                         box.innerHTML = `<div style="width: 100%; height: calc(100% - 50px); background-color: #000; display: flex; align-items: center; justify-content: center; overflow: hidden;">${mediaHTML}</div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; top: 0;">${voteBadge}${zoneTagHTML}</div>`;
                         box.style.position = 'relative';
                     } else {
                         // Text-only posts - show text centered with prominent vote badge styled like modal
-                        const zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${post.county || 'No zone'}</div>`;
                         
-                        console.log(`    📝 TEXT POST - Rendering zone tag with styling:`);
-                        console.log(`       🏷️ Zone text: "${post.county || 'No zone'}"`);
-                        console.log(`       📏 Font-size: 12px, font-weight: 900, Courier New`);
-                        console.log(`       📍 Position: absolute bottom: 0, left-aligned`);
+                        // FEDEX v3: Handle out-of-area badge rendering for text posts
+                        let zoneTagHTML = '';
+                        if (post.outOfAreaBadge) {
+                            // Out-of-area post with muted badge
+                            const badge = post.outOfAreaBadge;
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">${badge.emoji} ${badge.text} - Out of Area</div>`;
+                            console.log(`    📝 TEXT POST (OUT-OF-AREA) - Zone: ${badge.zone}, Badge: ${badge.emoji} ${badge.text}`);
+                        } else {
+                            // Regular local post
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${post.county || 'No zone'}</div>`;
+                            console.log(`    📝 TEXT POST - Rendering zone tag: 🌍 ${post.county || 'No zone'}`);
+                        }
                         
                         box.innerHTML = `<div style="font-size: 21px; color: #fff; overflow: auto; line-height: 1.4; text-align: center; padding: 12px; word-wrap: break-word; padding-bottom: 70px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; height: 100%; max-height: 200px; background-color: #1a1a1a;">${post.content}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>${zoneTagHTML}`;
                         box.style.position = 'relative';
