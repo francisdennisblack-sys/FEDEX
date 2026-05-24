@@ -794,3 +794,69 @@ At 50K users, you have a sophisticated location-based social network that can po
 - Sponsored content
 - Geographic analytics
 - Community management services
+
+---
+
+## 🔧 DEBUGGING: Zone Tag System (May 24, 2026)
+
+### Problem Fixed: Zone Tag Stuck on "Loading..."
+
+**Issue:** User's hyper-local zone was stuck on "Loading..." instead of showing actual POI or location.
+
+**Root Cause:**
+- Phase 0 initialization didn't always complete before UI queried it
+- POI database loading could fail silently
+- No fallback mechanism if geolocation or POI data unavailable
+- `detectUserGrid()` returned `null` when POI database was empty
+
+**Solution Implemented:**
+
+```javascript
+// 1. Added Fallback POI Creation
+function createFallbackPOI(userLat, userLon)
+  └─ Creates generic "Local Area" POI if database empty
+  
+// 2. POI Database Loading with Timeout
+const poiLoadTimeout = new Promise(resolve => 
+  setTimeout(() => resolve(), 3000)
+);
+await Promise.race([loadPOIData(), poiLoadTimeout]);
+  └─ Continues after 3 seconds even if load fails
+  
+// 3. Multi-Level Fallback Detection
+detectUserGrid():
+  ├─ Level 1: Nearest POI (e.g. ☕ Starbucks New York)
+  ├─ Level 2: User coordinates (e.g. 📍 40.713, -74.007)
+  └─ Level 3: Generic "Local Zone" (if location unavailable)
+  
+// 4. Never Show "Loading..." to User
+updateZonePredictor():
+  ├─ Checks for 'Loading...' string
+  ├─ Falls back to coordinates if found
+  └─ Always displays something valid
+```
+
+**Behavior After Fix:**
+
+| Scenario | Displayed | Status |
+|----------|-----------|--------|
+| POI database loads ✅ | ☕ Starbucks New York | Hyper-local |
+| POI database timeout ⏰ | 📍 40.713, -74.007 | Fallback coords |
+| Geolocation fails ❌ | 📍 Local Zone | Generic fallback |
+| User overrides | Move post to... | Custom location |
+
+**Key Improvements:**
+- ✅ Phase 0 always completes (even on error)
+- ✅ No "Loading..." stuck state
+- ✅ Always shows hyper-local or fallback location
+- ✅ Users can override with "Move post to" field
+- ✅ Better error logging at each step
+
+**Testing:**
+1. Open page → Zone shows immediately
+2. Refresh page → No loading stuck
+3. Check browser console → Logs show detection flow
+4. Create post → Zone predictor ready
+5. Type location → Autocomplete searches 219 cities
+6. Select suggestion → Zone updates dynamically
+
