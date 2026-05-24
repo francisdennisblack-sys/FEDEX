@@ -383,6 +383,134 @@ app.post('/api/moderate-photo', async (req, res) => {
     }
 });
 
+// ============================================
+// WiGLE API Integration with Regional Caching
+// ============================================
+
+const WIGLE_API_NAME = 'AIDe97cba68ed56029bcaac4988042aa344';
+const WIGLE_API_TOKEN = 'c501422fd5374ad95b59890b1f33de81';
+
+// Regional cache: stores WiFi networks by geographic tile
+// Tile key format: "lat_lon" (rounded to 0.1 degree = ~7 miles)
+let regionCache = {};
+const CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
+
+// Get regional tile key from coordinates
+function getTileKey(lat, lon) {
+    const tileLat = Math.round(lat * 10) / 10;
+    const tileLon = Math.round(lon * 10) / 10;
+    return `${tileLat}_${tileLon}`;
+}
+
+// Reverse geocode: get county/region name from lat/lon (simplified)
+// In production, use Google Maps Geocoding API or similar
+function getCountyFromCoordinates(lat, lon) {
+    // Placeholder: we'll use a simple approach
+    // In real implementation, would call reverse geocode service
+    // For now, return general region based on coordinates
+    
+    // Rough US regions for demo
+    if (lat > 40 && lat < 41 && lon > -74 && lon < -73) return 'New York County';
+    if (lat > 37 && lat < 38 && lon > -122 && lon < -121) return 'San Francisco County';
+    if (lat > 34 && lat < 35 && lon > -118 && lon < -117) return 'Los Angeles County';
+    if (lat > 41 && lat < 42 && lon > -87 && lon < -86) return 'Cook County';
+    if (lat > 39 && lat < 40 && lon > -104 && lon < -103) return 'Denver County';
+    
+    return 'Unknown County';
+}
+
+// Fetch WiFi networks from WiGLE API (with regional caching)
+app.get('/api/fetch-wifi', async (req, res) => {
+    const { lat, lon } = req.query;
+    
+    if (!lat || !lon) {
+        return res.status(400).json({ 
+            error: 'lat and lon query parameters required' 
+        });
+    }
+    
+    const userLat = parseFloat(lat);
+    const userLon = parseFloat(lon);
+    const tileKey = getTileKey(userLat, userLon);
+    
+    console.log(`📍 WiFi request for tile: ${tileKey} (${userLat}, ${userLon})`);
+    
+    // Check cache first
+    if (regionCache[tileKey] && regionCache[tileKey].timestamp > Date.now() - CACHE_EXPIRY) {
+        console.log(`✅ Cache HIT for tile: ${tileKey}`);
+        const county = getCountyFromCoordinates(userLat, userLon);
+        return res.json({
+            success: true,
+            source: 'cache',
+            networks: regionCache[tileKey].networks,
+            county: county,
+            cacheAge: Date.now() - regionCache[tileKey].timestamp
+        });
+    }
+    
+    console.log(`🔄 Cache MISS for tile: ${tileKey} - fetching from WiGLE...`);
+    
+    try {
+        // Fetch from WiGLE API
+        // WiGLE API docs: https://api.wigle.net/swagger
+        const response = await fetch('https://api.wigle.net/api/v2/Network/search', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Basic ' + Buffer.from(`${WIGLE_API_NAME}:${WIGLE_API_TOKEN}`).toString('base64'),
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: new URLSearchParams({
+                'latrange1': userLat - 0.05,  // ~3 miles radius
+                'latrange2': userLat + 0.05,
+                'longrange1': userLon - 0.05,
+                'longrange2': userLon + 0.05,
+                'limit': 100,
+                'sort': 'signal'
+            }).toString()
+        });
+        
+        if (!response.ok) {
+            throw new Error(`WiGLE API error: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        const networks = data.results || [];
+        
+        console.log(`📡 Found ${networks.length} WiFi networks from WiGLE`);
+        
+        // Cache the results
+        regionCache[tileKey] = {
+            networks: networks.slice(0, 50), // Keep top 50 for this region
+            timestamp: Date.now()
+        };
+        
+        const county = getCountyFromCoordinates(userLat, userLon);
+        
+        res.json({
+            success: true,
+            source: 'wigle-api',
+            networks: regionCache[tileKey].networks,
+            county: county,
+            resultsCount: networks.length
+        });
+        
+    } catch (error) {
+        console.error(`❌ WiGLE API error:`, error.message);
+        
+        // Fallback to cache (even if expired) or empty array
+        const fallbackNetworks = regionCache[tileKey]?.networks || [];
+        const county = getCountyFromCoordinates(userLat, userLon);
+        
+        res.json({
+            success: false,
+            error: error.message,
+            fallback: true,
+            networks: fallbackNetworks,
+            county: county
+        });
+    }
+});
+
 // Serve index.html for any non-API routes (SPA fallback)
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
