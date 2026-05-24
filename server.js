@@ -433,80 +433,54 @@ app.get('/api/fetch-wifi', async (req, res) => {
     const userLon = parseFloat(lon);
     const tileKey = getTileKey(userLat, userLon);
     
-    console.log(`📍 WiFi request for tile: ${tileKey} (${userLat}, ${userLon})`);
+    console.log(`[${new Date().toISOString()}] 📍 WiFi request for tile: ${tileKey} (${userLat}, ${userLon})`);
     
     // Check cache first
     if (regionCache[tileKey] && regionCache[tileKey].timestamp > Date.now() - CACHE_EXPIRY) {
-        console.log(`✅ Cache HIT for tile: ${tileKey}`);
+        console.log(`[${new Date().toISOString()}] ✅ Cache HIT for tile: ${tileKey}`);
         const county = getCountyFromCoordinates(userLat, userLon);
         return res.json({
             success: true,
             source: 'cache',
-            networks: regionCache[tileKey].networks,
+            networks: regionCache[tileKey].networks || [],
             county: county,
             cacheAge: Date.now() - regionCache[tileKey].timestamp
         });
     }
     
-    console.log(`🔄 Cache MISS for tile: ${tileKey} - fetching from WiGLE...`);
+    console.log(`[${new Date().toISOString()}] 🔄 Cache MISS for tile: ${tileKey}`);
     
     try {
-        // Fetch from WiGLE API
-        // WiGLE API docs: https://api.wigle.net/swagger
-        const response = await fetch('https://api.wigle.net/api/v2/Network/search', {
-            method: 'POST',
-            headers: {
-                'Authorization': 'Basic ' + Buffer.from(`${WIGLE_API_NAME}:${WIGLE_API_TOKEN}`).toString('base64'),
-                'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            body: new URLSearchParams({
-                'latrange1': userLat - 0.05,  // ~3 miles radius
-                'latrange2': userLat + 0.05,
-                'longrange1': userLon - 0.05,
-                'longrange2': userLon + 0.05,
-                'limit': 100,
-                'sort': 'signal'
-            }).toString()
-        });
+        // For now, return county without calling WiGLE (testing phase)
+        // TODO: Activate WiGLE API when needed
+        const county = getCountyFromCoordinates(userLat, userLon);
         
-        if (!response.ok) {
-            throw new Error(`WiGLE API error: ${response.status} ${response.statusText}`);
-        }
-        
-        const data = await response.json();
-        const networks = data.results || [];
-        
-        console.log(`📡 Found ${networks.length} WiFi networks from WiGLE`);
-        
-        // Cache the results
+        // Initialize empty cache entry
         regionCache[tileKey] = {
-            networks: networks.slice(0, 50), // Keep top 50 for this region
+            networks: [],
             timestamp: Date.now()
         };
         
-        const county = getCountyFromCoordinates(userLat, userLon);
+        console.log(`[${new Date().toISOString()}] 📍 Returning county: ${county}`);
         
         res.json({
             success: true,
-            source: 'wigle-api',
-            networks: regionCache[tileKey].networks,
+            source: 'coordinate-based',
+            networks: [],
             county: county,
-            resultsCount: networks.length
+            resultsCount: 0
         });
         
     } catch (error) {
-        console.error(`❌ WiGLE API error:`, error.message);
+        console.error(`[${new Date().toISOString()}] ❌ Error:`, error.message);
         
-        // Fallback to cache (even if expired) or empty array
-        const fallbackNetworks = regionCache[tileKey]?.networks || [];
         const county = getCountyFromCoordinates(userLat, userLon);
         
         res.json({
             success: false,
             error: error.message,
-            fallback: true,
-            networks: fallbackNetworks,
-            county: county
+            county: county,
+            fallback: true
         });
     }
 });
