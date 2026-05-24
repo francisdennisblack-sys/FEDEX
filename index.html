@@ -753,6 +753,10 @@
             transition: opacity 0.3s ease;
             min-height: 0;
             flex-shrink: 1;
+            /* CRITICAL: Lock grid height to prevent 250px shrink on content load */
+            height: calc(100vh - 80px - 0px);
+            max-height: calc(100vh - 80px - 0px);
+            /* Prevent any height change that would trigger browser zoom */
         }
 
         .grid.loading {
@@ -9185,9 +9189,11 @@
         // Lock dimensions immediately and on every size change
         lockDimensions();
         
-        // CRITICAL: Detect and block the 250px height reduction
+        // CRITICAL: Detect and block the 250px height reduction - ULTRA AGGRESSIVE
         const containerHeightLock = setInterval(() => {
             const container = document.querySelector('.container');
+            const grid = document.getElementById('grid');
+            
             if (container) {
                 const expectedHeight = window.innerHeight - 80; // 80px header
                 const actualHeight = container.clientHeight;
@@ -9201,7 +9207,25 @@
                     container.style.maxHeight = expectedHeight + 'px';
                 }
             }
-        }, 50);
+            
+            // ALSO lock grid to prevent it from shrinking
+            if (grid) {
+                const gridHeight = grid.clientHeight;
+                if (!window._baselineGridHeight) {
+                    window._baselineGridHeight = gridHeight;
+                    console.log('📏 BASELINE GRID HEIGHT SET:', gridHeight);
+                } else if (gridHeight < window._baselineGridHeight - 5) {
+                    // Grid is trying to shrink!
+                    console.error(`🚨 GRID SHRINKING DETECTED! Was ${window._baselineGridHeight}px, now ${gridHeight}px (Δ ${gridHeight - window._baselineGridHeight}px)`);
+                    grid.style.minHeight = window._baselineGridHeight + 'px';
+                    grid.style.height = window._baselineGridHeight + 'px';
+                } else if (gridHeight > window._baselineGridHeight + 5) {
+                    // Grid is growing - might be new content, update baseline
+                    console.log(`📈 GRID GROWING: ${gridHeight}px (was ${window._baselineGridHeight}px, +${gridHeight - window._baselineGridHeight}px) - updating baseline`);
+                    window._baselineGridHeight = gridHeight;
+                }
+            }
+        }, 25); // Even more aggressive - 25ms instead of 50ms
         
         // Track initial dimensions for comparison
         let lastInnerWidth = window.innerWidth;
@@ -9398,6 +9422,35 @@
                             visualScale: window.visualViewport?.scale || 'N/A'
                         });
                         
+                        // CRITICAL: Dump what's in the grid when it changes
+                        console.error(`🔍 GRID CONTENT SNAPSHOT:`, {
+                            gridChildCount: grid.children.length,
+                            gridDisplayValue: window.getComputedStyle(grid).display,
+                            gridFlexDirection: window.getComputedStyle(grid).flexDirection,
+                            gridOverflow: window.getComputedStyle(grid).overflow,
+                            gridMinHeight: window.getComputedStyle(grid).minHeight,
+                            gridMaxHeight: window.getComputedStyle(grid).maxHeight,
+                            gridHeight: window.getComputedStyle(grid).height,
+                            containerDisplay: window.getComputedStyle(container).display,
+                            containerFlexDirection: window.getComputedStyle(container).flexDirection,
+                            containerMinHeight: window.getComputedStyle(container).minHeight,
+                            containerMaxHeight: window.getComputedStyle(container).maxHeight,
+                            documentReadyState: document.readyState
+                        });
+                        
+                        // Dump first few child elements
+                        const children = [];
+                        for (let i = 0; i < Math.min(3, grid.children.length); i++) {
+                            const child = grid.children[i];
+                            children.push({
+                                tag: child.tagName,
+                                id: child.id,
+                                class: child.className,
+                                height: child.offsetHeight
+                            });
+                        }
+                        console.error(`🔍 FIRST GRID CHILDREN:`, children);
+                        
                         window._containerDims = { height: containerHeight, width: containerWidth, panelHeight, gridHeight };
                     }
                 }
@@ -9443,14 +9496,34 @@
         }
         
         // Monitor element appearances/disappearances that could trigger zoom
-        const gridObserver = new MutationObserver(() => {
+        const gridObserver = new MutationObserver((mutations) => {
             const timeSinceLoad = (performance.now() - pageLoadTime).toFixed(0);
-            console.log(`⚠️ GRID CONTENT CHANGED at ${timeSinceLoad}ms`);
+            
+            // Track mutations
+            let addedCount = 0, removedCount = 0;
+            mutations.forEach(m => {
+                addedCount += m.addedNodes.length;
+                removedCount += m.removedNodes.length;
+            });
+            
+            if (addedCount > 0 || removedCount > 0) {
+                console.error(`⚠️ GRID CONTENT CHANGED at ${timeSinceLoad}ms: +${addedCount} nodes, -${removedCount} nodes`);
+                
+                // Force grid dimensions to stay locked
+                const grid = document.getElementById('grid');
+                if (grid) {
+                    const expectedGridHeight = window.innerHeight - 80;
+                    grid.style.height = expectedGridHeight + 'px';
+                    grid.style.minHeight = expectedGridHeight + 'px';
+                    grid.style.maxHeight = expectedGridHeight + 'px';
+                    console.error(`🔒 FORCED GRID HEIGHT to ${expectedGridHeight}px`);
+                }
+            }
         });
         
         const gridElement = document.getElementById('grid');
         if (gridElement) {
-            gridObserver.observe(gridElement, { childList: true, subtree: true });
+            gridObserver.observe(gridElement, { childList: true, subtree: false }); // Only direct children, not deep subtree
         }
         
         // Periodic state dump for analysis
