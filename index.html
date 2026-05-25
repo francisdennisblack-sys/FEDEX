@@ -2429,9 +2429,25 @@
                     </div>
                 </div>
                 <div style="margin-top: 8px;">
-                    <label style="font-size: 11px; color: #888; display: block; margin-bottom: 4px; font-weight: 500;">🏠 Post closest to you...</label>
+                    <label style="font-size: 11px; color: #888; display: block; margin-bottom: 4px; font-weight: 500;">🏠 Auto-detected area</label>
+                    <div style="
+                        width: 100%;
+                        padding: 8px 12px;
+                        background-color: #222;
+                        border: 1px solid #444;
+                        border-radius: 4px;
+                        color: #fff;
+                        font-size: 12px;
+                        min-height: 20px;
+                    " id="autoAreaDisplay">
+                        <span id="autoAreaText" style="color: #aaa;">Detecting...</span>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 8px;">
+                    <label style="font-size: 11px; color: #888; display: block; margin-bottom: 4px; font-weight: 500;">📍 Choose nearby area (ML recommended)...</label>
                     <div style="position: relative;">
-                        <div id="mlRecommendationContainer" style="
+                        <div id="mlAreaSelector" style="
                             width: 100%;
                             padding: 8px 12px;
                             background-color: #222;
@@ -2441,27 +2457,39 @@
                             font-size: 12px;
                             cursor: pointer;
                             transition: all 0.2s;
-                            display: none;
-                        " onclick="toggleRecommendationDropdown()">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <span id="mlRecommendationText">Loading recommendations...</span>
-                                <span style="color: #667eea;">▼</span>
-                            </div>
-                            <div id="mlRecommendationReason" style="font-size: 10px; color: #999; margin-top: 4px;"></div>
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                        " onclick="toggleMLAreaDropdown()">
+                            <span id="mlAreaText">Loading areas...</span>
+                            <span style="color: #667eea;">▼</span>
                         </div>
                         
-                        <input type="text" id="customZoneTag" placeholder="Or search POI database..." style="
+                        <div id="mlAreaDropdown" style="
+                            position: absolute;
+                            top: 100%;
+                            left: 0;
+                            right: 0;
+                            background-color: #1a1a1a;
+                            border: 1px solid #667eea;
+                            border-top: none;
+                            border-radius: 0 0 4px 4px;
+                            max-height: 280px;
+                            overflow-y: auto;
+                            z-index: 1001;
+                            display: none;
+                        "></div>
+                        
+                        <input type="text" id="customZoneTag" placeholder="" style="
                             width: 100%;
                             padding: 8px 12px;
-                            background-color: #222;
-                            border: 1px solid #444;
-                            border-radius: 4px;
+                            background-color: transparent;
+                            border: none;
                             color: #fff;
                             font-size: 12px;
                             box-sizing: border-box;
-                            transition: border-color 0.2s;
                             display: none;
-                        " onfocus="this.style.borderColor='#667eea'" onblur="this.style.borderColor='#444'" maxlength="100" autocomplete="off">
+                        " maxlength="100" autocomplete="off">
                         
                         <div id="autocompleteDropdown" style="
                             position: absolute;
@@ -2475,21 +2503,6 @@
                             max-height: 200px;
                             overflow-y: auto;
                             z-index: 1000;
-                            display: none;
-                        "></div>
-                        
-                        <div id="mlRecommendationDropdown" style="
-                            position: absolute;
-                            top: 100%;
-                            left: 0;
-                            right: 0;
-                            background-color: #1a1a1a;
-                            border: 1px solid #667eea;
-                            border-top: none;
-                            border-radius: 0 0 4px 4px;
-                            max-height: 250px;
-                            overflow-y: auto;
-                            z-index: 1001;
                             display: none;
                         "></div>
                     </div>
@@ -9893,71 +9906,87 @@
         window.postRecommendationSystem = postRecommendationSystem;
 
         // ============================================
-        // ML RECOMMENDATION UI FUNCTIONS
+        // FAST ML AREA RECOMMENDATION UI FUNCTIONS
         // ============================================
         
-        function updatePostRecommendationUI(recommendation) {
-            if (!recommendation) return;
+        /**
+         * INSTANT: Auto-generate closest area with zero delay
+         * Called synchronously - no waiting
+         */
+        function autoDetectClosestArea(userLocation) {
+            if (!userLocation || !poiDatabase || poiDatabase.length === 0) {
+                document.getElementById('autoAreaText').textContent = currentZoneTag || '📍 Current location';
+                document.getElementById('customZoneTag').value = currentZoneTag || '';
+                return currentZoneTag;
+            }
             
-            try {
-                const container = document.getElementById('mlRecommendationContainer');
-                const text = document.getElementById('mlRecommendationText');
-                const reason = document.getElementById('mlRecommendationReason');
-                
-                if (container && text && reason) {
-                    text.textContent = `🎯 ${recommendation.area}`;
-                    reason.textContent = recommendation.reason;
-                    container.style.display = 'block';
-                    
-                    // Also populate the hidden input with the recommended area
-                    document.getElementById('customZoneTag').value = recommendation.area;
+            // Find closest POI
+            let closest = null;
+            let minDistance = Infinity;
+            
+            poiDatabase.forEach(poi => {
+                const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    closest = poi;
                 }
-            } catch (e) {
-                console.warn('❌ Error updating recommendation UI:', e);
-            }
-        }
-        
-        function toggleRecommendationDropdown() {
-            const dropdown = document.getElementById('mlRecommendationDropdown');
-            if (!dropdown) return;
+            });
             
-            // Generate dropdown items from recommendations
-            if (dropdown.style.display === 'none') {
-                populateRecommendationDropdown();
-                dropdown.style.display = 'block';
+            if (closest && minDistance < Infinity) {
+                const area = closest.name || closest.city;
+                const distStr = Math.round(minDistance * 10) / 10;
+                
+                // Display instantly
+                document.getElementById('autoAreaText').textContent = `✓ ${area}${distStr < 1 ? ' (right here!)' : ` (${distStr}mi)`}`;
+                document.getElementById('autoAreaText').style.color = '#fff';
+                document.getElementById('customZoneTag').value = area;
+                
+                return area;
             } else {
-                dropdown.style.display = 'none';
+                document.getElementById('autoAreaText').textContent = currentZoneTag || '📍 Current location';
+                document.getElementById('customZoneTag').value = currentZoneTag || '';
+                return currentZoneTag;
             }
         }
         
-        function populateRecommendationDropdown() {
-            const dropdown = document.getElementById('mlRecommendationDropdown');
+        /**
+         * INSTANT: Populate ML area dropdown with closest areas
+         * Called immediately when grid renders - no delay
+         */
+        function populateMLAreaDropdown() {
+            const dropdown = document.getElementById('mlAreaDropdown');
             if (!dropdown) return;
             
             const recs = window.postRecommendationSystem.getRecommendedAreas(currentUserId) || [];
             
             if (recs.length === 0) {
-                dropdown.innerHTML = '<div style="padding: 12px; color: #999; text-align: center;">No recommendations available</div>';
+                dropdown.innerHTML = '<div style="padding: 12px; color: #999; text-align: center;">No nearby areas found</div>';
                 return;
             }
             
             let html = '';
             recs.forEach((rec, idx) => {
                 const scorePercent = Math.round(rec.score);
-                const scoreColor = scorePercent > 70 ? '#4ade80' : scorePercent > 50 ? '#fbbf24' : '#ef4444';
+                // Color coding: green for very close, yellow for close, red for far
+                let scoreColor = '#ff4444';  // Red = far
+                if (scorePercent >= 80) scoreColor = '#4ade80';  // Green = very close
+                else if (scorePercent >= 50) scoreColor = '#fbbf24';  // Yellow = close
                 
                 html += `
                     <div style="
-                        padding: 12px;
+                        padding: 10px 12px;
                         border-bottom: 1px solid #333;
                         cursor: pointer;
-                        transition: background-color 0.2s;
-                    " onmouseover="this.style.backgroundColor='#2a2a2a'" onmouseout="this.style.backgroundColor='transparent'" onclick="selectRecommendedArea('${rec.value}', event)">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <span style="font-weight: 500;">${rec.value}</span>
-                            <span style="color: ${scoreColor}; font-weight: 600;">${scorePercent}%</span>
+                        transition: background-color 0.1s;
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                    " onmouseover="this.style.backgroundColor='#2a2a2a'" onmouseout="this.style.backgroundColor='transparent'" onclick="selectMLArea('${rec.value}', event)">
+                        <div style="flex: 1;">
+                            <div style="font-weight: 500; font-size: 12px;">${rec.value}</div>
+                            <div style="font-size: 9px; color: #777; margin-top: 2px;">${rec.distance ? rec.distance + 'mi away' : 'Distance N/A'}</div>
                         </div>
-                        <div style="font-size: 10px; color: #999; margin-top: 4px;">${rec.reason}</div>
+                        <span style="color: ${scoreColor}; font-weight: 700; font-size: 13px; margin-left: 8px;">${scorePercent}%</span>
                     </div>
                 `;
             });
@@ -9965,21 +9994,35 @@
             dropdown.innerHTML = html;
         }
         
-        function selectRecommendedArea(area, event) {
-            event.stopPropagation();
+        function toggleMLAreaDropdown() {
+            const dropdown = document.getElementById('mlAreaDropdown');
+            if (!dropdown) return;
             
-            document.getElementById('customZoneTag').value = area;
-            document.getElementById('mlRecommendationText').textContent = `🎯 ${area}`;
-            document.getElementById('mlRecommendationDropdown').style.display = 'none';
-            
-            console.log(`✅ User selected recommended area: ${area}`);
+            if (dropdown.style.display === 'none' || dropdown.style.display === '') {
+                populateMLAreaDropdown();
+                dropdown.style.display = 'block';
+            } else {
+                dropdown.style.display = 'none';
+            }
         }
         
-        // Close dropdown when clicking outside
+        function selectMLArea(area, event) {
+            if (event) event.stopPropagation();
+            
+            document.getElementById('customZoneTag').value = area;
+            document.getElementById('mlAreaText').textContent = `✓ ${area}`;
+            document.getElementById('mlAreaDropdown').style.display = 'none';
+            
+            console.log(`✅ Selected area: ${area}`);
+        }
+        
+        // Close dropdowns when clicking outside
         document.addEventListener('click', (e) => {
-            if (e.target.id !== 'mlRecommendationContainer' && e.target.id !== 'mlRecommendationDropdown') {
-                const dropdown = document.getElementById('mlRecommendationDropdown');
-                if (dropdown) dropdown.style.display = 'none';
+            if (e.target.id !== 'mlAreaSelector' && e.target.id !== 'mlAreaDropdown') {
+                const dropdown = document.getElementById('mlAreaDropdown');
+                if (dropdown && !dropdown.contains(e.target)) {
+                    dropdown.style.display = 'none';
+                }
             }
         });
 
@@ -10063,15 +10106,20 @@
             }
             
             // ========================================================================
-            // ML POST RECOMMENDATIONS: Analyze where posts are needed + user preferences
+            // INSTANT: Auto-detect closest area (ZERO DELAY)
+            // ========================================================================
+            if (userLocation) {
+                autoDetectClosestArea(userLocation);
+            }
+            
+            // ========================================================================
+            // INSTANT: Generate ML recommendations and populate dropdown
             // ========================================================================
             if (window.postRecommendationSystem && allPosts.length > 0) {
                 window.postRecommendationSystem.generateRecommendations(currentUserId, allPosts, userLocation);
-                const topRec = window.postRecommendationSystem.getTopRecommendation(currentUserId);
-                if (topRec) {
-                    console.log(`🎯 Top post recommendation: ${topRec.area} (Score: ${topRec.score}/100) - ${topRec.reason}`);
-                    updatePostRecommendationUI(topRec);
-                }
+                // Immediately populate dropdown for fast interaction
+                populateMLAreaDropdown();
+                console.log(`🎯 ML area recommendations ready`);
             }
             
             // CRITICAL: De-duplicate posts by ID to prevent ghost posts
