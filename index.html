@@ -825,7 +825,7 @@
             overflow: hidden;
             position: relative;
             min-height: 250px;
-            box-shadow: 0 0 15px rgba(255, 255, 255, 0.1);
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.1), 0 0 30px rgba(102, 126, 234, 0.3);
         }
 
         .grid-box:hover {
@@ -898,7 +898,7 @@
         }
 
         .grid-box.badge-new::before {
-            content: 'NEW';
+            content: '✨';
             position: absolute;
             top: 4px;
             left: 8px;
@@ -1265,8 +1265,8 @@
         }
 
         .grid-box.badge-balanced {
-            border-top: 4px solid #ec4899;
-            box-shadow: 0 0 15px rgba(236, 72, 153, 0.4);
+            border: 2px solid #ec4899;
+            box-shadow: 0 0 15px rgba(236, 72, 153, 0.4), 0 0 30px rgba(236, 72, 153, 0.2);
         }
 
         .grid-box.badge-balanced::before {
@@ -5308,35 +5308,34 @@
             
             if (voteType === 'like') {
                 if (currentVote === 'like') {
-                    // User already liked - do not allow vote removal, just return
                     return;
                 } else if (currentVote === 'dislike') {
-                    // Change from dislike to like
                     newDislikes--;
                     newLikes++;
                     userVotes[voteKey] = 'like';
                 } else {
-                    // Add like (first vote on this post)
                     newLikes++;
                     userVotes[voteKey] = 'like';
                 }
             } else if (voteType === 'dislike') {
                 if (currentVote === 'dislike') {
-                    // User already disliked - do not allow vote removal, just return
                     return;
                 } else if (currentVote === 'like') {
-                    // Change from like to dislike
                     newLikes--;
                     newDislikes++;
                     userVotes[voteKey] = 'dislike';
                 } else {
-                    // Add dislike (first vote on this post)
                     newDislikes++;
                     userVotes[voteKey] = 'dislike';
                 }
             }
             
-            // Update Firebase with vote counts
+            // Update UI immediately for instant feedback (optimistic update)
+            post.likes = newLikes;
+            post.dislikes = newDislikes;
+            renderGrid();
+            
+            // Update Firebase asynchronously without blocking UI
             updatePostVotesFirebase(currentWiFiNetwork, postId, {
                 likes: newLikes,
                 dislikes: newDislikes
@@ -5430,7 +5429,7 @@
                 // Start spotlight rotation every 5 minutes (300000 ms)
                 if (spotlightInterval) clearInterval(spotlightInterval);
                 rotateSpotlight(); // Show first spotlight immediately
-                spotlightInterval = setInterval(rotateSpotlight, 5 * 60 * 1000);
+                spotlightInterval = setInterval(rotateSpotlight, 15 * 1000); // Rotate every 15 seconds
                 
             } else {
                 // User is signed out - sign in anonymously
@@ -8496,13 +8495,24 @@
         }
 
         function rotateSpotlight() {
-            // Find all disliked posts (has dislikes)
+            // Find posts with no badges or low engagement to boost visibility
             const allPosts = gridContent[currentUserId] || [];
-            const dislikedPosts = allPosts.filter(p => (p.dislikes || 0) > 0);
             
-            if (dislikedPosts.length > 0) {
-                // Pick a random disliked post
-                const randomPost = dislikedPosts[Math.floor(Math.random() * dislikedPosts.length)];
+            // Filter posts that need a spotlight boost: low/no badges
+            const lowBadgePosts = allPosts.filter(p => {
+                const likes = p.likes || 0;
+                const dislikes = p.dislikes || 0;
+                const totalVotes = likes + dislikes;
+                // Focus on posts with few votes or no badges
+                return totalVotes < 3 || (likes === 0 && dislikes === 0);
+            });
+            
+            // If no low-badge posts, pick from all posts
+            const candidatePosts = lowBadgePosts.length > 0 ? lowBadgePosts : allPosts;
+            
+            if (candidatePosts.length > 0) {
+                // Pick a random post from candidates
+                const randomPost = candidatePosts[Math.floor(Math.random() * candidatePosts.length)];
                 spotlightPostId = randomPost.id;
                 
                 // Re-render to show new spotlight
