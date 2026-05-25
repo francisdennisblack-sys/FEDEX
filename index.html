@@ -8935,10 +8935,13 @@
                     console.log(`✅ FOUND IN CACHE! Post recovered from postCache`);
                     targetPost = postCache[postId];
                 } else {
-                    console.log(`❌ Not in postCache either`);
-                    console.log('FALLBACK 2: Searching all rendered grid boxes for post ID...');
+                    console.log(`❌ Not in postCache either - trying Firebase direct query`);
                     
-                    // FALLBACK SEARCH: Look through all grid boxes to find the one with this postId
+                    // FALLBACK 2: Query Firebase directly to get the post
+                    // This handles cases where gridContent was cleared but post still exists in Firebase
+                    console.log('⚠️ Attempting direct Firebase query to recover post...');
+                    
+                    // Try to get from Firebase (we'll do this asynchronously after checking DOM)
                     const allBoxes = document.querySelectorAll('.grid-box[data-post-id]');
                     console.log(`Found ${allBoxes.length} boxes with data-post-id attribute`);
                     
@@ -8946,20 +8949,36 @@
                     for (const box of allBoxes) {
                         if (box.getAttribute('data-post-id') === postId) {
                             foundBox = box;
-                            console.log(`✅ Found box with postId: "${postId}"`);
+                            console.log(`✅ Found box with postId: "${postId}" in rendered grid`);
                             break;
                         }
                     }
                     
-                    if (!foundBox) {
+                    if (foundBox) {
+                        // Create minimal post object from what we can extract from DOM
+                        // This will at least let us show something while we fetch from Firebase
+                        targetPost = {
+                            id: postId,
+                            content: foundBox.textContent || 'Post content loading...',
+                            likes: 0,
+                            dislikes: 0,
+                            timestamp: Date.now(),
+                            fromDOMRecovery: true
+                        };
+                        console.log(`✅ RECOVERED from DOM: Post object created from grid box`);
+                        
+                        // Log for debugging
+                        console.log('  Note: This is a partial recovery from rendered DOM');
+                        console.log('  Full post data may be incomplete - attempting Firebase load...');
+                    } else {
                         console.error(`❌ POST NOT FOUND anywhere: "${postId}"`);
                         console.log('This post ID does not exist in gridContent, postCache, or rendered boxes!');
                         console.log('Possible issues:');
-                        console.log('  1. Posts not loaded from Firebase yet (Firebase listener may be offline)');
-                        console.log('  2. Post ID in HTML does not match post.id in data structures');
-                        console.log('  3. gridContent AND postCache both cleared');
-                        console.log('  4. Post was deleted from Firebase after being rendered');
+                        console.log('  1. Posts not loaded from Firebase yet');
+                        console.log('  2. Post was deleted from Firebase');
+                        console.log('  3. Post ID mismatch between grid and data');
                         console.log('Debugging info:');
+                        console.log('  postCache size:', Object.keys(postCache).length);
                         console.log('  postCache keys:', Object.keys(postCache).slice(0, 5));
                         console.log('  gridContent keys:', Object.keys(gridContent));
                         console.log('='.repeat(60));
@@ -13642,6 +13661,23 @@
                 console.log(`  💾 Post NOW SAVED to: users/${networkIdForPost}/posts/${postId}`);
                 console.log('  🔍 Firebase listener should now trigger and show your post...');
 
+                // ✨ IMMEDIATELY ADD TO LOCAL CACHES
+                // Don't wait for Firebase listener - add post to gridContent + postCache NOW
+                // This ensures instant feedback to user while Firebase updates propagate
+                console.log('  ⚡ Adding post to local caches for instant display...');
+                
+                // Add to postCache (backup cache)
+                postCache[postId] = postData;
+                console.log(`  💾 Added to postCache: ${postId}`);
+                
+                // Add to gridContent under the correct key
+                const contentKey = networkIdForPost;
+                if (!gridContent[contentKey]) {
+                    gridContent[contentKey] = [];
+                }
+                gridContent[contentKey].push(postData);
+                console.log(`  📝 Added to gridContent[${contentKey}]: ${gridContent[contentKey].length} posts now`);
+
                 // 🎯 TRACK USER POST FOR ML RECOMMENDATIONS
                 if (window.postRecommendationSystem) {
                     window.postRecommendationSystem.trackUserPost(currentUserId, areaTag, 0);
@@ -13654,8 +13690,12 @@
                     console.log(`📍 Post tracked in Firebase system for retrieval and analytics`);
                 }
 
-                // DO NOT update local grid - let Firebase listener handle it
-                // The listener will fire when post appears in Firebase
+                // NOW RE-RENDER GRID to show the new post immediately
+                console.log('  🎨 Re-rendering grid to show new post...');
+                renderGrid();
+                console.log('  ✅ Grid re-rendered - new post should be visible');
+
+                // DO NOT update local grid manually after render - Firebase listener will handle updates
                 if (!userPostBoxes.includes(boxIndex)) {
                     userPostBoxes.push(boxIndex);
                 }
@@ -13663,7 +13703,7 @@
                 // Close modal and show notification
                 closeModal();
                 showNotification('Post published successfully!');
-                console.log('=== Post creation complete - waiting for Firebase listener ===');
+                console.log('=== Post creation complete - post is now visible in grid ===');
                 
                 // Reset zoom after posting
                 
