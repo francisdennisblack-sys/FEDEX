@@ -2987,9 +2987,9 @@
             console.log('light-mode class now:', body.classList.contains('light-mode'));
         }
 
-        // Initialize theme from localStorage
+        // Initialize theme from localStorage - DEFAULT TO LIGHT MODE
         function initializeTheme() {
-            const savedTheme = localStorage.getItem('theme-mode') || 'dark';
+            const savedTheme = localStorage.getItem('theme-mode') || 'light';
             const body = document.body;
             const toggle = document.getElementById('themToggle');
             
@@ -7734,15 +7734,16 @@
                 console.log('Subscribing to Firebase posts for network:', currentUserId);
                 subscribeToFirebasePostsWithReconnect(currentUserId);
                 
-                // CRITICAL MOBILE FIX: If Firebase hasn't delivered posts within 2 seconds,
+                // CRITICAL MOBILE FIX: If Firebase hasn't delivered posts within 500ms,
                 // force render the grid anyway so user sees the "Add content" button
                 // This prevents frozen blank screen on slow mobile connections
                 const firebaseTimeoutId = setTimeout(() => {
-                    if (gridContent[currentUserId] && gridContent[currentUserId].length === 0) {
-                        console.log('⚠️  Firebase slow on mobile - forcing grid render with empty state');
-                        renderGrid();
+                    console.log('⚠️  Firebase timeout (500ms) - forcing grid render immediately');
+                    if (!gridContent[currentUserId]) {
+                        gridContent[currentUserId] = [];
                     }
-                }, 2000);
+                    renderGrid();
+                }, 500);
                 
                 // Store timeout ID so we can clear it when Firebase data arrives
                 window.firebaseLoadTimeoutId = firebaseTimeoutId;
@@ -7798,6 +7799,12 @@
                 });
             } catch (error) {
                 console.error('Firebase listener error:', error);
+                // CRITICAL: Still show grid even on error so user isn't stuck
+                if (!gridContent[currentUserId]) {
+                    gridContent[currentUserId] = [];
+                }
+                renderGrid();
+                console.log('✅ Grid rendered despite Firebase error - will retry');
                 // Will try again on next heartbeat
             }
         }
@@ -7924,19 +7931,32 @@
             return 300000 + Math.random() * 1000;
         }
 
+        let firstRenderComplete = false;
+
         function renderGrid() {
             if (!isConnected) return;
             
+            const startTime = performance.now();
+            
             const grid = document.getElementById('grid');
+            if (!grid) return;
             
             // CRITICAL: Force mobile layout on small screens
             fixMobileGridLayout();
             
-            // ====== COMPREHENSIVE MOBILE DEBUGGING ======
+            // Skip verbose debugging on first render for performance
+            const shouldDebug = firstRenderComplete;
+            
+            // Get viewport info for debugging
             const viewportWidth = window.innerWidth;
             const viewportHeight = window.innerHeight;
             const devicePixelRatio = window.devicePixelRatio;
             const isMobile = viewportWidth <= 599;
+            
+            if (shouldDebug) {
+                console.log('📊 renderGrid() performance timer started');
+                console.log('Viewport:', viewportWidth, 'x', viewportHeight);
+            }
             
             const gridWidth = grid?.offsetWidth || 0;
             const gridHeight = grid?.offsetHeight || 0;
@@ -7950,65 +7970,27 @@
             const boxHeight = firstBox?.offsetHeight || 0;
             const boxStyle = firstBox ? window.getComputedStyle(firstBox) : {};
             
-            // Check media query matching
-            const cssText = getComputedStyle(document.documentElement).fontSize;
-            const mediaQuery320 = window.matchMedia('(min-width: 320px) and (max-width: 599px)');
-            const mediaQuery600 = window.matchMedia('(min-width: 600px)');
-            const mediaQuery1200 = window.matchMedia('(min-width: 1200px)');
-            
-            // Check if CSS is actually being applied by looking at parent container
-            const container = document.querySelector('.container');
-            const containerStyle = window.getComputedStyle(container);
-            const containerPadding = containerStyle.padding;
-            
-            console.log(`
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                    📱 COMPLETE MOBILE DEBUG OUTPUT                           ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
-
-🔍 VIEWPORT & DEVICE DETECTION:
-   window.innerWidth: ${viewportWidth}px
-   window.innerHeight: ${viewportHeight}px
-   devicePixelRatio: ${devicePixelRatio}
-   Detected Device: ${isMobile ? '✅ MOBILE (≤599px)' : '❌ NOT MOBILE (>599px)'}
-   
-📡 MEDIA QUERY MATCHING STATUS:
-   @media (320px-599px): ${mediaQuery320.matches ? '✅ MATCHES' : '❌ NO MATCH'}
-   @media (600px+): ${mediaQuery600.matches ? '✅ MATCHES' : '❌ NO MATCH'}
-   @media (1200px+): ${mediaQuery1200.matches ? '✅ MATCHES' : '❌ NO MATCH'}
-   
-📐 CSS GRID PROPERTIES (Rendered):
-   Grid container width: ${gridWidth}px
-   Grid container height: ${gridHeight}px
-   gridTemplateColumns: "${gridColumns}"
-   gap: "${gridGap}"
-   
-📦 GRID BOX SIZING:
-   Box width: ${boxWidth}px
-   Box height: ${boxHeight}px
-   CSS minHeight: "${boxStyle.minHeight}"
-   CSS aspectRatio: "${boxStyle.aspectRatio}"
-   CSS padding: "${boxStyle.padding}"
-   CSS margin: "${boxStyle.margin}"
-   
-🏗️  CONTAINER SIZING:
-   Container padding: "${containerPadding}"
-   Container display: "${containerStyle.display}"
-   Container flex-direction: "${containerStyle.flexDirection}"
-   
-🎯 CONTENT:
-   currentZoneTag: "${currentZoneTag}"
-   userLocation: ${userLocation ? `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}` : 'UNDEFINED'}
-   isConnected: ${isConnected}
-   
-⚠️  DIAGNOSTIC CHECKS:
-   ${mediaQuery320.matches ? '✅' : '❌'} Mobile media query should apply
-   ${isMobile ? '✅' : '❌'} Viewport is ≤599px (mobile size)
-   ${boxHeight <= 150 ? '✅' : '❌'} Box height ≤150px (expected ~150px)
-   ${boxWidth > 0 ? '✅' : '❌'} Box width > 0 (width is ${boxWidth}px)
-   
-═══════════════════════════════════════════════════════════════════════════════
-            `);
+            // Only run expensive CSS calculations if debugging
+            if (shouldDebug) {
+                // Check media query matching
+                const cssText = getComputedStyle(document.documentElement).fontSize;
+                const mediaQuery320 = window.matchMedia('(min-width: 320px) and (max-width: 599px)');
+                const mediaQuery600 = window.matchMedia('(min-width: 600px)');
+                const mediaQuery1200 = window.matchMedia('(min-width: 1200px)');
+                
+                // Check if CSS is actually being applied by looking at parent container
+                const container = document.querySelector('.container');
+                const containerStyle = window.getComputedStyle(container);
+                const containerPadding = containerStyle.padding;
+                
+                const gridWidth = grid?.offsetWidth || 0;
+                const gridHeight = grid?.offsetHeight || 0;
+                const gridStyle = window.getComputedStyle(grid);
+                const gridColumns = gridStyle.gridTemplateColumns;
+                const gridGap = gridStyle.gap;
+                
+                console.log(`📱 Mobile debug - viewport: ${viewportWidth}x${viewportHeight}, mobile: ${isMobile}, grid: ${gridWidth}x${gridHeight}`);
+            }
             
             const hiddenForThisWiFi = hiddenPosts[currentUserId] || [];
             
@@ -8349,6 +8331,12 @@
                         lazyGridPosition++;
                     });
                 }, 50); // Minimal delay - almost instant but doesn't block UI
+            }
+            
+            // Mark first render complete for performance optimization
+            if (!firstRenderComplete) {
+                firstRenderComplete = true;
+                console.log('✅ First render complete - subsequent renders will show debug info');
             }
         }
 
