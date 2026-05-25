@@ -3237,6 +3237,326 @@
         window.postCacheSystem = postCacheSystem;
 
         // ============================================
+        // 🧠 ML TAG REWRITING SYSTEM
+        // Dynamic tag transformation based on post performance & geography
+        // ============================================
+        const mlTagRewritingSystem = {
+            // Track post performance by geographic distance brackets
+            engagementByDistance: {}, // { postId: { distance_bracket: { likes, dislikes, viewers } } }
+            
+            /**
+             * Record when a post gets engagement at a specific location
+             * Used to learn which distance brackets show highest engagement
+             */
+            trackEngagement(postId, viewerLat, viewerLon, postLat, postLon, engagementType) {
+                if (!postId || !postLat || !postLon || !viewerLat || !viewerLon) return;
+                
+                const distance = calculateDistance(viewerLat, viewerLon, postLat, postLon);
+                const bracket = this.getDistanceBracket(distance);
+                
+                if (!this.engagementByDistance[postId]) {
+                    this.engagementByDistance[postId] = {};
+                }
+                if (!this.engagementByDistance[postId][bracket]) {
+                    this.engagementByDistance[postId][bracket] = { likes: 0, dislikes: 0, viewers: 0 };
+                }
+                
+                if (engagementType === 'like') {
+                    this.engagementByDistance[postId][bracket].likes++;
+                } else if (engagementType === 'dislike') {
+                    this.engagementByDistance[postId][bracket].dislikes++;
+                }
+                this.engagementByDistance[postId][bracket].viewers++;
+                
+                console.log(`📍 Tracked ${engagementType} at ${distance.toFixed(1)}mi (bracket: ${bracket})`);
+            },
+            
+            /**
+             * Get distance bracket for tracking engagement patterns
+             * Brackets: LOCAL (0-0.5mi), NEIGHBORHOOD (0.5-2mi), DISTRICT (2-10mi), CITY (10-50mi), METRO (50-200mi), STATE (200-500mi), COUNTRY (500+mi)
+             */
+            getDistanceBracket(distance) {
+                if (distance < 0.5) return 'LOCAL';
+                if (distance < 2) return 'NEIGHBORHOOD';
+                if (distance < 10) return 'DISTRICT';
+                if (distance < 50) return 'CITY';
+                if (distance < 200) return 'METRO';
+                if (distance < 500) return 'STATE';
+                return 'COUNTRY';
+            },
+            
+            /**
+             * Get engagement statistics for a post
+             * Returns which distance brackets have best performance
+             */
+            getEngagementStats(postId) {
+                if (!this.engagementByDistance[postId]) {
+                    return { 
+                        strongBrackets: [], 
+                        weakBrackets: [], 
+                        peakDistance: null,
+                        spreadingPattern: 'NEW'
+                    };
+                }
+                
+                const stats = this.engagementByDistance[postId];
+                const brackets = Object.keys(stats);
+                const engagementScores = {};
+                
+                // Calculate engagement rate (likes - dislikes) / viewers for each bracket
+                brackets.forEach(bracket => {
+                    const data = stats[bracket];
+                    engagementScores[bracket] = data.viewers > 0 ? (data.likes - data.dislikes) / data.viewers : 0;
+                });
+                
+                // Find strong vs weak brackets
+                const avgScore = Object.values(engagementScores).reduce((a, b) => a + b, 0) / brackets.length;
+                const strongBrackets = Object.entries(engagementScores)
+                    .filter(([_, score]) => score > avgScore * 1.5)
+                    .map(([bracket, _]) => bracket);
+                const weakBrackets = Object.entries(engagementScores)
+                    .filter(([_, score]) => score < avgScore * 0.5)
+                    .map(([bracket, _]) => bracket);
+                
+                // Determine peak distance (where most engagement happens)
+                let peakDistance = null;
+                if (brackets.length > 0) {
+                    peakDistance = brackets.reduce((max, bracket) => {
+                        return engagementScores[bracket] > (engagementScores[max] || 0) ? bracket : max;
+                    });
+                }
+                
+                // Determine spreading pattern
+                let spreadingPattern = 'NEW';
+                if (brackets.length > 3) {
+                    spreadingPattern = 'VIRAL_SPREAD';
+                } else if (brackets.length > 1) {
+                    spreadingPattern = 'SPREADING';
+                } else if (brackets.length === 1) {
+                    spreadingPattern = 'LOCAL_ONLY';
+                }
+                
+                return { strongBrackets, weakBrackets, peakDistance, spreadingPattern };
+            },
+            
+            /**
+             * 🎯 CORE: Rewrite tag based on engagement pattern and viewer distance
+             * Example: "Cat meow coffe" → 
+             *   - Local viewer: "Cat meow coffe" (POI)
+             *   - City viewer: "☕ Cat Trends" (Category)
+             *   - State viewer: "🐱 Pets Trending" (Category)
+             *   - Country viewer: "🌟 Pet Content" (General)
+             */
+            rewriteTag(originalTag, postId, postLat, postLon, viewerLat, viewerLon, isCreator = false) {
+                if (!originalTag) return { original: originalTag, rewritten: 'Content', scale: 'unknown' };
+                
+                // Get post performance stats
+                const stats = this.getEngagementStats(postId);
+                const distance = calculateDistance(viewerLat, viewerLon, postLat, postLon);
+                const bracket = this.getDistanceBracket(distance);
+                
+                // Tag transformation hierarchy
+                const transformations = this.buildTagHierarchy(originalTag, stats);
+                
+                // For creator viewing own post: always show original tag
+                if (isCreator) {
+                    return {
+                        original: originalTag,
+                        rewritten: originalTag,
+                        scale: 'CREATOR_VIEW',
+                        emoji: '👤',
+                        reason: 'creator_viewing_own'
+                    };
+                }
+                
+                // Viewer distance-based tag rewriting
+                if (bracket === 'LOCAL' || bracket === 'NEIGHBORHOOD') {
+                    // Very close: Show exact tag (supports hyper-local discovery)
+                    return {
+                        original: originalTag,
+                        rewritten: originalTag,
+                        scale: 'HYPERLOCAL',
+                        emoji: '📍',
+                        reason: 'local_exact_tag',
+                        distance
+                    };
+                }
+                
+                if (bracket === 'DISTRICT' || bracket === 'CITY') {
+                    // City level: Broaden to category
+                    return {
+                        original: originalTag,
+                        rewritten: transformations.categoryTag || originalTag,
+                        scale: 'CITY_CATEGORY',
+                        emoji: '🏙️',
+                        reason: 'city_category_tag',
+                        distance
+                    };
+                }
+                
+                if (bracket === 'METRO' || bracket === 'STATE') {
+                    // State level: Show broader topic
+                    return {
+                        original: originalTag,
+                        rewritten: transformations.topicTag || transformations.categoryTag || originalTag,
+                        scale: 'STATE_TOPIC',
+                        emoji: '⭐',
+                        reason: 'state_topic_tag',
+                        distance
+                    };
+                }
+                
+                // Country level: Show general interest
+                return {
+                    original: originalTag,
+                    rewritten: transformations.generalTag || transformations.topicTag || originalTag,
+                    scale: 'COUNTRY_GENERAL',
+                    emoji: '🌟',
+                    reason: 'country_general_tag',
+                    distance
+                };
+            },
+            
+            /**
+             * Build tag hierarchy: POI → Category → Topic → General
+             * Example: "Cat meow coffe" →
+             *   - Category: "Coffee & Cats"
+             *   - Topic: "Pet Cafés"
+             *   - General: "Cozy Spots"
+             */
+            buildTagHierarchy(tag, stats) {
+                const lowerTag = tag.toLowerCase();
+                
+                // Extract keywords
+                const keywords = this.extractKeywords(lowerTag);
+                
+                // Smart categorization
+                let categoryTag = this.generateCategoryTag(keywords, stats);
+                let topicTag = this.generateTopicTag(keywords, stats);
+                let generalTag = this.generateGeneralTag(keywords, stats);
+                
+                return { 
+                    categoryTag, 
+                    topicTag, 
+                    generalTag,
+                    keywords
+                };
+            },
+            
+            /**
+             * Extract semantic keywords from tag
+             */
+            extractKeywords(tag) {
+                // Remove common words
+                const stopwords = ['the', 'a', 'an', 'at', 'in', 'on', 'and', 'or', 'is', 'are', 'be', 'by', 'for', 'to', 'from', 'as', 'of'];
+                const words = tag.replace(/[^a-z0-9\s]/g, '').split(/\s+/);
+                return words.filter(w => w.length > 2 && !stopwords.includes(w));
+            },
+            
+            /**
+             * Generate category-level tag (e.g., "Coffee & Cats" from "cat meow coffe")
+             */
+            generateCategoryTag(keywords, stats) {
+                if (keywords.length === 0) return 'Popular';
+                
+                // Map common keywords to categories
+                const categoryMap = {
+                    'cat': '🐱 Feline Things',
+                    'dog': '🐕 Canine Things',
+                    'coffee': '☕ Coffee & Vibes',
+                    'cafe': '☕ Cafés',
+                    'park': '🌳 Parks',
+                    'food': '🍽️ Food Spots',
+                    'restaurant': '🍽️ Dining',
+                    'bar': '🍺 Nightlife',
+                    'shop': '🛍️ Shopping',
+                    'gym': '💪 Fitness',
+                    'music': '🎵 Music',
+                    'art': '🎨 Art',
+                    'sports': '⚽ Sports',
+                    'game': '🎮 Gaming',
+                    'tech': '🖥️ Tech',
+                    'book': '📚 Reading'
+                };
+                
+                for (let keyword of keywords) {
+                    if (categoryMap[keyword]) return categoryMap[keyword];
+                }
+                
+                // Fallback: Capitalize and pluralize
+                return `✨ ${keywords.map(k => k.charAt(0).toUpperCase() + k.slice(1)).join(' & ')}`;
+            },
+            
+            /**
+             * Generate topic-level tag (broader than category)
+             */
+            generateTopicTag(keywords, stats) {
+                const topicMap = {
+                    'cat': '🐾 Pets & Animals',
+                    'dog': '🐾 Pets & Animals',
+                    'coffee': '☕ Lifestyle',
+                    'cafe': '☕ Lifestyle',
+                    'park': '🌍 Outdoor Spaces',
+                    'food': '🍽️ Dining Culture',
+                    'restaurant': '🍽️ Dining Culture',
+                    'bar': '🎉 Social Scene',
+                    'shop': '🛍️ Local Commerce',
+                    'gym': '💪 Wellness',
+                    'music': '🎭 Entertainment',
+                    'art': '🎭 Entertainment',
+                    'sports': '🏆 Recreation',
+                    'game': '🎯 Entertainment',
+                    'tech': '💡 Innovation',
+                    'book': '📖 Culture'
+                };
+                
+                for (let keyword of keywords) {
+                    if (topicMap[keyword]) return topicMap[keyword];
+                }
+                
+                return '✨ Local Interest';
+            },
+            
+            /**
+             * Generate general-level tag (broadest, country-wide appeal)
+             */
+            generateGeneralTag(keywords, stats) {
+                // Check for spreading pattern - if viral, use viral tag
+                if (stats.spreadingPattern === 'VIRAL_SPREAD') {
+                    return '🌟 Trending Nationwide';
+                }
+                
+                const generalMap = {
+                    'cat': '🐾 Pets',
+                    'dog': '🐾 Pets',
+                    'coffee': '☕ Lifestyle',
+                    'cafe': '☕ Lifestyle',
+                    'park': '🌍 Outdoors',
+                    'food': '🍽️ Dining',
+                    'restaurant': '🍽️ Dining',
+                    'bar': '🎉 Social',
+                    'shop': '🛍️ Shopping',
+                    'gym': '💪 Health',
+                    'music': '🎵 Culture',
+                    'art': '🎨 Culture',
+                    'sports': '🏆 Sports',
+                    'game': '🎮 Gaming',
+                    'tech': '💻 Tech',
+                    'book': '📚 Culture'
+                };
+                
+                for (let keyword of keywords) {
+                    if (generalMap[keyword]) return generalMap[keyword];
+                }
+                
+                return '⭐ Popular Content';
+            }
+        };
+        
+        // Expose globally
+        window.mlTagRewritingSystem = mlTagRewritingSystem;
+
+        // ============================================
         // PHASE 0: FEDEX-ZONES FOUNDATION LAYER
         // Theme Toggle Function - Define at top level for onclick access
         function toggleTheme() {
@@ -4430,6 +4750,9 @@
             // ========== CUSTOM TAG OVERRIDE ==========
             // If user manually tagged this post, use that as base context
             if (post.customTag) {
+                // Apply ML tag rewriting based on viewer distance & post engagement
+                const displayTag = getDisplayTagForPost(post, post.userId === currentUserId);
+                
                 const customLikes = post.likes || 0;
                 const customDislikes = post.dislikes || 0;
                 const customThresholds = getAdaptiveEngagementThresholds();
@@ -4437,7 +4760,7 @@
                 // Even with custom tag, still show engagement-based emojis
                 if (customLikes < customThresholds.low) {
                     return {
-                        display: post.customTag,
+                        display: displayTag,
                         emoji: '📍',
                         scale: 'CUSTOM_POI',
                         context: 'custom',
@@ -4446,7 +4769,7 @@
                 }
                 if (customLikes < customThresholds.medium) {
                     return {
-                        display: post.customTag,
+                        display: displayTag,
                         emoji: '🏘️',
                         scale: 'CUSTOM_AREA',
                         context: 'custom',
@@ -4455,7 +4778,7 @@
                 }
                 if (customLikes < customThresholds.high) {
                     return {
-                        display: `🔥 ${post.customTag}`,
+                        display: `🔥 ${displayTag}`,
                         emoji: '🔥',
                         scale: 'CUSTOM_TRENDING',
                         context: 'custom_trending',
@@ -4464,7 +4787,7 @@
                 }
                 if (customLikes < customThresholds.veryHigh) {
                     return {
-                        display: `⭐ ${post.customTag}`,
+                        display: `⭐ ${displayTag}`,
                         emoji: '⭐',
                         scale: 'CUSTOM_POPULAR',
                         context: 'custom_popular',
@@ -4473,7 +4796,7 @@
                 }
                 // Viral
                 return {
-                    display: `🌟 ${post.customTag} - VIRAL`,
+                    display: `🌟 ${displayTag} - VIRAL`,
                     emoji: '🌟',
                     scale: 'CUSTOM_VIRAL',
                     context: 'custom_viral',
@@ -4655,6 +4978,43 @@
                 context: 'viral',
                 reach: 'country'
             };
+        }
+
+        // 🧠 ML TAG REWRITING: Apply dynamic tag transformation based on engagement & distance
+        // Different viewers see different tag versions of the same post
+        function getDisplayTagForPost(post, isCreator = false) {
+            if (!post || !post.customTag) {
+                return post?.customTag || null;
+            }
+            
+            // Creator viewing own post: Always show original tag
+            if (isCreator) {
+                console.log(`👤 Post creator viewing own post: "${post.customTag}" (no rewriting)`);
+                return post.customTag;
+            }
+            
+            // No ML system or no location data: Show original
+            if (!window.mlTagRewritingSystem || !userLocation || !post.lat || !post.lon) {
+                return post.customTag;
+            }
+            
+            // Apply ML tag rewriting
+            const rewriteResult = window.mlTagRewritingSystem.rewriteTag(
+                post.customTag,
+                post.id,
+                post.lat,
+                post.lon,
+                userLocation.latitude,
+                userLocation.longitude,
+                false // isCreator = false (already checked above)
+            );
+            
+            if (rewriteResult.rewritten !== post.customTag) {
+                console.log(`🧠 Tag rewritten: "${post.customTag}" → "${rewriteResult.rewritten}" (distance: ${rewriteResult.distance?.toFixed(1)}mi, scale: ${rewriteResult.scale})`);
+                return rewriteResult.rewritten;
+            }
+            
+            return post.customTag;
         }
 
         // Get location data needed for zone conversion
@@ -5721,6 +6081,19 @@
                     newDislikes++;
                     userVotes[voteKey] = 'dislike';
                 }
+            }
+            
+            // 🧠 ML TAG SYSTEM: Track where this post gets engagement
+            if (window.mlTagRewritingSystem && userLocation && post.lat && post.lon) {
+                window.mlTagRewritingSystem.trackEngagement(
+                    postId,
+                    userLocation.latitude,
+                    userLocation.longitude,
+                    post.lat,
+                    post.lon,
+                    voteType
+                );
+                console.log(`🧠 Tracked ${voteType} for ML tag rewriting at distance from post origin`);
             }
             
             // Update UI immediately for instant feedback (optimistic update)
