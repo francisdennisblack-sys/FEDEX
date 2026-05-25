@@ -1281,6 +1281,24 @@
             text-shadow: 0 0 4px rgba(236, 72, 153, 0.5);
         }
 
+        /* REDEMPTION badge: disliked posts that got likes */
+        .grid-box.badge-redemption {
+            border-top: 4px solid #f59e0b;
+            box-shadow: 0 0 15px rgba(245, 158, 11, 0.4);
+        }
+
+        .grid-box.badge-redemption::before {
+            content: '🔄';
+            position: absolute;
+            top: 4px;
+            left: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #f59e0b;
+            letter-spacing: 0.5px;
+            text-shadow: 0 0 4px rgba(245, 158, 11, 0.5);
+        }
+
         .grid-box.badge-media-content {
             border-top: 4px solid transparent;
             border-image: linear-gradient(to right, transparent 50%, #06b6d4 50%, #06b6d4 100%) 1;
@@ -2138,7 +2156,7 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 24px;
+            margin-bottom: 12px;
         }
 
         .modal-header h2 {
@@ -2165,11 +2183,11 @@
         }
 
         .modal .upload-area {
-            margin-bottom: 16px;
+            margin-bottom: 8px;
         }
 
         .modal textarea {
-            margin-bottom: 16px;
+            margin-bottom: 8px;
         }
 
         .modal .upload-buttons {
@@ -2462,7 +2480,7 @@
                     resize: vertical;
                     min-height: 140px;
                     width: 100%;
-                    margin-top: 12px;
+                    margin-top: 6px;
                     line-height: 1.6;
                     box-sizing: border-box;
                     transition: box-shadow 0.3s ease;
@@ -2485,8 +2503,8 @@
                 font-family: 'Segoe UI', 'Helvetica Neue', sans-serif;
                 font-size: 14px;
                 width: 100%;
-                margin-top: 36px;
-                margin-bottom: 16px;
+                margin-top: 16px;
+                margin-bottom: 8px;
                 box-sizing: border-box;
                 transition: box-shadow 0.3s ease;
                 box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
@@ -2498,8 +2516,8 @@
                 background-color: #ff6b6b;
                 color: white;
                 border-radius: 4px;
-                margin-top: 4px;
-                margin-bottom: 40px;
+                margin-top: 2px;
+                margin-bottom: 20px;
                 font-size: 12px;
                 font-weight: 500;
             "></div>
@@ -2510,13 +2528,13 @@
                 background-color: #f44336;
                 color: white;
                 border-radius: 6px;
-                margin-top: 8px;
-                margin-bottom: 48px;
+                margin-top: 4px;
+                margin-bottom: 20px;
                 font-size: 14px;
                 font-weight: 600;
             "></div>
 
-            <div class="upload-buttons" style="display: flex; gap: 12px; justify-content: center; margin-top: 24px;">
+            <div class="upload-buttons" style="display: flex; gap: 12px; justify-content: center; margin-top: 12px;">
                 <button id="uploadBtn" onclick="uploadPost()" style="
                     flex: 1;
                     padding: 14px 32px;
@@ -8380,24 +8398,41 @@
             const hasContent = post.content && post.content.trim().length > 0;
             const hasMixedContent = hasMedia && hasContent;
             
-            // Collect all applicable badges in priority order
-            // Badge priority (top to bottom):
-            // 1. NEW - Newest posts
-            // 2. LIKED/TRENDING - Most liked posts
-            // 3. RUNNER-UP (2ND) - Second place posts
-            // 4. SPOTLIGHT - Special featured posts
-            // 5. PODIUM (3RD) - Third place posts
+            // Get post's grid position (find its index in sorted order)
+            let gridPosition = null;
+            if (allPosts && allPosts.length > 0) {
+                const sortedPosts = [...allPosts].sort((a, b) => {
+                    const aNetLikes = (a.likes || 0) - (a.dislikes || 0);
+                    const bNetLikes = (b.likes || 0) - (b.dislikes || 0);
+                    return bNetLikes - aNetLikes;
+                });
+                gridPosition = sortedPosts.findIndex(p => p.id === post.id) + 1;
+            }
+            
             const applicableBadges = [];
             
-            // Priority 1: NEW badge (dynamic duration based on online user count)
+            // NEW badge (dynamic duration based on online user count)
             const newBadgeDuration = getNewBadgeDurationMs();
             if (postAge < newBadgeDuration) {
                 applicableBadges.push('new');
             }
             
-            // HOT badge: high engagement (likes > 8)
-            if (likes > 8) {
-                applicableBadges.push('hot');
+            // HOT badge: posts that moved up 3 times in a row (track via post.movedUpCount)
+            // Initially 0, increments when post moves up, resets if moves down
+            if (post.movedUpCount >= 3) {
+                // Only allowed for non-podium positions (not 1, 2, or 3)
+                if (!gridPosition || gridPosition > 3) {
+                    applicableBadges.push('hot');
+                }
+            }
+            
+            // TRENDING badge: posts with likes but no votes cast yet (OR low vote counts)
+            // More accurately: posts with likes but without dislikes yet
+            if (likes > 0 && dislikes === 0 && !applicableBadges.includes('hot')) {
+                // Only allowed for non-podium positions
+                if (!gridPosition || gridPosition > 3) {
+                    applicableBadges.push('trending');
+                }
             }
             
             // RISING badge: recent post (< 6 hours) with good engagement (likes > 3)
@@ -8405,44 +8440,44 @@
                 applicableBadges.push('rising');
             }
             
-            // Priority 2: TRENDING/CROWNED badge: highest engagement in all posts (ONLY for position 1 most-liked)
-            // Based on net positive likes (likes - dislikes)
+            // PODIUM badges: positions 1-3 only
             const netLikes = likes - dislikes;
-            const maxNetLikes = Math.max(...allPosts.map(p => (p.likes || 0) - (p.dislikes || 0)));
-            if (netLikes === maxNetLikes && netLikes > 0) {
-                applicableBadges.push('trending');
-                applicableBadges.push('crowned'); // Most liked post gets crowned badge
+            if (allPosts && allPosts.length > 0) {
+                const netLikesArray = [...allPosts.map(p => (p.likes || 0) - (p.dislikes || 0))].sort((a, b) => b - a);
+                const topNetLikes = [...new Set(netLikesArray)].slice(0, 3);
+                
+                // Position 1: CROWNED badge (most liked)
+                if (topNetLikes[0] && netLikes === topNetLikes[0] && netLikes > 0) {
+                    applicableBadges.push('crowned');
+                }
+                
+                // Position 2: RUNNER-UP badge (2nd most liked)
+                if (topNetLikes[1] && netLikes === topNetLikes[1] && netLikes > 0) {
+                    applicableBadges.push('runner-up');
+                }
+                
+                // Position 3: PODIUM badge (3rd most liked)
+                if (topNetLikes[2] && netLikes === topNetLikes[2] && netLikes > 0) {
+                    applicableBadges.push('podium');
+                }
             }
             
-            // Priority 2: LIKED badge: more likes than dislikes and not one of the better badge posts
-            // Only excluded by TOP TIER badges: CROWNED, RUNNER-UP, PODIUM, SPOTLIGHT, DISLIKED, TRENDING
-            // LIKED can coexist with: NEW, RISING, HOT, CONTROVERSIAL, MEDIA-CONTENT
+            // LIKED badge: more likes than dislikes
             if (likes > dislikes && 
                 likes > 0 &&
                 !applicableBadges.includes('crowned') && 
                 !applicableBadges.includes('runner-up') && 
-                !applicableBadges.includes('podium') && 
-                !applicableBadges.includes('trending') && 
-                !applicableBadges.includes('disliked') &&
-                post.id !== spotlightPostId) {
+                !applicableBadges.includes('podium')) {
                 applicableBadges.push('liked');
-                console.log(`✅ LIKED badge added to post ${post.id}: likes=${likes}, dislikes=${dislikes}`);
             }
             
-            // Priority 3: RUNNER-UP badge: 2nd most net positive liked post (NO TRENDING)
-            if (allPosts && allPosts.length > 0) {
-                const netLikesArray = [...allPosts.map(p => (p.likes || 0) - (p.dislikes || 0))].sort((a, b) => b - a);
-                const topNetLikes = [...new Set(netLikesArray)].slice(0, 3);
-                if (topNetLikes[1] && netLikes === topNetLikes[1] && netLikes > 0) {
-                    applicableBadges.push('runner-up');
-                    // NO trending badge for 2nd place
-                }
-                
-                // Priority 5: PODIUM badge: 3rd most net positive liked post (NO TRENDING)
-                // Placed after SPOTLIGHT
-                if (topNetLikes[2] && netLikes === topNetLikes[2] && netLikes > 0) {
-                    applicableBadges.push('podium');
-                    // NO trending badge for 3rd place
+            // REDEMPTION badge: disliked posts that get likes (NEW BADGE)
+            // Posts where dislikes > likes initially, but now has gained likes
+            if (dislikes > 0 && likes > 0 && likes > (post.previousDislikes || dislikes)) {
+                // Redemption is rarer in early days, more common at 100m users
+                const shouldShowRedemption = Math.random() < (totalUserCount / 100000000) * 0.1;
+                if (shouldShowRedemption) {
+                    applicableBadges.push('redemption');
                 }
             }
             
@@ -8454,7 +8489,6 @@
             // DISLIKED badge: more dislikes than likes
             if (dislikes > likes) {
                 applicableBadges.push('disliked');
-                console.log(`🔴 DISLIKED badge added to post ${post.id.substring(0, 8)}...: ${likes}L / ${dislikes}D`);
             }
             
             // BALANCED badge: equal likes and dislikes (requires at least 1 vote each)
@@ -8467,29 +8501,28 @@
                 applicableBadges.push('verified');
             }
             
-            // Add all applicable badges (excluding PODIUM which goes after SPOTLIGHT)
-            badges.push(...applicableBadges.filter(b => b !== 'podium'));
-            
-            // Priority 4: Add SPOTLIGHT badge if this is the currently spotlighted post
+            // SPOTLIGHT badge
             if (post.id === spotlightPostId) {
-                badges.push('spotlight');
+                applicableBadges.push('spotlight');
             }
             
-            // Priority 5: Add PODIUM badge after SPOTLIGHT
-            if (applicableBadges.includes('podium')) {
-                badges.push('podium');
-            }
+            // Build final badges array with ordering rules for grid positions 1-2000
+            // Order: PODIUM → GOOD BADGES → LIKE BADGES → RISING BADGES → DISLIKED BADGES
+            const podiumBadges = ['crowned', 'runner-up', 'podium'];
+            const goodBadges = ['spotlight', 'verified'];
+            const likeBadges = ['liked'];
+            const risingBadges = ['trending', 'rising', 'hot', 'new'];
+            const dislikedBadges = ['disliked', 'redemption'];
             
-            // Add MIXED badge if post has both media and content
-            // Can combine with LIKED and NEW as split badges
-            if (hasMixedContent) {
-                badges.push('media-content');
-            }
+            // Add in priority order
+            badges.push(...applicableBadges.filter(b => podiumBadges.includes(b)));
+            badges.push(...applicableBadges.filter(b => goodBadges.includes(b)));
+            badges.push(...applicableBadges.filter(b => likeBadges.includes(b)));
+            badges.push(...applicableBadges.filter(b => risingBadges.includes(b)));
+            badges.push(...applicableBadges.filter(b => dislikedBadges.includes(b)));
             
-            // Debug: Log all badges for this post
-            if (likes <= 1 && dislikes >= 3) {
-                console.log(`📌 Post ${post.id.substring(0, 8)}... badges: [${badges.join(', ')}]`);
-            }
+            // Add remaining badges (controversial, balanced, media-content)
+            badges.push(...applicableBadges.filter(b => !podiumBadges.concat(goodBadges, likeBadges, risingBadges, dislikedBadges).includes(b)));
             
             return badges;
         }
