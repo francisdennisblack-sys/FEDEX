@@ -2377,7 +2377,7 @@
                 <span>📊</span>
                 <span id="postCountValue">Posts: Loading...</span>
                 <span id="postAgeBreakdown" style="color: #666;"></span>
-                <span id="debugDeleteBtn" style="cursor: pointer; color: #666; font-size: 9px; padding: 2px 6px; border: 1px solid #555; border-radius: 3px; margin-left: 4px;" onclick="testManualDelete()" title="Test delete oldest post">Test Delete</span>
+                <span id="debugDeleteBtn" style="cursor: pointer; color: #666; font-size: 9px; padding: 2px 6px; border: 1px solid #555; border-radius: 3px; margin-left: 4px;" onclick="if(typeof testManualDelete==='function') testManualDelete(); else alert('Function loading...')" title="Test delete oldest post">Test Delete</span>
             </div>
             <div id="zoneDropdown" style="display: none; position: absolute; top: 60px; left: 12px; background: #222; border: 1px solid #4ade80; border-radius: 6px; padding: 8px 0; min-width: 240px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
                 <div style="padding: 8px 12px; color: #888; font-size: 11px; border-bottom: 1px solid #333;">�️ Network Zone (Balanced Location + POI)</div>
@@ -2849,8 +2849,8 @@
                     </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                    <button onclick="testManualDelete()" style="padding: 10px; background-color: #ef4444; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px;">🧪 Test Delete Oldest</button>
-                    <button onclick="manuallyTriggerCleanup()" style="padding: 10px; background-color: #10b981; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px;">⚡ Force Cleanup Now</button>
+                    <button onclick="if(typeof testManualDelete==='function') testManualDelete(); else alert('Function loading...')" style="padding: 10px; background-color: #ef4444; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px;">🧪 Test Delete Oldest</button>
+                    <button onclick="if(typeof manuallyTriggerCleanup==='function') manuallyTriggerCleanup(); else alert('Function loading...')" style="padding: 10px; background-color: #10b981; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px;">⚡ Force Cleanup Now</button>
                 </div>
                 <div style="margin-top: 8px; font-size: 11px; color: #a0aec0;">⚙️ Automatic cleanup runs every 10 seconds • Last check: <span id="adminLastCleanupCheck">never</span></div>
             </div>
@@ -9327,6 +9327,10 @@
                 let deletedCount = 0;
                 let keptCount = 0;
                 let deletedPostIds = [];
+                let deletionErrors = [];
+                
+                // Create array of deletion promises
+                const deletionPromises = [];
                 
                 // Check each post's age
                 Object.keys(posts).forEach(postId => {
@@ -9337,21 +9341,41 @@
                     
                     // If post is older than or equal to 24 hours, delete it immediately
                     if (postAge >= TWENTY_FOUR_HOURS) {
-                        console.log(`🗑️ INSTANT DELETE: Post "${postId.substring(0, 8)}..." is ${Math.round(ageHours)}h old - DELETING NOW`);
-                        deletePostFromFirebase(currentWiFiNetwork, postId);
-                        deletedCount++;
-                        deletedPostIds.push(postId.substring(0, 8));
+                        console.log(`🗑️ SCHEDULED FOR DELETE: Post "${postId.substring(0, 8)}..." is ${Math.round(ageHours)}h old`);
+                        
+                        // Push deletion promise to array
+                        deletionPromises.push(
+                            deletePostFromFirebase(currentWiFiNetwork, postId)
+                                .then(() => {
+                                    deletedCount++;
+                                    deletedPostIds.push(postId.substring(0, 8));
+                                    console.log(`✅ Successfully deleted: ${postId.substring(0, 8)}`);
+                                })
+                                .catch(err => {
+                                    deletionErrors.push(`${postId.substring(0, 8)}: ${err.message}`);
+                                    console.error(`❌ Failed to delete ${postId.substring(0, 8)}:`, err);
+                                })
+                        );
                     } else {
                         keptCount++;
                     }
                 });
+                
+                // Wait for ALL deletions to complete
+                if (deletionPromises.length > 0) {
+                    console.log(`⏳ Waiting for ${deletionPromises.length} deletions to complete...`);
+                    await Promise.all(deletionPromises);
+                }
                 
                 // Show post count summary
                 const totalAfter = totalBefore - deletedCount;
                 
                 if (deletedCount > 0) {
                     console.log(`📊 POST COUNT: ${totalBefore} → ${totalAfter} (deleted ${deletedCount}, kept ${keptCount})`);
-                    console.log(`🗂️ Deleted posts: ${deletedPostIds.join(', ')}`);
+                    console.log(`🗂️ Successfully deleted posts: ${deletedPostIds.join(', ')}`);
+                    if (deletionErrors.length > 0) {
+                        console.warn(`⚠️ Deletion errors: ${deletionErrors.join(' | ')}`);
+                    }
                     console.log(`%c📉 POSTS DROPPED BY ${deletedCount}`, 'color: #ef4444; font-weight: bold; font-size: 14px;');
                 } else if (totalBefore > 0) {
                     console.log(`📊 POST COUNT: ${totalBefore} total (all fresh - none old enough to delete yet)`);
