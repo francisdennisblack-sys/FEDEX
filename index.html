@@ -7774,112 +7774,91 @@
             }
         }
 
-        // Force manual cleanup from admin page - Delete ALL posts, reported posts, hidden posts, and photos
+        // Force manual cleanup from admin page - Delete ALL posts, reported posts, hidden posts, and photos globally
         async function manuallyTriggerCleanup() {
             console.log('⚡ FORCE DELETE ALL - INITIATED');
             
-            if (!currentWiFiNetwork) {
-                alert('❌ No network connected');
-                return;
-            }
-            
             try {
-                console.log('🔥 Starting complete database wipe...');
+                console.log('🔥 Starting complete Firebase wipe...');
                 
-                // 1. DELETE ALL ACTIVE POSTS
-                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
+                // 1. DELETE ALL POSTS (ROOT LEVEL)
+                const postsRef = ref(database, `posts`);
                 const postsSnapshot = await get(postsRef);
                 let deletedPostsCount = 0;
-                let deletedPhotosCount = 0;
                 
                 if (postsSnapshot.exists()) {
                     const posts = postsSnapshot.val();
                     const allPostIds = Object.keys(posts);
                     deletedPostsCount = allPostIds.length;
                     
-                    console.log(`📝 Active Posts: ${deletedPostsCount} to delete`);
+                    console.log(`📝 Global Posts: ${deletedPostsCount} to delete`);
                     
-                    // Delete posts and their photos in parallel
                     const deletionPromises = allPostIds.map((postId, index) => {
-                        return Promise.all([
-                            deletePostFromFirebase(currentWiFiNetwork, postId),
-                            remove(ref(database, `networks/${currentWiFiNetwork}/photos/${postId}`))
-                                .catch(() => {}) // Photos might not exist, that's ok
-                        ]).then(() => {
-                            const progress = Math.round(((index + 1) / deletedPostsCount) * 100);
-                            console.log(`✅ [${progress}%] Post: ${postId.substring(0, 8)}`);
-                        }).catch(err => {
-                            console.error(`❌ Failed: ${postId.substring(0, 8)}`);
-                        });
+                        return remove(ref(database, `posts/${postId}`))
+                            .then(() => {
+                                const progress = Math.round(((index + 1) / deletedPostsCount) * 100);
+                                console.log(`✅ [${progress}%] Post: ${postId.substring(0, 8)}`);
+                            })
+                            .catch(err => {
+                                console.error(`❌ Failed: ${postId.substring(0, 8)}`);
+                            });
                     });
                     
                     await Promise.all(deletionPromises);
                 }
                 
-                // 2. DELETE ALL REPORTED POSTS FROM LOCALSTORAGE
-                let reportedCount = 0;
-                const reportedPosts = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
-                if (reportedPosts.length > 0) {
-                    reportedCount = reportedPosts.length;
-                    console.log(`🚩 Reported Posts: ${reportedCount} to clear`);
-                    
-                    for (const postId of reportedPosts) {
-                        await remove(ref(database, `networks/${currentWiFiNetwork}/posts/${postId}`)).catch(() => {});
-                        await remove(ref(database, `networks/${currentWiFiNetwork}/photos/${postId}`)).catch(() => {});
-                    }
-                    
-                    localStorage.removeItem('hiddenReportedPosts');
-                    console.log(`✅ Reported posts cleared`);
-                }
-                
-                // 3. DELETE ALL HIDDEN POSTS FROM LOCALSTORAGE
-                let hiddenCount = 0;
-                const hiddenPosts = JSON.parse(localStorage.getItem('hiddenPostsForThisWiFi') || '[]');
-                if (hiddenPosts.length > 0) {
-                    hiddenCount = hiddenPosts.length;
-                    console.log(`👁️ Hidden Posts: ${hiddenCount} to clear`);
-                    
-                    for (const postId of hiddenPosts) {
-                        await remove(ref(database, `networks/${currentWiFiNetwork}/posts/${postId}`)).catch(() => {});
-                        await remove(ref(database, `networks/${currentWiFiNetwork}/photos/${postId}`)).catch(() => {});
-                    }
-                    
-                    localStorage.removeItem('hiddenPostsForThisWiFi');
-                    console.log(`✅ Hidden posts cleared`);
-                }
-                
-                // 4. CLEAR ALL PHOTOS FOLDER
-                const photosRef = ref(database, `networks/${currentWiFiNetwork}/photos`);
+                // 2. DELETE ALL PHOTOS (ROOT LEVEL)
+                let deletedPhotosCount = 0;
+                const photosRef = ref(database, `photos`);
                 const photosSnapshot = await get(photosRef);
+                
                 if (photosSnapshot.exists()) {
                     const photos = photosSnapshot.val();
                     const photoIds = Object.keys(photos);
                     deletedPhotosCount = photoIds.length;
                     
-                    console.log(`📷 Photos: ${deletedPhotosCount} orphaned photos to delete`);
+                    console.log(`📷 Global Photos: ${deletedPhotosCount} to delete`);
                     
-                    const photoDeletePromises = photoIds.map(photoId => 
-                        remove(ref(database, `networks/${currentWiFiNetwork}/photos/${photoId}`))
-                            .catch(() => {})
-                    );
+                    const photoDeletePromises = photoIds.map((photoId, index) => {
+                        return remove(ref(database, `photos/${photoId}`))
+                            .then(() => {
+                                const progress = Math.round(((index + 1) / deletedPhotosCount) * 100);
+                                console.log(`✅ [${progress}%] Photo: ${photoId.substring(0, 8)}`);
+                            })
+                            .catch(() => {});
+                    });
                     
                     await Promise.all(photoDeletePromises);
-                    console.log(`✅ All orphaned photos deleted`);
                 }
                 
-                // 5. VERIFY COMPLETE DELETION
+                // 3. DELETE ALL NETWORK-SPECIFIC DATA
+                const networksRef = ref(database, `networks`);
+                const networksSnapshot = await get(networksRef);
+                
+                if (networksSnapshot.exists()) {
+                    console.log(`🗂️ Deleting all network-specific data...`);
+                    await remove(networksRef).catch(() => {});
+                    console.log(`✅ All network data deleted`);
+                }
+                
+                // 4. CLEAR ALL VOTES
+                const votesRef = ref(database, `user-votes`);
+                console.log(`🗳️ Clearing all votes...`);
+                await remove(votesRef).catch(() => {});
+                
+                // 5. VERIFY DELETION
                 const verifyPosts = await get(postsRef);
                 const verifyPhotos = await get(photosRef);
                 const postsRemaining = verifyPosts.exists() ? Object.keys(verifyPosts.val()).length : 0;
                 const photosRemaining = verifyPhotos.exists() ? Object.keys(verifyPhotos.val()).length : 0;
                 
-                const totalDeleted = deletedPostsCount + reportedCount + hiddenCount + deletedPhotosCount;
+                const totalDeleted = deletedPostsCount + deletedPhotosCount;
                 
-                console.log(`%c🎉 COMPLETE WIPE SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
-                console.log(`✅ Deleted: ${deletedPostsCount} posts, ${reportedCount} reported, ${hiddenCount} hidden, ${deletedPhotosCount} photos`);
+                console.log(`%c🎉 COMPLETE FIREBASE WIPE SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
+                console.log(`✅ Deleted: ${deletedPostsCount} posts, ${deletedPhotosCount} photos`);
                 
                 if (postsRemaining === 0 && photosRemaining === 0) {
-                    alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${deletedPostsCount}\n• Reported: ${reportedCount}\n• Hidden: ${hiddenCount}\n• Photos: ${deletedPhotosCount}\n\n✓ Database completely cleaned`);
+                    alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${deletedPostsCount}\n• Photos: ${deletedPhotosCount}\n• Votes: cleared\n• Network data: cleared\n\n✓ Firebase completely wiped`);
                 } else {
                     alert(`⚠️ Partial deletion:\n• Deleted: ${totalDeleted} items\n• Posts remaining: ${postsRemaining}\n• Photos remaining: ${photosRemaining}`);
                 }
@@ -9417,109 +9396,85 @@
             }
         }
 
-        // Force delete ALL posts from Firebase (active, reported, hidden, and photos)
+        // Force delete ALL posts from Firebase (directly from root, not network-specific)
         async function forceDeleteAllPosts() {
-            if (!currentWiFiNetwork) {
-                alert('❌ No network connected');
-                return;
-            }
-            
-            const confirm = window.confirm('⚠️ FORCE DELETE ALL\n\nThis will DELETE:\n✓ All active posts\n✓ All reported posts\n✓ All hidden posts\n✓ All photos\n\nThis action cannot be undone!\n\nClick OK to proceed.');
+            const confirm = window.confirm('⚠️ FORCE DELETE ALL\n\nThis will DELETE EVERYTHING from Firebase:\n✓ All posts globally\n✓ All photos globally\n✓ All network data\n✓ All votes\n\nThis action cannot be undone!\n\nClick OK to proceed.');
             if (!confirm) return;
             
-            console.log('🔥 FORCE DELETE ALL - Starting complete wipe...');
+            console.log('🔥 FORCE DELETE ALL FIREBASE - Starting...');
             
             try {
                 let deletedPostsCount = 0;
                 let deletedPhotosCount = 0;
-                let reportedCount = 0;
-                let hiddenCount = 0;
                 
-                // 1. DELETE ALL ACTIVE POSTS
-                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
-                const snapshot = await get(postsRef);
+                // 1. DELETE ALL POSTS (ROOT)
+                const postsRef = ref(database, `posts`);
+                const postsSnapshot = await get(postsRef);
                 
-                if (snapshot.exists()) {
-                    const posts = snapshot.val();
+                if (postsSnapshot.exists()) {
+                    const posts = postsSnapshot.val();
                     const allPostIds = Object.keys(posts);
                     deletedPostsCount = allPostIds.length;
                     
-                    console.log(`📝 Active Posts: ${deletedPostsCount} to delete`);
+                    console.log(`📝 Global Posts: ${deletedPostsCount} to delete`);
                     
                     const deletionPromises = allPostIds.map((postId, index) => {
-                        return Promise.all([
-                            deletePostFromFirebase(currentWiFiNetwork, postId),
-                            remove(ref(database, `networks/${currentWiFiNetwork}/photos/${postId}`))
-                                .catch(() => {})
-                        ]).then(() => {
-                            const progress = Math.round(((index + 1) / deletedPostsCount) * 100);
-                            console.log(`✅ [${progress}%] Post: ${postId.substring(0, 8)}`);
-                        }).catch(err => {
-                            console.error(`❌ Failed: ${postId.substring(0, 8)}`);
-                        });
+                        return remove(ref(database, `posts/${postId}`))
+                            .then(() => {
+                                const progress = Math.round(((index + 1) / deletedPostsCount) * 100);
+                                console.log(`✅ [${progress}%] Post: ${postId.substring(0, 8)}`);
+                            })
+                            .catch(err => {
+                                console.error(`❌ Failed: ${postId.substring(0, 8)}`);
+                            });
                     });
                     
                     await Promise.all(deletionPromises);
                 }
                 
-                // 2. DELETE REPORTED POSTS
-                const reportedPosts = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
-                if (reportedPosts.length > 0) {
-                    reportedCount = reportedPosts.length;
-                    console.log(`🚩 Reported Posts: ${reportedCount} to clear`);
-                    
-                    for (const postId of reportedPosts) {
-                        await remove(ref(database, `networks/${currentWiFiNetwork}/posts/${postId}`)).catch(() => {});
-                        await remove(ref(database, `networks/${currentWiFiNetwork}/photos/${postId}`)).catch(() => {});
-                    }
-                    
-                    localStorage.removeItem('hiddenReportedPosts');
-                }
-                
-                // 3. DELETE HIDDEN POSTS
-                const hiddenPosts = JSON.parse(localStorage.getItem('hiddenPostsForThisWiFi') || '[]');
-                if (hiddenPosts.length > 0) {
-                    hiddenCount = hiddenPosts.length;
-                    console.log(`👁️ Hidden Posts: ${hiddenCount} to clear`);
-                    
-                    for (const postId of hiddenPosts) {
-                        await remove(ref(database, `networks/${currentWiFiNetwork}/posts/${postId}`)).catch(() => {});
-                        await remove(ref(database, `networks/${currentWiFiNetwork}/photos/${postId}`)).catch(() => {});
-                    }
-                    
-                    localStorage.removeItem('hiddenPostsForThisWiFi');
-                }
-                
-                // 4. DELETE ALL ORPHANED PHOTOS
-                const photosRef = ref(database, `networks/${currentWiFiNetwork}/photos`);
+                // 2. DELETE ALL PHOTOS (ROOT)
+                const photosRef = ref(database, `photos`);
                 const photosSnapshot = await get(photosRef);
+                
                 if (photosSnapshot.exists()) {
                     const photos = photosSnapshot.val();
                     const photoIds = Object.keys(photos);
                     deletedPhotosCount = photoIds.length;
                     
-                    console.log(`📷 Photos: ${deletedPhotosCount} to delete`);
+                    console.log(`📷 Global Photos: ${deletedPhotosCount} to delete`);
                     
-                    const photoDeletePromises = photoIds.map(photoId => 
-                        remove(ref(database, `networks/${currentWiFiNetwork}/photos/${photoId}`))
-                            .catch(() => {})
-                    );
+                    const photoDeletePromises = photoIds.map((photoId, index) => {
+                        return remove(ref(database, `photos/${photoId}`))
+                            .then(() => {
+                                const progress = Math.round(((index + 1) / deletedPhotosCount) * 100);
+                                console.log(`✅ [${progress}%] Photo: ${photoId.substring(0, 8)}`);
+                            })
+                            .catch(() => {});
+                    });
                     
                     await Promise.all(photoDeletePromises);
                 }
                 
-                // 5. VERIFY COMPLETE DELETION
+                // 3. DELETE ALL NETWORK DATA
+                console.log(`🗂️ Deleting all network data...`);
+                await remove(ref(database, `networks`)).catch(() => {});
+                
+                // 4. CLEAR ALL VOTES
+                console.log(`🗳️ Clearing all votes...`);
+                await remove(ref(database, `user-votes`)).catch(() => {});
+                
+                // 5. VERIFY DELETION
                 const verifyPosts = await get(postsRef);
                 const verifyPhotos = await get(photosRef);
                 const postsRemaining = verifyPosts.exists() ? Object.keys(verifyPosts.val()).length : 0;
                 const photosRemaining = verifyPhotos.exists() ? Object.keys(verifyPhotos.val()).length : 0;
                 
-                const totalDeleted = deletedPostsCount + reportedCount + hiddenCount + deletedPhotosCount;
+                const totalDeleted = deletedPostsCount + deletedPhotosCount;
                 
-                console.log(`%c🎉 COMPLETE WIPE SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
+                console.log(`%c🎉 COMPLETE FIREBASE WIPE SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
                 
                 if (postsRemaining === 0 && photosRemaining === 0) {
-                    alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${deletedPostsCount}\n• Reported: ${reportedCount}\n• Hidden: ${hiddenCount}\n• Photos: ${deletedPhotosCount}\n\n✓ Database completely cleaned`);
+                    alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${deletedPostsCount}\n• Photos: ${deletedPhotosCount}\n• Votes: cleared\n• Network data: cleared\n\n✓ Firebase completely wiped`);
                     console.log(`✅ Total deleted: ${totalDeleted} items`);
                 } else {
                     alert(`⚠️ Partial deletion:\n• Deleted: ${totalDeleted} items\n• Posts remaining: ${postsRemaining}\n• Photos remaining: ${photosRemaining}`);
