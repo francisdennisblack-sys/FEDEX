@@ -301,24 +301,26 @@ app.post('/api/moderate-video', async (req, res) => {
         
         // Explicit Content Detection
         // Likelihood: UNKNOWN=0, VERY_UNLIKELY=1, UNLIKELY=2, POSSIBLE=3, LIKELY=4, VERY_LIKELY=5
+        // ADJUSTED: Flag only at LIKELY (4) or higher to reduce false positives
         if (explicitAnnotation.frames && explicitAnnotation.frames.length > 0) {
             const confidenceValues = explicitAnnotation.frames.map(f => f.pornographyLikelihood || 0);
             explicitConfidence = Math.max(...confidenceValues);
-            console.log('📊 Explicit content confidence:', explicitConfidence, '(5=VERY_LIKELY, 3=POSSIBLE)');
+            console.log('📊 Explicit content confidence:', explicitConfidence, '(5=VERY_LIKELY, 4=LIKELY)');
             
-            if (explicitConfidence >= 3) {
+            if (explicitConfidence >= 4) {
                 isFlagged = true;
                 moderationReason = 'Explicit/Nudity content detected';
             }
         }
         
         // Violence Detection
+        // ADJUSTED: Flag only at 0.85 or higher to reduce false positives (action sequences, sports, etc.)
         if (!isFlagged && violenceAnnotations && violenceAnnotations.length > 0) {
             const violenceScores = violenceAnnotations.map(v => v.confidence || 0);
             violenceConfidence = Math.max(...violenceScores);
-            console.log('📊 Violence confidence:', violenceConfidence, '(0.7+ = flagged)');
+            console.log('📊 Violence confidence:', violenceConfidence, '(0.85+ = flagged, reduced from 0.7)');
             
-            if (violenceConfidence >= 0.7) {
+            if (violenceConfidence >= 0.85) {
                 isFlagged = true;
                 moderationReason = 'Violence detected';
             }
@@ -381,21 +383,22 @@ app.post('/api/moderate-photo', async (req, res) => {
         };
         
         // Likelihood scale: UNKNOWN=0, VERY_UNLIKELY=1, UNLIKELY=2, POSSIBLE=3, LIKELY=4, VERY_LIKELY=5
-        // Flag if adult (explicit/nudity) or violence is POSSIBLE or higher
+        // ADJUSTED THRESHOLDS: Only flag for clear violations, not borderline cases
+        // This allows innocent beach photos, swimwear, athletic content, sports photos
         
-        if (safeSearchResult.adult >= 3) { // POSSIBLE or higher
+        if (safeSearchResult.adult >= 4) { // LIKELY or VERY_LIKELY only (was 3)
             isFlagged = true;
             moderationReason = 'Explicit/Nudity content detected in photo';
             console.log('🚫 Flagged for adult content:', safeSearchResult.adult);
         }
         
-        if (!isFlagged && safeSearchResult.violence >= 3) { // POSSIBLE or higher
+        if (!isFlagged && safeSearchResult.violence >= 4) { // LIKELY or higher (was 3)
             isFlagged = true;
             moderationReason = 'Violence detected in photo';
             console.log('🚫 Flagged for violence:', safeSearchResult.violence);
         }
         
-        if (!isFlagged && safeSearchResult.racy >= 4) { // LIKELY or VERY_LIKELY
+        if (!isFlagged && safeSearchResult.racy >= 5) { // VERY_LIKELY only (was 4)
             isFlagged = true;
             moderationReason = 'Racy/Suggestive content detected in photo';
             console.log('🚫 Flagged for racy content:', safeSearchResult.racy);
