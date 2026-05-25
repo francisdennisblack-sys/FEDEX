@@ -6255,6 +6255,8 @@
         let gridContent = {}; // Store posts by user ID instead of WiFi
         let selectedFile = null;
         let selectedMediaType = null; // Track if media is 'video' or 'image'
+        let lastModerationRejectionTime = 0; // Track when moderation last rejected a file
+        let lastRejectedFileName = null; // Track the filename that was rejected
         let selectedBoxIndex = -1;
         let userPostBoxes = []; // Array to track up to 5 user posts
         let userVotes = {};
@@ -6884,6 +6886,10 @@
                     console.log('Explicit confidence:', result.explicitConfidence);
                     console.log('Violence confidence:', result.violenceConfidence);
                     
+                    // CRITICAL: Track this rejection to prevent bypass
+                    lastModerationRejectionTime = Date.now();
+                    lastRejectedFileName = selectedFile ? selectedFile.name : 'unknown';
+                    
                     // Delete the post from Firebase
                     await deletePostFromFirebase(networkId, postId);
                     
@@ -6913,6 +6919,10 @@
                 
             } catch (error) {
                 console.error('Moderation error:', error);
+                
+                // CRITICAL: Track this error to prevent bypass
+                lastModerationRejectionTime = Date.now();
+                lastRejectedFileName = selectedFile ? selectedFile.name : 'unknown';
                 
                 // Clear the selected file on error
                 selectedFile = null;
@@ -6945,6 +6955,10 @@
                     console.log('🚫 Photo flagged:', result.moderationReason);
                     console.log('Confidence details:', result.confidenceDetails);
                     
+                    // CRITICAL: Track this rejection to prevent bypass
+                    lastModerationRejectionTime = Date.now();
+                    lastRejectedFileName = selectedFile ? selectedFile.name : 'unknown';
+                    
                     // Delete the post from Firebase
                     await deletePostFromFirebase(networkId, postId);
                     
@@ -6974,6 +6988,10 @@
                 
             } catch (error) {
                 console.error('Photo moderation error:', error);
+                
+                // CRITICAL: Track this error to prevent bypass
+                lastModerationRejectionTime = Date.now();
+                lastRejectedFileName = selectedFile ? selectedFile.name : 'unknown';
                 
                 // Clear the selected file on error
                 selectedFile = null;
@@ -11983,6 +12001,25 @@
             const postId = `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             
             try {
+                // SECURITY FIX: Prevent moderation bypass
+                // If moderation just failed, require the user to select a NEW file
+                const timeSinceRejection = Date.now() - lastModerationRejectionTime;
+                if (lastModerationRejectionTime > 0 && timeSinceRejection < 60000) { // Within last 60 seconds
+                    if (!imageFile) {
+                        // User is trying to post without selecting a new file after rejection
+                        console.error('🚫 SECURITY: User attempted to post without file after moderation rejection');
+                        alert('⚠️ Your previous photo was rejected by content moderation. You must select a different photo before posting.');
+                        throw new Error('Moderation bypass attempt: no file selected after rejection');
+                    } else {
+                        // Check if they're trying to use the same file again
+                        if (imageFile.name === lastRejectedFileName) {
+                            console.error('🚫 SECURITY: User attempted to post same rejected file');
+                            alert('❌ You cannot post the same photo that was just rejected. Please select a different photo.');
+                            throw new Error('Moderation bypass attempt: same rejected file');
+                        }
+                    }
+                }
+                
                 console.log('=== Starting post creation ===');
                 console.log('Network ID (currentUserId):', currentUserId);
                 console.log('Network ID type:', typeof currentUserId);
