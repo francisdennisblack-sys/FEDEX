@@ -4590,8 +4590,9 @@
                 console.log(`✅ Coverage: ${cityList.length} major cities across 5 continents`);
                 console.log(`📊 POI Categories: Cafe, Restaurant, Retail, Entertainment, Services, Museums, Parks, Hotels, Landmarks, Markets, Banks, Hospitals, Libraries, Schools, Transportation`);
                 
-                // Also load US locations database for enhanced zone search
-                loadUSLocationDatabase();
+                // PRIORITY: Load worldwide POI database as PRIMARY location source
+                // Then enhance with US locations database
+                await loadWorldwidePOIAsLocationDatabase();
             } catch (error) {
                 console.error('❌ Error loading POI/density data:', error);
                 poiDatabase = [];
@@ -4602,12 +4603,12 @@
         // Load comprehensive US locations database (3000+ cities, towns, neighborhoods)
         async function loadUSLocationDatabase() {
             try {
-                console.log('🔄 Starting to load US locations database...');
+                console.log('🔄 Step 2 Fallback: Attempting to load US locations database...');
                 const response = await fetch('/us_locations_database.json');
                 if (!response.ok) throw new Error('Failed to load US locations database');
                 
                 const data = await response.json();
-                console.log(`📊 Database version: ${data.version}, Total in file: ${data.totalLocations}`);
+                console.log(`📊 US Database version: ${data.version}, Total in file: ${data.totalLocations}`);
                 
                 // Flatten all locations from all states and regions
                 const allLocations = [];
@@ -4623,8 +4624,6 @@
                             state.regions.forEach(region => {
                                 regionCount++;
                                 if (region.areas && Array.isArray(region.areas)) {
-                                    console.log(`   State ${stateIdx + 1}: ${state.state} (${state.stateCode}) - Region "${region.name}" has ${region.areas.length} areas`);
-                                    
                                     region.areas.forEach((area, areaIdx) => {
                                         if (!area.name || !area.lat || !area.lon) {
                                             console.warn(`   ⚠️  Invalid area in ${state.state} region ${region.name}: missing name/coords`, area);
@@ -4638,48 +4637,74 @@
                                             lon: area.lon,
                                             type: area.type || 'city',
                                             population: area.population,
-                                            region: region.name
+                                            region: region.name,
+                                            source: 'us_database'
                                         });
                                     });
-                                } else {
-                                    console.warn(`   ⚠️  Region "${region.name}" in ${state.state} has no areas array`);
                                 }
                             });
-                        } else {
-                            console.warn(`   ⚠️  State ${state.state} has no regions array`);
                         }
                     });
                 }
                 
-                globalLocationDatabase = allLocations;
-                console.log(`✅ Successfully loaded database!`);
-                console.log(`   📍 Total locations flattened: ${allLocations.length}`);
-                console.log(`   🗺️  States: ${stateCount}`);
-                console.log(`   📍 Regions: ${regionCount}`);
-                console.log(`📊 globalLocationDatabase assigned:`, {
-                    type: typeof globalLocationDatabase,
-                    isArray: Array.isArray(globalLocationDatabase),
-                    length: globalLocationDatabase?.length,
-                    firstItem: globalLocationDatabase?.[0]
-                });
-                
-                // Verify some key locations
-                const huntington = allLocations.find(l => l.name === 'Huntington Beach');
-                if (huntington) {
-                    console.log(`✅ Huntington Beach found: ${huntington.name}, ${huntington.state} @ ${huntington.lat}, ${huntington.lon}`);
+                // Merge with existing worldwide data instead of replacing it
+                if (globalLocationDatabase.length > 0) {
+                    console.log(`📍 Merging ${allLocations.length} US locations with existing ${globalLocationDatabase.length} worldwide locations...`);
+                    globalLocationDatabase.push(...allLocations);
                 } else {
-                    console.warn(`❌ Huntington Beach NOT FOUND in database`);
+                    globalLocationDatabase = allLocations;
                 }
                 
-                // Sample check
-                const caLocations = allLocations.filter(l => l.state === 'California');
-                console.log(`📍 California locations: ${caLocations.length} (sample: ${caLocations.slice(0, 3).map(l => l.name).join(', ')})`);
+                console.log(`✅ US locations merged!`);
+                console.log(`   📍 Total locations now: ${globalLocationDatabase.length}`);
+                console.log(`   🗺️  States in US DB: ${stateCount}`);
+                console.log(`   📍 Regions: ${regionCount}`);
                 
             } catch (error) {
-                console.error('❌ CRITICAL: Could not load US locations database:', error);
-                console.error('   Stack:', error.stack);
+                console.error('⚠️ Could not load US locations database as fallback:', error);
+                console.log('✅ Continuing with worldwide POI data only...');
+            }
+        }
+
+        // PRIMARY: Load worldwide POI database and extract city names as locations
+        async function loadWorldwidePOIAsLocationDatabase() {
+            try {
+                console.log('🔄 Step 1 PRIMARY: Loading worldwide POI database for locations...');
+                const response = await fetch('/poi_database_worldwide.json');
+                if (!response.ok) throw new Error('Failed to load worldwide POI database');
+                
+                const data = await response.json();
+                const primaryLocations = [];
+                
+                // Extract city names from POI database as PRIMARY locations
+                if (data.cities && typeof data.cities === 'object') {
+                    Object.entries(data.cities).forEach(([cityName, cityData]) => {
+                        primaryLocations.push({
+                            name: cityName,
+                            state: cityData.country || 'International',
+                            lat: cityData.lat,
+                            lon: cityData.lon,
+                            type: 'city',
+                            population: cityData.poiCount || 0,
+                            region: cityData.country || 'World',
+                            source: 'worldwide_poi_database'
+                        });
+                    });
+                }
+                
+                globalLocationDatabase = primaryLocations;
+                console.log(`✅ Loaded worldwide POI database as PRIMARY location source!`);
+                console.log(`   📍 Total cities extracted: ${primaryLocations.length}`);
+                console.log(`   🌍 Cities: ${primaryLocations.map(l => `${l.name} (${l.state})`).join(', ')}`);
+                
+                // Now try to enhance with US database
+                console.log('\n🔄 Now loading US database to enhance coverage...');
+                await loadUSLocationDatabase();
+                
+            } catch (error) {
+                console.error('❌ Could not load worldwide POI database:', error);
                 globalLocationDatabase = [];
-                console.log('🔴 Fallback: globalLocationDatabase set to empty array');
+                console.log('🔴 Location detection will use coordinates only');
             }
         }
 
