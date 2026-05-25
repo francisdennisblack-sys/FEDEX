@@ -4446,6 +4446,9 @@
                         // Update status display
                         updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
                         resolve(userLocation);
+                        
+                        // NOW: Start continuous location watching for real-time updates
+                        startContinuousLocationTracking();
                         return;
                     } catch (e) {
                         console.log('⚠️ Cached location invalid, requesting fresh location');
@@ -4482,6 +4485,9 @@
                                     console.log('📍 User Location Acquired');
                                     updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
                                     resolve(userLocation);
+                                    
+                                    // NOW: Start continuous location watching for real-time updates
+                                    startContinuousLocationTracking();
                                 },
                                 () => {
                                     console.log('⚠️ Location access failed');
@@ -4510,6 +4516,9 @@
                                     console.log('📍 User Location Acquired & Cached');
                                     updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
                                     resolve(userLocation);
+                                    
+                                    // NOW: Start continuous location watching for real-time updates
+                                    startContinuousLocationTracking();
                                 },
                                 () => {
                                     console.log('⚠️ User denied or location access failed');
@@ -4535,6 +4544,9 @@
                             console.log('💾 Location cached in localStorage');
                             console.log('📍 User Location Acquired');
                             resolve(userLocation);
+                            
+                            // NOW: Start continuous location watching for real-time updates
+                            startContinuousLocationTracking();
                         },
                         () => {
                             console.log('⚠️ Location access failed or denied');
@@ -4546,6 +4558,105 @@
                 }
             });
         }
+
+        // ============================================
+        // CONTINUOUS LOCATION TRACKING
+        // Watch position and update zone tag as user moves
+        // ============================================
+        let locationWatchId = null;
+        let lastDetectedZone = null;
+        let lastLocationUpdateTime = 0;
+        const ZONE_UPDATE_THROTTLE = 3000; // Update zone every 3 seconds minimum
+
+        function startContinuousLocationTracking() {
+            if (locationWatchId !== null) {
+                console.log('✅ Continuous location tracking already active');
+                return;
+            }
+
+            if (!navigator.geolocation) {
+                console.warn('⚠️ Geolocation not available for continuous tracking');
+                return;
+            }
+
+            console.log('🔄 Starting continuous location tracking...');
+            
+            locationWatchId = navigator.geolocation.watchPosition(
+                (position) => {
+                    const newLocation = {
+                        lat: position.coords.latitude,
+                        lon: position.coords.longitude,
+                        accuracy: position.coords.accuracy
+                    };
+
+                    // Check if location has significantly changed
+                    const distanceChanged = calculateDistance(
+                        userLocation.lat, userLocation.lon,
+                        newLocation.lat, newLocation.lon
+                    );
+
+                    // Update location and cache
+                    userLocation = newLocation;
+                    localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+
+                    // Log movement
+                    if (distanceChanged > 0.01) { // ~1 km
+                        console.log(`📍 Location updated: ${newLocation.lat.toFixed(4)}, ${newLocation.lon.toFixed(4)} (moved ${(distanceChanged * 1000).toFixed(0)}m)`);
+                        updateLocationStatus('📍 Live', `${newLocation.lat.toFixed(4)}, ${newLocation.lon.toFixed(4)}`);
+                    }
+
+                    // Throttle zone detection updates to every 3 seconds
+                    const now = Date.now();
+                    if (now - lastLocationUpdateTime > ZONE_UPDATE_THROTTLE) {
+                        lastLocationUpdateTime = now;
+                        
+                        // Re-detect zone with new location
+                        console.log('🔄 Re-detecting zone for new location...');
+                        detectUserGrid();
+
+                        // Check if zone changed
+                        if (currentZoneTag !== lastDetectedZone) {
+                            lastDetectedZone = currentZoneTag;
+                            console.log(`✅ Zone changed to: ${currentZoneTag}`);
+                            
+                            // Update zone display
+                            const label = document.getElementById('zoneLabel');
+                            if (label) {
+                                label.textContent = `📍 ${currentZoneTag}`;
+                                label.style.color = '#4ade80';
+                            }
+                            
+                            // Update area selector
+                            if (typeof autoDetectClosestArea === 'function') {
+                                autoDetectClosestArea(userLocation);
+                            }
+                        }
+                    }
+                },
+                (error) => {
+                    console.warn('⚠️ Continuous location tracking error:', error);
+                },
+                {
+                    enableHighAccuracy: false,
+                    timeout: 10000,
+                    maximumAge: 1000 // Update every second if available
+                }
+            );
+
+            console.log('✅ Continuous location tracking active (watchPosition ID: ' + locationWatchId + ')');
+        }
+
+        function stopContinuousLocationTracking() {
+            if (locationWatchId !== null) {
+                navigator.geolocation.clearWatch(locationWatchId);
+                console.log('🛑 Continuous location tracking stopped');
+                locationWatchId = null;
+            }
+        }
+
+        // Expose location tracking functions globally
+        window.startContinuousLocationTracking = startContinuousLocationTracking;
+        window.stopContinuousLocationTracking = stopContinuousLocationTracking;
 
         // Find nearby networks and assign zone
         // ============================================
