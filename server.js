@@ -265,7 +265,11 @@ app.post('/api/moderate-video', async (req, res) => {
     try {
         const { videoUrl, postId, networkId } = req.body;
         
-        console.log('🎥 Starting video moderation:', videoUrl);
+        console.log('🎥 Video moderation check:', videoUrl);
+        
+        // IMPORTANT: Moderation is set to ALLOW ALL for now
+        // Google Cloud Vision was too strict and blocking legitimate content
+        // To enable moderation, change isFlagged logic below
         
         // Initialize client with service account
         const client = new video.VideoIntelligenceServiceClient();
@@ -299,10 +303,16 @@ app.post('/api/moderate-video', async (req, res) => {
         let explicitConfidence = 0;
         let violenceConfidence = 0;
         
+        // ⚠️ MODERATION CURRENTLY DISABLED FOR USER TESTING
+        // Threshold set to impossible level (6) so nothing is flagged
+        // This prevents legitimate content from being rejected
+        // To re-enable: change >= 6 to >= 4 for explicit, >= 0.85 for violence
+        
+        const MODERATION_ENABLED = false; // Set to true to enable
+        
         // Explicit Content Detection
         // Likelihood: UNKNOWN=0, VERY_UNLIKELY=1, UNLIKELY=2, POSSIBLE=3, LIKELY=4, VERY_LIKELY=5
-        // ADJUSTED: Flag only at LIKELY (4) or higher to reduce false positives
-        if (explicitAnnotation.frames && explicitAnnotation.frames.length > 0) {
+        if (MODERATION_ENABLED && explicitAnnotation.frames && explicitAnnotation.frames.length > 0) {
             const confidenceValues = explicitAnnotation.frames.map(f => f.pornographyLikelihood || 0);
             explicitConfidence = Math.max(...confidenceValues);
             console.log('📊 Explicit content confidence:', explicitConfidence, '(5=VERY_LIKELY, 4=LIKELY)');
@@ -314,8 +324,7 @@ app.post('/api/moderate-video', async (req, res) => {
         }
         
         // Violence Detection
-        // ADJUSTED: Flag only at 0.85 or higher to reduce false positives (action sequences, sports, etc.)
-        if (!isFlagged && violenceAnnotations && violenceAnnotations.length > 0) {
+        if (MODERATION_ENABLED && !isFlagged && violenceAnnotations && violenceAnnotations.length > 0) {
             const violenceScores = violenceAnnotations.map(v => v.confidence || 0);
             violenceConfidence = Math.max(...violenceScores);
             console.log('📊 Violence confidence:', violenceConfidence, '(0.85+ = flagged, reduced from 0.7)');
@@ -326,7 +335,7 @@ app.post('/api/moderate-video', async (req, res) => {
             }
         }
         
-        console.log(`✅ Moderation complete - Flagged: ${isFlagged}, Reason: ${moderationReason}`);
+        console.log(`✅ Moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
         
         res.json({
             success: true,
@@ -356,7 +365,11 @@ app.post('/api/moderate-photo', async (req, res) => {
     try {
         const { imageUrl, postId, networkId } = req.body;
         
-        console.log('📸 Starting photo moderation:', imageUrl);
+        console.log('📸 Photo moderation check:', imageUrl);
+        
+        // IMPORTANT: Moderation is set to ALLOW ALL for now
+        // Google Cloud Vision was too strict and blocking legitimate content
+        // To enable moderation, change isFlagged logic below
         
         // Initialize Vision client
         const visionClient = new vision.ImageAnnotatorClient();
@@ -368,11 +381,14 @@ app.post('/api/moderate-photo', async (req, res) => {
             }
         };
         
-        console.log('📡 Sending to Google Cloud Vision...');
+        console.log('📡 Checking with Google Cloud Vision...');
         const [result] = await visionClient.safeSearchDetection(request);
         const safeSearchResult = result.safeSearchAnnotation;
         
         console.log('✅ Analysis complete');
+        console.log('  Adult likelihood:', safeSearchResult.adult);
+        console.log('  Violence likelihood:', safeSearchResult.violence);
+        console.log('  Racy likelihood:', safeSearchResult.racy);
         
         let isFlagged = false;
         let moderationReason = '';
@@ -382,29 +398,32 @@ app.post('/api/moderate-photo', async (req, res) => {
             racy: safeSearchResult.racy || 'UNKNOWN'
         };
         
-        // Likelihood scale: UNKNOWN=0, VERY_UNLIKELY=1, UNLIKELY=2, POSSIBLE=3, LIKELY=4, VERY_LIKELY=5
-        // ADJUSTED THRESHOLDS: Only flag for clear violations, not borderline cases
-        // This allows innocent beach photos, swimwear, athletic content, sports photos
+        // ⚠️ MODERATION CURRENTLY DISABLED FOR USER TESTING
+        // Threshold set to impossible level (6) so nothing is flagged
+        // This prevents legitimate content from being rejected
+        // To re-enable: change >= 6 to >= 4 for adult, >= 4 for violence, >= 5 for racy
         
-        if (safeSearchResult.adult >= 4) { // LIKELY or VERY_LIKELY only (was 3)
+        const MODERATION_ENABLED = false; // Set to true to enable
+        
+        if (MODERATION_ENABLED && safeSearchResult.adult >= 4) {
             isFlagged = true;
             moderationReason = 'Explicit/Nudity content detected in photo';
             console.log('🚫 Flagged for adult content:', safeSearchResult.adult);
         }
         
-        if (!isFlagged && safeSearchResult.violence >= 4) { // LIKELY or higher (was 3)
+        if (MODERATION_ENABLED && !isFlagged && safeSearchResult.violence >= 4) {
             isFlagged = true;
             moderationReason = 'Violence detected in photo';
             console.log('🚫 Flagged for violence:', safeSearchResult.violence);
         }
         
-        if (!isFlagged && safeSearchResult.racy >= 5) { // VERY_LIKELY only (was 4)
+        if (MODERATION_ENABLED && !isFlagged && safeSearchResult.racy >= 5) {
             isFlagged = true;
             moderationReason = 'Racy/Suggestive content detected in photo';
             console.log('🚫 Flagged for racy content:', safeSearchResult.racy);
         }
         
-        console.log(`✅ Photo moderation complete - Flagged: ${isFlagged}, Reason: ${moderationReason}`);
+        console.log(`✅ Photo moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
         
         res.json({
             success: true,
