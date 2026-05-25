@@ -2394,6 +2394,26 @@
                 <!-- Grid boxes will be generated here -->
             </div>
         </div>
+        
+        <!-- Recommended for You Section (ML-powered) -->
+        <div style="margin-top: 24px; padding: 16px; background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%); border-radius: 12px; border: 1px solid #333;">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                <span style="font-size: 20px;">✨</span>
+                <h2 style="color: #fff; font-size: 16px; font-weight: 600; margin: 0;">Recommended for You</h2>
+                <span style="font-size: 12px; color: #888; margin-left: auto;">ML-powered</span>
+            </div>
+            <div id="recommendationGrid" style="
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+                gap: 8px;
+                max-height: 250px;
+                overflow-y: auto;
+                padding: 8px 0;
+            "></div>
+            <div id="noRecommendations" style="text-align: center; color: #888; padding: 16px; font-size: 14px;">
+                Interact with more posts to get personalized recommendations
+            </div>
+        </div>
 
         <div style="display: none;" class="upload-panel">
             <!-- Hidden for display but kept for WiFi connection logic -->
@@ -5335,6 +5355,10 @@
             post.dislikes = newDislikes;
             renderGrid();
             
+            // Update ML preferences based on this vote (real-time learning)
+            updateUserPreferences(currentUserId);
+            updateMLScores();
+            
             // Update Firebase asynchronously without blocking UI
             updatePostVotesFirebase(currentWiFiNetwork, postId, {
                 likes: newLikes,
@@ -8072,6 +8096,206 @@
 
         let firstRenderComplete = false;
 
+        // ============================================================================
+        // MACHINE LEARNING SYSTEM - Cross-Area Post Promotion & Recommendations
+        // ============================================================================
+        
+        // ML data structures
+        const mlSystem = {
+            userPreferences: {}, // { userId: { area: score, contentType: score, poi: score } }
+            postScores: {}, // { postId: mlScore (0-1 for recommendation confidence) }
+            recommendedPosts: [], // Top posts for "Recommended for You" section
+            lastUpdateTime: 0,
+            updateInterval: 5000, // Update ML scores every 5 seconds
+        };
+        
+        /**
+         * Build user preference profile based on voting history
+         * Learns: what areas user likes, content preferences, POI preferences
+         */
+        function updateUserPreferences(userId) {
+            if (!userVotes || Object.keys(userVotes).length === 0) return;
+            
+            const userVoteKeys = Object.keys(userVotes).filter(key => key.startsWith(userId));
+            const preferences = {
+                areaScores: {},      // county/area -> engagement score
+                poiScores: {},       // POI name -> engagement score
+                contentTypeScores: {} // 'text' | 'photo' | 'video' -> score
+            };
+            
+            // Analyze each vote this user made
+            userVoteKeys.forEach(voteKey => {
+                const postId = voteKey.split('_').slice(1).join('_');
+                const voteType = userVotes[voteKey]; // 'like' or 'dislike'
+                const post = gridContent[currentUserId]?.find(p => p.id === postId);
+                
+                if (!post) return;
+                
+                const voteScore = voteType === 'like' ? 1 : -0.5; // Likes worth more than dislikes
+                
+                // Track area preferences
+                const area = post.county || 'Unknown';
+                preferences.areaScores[area] = (preferences.areaScores[area] || 0) + voteScore;
+                
+                // Track POI preferences
+                if (post.poiName) {
+                    preferences.poiScores[post.poiName] = (preferences.poiScores[post.poiName] || 0) + voteScore;
+                }
+                
+                // Track content type preferences
+                const contentType = post.photoURL || post.imageData ? 'photo' : post.mediaType === 'video' ? 'video' : 'text';
+                preferences.contentTypeScores[contentType] = (preferences.contentTypeScores[contentType] || 0) + voteScore;
+            });
+            
+            mlSystem.userPreferences[userId] = preferences;
+            console.log('🧠 Updated ML preferences for user:', userId, preferences);
+        }
+        
+        /**
+         * Score posts for ML-based recommendations
+         * Recommends posts from other areas that match user's demonstrated preferences
+         */
+        function scorePostForML(post, userId) {
+            if (!mlSystem.userPreferences[userId]) {
+                updateUserPreferences(userId);
+            }
+            
+            const userPrefs = mlSystem.userPreferences[userId];
+            if (!userPrefs) return 0;
+            
+            let score = 0;
+            const currentUserArea = getCurrentUserArea();
+            
+            // Boost cross-area posts (from different areas)
+            if (post.county && post.county !== currentUserArea) {
+                score += 0.3; // Cross-area bonus
+            }
+            
+            // Match area preferences
+            const areaScore = userPrefs.areaScores[post.county] || 0;
+            const areaWeight = Math.max(0, Math.min(1, areaScore / 10)); // Normalize
+            score += areaWeight * 0.25;
+            
+            // Match POI preferences
+            if (post.poiName && userPrefs.poiScores[post.poiName]) {
+                const poiScore = userPrefs.poiScores[post.poiName];
+                const poiWeight = Math.max(0, Math.min(1, poiScore / 10));
+                score += poiWeight * 0.2;
+            }
+            
+            // Match content type preferences
+            const contentType = post.photoURL || post.imageData ? 'photo' : post.mediaType === 'video' ? 'video' : 'text';
+            const contentScore = userPrefs.contentTypeScores[contentType] || 0;
+            const contentWeight = Math.max(0, Math.min(1, contentScore / 10));
+            score += contentWeight * 0.15;
+            
+            // Engagement quality (posts with good engagement are more likely to be liked)
+            const netEngagement = (post.likes || 0) - (post.dislikes || 0);
+            const engagementBonus = Math.max(0, Math.min(0.2, netEngagement / 100)); // Cap at 0.2
+            score += engagementBonus;
+            
+            // Boost newer posts slightly (freshness)
+            const postAge = Date.now() - (post.timestamp || 0);
+            const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
+            if (postAge < maxAge) {
+                const recencyBonus = (1 - (postAge / maxAge)) * 0.1;
+                score += recencyBonus;
+            }
+            
+            // Penalty: already voted on this post
+            const voteKey = `${userId}_${post.id}`;
+            if (userVotes[voteKey]) {
+                score *= 0.3; // Reduce score for posts user already interacted with
+            }
+            
+            return Math.min(score, 1); // Normalize to 0-1 range
+        }
+        
+        /**
+         * Generate recommended posts for current user
+         * Called real-time as posts arrive or votes change
+         */
+        function generateRecommendations(userId, limit = 5) {
+            if (!gridContent[currentUserId] || gridContent[currentUserId].length === 0) {
+                return [];
+            }
+            
+            updateUserPreferences(userId);
+            
+            // Score all posts
+            const scoredPosts = gridContent[currentUserId].map(post => ({
+                ...post,
+                mlScore: scorePostForML(post, userId)
+            }));
+            
+            // Sort by ML score and get top recommendations
+            const recommendations = scoredPosts
+                .sort((a, b) => b.mlScore - a.mlScore)
+                .filter(p => p.mlScore > 0.3 && p.county !== getCurrentUserArea()) // Filter: high score + cross-area
+                .slice(0, limit);
+            
+            mlSystem.recommendedPosts = recommendations;
+            console.log(`✨ Generated ${recommendations.length} recommendations for ${userId}`);
+            
+            return recommendations;
+        }
+        
+        /**
+         * Get current user's area (WiFi zone or location)
+         */
+        function getCurrentUserArea() {
+            // Try to get from WiFi network first
+            if (currentZoneTag) return currentZoneTag;
+            // Fallback to user's detected county if available
+            if (window.userDetectedCounty) return window.userDetectedCounty;
+            return 'Unknown';
+        }
+        
+        /**
+         * Reorder grid posts with ML predictions
+         * Called during grid render to boost recommended posts
+         */
+        function applyMLReordering(displayPosts) {
+            if (!mlSystem.userPreferences[currentUserId]) {
+                updateUserPreferences(currentUserId);
+            }
+            
+            // Score all posts
+            const scoredPosts = displayPosts.map(post => ({
+                ...post,
+                mlScore: scorePostForML(post, currentUserId)
+            }));
+            
+            // Separate into: local (high priority), recommended (boost), and regular
+            const currentArea = getCurrentUserArea();
+            const localPosts = scoredPosts.filter(p => p.county === currentArea);
+            const recommendedPosts = scoredPosts.filter(p => p.county !== currentArea && p.mlScore > 0.4);
+            const regularPosts = scoredPosts.filter(p => p.county !== currentArea && p.mlScore <= 0.4);
+            
+            // Reorder: local posts first (preserve local priority), then boosted recommendations, then regular
+            return [...localPosts, ...recommendedPosts.sort((a, b) => b.mlScore - a.mlScore), ...regularPosts];
+        }
+        
+        /**
+         * Update ML scores in real-time
+         * Called every 5 seconds or on vote change
+         */
+        function updateMLScores() {
+            const now = Date.now();
+            if (now - mlSystem.lastUpdateTime < mlSystem.updateInterval) {
+                return; // Skip if too soon
+            }
+            
+            mlSystem.lastUpdateTime = now;
+            generateRecommendations(currentUserId, 8); // Keep top 8 recommendations
+            console.log('🧠 ML scores updated');
+        }
+        
+        // Expose ML system globally
+        window.mlSystem = mlSystem;
+        window.generateRecommendations = generateRecommendations;
+        window.updateMLScores = updateMLScores;
+
         function renderGrid() {
             if (!isConnected) return;
             
@@ -8215,6 +8439,13 @@
             
             // Add proximity badges to all posts
             displayPosts = displayPosts.map(post => addProximityBadge(post, currentGrid));
+            
+            // ========================================================================
+            // MACHINE LEARNING: Apply ML-based reordering for cross-area promotion
+            // ========================================================================
+            displayPosts = applyMLReordering(displayPosts);
+            updateMLScores(); // Update ML scores in real-time
+            console.log(`🧠 ML reordering applied, generating recommendations...`);
             
             // Filter hidden/deleted posts from display list
             const sortedPosts = displayPosts.filter(post => {
@@ -8477,6 +8708,9 @@
                 firstRenderComplete = true;
                 console.log('✅ First render complete - subsequent renders will show debug info');
             }
+            
+            // Render ML recommendations at the end
+            renderRecommendations();
         }
 
         function getNewBadgeDurationMs() {
@@ -8498,6 +8732,85 @@
             } else {
                 return 2.5 * 1000; // 2.5 seconds (10k-100k+)
             }
+        }
+
+        /**
+         * Render "Recommended for You" section with ML predictions
+         * Shows top ML-scored posts from other areas
+         */
+        function renderRecommendations() {
+            const recGrid = document.getElementById('recommendationGrid');
+            const noRec = document.getElementById('noRecommendations');
+            
+            if (!recGrid) return;
+            
+            const recommendations = mlSystem.recommendedPosts || [];
+            
+            if (recommendations.length === 0) {
+                recGrid.innerHTML = '';
+                noRec.style.display = 'block';
+                return;
+            }
+            
+            noRec.style.display = 'none';
+            recGrid.innerHTML = '';
+            
+            // Render top 8 recommendations
+            recommendations.slice(0, 8).forEach((post, idx) => {
+                const recBox = document.createElement('div');
+                recBox.style.cssText = `
+                    aspect-ratio: 1;
+                    background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
+                    border: 1px solid #444;
+                    border-radius: 8px;
+                    cursor: pointer;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 8px;
+                    font-size: 12px;
+                    color: #fff;
+                    text-align: center;
+                    overflow: hidden;
+                    transition: all 0.2s ease;
+                    position: relative;
+                `;
+                
+                // Add hover effect
+                recBox.onmouseover = () => {
+                    recBox.style.transform = 'scale(1.05)';
+                    recBox.style.borderColor = '#60a5fa';
+                    recBox.style.boxShadow = '0 0 15px rgba(96, 165, 250, 0.4)';
+                };
+                recBox.onmouseout = () => {
+                    recBox.style.transform = 'scale(1)';
+                    recBox.style.borderColor = '#444';
+                    recBox.style.boxShadow = 'none';
+                };
+                
+                // Add click handler to vote on recommendation
+                recBox.onclick = (e) => {
+                    e.stopPropagation();
+                    voteOnPost(post.id, 'like');
+                };
+                
+                // Content preview
+                const preview = post.content?.substring(0, 20) || (post.photoURL ? '📸 Photo' : '📹 Video');
+                const area = post.county || 'Distant';
+                const mlScore = ((post.mlScore || 0) * 100).toFixed(0);
+                
+                recBox.innerHTML = `
+                    <div style="font-size: 16px; margin-bottom: 4px;">✨</div>
+                    <div style="font-size: 11px; color: #60a5fa; font-weight: 600;">${mlScore}%</div>
+                    <div style="font-size: 10px; color: #888; margin-top: 2px;">${area}</div>
+                    <div style="font-size: 9px; color: #aaa; margin-top: 4px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis;">${preview}...</div>
+                `;
+                
+                recGrid.appendChild(recBox);
+            });
+            
+            console.log(`✨ Rendered ${recommendations.length} recommendations`);
         }
 
         function rotateSpotlight() {
