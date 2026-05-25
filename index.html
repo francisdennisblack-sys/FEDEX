@@ -3557,6 +3557,378 @@
         window.mlTagRewritingSystem = mlTagRewritingSystem;
 
         // ============================================
+        // 📈 GROWTH TRAJECTORY ML SYSTEM
+        // Learns from Day 1 vs Day 365 patterns to optimize content delivery
+        // ============================================
+        const growthAnalyticsSystem = {
+            // User lifecycle metrics
+            userLifecycles: {}, // { userId: { joinDate, posts, votes, days, trajectory } }
+            
+            // Cohort analysis - group users by join date
+            cohorts: {}, // { weekOfJoin: { users: [], avgPosts, avgVotes, retention } }
+            
+            // Growth trajectory curves - historical data
+            trajectoryDatabase: {
+                // day1: { avgPosts, avgVotes, avgEngagement, avgContentConsumption },
+                // day7: { ... },
+                // day30: { ... },
+                // day90: { ... },
+                // day365: { ... }
+            },
+            
+            /**
+             * Track user lifecycle - called when user first joins
+             */
+            trackUserJoin(userId) {
+                if (this.userLifecycles[userId]) return; // Already tracked
+                
+                this.userLifecycles[userId] = {
+                    userId,
+                    joinDate: new Date().getTime(),
+                    posts: 0,
+                    votes: 0,
+                    daysActive: 0,
+                    lastActiveDate: new Date().getTime(),
+                    trajectory: [],
+                    engagement: {
+                        likes: 0,
+                        dislikes: 0,
+                        flagged: 0
+                    },
+                    contentConsumption: {
+                        postsViewed: 0,
+                        uniqueAreasExplored: [],
+                        avgTimePerPost: 0
+                    }
+                };
+                
+                console.log(`📊 Tracking new user lifecycle: ${userId}`);
+                return this.userLifecycles[userId];
+            },
+            
+            /**
+             * Update user metrics throughout their journey
+             */
+            updateUserMetrics(userId, postCreated = false, voteType = null, contentViewed = false, viewDuration = 0) {
+                if (!this.userLifecycles[userId]) {
+                    this.trackUserJoin(userId);
+                }
+                
+                const profile = this.userLifecycles[userId];
+                const now = new Date().getTime();
+                const daysSinceJoin = Math.floor((now - profile.joinDate) / (24 * 60 * 60 * 1000));
+                
+                profile.daysActive = daysSinceJoin + 1; // +1 to include current day
+                profile.lastActiveDate = now;
+                
+                if (postCreated) profile.posts++;
+                
+                if (voteType === 'like') profile.votes++;
+                if (voteType === 'like') profile.engagement.likes++;
+                if (voteType === 'dislike') profile.engagement.dislikes++;
+                
+                if (contentViewed) {
+                    profile.contentConsumption.postsViewed++;
+                    if (viewDuration > 0) {
+                        // Exponential moving average of view time
+                        profile.contentConsumption.avgTimePerPost = 
+                            (profile.contentConsumption.avgTimePerPost * 0.7) + (viewDuration * 0.3);
+                    }
+                }
+                
+                // Capture trajectory snapshot at key intervals
+                this.captureTrajectorySnapshot(userId, daysSinceJoin);
+            },
+            
+            /**
+             * Capture user metrics at key growth milestones (Day 1, 7, 30, 90, 365)
+             */
+            captureTrajectorySnapshot(userId, daysActive) {
+                const profile = this.userLifecycles[userId];
+                const keyMilestones = [0, 1, 6, 7, 29, 30, 89, 90, 364, 365];
+                
+                if (keyMilestones.includes(daysActive)) {
+                    const milestone = daysActive === 0 ? 'DAY_1' : 
+                                      daysActive === 6 ? 'DAY_7' : 
+                                      daysActive === 29 ? 'DAY_30' :
+                                      daysActive === 89 ? 'DAY_90' :
+                                      daysActive === 364 ? 'DAY_365' : null;
+                    
+                    if (milestone) {
+                        const snapshot = {
+                            milestone,
+                            daysActive: daysActive + 1,
+                            postsCreated: profile.posts,
+                            votesGiven: profile.votes,
+                            engagement: { ...profile.engagement },
+                            contentConsumed: profile.contentConsumption.postsViewed,
+                            avgTimePerPost: profile.contentConsumption.avgTimePerPost,
+                            timestamp: new Date().getTime()
+                        };
+                        
+                        profile.trajectory.push(snapshot);
+                        console.log(`📈 ${snapshot.milestone} snapshot: ${snapshot.postsCreated} posts, ${snapshot.votesGiven} votes, ${snapshot.contentConsumed} items viewed`);
+                        
+                        // Update global trajectory database
+                        this.updateGlobalTrajectory(snapshot);
+                    }
+                }
+            },
+            
+            /**
+             * Aggregate user snapshots into global growth trajectory database
+             */
+            updateGlobalTrajectory(snapshot) {
+                if (!this.trajectoryDatabase[snapshot.milestone]) {
+                    this.trajectoryDatabase[snapshot.milestone] = {
+                        samples: [],
+                        avgPosts: 0,
+                        avgVotes: 0,
+                        avgEngagement: 0,
+                        avgContentConsumption: 0,
+                        avgTimePerPost: 0,
+                        retentionRate: 0
+                    };
+                }
+                
+                const traj = this.trajectoryDatabase[snapshot.milestone];
+                traj.samples.push(snapshot);
+                
+                // Recalculate averages
+                const total = traj.samples.length;
+                traj.avgPosts = traj.samples.reduce((sum, s) => sum + s.postsCreated, 0) / total;
+                traj.avgVotes = traj.samples.reduce((sum, s) => sum + s.votesGiven, 0) / total;
+                traj.avgEngagement = traj.samples.reduce((sum, s) => sum + (s.engagement.likes - s.engagement.dislikes), 0) / total;
+                traj.avgContentConsumption = traj.samples.reduce((sum, s) => sum + s.contentConsumed, 0) / total;
+                traj.avgTimePerPost = traj.samples.reduce((sum, s) => sum + s.avgTimePerPost, 0) / total;
+                traj.sampleCount = total;
+            },
+            
+            /**
+             * Get growth trajectory document (Day 1 vs Day 365 comparison)
+             */
+            getGrowthTrajectoryDocument() {
+                const day1 = this.trajectoryDatabase['DAY_1'];
+                const day365 = this.trajectoryDatabase['DAY_365'];
+                
+                if (!day1 || !day365) {
+                    return {
+                        status: 'INSUFFICIENT_DATA',
+                        message: 'Need both Day 1 and Day 365 data',
+                        day1Available: !!day1,
+                        day365Available: !!day365
+                    };
+                }
+                
+                return {
+                    status: 'COMPLETE',
+                    day1: {
+                        avgPostsCreated: day1.avgPosts.toFixed(2),
+                        avgVotesGiven: day1.avgVotes.toFixed(2),
+                        avgContentViewed: day1.avgContentConsumption.toFixed(0),
+                        avgEngagement: day1.avgEngagement.toFixed(2),
+                        avgTimePerItem: (day1.avgTimePerPost * 1000).toFixed(0) + 'ms',
+                        sampleSize: day1.sampleCount
+                    },
+                    day365: {
+                        avgPostsCreated: day365.avgPosts.toFixed(2),
+                        avgVotesGiven: day365.avgVotes.toFixed(2),
+                        avgContentViewed: day365.avgContentConsumption.toFixed(0),
+                        avgEngagement: day365.avgEngagement.toFixed(2),
+                        avgTimePerItem: (day365.avgTimePerPost * 1000).toFixed(0) + 'ms',
+                        sampleSize: day365.sampleCount
+                    },
+                    growth: {
+                        postsGrowth: (((day365.avgPosts / day1.avgPosts) - 1) * 100).toFixed(0) + '%',
+                        votesGrowth: (((day365.avgVotes / day1.avgVotes) - 1) * 100).toFixed(0) + '%',
+                        contentConsumptionGrowth: (((day365.avgContentConsumption / day1.avgContentConsumption) - 1) * 100).toFixed(0) + '%',
+                        engagementGrowth: (((day365.avgEngagement / day1.avgEngagement) - 1) * 100).toFixed(0) + '%'
+                    },
+                    trajectory: {
+                        day1: day1.avgPosts,
+                        day7: this.trajectoryDatabase['DAY_7']?.avgPosts || 0,
+                        day30: this.trajectoryDatabase['DAY_30']?.avgPosts || 0,
+                        day90: this.trajectoryDatabase['DAY_90']?.avgPosts || 0,
+                        day365: day365.avgPosts
+                    }
+                };
+            },
+            
+            /**
+             * 🎯 Predict optimal content strategy for a user based on their lifecycle stage
+             */
+            predictOptimalContentStrategy(userId) {
+                if (!this.userLifecycles[userId]) {
+                    return this.getNewUserContentStrategy();
+                }
+                
+                const profile = this.userLifecycles[userId];
+                const daysActive = profile.daysActive;
+                
+                // Growth trajectory thresholds based on aggregate data
+                const trajectory = this.trajectoryDatabase;
+                
+                // Determine user lifecycle stage
+                let stage = 'BRAND_NEW';
+                let contentMultiplier = 1.0;
+                let contentType = 'DISCOVERY';
+                
+                if (daysActive === 0) {
+                    stage = 'BRAND_NEW';
+                    contentMultiplier = 0.5; // Show 50% normal content - avoid overwhelming
+                    contentType = 'DISCOVERY'; // Focus on education
+                } else if (daysActive <= 7) {
+                    stage = 'NEW_USER';
+                    contentMultiplier = 0.7; // Show 70% normal content
+                    contentType = 'DISCOVERY'; // Trending + nearby
+                } else if (daysActive <= 30) {
+                    stage = 'EARLY_ADOPTER';
+                    contentMultiplier = 0.9; // Show 90% normal content
+                    contentType = 'EXPLORATION'; // Diverse areas
+                } else if (daysActive <= 90) {
+                    stage = 'ENGAGED_USER';
+                    contentMultiplier = 1.1; // Show 110% (more content)
+                    contentType = 'EXPLORATION'; // Deep dives into interests
+                } else if (daysActive <= 180) {
+                    stage = 'POWER_USER';
+                    contentMultiplier = 1.3; // Show 130% content
+                    contentType = 'SPECIALIZED'; // Niche interests
+                } else {
+                    stage = 'VETERAN_USER';
+                    contentMultiplier = 1.5; // Show 150% (most content)
+                    contentType = 'PERSONALIZED'; // Highly tailored
+                }
+                
+                return {
+                    userId,
+                    stage,
+                    daysActive,
+                    contentMultiplier,
+                    contentType,
+                    postsToShow: Math.floor(25 * contentMultiplier),
+                    expectedEngagementRate: this.predictEngagementRate(daysActive),
+                    recommendedPacing: this.getRecommendedPacing(stage),
+                    whosContentToShow: this.predictWhosContent(userId, stage),
+                    description: this.getStageDescription(stage)
+                };
+            },
+            
+            /**
+             * Predict engagement rate based on user age
+             */
+            predictEngagementRate(daysActive) {
+                // Engagement typically follows S-curve: slow start, exponential growth, plateau
+                if (daysActive === 0) return 0.15; // 15% of content gets engagement
+                if (daysActive <= 7) return 0.25;
+                if (daysActive <= 30) return 0.40;
+                if (daysActive <= 90) return 0.55;
+                if (daysActive <= 180) return 0.65;
+                return 0.75; // Veterans engage with 75% of content
+            },
+            
+            /**
+             * Recommended pacing for content (milliseconds between showing posts)
+             */
+            getRecommendedPacing(stage) {
+                const pacingMap = {
+                    'BRAND_NEW': 2000, // 2 seconds between posts
+                    'NEW_USER': 1500,
+                    'EARLY_ADOPTER': 1000,
+                    'ENGAGED_USER': 700,
+                    'POWER_USER': 500,
+                    'VETERAN_USER': 300
+                };
+                return pacingMap[stage] || 1000;
+            },
+            
+            /**
+             * Predict whose content user should see
+             * Returns mix of local creators, trending creators, and user's own network
+             */
+            predictWhosContent(userId, stage) {
+                const mixMap = {
+                    'BRAND_NEW': {
+                        topCreators: 0.30,      // 30% - Famous/trending content for discovery
+                        localCreators: 0.50,    // 50% - Local content for familiarity
+                        userNetwork: 0.10,      // 10% - Their own posts when they create
+                        algorithmic: 0.10       // 10% - Curated recommendations
+                    },
+                    'NEW_USER': {
+                        topCreators: 0.25,
+                        localCreators: 0.55,
+                        userNetwork: 0.15,
+                        algorithmic: 0.05
+                    },
+                    'EARLY_ADOPTER': {
+                        topCreators: 0.15,
+                        localCreators: 0.50,
+                        userNetwork: 0.25,
+                        algorithmic: 0.10
+                    },
+                    'ENGAGED_USER': {
+                        topCreators: 0.10,
+                        localCreators: 0.40,
+                        userNetwork: 0.35,
+                        algorithmic: 0.15
+                    },
+                    'POWER_USER': {
+                        topCreators: 0.05,
+                        localCreators: 0.30,
+                        userNetwork: 0.45,
+                        algorithmic: 0.20
+                    },
+                    'VETERAN_USER': {
+                        topCreators: 0.03,
+                        localCreators: 0.20,
+                        userNetwork: 0.50,
+                        algorithmic: 0.27
+                    }
+                };
+                return mixMap[stage] || mixMap['BRAND_NEW'];
+            },
+            
+            /**
+             * Get user stage description
+             */
+            getStageDescription(stage) {
+                const descriptions = {
+                    'BRAND_NEW': 'New user (Day 0) - Show curated, easy-to-understand content',
+                    'NEW_USER': 'New user (Days 1-7) - Growing comfort, some exploration',
+                    'EARLY_ADOPTER': 'Early adopter (Days 8-30) - Ready for diverse content',
+                    'ENGAGED_USER': 'Engaged user (Days 31-90) - Actively exploring',
+                    'POWER_USER': 'Power user (Days 91-180) - Deep engagement',
+                    'VETERAN_USER': 'Veteran user (180+ days) - Highly personalized'
+                };
+                return descriptions[stage] || 'Unknown stage';
+            },
+            
+            /**
+             * Get content strategy for brand new user (no lifecycle data yet)
+             */
+            getNewUserContentStrategy() {
+                return {
+                    stage: 'BRAND_NEW',
+                    daysActive: 0,
+                    contentMultiplier: 0.5,
+                    contentType: 'DISCOVERY',
+                    postsToShow: 12,
+                    expectedEngagementRate: 0.15,
+                    recommendedPacing: 2000,
+                    whosContentToShow: {
+                        topCreators: 0.30,
+                        localCreators: 0.50,
+                        userNetwork: 0.10,
+                        algorithmic: 0.10
+                    },
+                    description: 'Brand new user - controlled discovery experience'
+                };
+            }
+        };
+        
+        // Expose globally
+        window.growthAnalyticsSystem = growthAnalyticsSystem;
+
+        // ============================================
         // PHASE 0: FEDEX-ZONES FOUNDATION LAYER
         // Theme Toggle Function - Define at top level for onclick access
         function toggleTheme() {
@@ -6096,6 +6468,18 @@
                 console.log(`🧠 Tracked ${voteType} for ML tag rewriting at distance from post origin`);
             }
             
+            // 📈 GROWTH ANALYTICS: Track user engagement for growth prediction
+            if (window.growthAnalyticsSystem && currentUserId) {
+                window.growthAnalyticsSystem.updateUserMetrics(
+                    currentUserId,
+                    false, // postCreated
+                    voteType, // voteType: 'like' or 'dislike'
+                    false, // contentViewed
+                    0 // viewDuration
+                );
+                console.log(`📈 Tracked user engagement: ${voteType}`);
+            }
+            
             // Update UI immediately for instant feedback (optimistic update)
             post.likes = newLikes;
             post.dislikes = newDislikes;
@@ -6205,6 +6589,12 @@
                     lastSeen: new Date().getTime(),
                     isAnonymous: true
                 }, { merge: true });
+                
+                // 📈 GROWTH ANALYTICS: Track this user's lifecycle journey
+                if (window.growthAnalyticsSystem) {
+                    window.growthAnalyticsSystem.trackUserJoin(currentUserId);
+                    console.log(`📈 User lifecycle tracking initialized for ${currentUserId}`);
+                }
                 
                 // Initialize online user tracking
                 initializeOnlineTracking();
@@ -9199,6 +9589,127 @@
         }
         
         /**
+         * Apply growth-optimized content delivery based on user lifecycle stage
+         * Uses growth trajectory data to predict optimal content strategy
+         */
+        function applyGrowthOptimizedDelivery(displayPosts, userId) {
+            if (!userId || !window.growthAnalyticsSystem) return displayPosts;
+            
+            try {
+                // Get user's growth-based content strategy
+                const strategy = window.growthAnalyticsSystem.predictOptimalContentStrategy(userId);
+                
+                // Log user stage and content adjustments
+                console.log(`📈 ${strategy.stage}: ${strategy.description}`);
+                console.log(`   Content multiplier: ${strategy.contentMultiplier}x (showing ${strategy.postsToShow} posts)`);
+                console.log(`   Content type: ${strategy.contentType}`);
+                console.log(`   Engagement rate: ${(strategy.expectedEngagementRate * 100).toFixed(0)}%`);
+                
+                // Limit posts based on user stage
+                let optimizedPosts = displayPosts.slice(0, strategy.postsToShow);
+                
+                // Reorder by content type strategy
+                const contentMix = strategy.whosContentToShow;
+                
+                // Segment posts by creator type
+                const topCreatorPosts = [];
+                const localCreatorPosts = [];
+                const userNetworkPosts = [];
+                const algorithmicPosts = [];
+                
+                optimizedPosts.forEach(post => {
+                    // Determine post category
+                    const isUserPost = post.userId === currentUserId;
+                    const isLocalCreator = post.county === (currentGrid?.poi?.name || currentZoneTag);
+                    const likes = post.likes || 0;
+                    
+                    if (isUserPost) {
+                        userNetworkPosts.push(post);
+                    } else if (likes > 50) { // Top creator threshold
+                        topCreatorPosts.push(post);
+                    } else if (isLocalCreator) {
+                        localCreatorPosts.push(post);
+                    } else {
+                        algorithmicPosts.push(post);
+                    }
+                });
+                
+                // Build optimal mix based on strategy
+                const mixed = [];
+                
+                // Calculate target counts for each segment
+                const targets = {
+                    topCreators: Math.floor(strategy.postsToShow * contentMix.topCreators),
+                    localCreators: Math.floor(strategy.postsToShow * contentMix.localCreators),
+                    userNetwork: Math.floor(strategy.postsToShow * contentMix.userNetwork),
+                    algorithmic: Math.floor(strategy.postsToShow * contentMix.algorithmic)
+                };
+                
+                // Distribute posts according to optimal mix
+                let idx = 0;
+                
+                // Add top creator posts
+                for (let i = 0; i < targets.topCreators && idx < strategy.postsToShow; i++) {
+                    if (topCreatorPosts[i]) {
+                        mixed.push(topCreatorPosts[i]);
+                        idx++;
+                    }
+                }
+                
+                // Add local creator posts
+                for (let i = 0; i < targets.localCreators && idx < strategy.postsToShow; i++) {
+                    if (localCreatorPosts[i]) {
+                        mixed.push(localCreatorPosts[i]);
+                        idx++;
+                    }
+                }
+                
+                // Add user network posts
+                for (let i = 0; i < targets.userNetwork && idx < strategy.postsToShow; i++) {
+                    if (userNetworkPosts[i]) {
+                        mixed.push(userNetworkPosts[i]);
+                        idx++;
+                    }
+                }
+                
+                // Fill remaining with algorithmic
+                for (let i = 0; i < targets.algorithmic && idx < strategy.postsToShow; i++) {
+                    if (algorithmicPosts[i]) {
+                        mixed.push(algorithmicPosts[i]);
+                        idx++;
+                    }
+                }
+                
+                // Ensure we have enough posts
+                while (mixed.length < strategy.postsToShow) {
+                    for (const post of optimizedPosts) {
+                        if (!mixed.includes(post)) {
+                            mixed.push(post);
+                            if (mixed.length >= strategy.postsToShow) break;
+                        }
+                    }
+                }
+                
+                console.log(`📊 Content mix for ${strategy.stage}:`);
+                console.log(`   ${topCreatorPosts.length} top creators, using ${Math.min(targets.topCreators, topCreatorPosts.length)}`);
+                console.log(`   ${localCreatorPosts.length} local creators, using ${Math.min(targets.localCreators, localCreatorPosts.length)}`);
+                console.log(`   ${userNetworkPosts.length} user network, using ${Math.min(targets.userNetwork, userNetworkPosts.length)}`);
+                console.log(`   ${algorithmicPosts.length} algorithmic, using ${Math.min(targets.algorithmic, algorithmicPosts.length)}`);
+                
+                // Store strategy for later use (pacing, notifications, etc.)
+                if (!window.currentUserGrowthStrategy) {
+                    window.currentUserGrowthStrategy = {};
+                }
+                window.currentUserGrowthStrategy[userId] = strategy;
+                
+                return mixed.slice(0, strategy.postsToShow);
+            } catch (error) {
+                console.error('❌ Growth optimization error:', error);
+                return displayPosts;
+            }
+        }
+
+        /**
          * Apply adaptive content delivery
          * Main function called during grid render
          */
@@ -10604,6 +11115,12 @@
             console.log(`🧠 ML reordering applied, generating recommendations...`);
             
             // ========================================================================
+            // GROWTH-BASED CONTENT PREDICTION: Optimize for user lifecycle stage
+            // ========================================================================
+            displayPosts = applyGrowthOptimizedDelivery(displayPosts, currentUserId);
+            console.log(`📈 Growth-optimized delivery applied - tailored to user age & stage`);
+            
+            // ========================================================================
             // ADAPTIVE CONTENT DELIVERY: Optimize for user behavior & first-time UX
             // ========================================================================
             displayPosts = applyAdaptiveContentDelivery(displayPosts, currentUserId);
@@ -11979,6 +12496,18 @@
                 if (window.postRecommendationSystem) {
                     window.postRecommendationSystem.trackUserPost(currentUserId, areaTag, 0);
                     console.log(`📊 Tracked user post to area: ${areaTag}`);
+                }
+                
+                // 📈 GROWTH ANALYTICS: Track user posting for growth prediction
+                if (window.growthAnalyticsSystem) {
+                    window.growthAnalyticsSystem.updateUserMetrics(
+                        currentUserId,
+                        true, // postCreated = true
+                        null, // voteType = null
+                        false, // contentViewed = false
+                        0 // viewDuration = 0
+                    );
+                    console.log(`📈 Tracked user post creation for growth analytics`);
                 }
 
                 // DO NOT update local grid - let Firebase listener handle it
