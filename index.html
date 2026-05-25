@@ -3038,6 +3038,50 @@
 
         // Make theme functions globally accessible
         window.toggleTheme = toggleTheme;
+        
+        // EMERGENCY DEBUG: Force load posts from Firebase
+        window.forceLoadPosts = function() {
+            console.log('🆘 FORCE LOAD POSTS CALLED');
+            console.log('Current state:', {
+                isConnected,
+                currentUserId,
+                currentWiFiNetwork,
+                gridContentKeys: Object.keys(gridContent)
+            });
+            
+            if (!isConnected) {
+                console.log('❌ Not connected, connecting...');
+                connectToWiFi();
+            } else {
+                console.log('✅ Already connected, forcing Firebase refresh...');
+                if (currentUserId) {
+                    subscribeToFirebasePostsWithReconnect(currentUserId);
+                }
+            }
+        };
+        
+        // Emergency debug: manually get from Firebase
+        window.directFirebaseQuery = async function() {
+            console.log('🔍 DIRECT FIREBASE QUERY');
+            try {
+                const networkId = currentUserId || 'shared-network-1';
+                console.log('  Querying network:', networkId);
+                const postsRef = ref(database, `networks/${networkId}/posts`);
+                console.log('  postsRef:', postsRef);
+                
+                const snapshot = await get(postsRef);
+                console.log('  snapshot exists:', snapshot.exists());
+                if (snapshot.exists()) {
+                    const posts = snapshot.val();
+                    console.log('  posts found:', Object.keys(posts).length);
+                    console.log('  posts:', posts);
+                } else {
+                    console.log('  ❌ No posts found at path');
+                }
+            } catch (error) {
+                console.error('  Error:', error);
+            }
+        };
         window.initializeTheme = initializeTheme;
         window.fixMobileGridLayout = fixMobileGridLayout;
 
@@ -6118,49 +6162,76 @@
                 // Use the networkId parameter (currentUserId) for consistency
                 // networkId comes from subscribeToFirebasePostsWithReconnect(currentUserId)
                 const actualNetworkId = networkId || currentWiFiNetwork || currentUserId;
-                const postsRef = ref(database, `networks/${actualNetworkId}/posts`);
-                console.log('📡 Setting up Firebase listener');
+                
+                console.log('🔴🔴🔴 subscribeToFirebasePosts CALLED 🔴🔴🔴');
                 console.log('  networkId param:', networkId);
                 console.log('  actualNetworkId:', actualNetworkId);
-                console.log('  postsRef path:', `networks/${actualNetworkId}/posts`);
+                console.log('  currentUserId:', currentUserId);
+                console.log('  currentWiFiNetwork:', currentWiFiNetwork);
                 
+                const postsRef = ref(database, `networks/${actualNetworkId}/posts`);
+                console.log('  postsRef path:', `networks/${actualNetworkId}/posts`);
+                console.log('  database:', database);
+                
+                let callCount = 0;
                 const unsubscribe = onValue(postsRef, (snapshot) => {
+                    callCount++;
+                    console.log(`\n🔥🔥🔥 FIREBASE LISTENER FIRED (call #${callCount}) 🔥🔥🔥`);
+                    console.log('  snapshot exists:', snapshot.exists());
+                    console.log('  snapshot ref path:', snapshot.ref.path);
+                    
                     const allPosts = [];
                     const seenPostIds = new Set(); // Track unique post IDs to prevent duplicates
                     
                     if (snapshot.exists()) {
                         const postsObj = snapshot.val();
-                        console.log('📡 FIREBASE LISTENER TRIGGERED - Network snapshot - posts count:', Object.keys(postsObj).length);
+                        console.log('  ✅ snapshot.val() returned object');
+                        console.log('  posts object:', postsObj);
+                        console.log('  posts count:', Object.keys(postsObj).length);
                         
                         // Convert posts object to array
                         Object.keys(postsObj).forEach(postId => {
+                            console.log(`    Processing post ID: ${postId}`);
+                            
                             // CRITICAL: De-duplicate - only keep first instance of each post ID
                             if (seenPostIds.has(postId)) {
-                                console.log(`  ⚠️ DUPLICATE DETECTED: post ID ${postId.substring(0, 8)}... appears multiple times in Firebase snapshot - SKIPPING duplicate`);
+                                console.log(`    ⚠️ DUPLICATE: ${postId} already seen - SKIPPING`);
                                 return; // Skip this duplicate
                             }
                             
                             seenPostIds.add(postId);
                             const post = postsObj[postId];
+                            console.log(`    ✅ Added post:`, post);
                             allPosts.push({
                                 id: postId,
                                 ...post
                             });
                         });
+                        
+                        console.log(`  📊 Total posts after processing: ${allPosts.length}`);
                     } else {
-                        console.log('📡 FIREBASE LISTENER TRIGGERED - No posts in network yet');
+                        console.log('  ⚠️ snapshot.exists() returned FALSE - No posts in network');
                     }
                     
-                    console.log('📊 Calling callback with', allPosts.length, 'posts (after de-duplication)');
+                    console.log(`  📞 About to call callback with ${allPosts.length} posts`);
+                    console.log('  callback function:', callback.toString().substring(0, 100));
                     callback(allPosts);
+                    console.log('  ✅ callback completed');
                 }, (error) => {
-                    console.error('Firebase listener error:', error);
+                    console.error('🚨🚨🚨 FIREBASE LISTENER ERROR 🚨🚨🚨', error);
+                    console.error('  Error code:', error.code);
+                    console.error('  Error message:', error.message);
+                    console.error('  Full error:', error);
                 });
                 
-                console.log('✅ Firebase listener set up successfully');
+                console.log('✅ Firebase onValue listener set up successfully');
+                console.log('  unsubscribe function:', unsubscribe.toString().substring(0, 100));
+                
                 return unsubscribe;
             } catch (error) {
-                console.error('Error subscribing to Firebase posts:', error);
+                console.error('💥 ERROR in subscribeToFirebasePosts:', error);
+                console.error('  Error:', error.message);
+                console.error('  Stack:', error.stack);
                 return () => {};
             }
         }
@@ -7761,12 +7832,16 @@
 
         function subscribeToFirebasePostsWithReconnect(networkId) {
             try {
-                console.log('🔗 subscribeToFirebasePostsWithReconnect called with networkId:', networkId);
+                console.log('\n🔗🔗🔗 subscribeToFirebasePostsWithReconnect CALLED 🔗🔗🔗');
+                console.log('  networkId:', networkId);
+                console.log('  currentUserId:', currentUserId);
+                console.log('  isConnected:', isConnected);
+                
                 firebaseUnsubscribe = subscribeToFirebasePosts(networkId, (posts) => {
-                    console.log('====== FIREBASE LISTENER FIRED ======');
-                    console.log('Posts updated from Firebase:', posts.length);
-                    console.log('Posts data:', posts);
-                    console.log('currentZoneTag:', currentZoneTag);
+                    console.log('\n✅✅✅ CALLBACK RECEIVED FROM FIREBASE ✅✅✅');
+                    console.log('  Posts count:', posts.length);
+                    console.log('  Posts:', posts);
+                    console.log('  currentZoneTag:', currentZoneTag);
                     
                     // CRITICAL: De-duplicate posts by ID (can happen if Firebase has duplicate keys)
                     const seenIds = new Set();
@@ -7776,7 +7851,7 @@
                             seenIds.add(post.id);
                             uniquePosts.push(post);
                         } else {
-                            console.log(`  ⚠️ De-duplicated post in Firebase listener: ${post.id.substring(0, 8)}... (zone: ${post.county})`);
+                            console.log(`  ⚠️ De-duplicated post: ${post.id.substring(0, 8)}... (zone: ${post.county})`);
                         }
                     });
                     
@@ -7791,12 +7866,21 @@
                         console.log('✅ Firebase loaded in time - timeout cleared');
                     }
                     
+                    console.log('  🔄 Updating gridContent for:', currentUserId);
                     gridContent[currentUserId] = uniquePosts;
-                    console.log('gridContent updated:', gridContent);
-                    console.log('About to call renderGrid()');
+                    console.log('  ✅ gridContent updated. New state:', {
+                        networkId: currentUserId,
+                        postsCount: uniquePosts.length,
+                        gridContentKeys: Object.keys(gridContent),
+                        gridContent: gridContent
+                    });
+                    
+                    console.log('  📞 About to call renderGrid()');
                     renderGrid();
-                    console.log('renderGrid() complete');
+                    console.log('  ✅ renderGrid() complete');
                 });
+                
+                console.log('  ✅ subscribeToFirebasePosts returned, subscription active');
             } catch (error) {
                 console.error('Firebase listener error:', error);
                 // CRITICAL: Still show grid even on error so user isn't stuck
