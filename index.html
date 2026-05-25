@@ -6450,8 +6450,8 @@
                     // Clean up old posts on startup
                     cleanupOldPosts();
                     
-                    // Set up periodic cleanup (every 6 hours)
-                    setInterval(cleanupOldPosts, 6 * 60 * 60 * 1000);
+                    // Set up periodic cleanup (every 1 hour for faster deletion)
+                    setInterval(cleanupOldPosts, 1 * 60 * 60 * 1000);
                     
                     // Set up REAL-TIME grid checking (every 500ms = 5Hz) - detect when user moves to different POI
                     // Increased frequency for more responsive POI/grid detection
@@ -6472,7 +6472,7 @@
                     
                     // Clean up old posts
                     cleanupOldPosts();
-                    setInterval(cleanupOldPosts, 6 * 60 * 60 * 1000);
+                    setInterval(cleanupOldPosts, 1 * 60 * 60 * 1000);
                     
                     // Real-time grid checking (every 500ms = 5Hz for responsive POI detection)
                     setInterval(checkGridUpdate, 500);
@@ -9066,35 +9066,51 @@
 
         // Clean up posts older than 24 hours
         async function cleanupOldPosts() {
-            if (!currentWiFiNetwork) return;
+            if (!currentWiFiNetwork) {
+                console.warn('⚠️ cleanupOldPosts: currentWiFiNetwork not set, skipping');
+                return;
+            }
             
             const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
             const now = new Date().getTime();
+            
+            console.log(`🧹 cleanupOldPosts started at ${new Date().toLocaleString()}`);
             
             try {
                 const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
                 const snapshot = await get(postsRef);
                 
-                if (!snapshot.exists()) return;
+                if (!snapshot.exists()) {
+                    console.log('ℹ️ No posts found to clean up');
+                    return;
+                }
                 
                 const posts = snapshot.val();
                 let deletedCount = 0;
                 
+                console.log(`📊 Checking ${Object.keys(posts).length} posts for deletion...`);
+                
                 // Check each post's age
                 Object.keys(posts).forEach(postId => {
                     const post = posts[postId];
-                    const postAge = now - (post.timestamp || 0);
+                    const postTimestamp = post.timestamp || post.createdAt || 0;
+                    const postAge = now - postTimestamp;
+                    const ageHours = Math.round(postAge / (60 * 60 * 1000));
                     
                     // If post is older than 24 hours, delete it
                     if (postAge > TWENTY_FOUR_HOURS) {
-                        console.log(`🗑️  Deleting old post (${Math.round(postAge / (60 * 60 * 1000))}h old): ${postId}`);
+                        console.log(`🗑️ Deleting old post (${ageHours}h old): ${postId}`);
                         deletePostFromFirebase(currentWiFiNetwork, postId);
                         deletedCount++;
+                    } else {
+                        console.log(`✅ Keeping post (${ageHours}h old): ${postId.substring(0, 8)}...`);
                     }
                 });
                 
                 if (deletedCount > 0) {
                     console.log(`✅ Cleaned up ${deletedCount} posts older than 24 hours`);
+                } else {
+                    console.log(`ℹ️ No posts old enough to delete`);
                 }
             } catch (error) {
                 console.error('Error cleaning up old posts:', error);
