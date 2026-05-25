@@ -3175,7 +3175,20 @@
    • Monitor 'window.calculateContentBudget()' per user
    • View 'window.getPOIClusteringReport()' for POI analysis
    • View 'window.tagSystem' for custom tag data
+   • View 'window.getDistributionMetrics()' for post routing stats
             `);
+            
+            // Show distribution metrics if available
+            if (window.distributionSystem && window.getDistributionMetrics) {
+                const distMetrics = window.getDistributionMetrics();
+                console.log(`
+📡 POST DISTRIBUTION METRICS:
+   Total posts routed: ${Object.keys(distMetrics.postDistributionHistory).length}
+   User post recirculations: ${Object.keys(distMetrics.userPostRecirculation).reduce((sum, userId) => sum + Object.keys(distMetrics.userPostRecirculation[userId]).length, 0)}
+   Area tag mappings: ${Object.keys(distMetrics.areaTagMaps).length}
+   Posts with target audiences: ${Object.keys(distMetrics.postTargetAudience).length}
+            `);
+            }
             
             return metrics;
         };
@@ -9155,6 +9168,224 @@
         window.getCustomTagRecommendations = getCustomTagRecommendations;
         window.updateTagEngagementOnVote = updateTagEngagementOnVote;
 
+        // ============================================================================
+        // POST DISTRIBUTION ML - Route posts by area tags, recirculate content
+        // ============================================================================
+        
+        const distributionSystem = {
+            postDistributionHistory: {}, // { postId: { targetAreas: [], sentAt, recirculated: [] } }
+            userPostRecirculation: {}, // { userId: { postId: { lastShown: timestamp, timesShown: count } } }
+            areaTagMaps: {}, // { area: [tags that should route TO this area] }
+            postTargetAudience: {}, // { postId: { targetAreas, targetUsers, confidence } }
+        };
+        
+        /**
+         * Determine target areas for a post based on custom tags
+         * Posts with tags like "#downtown" → show to users in downtown area
+         */
+        function calculatePostTargetAreas(post) {
+            if (!post.customTags || post.customTags.length === 0) {
+                // No custom tags = show in origin area only
+                return [post.county];
+            }
+            
+            const targetAreas = new Set();
+            targetAreas.add(post.county); // Always include origin area
+            
+            post.customTags.forEach(tag => {
+                // Tag format analysis: #downtown, #brooklyn, #brooklyn-brooklyn-heights, etc.
+                const tagLower = tag.toLowerCase();
+                
+                // If tag contains area name pattern, extract it
+                const areaParts = tagLower.split('-');
+                areaParts.forEach(part => {
+                    // Match against known areas/POIs
+                    if (part.length > 2) {
+                        targetAreas.add(part);
+                    }
+                });
+            });
+            
+            console.log(`🎯 Post ${post.id.substring(0, 8)}... target areas:`, Array.from(targetAreas));
+            
+            return Array.from(targetAreas);
+        }
+        
+        /**
+         * Check if user matches post's target audience
+         * User in target area + matching tag preferences = show post
+         */
+        function userMatchesPostTargeting(post, userId) {
+            const userArea = getCurrentUserArea();
+            const targetAreas = calculatePostTargetAreas(post);
+            
+            // Primary match: user is in target area
+            const areaMatch = targetAreas.includes(userArea);
+            
+            // Secondary match: user has voted on similar tags before
+            const userPrefs = tagSystem.userTagPreferences[userId] || {};
+            let tagMatch = false;
+            if (post.customTags && post.customTags.length > 0) {
+                tagMatch = post.customTags.some(tag => userPrefs[tag] && userPrefs[tag] > 0);
+            }
+            
+            const matches = areaMatch || tagMatch;
+            console.log(`🎯 User ${userId.substring(0, 8)}... matches post targeting: area=${areaMatch}, tags=${tagMatch}, result=${matches}`);
+            
+            return matches;
+        }
+        
+        /**
+         * Apply post distribution filtering
+         * Route posts to correct areas, recirculate user's own posts
+         */
+        function applyPostDistributionRouting(displayPosts, userId) {
+            if (!userId) return displayPosts;
+            
+            const distributed = [];
+            const userPosts = [];
+            
+            displayPosts.forEach(post => {
+                // Separate user's own posts for recirculation
+                if (post.userId === userId) {
+                    userPosts.push(post);
+                    // Add user's own posts with lower priority but visible
+                    distributed.push({
+                        ...post,
+                        distributionScore: 0.3, // Lower priority for own posts initially
+                        isUserPost: true
+                    });
+                } else {
+                    // Check if post targets this user
+                    const targets = calculatePostTargetAreas(post);
+                    const userArea = getCurrentUserArea();
+                    const isTargeted = targets.includes(userArea);
+                    
+                    distributed.push({
+                        ...post,
+                        distributionScore: isTargeted ? 0.8 : 0.2, // Targeted = higher score
+                        isTargeted: isTargeted,
+                        targetAreas: targets
+                    });
+                }
+            });
+            
+            // Reorder: targeted posts first, then user's own, then other content
+            const targeted = distributed.filter(p => p.isTargeted).sort((a, b) => b.distributionScore - a.distributionScore);
+            const own = distributed.filter(p => p.isUserPost);
+            const other = distributed.filter(p => !p.isTargeted && !p.isUserPost);
+            
+            const reordered = [...targeted, ...own, ...other].map(p => {
+                const { distributionScore, isUserPost, isTargeted, targetAreas, ...post } = p;
+                return post;
+            });
+            
+            console.log(`📍 Post distribution: ${targeted.length} targeted + ${own.length} own posts + ${other.length} other = ${reordered.length}`);
+            
+            return reordered;
+        }
+        
+        /**
+         * Track when user's post is shown to them (for recirculation)
+         */
+        function trackOwnPostShown(userId, postId) {
+            if (!distributionSystem.userPostRecirculation[userId]) {
+                distributionSystem.userPostRecirculation[userId] = {};
+            }
+            
+            if (!distributionSystem.userPostRecirculation[userId][postId]) {
+                distributionSystem.userPostRecirculation[userId][postId] = {
+                    lastShown: Date.now(),
+                    timesShown: 1,
+                    createdAt: Date.now()
+                };
+            } else {
+                distributionSystem.userPostRecirculation[userId][postId].lastShown = Date.now();
+                distributionSystem.userPostRecirculation[userId][postId].timesShown++;
+            }
+        }
+        
+        /**
+         * Recirculate user's posts periodically
+         * Posts can reappear in user's feed after time + engagement drop
+         */
+        function shouldRecirculateOwnPost(post, userId) {
+            const recircData = distributionSystem.userPostRecirculation[userId]?.[post.id];
+            if (!recircData) return true; // New post, show it
+            
+            const now = Date.now();
+            const timeSinceLastShown = now - recircData.lastShown;
+            const hoursSinceCreation = (now - recircData.createdAt) / (60 * 60 * 1000);
+            
+            // Recirculate if:
+            // 1) Post is older than 6 hours AND
+            // 2) Hasn't been shown in last 2 hours
+            const shouldRecirculate = hoursSinceCreation > 6 && timeSinceLastShown > (2 * 60 * 60 * 1000);
+            
+            console.log(`🔄 Post age: ${hoursSinceCreation.toFixed(1)}h, last shown: ${(timeSinceLastShown / 1000 / 60).toFixed(0)}m ago → recirculate: ${shouldRecirculate}`);
+            
+            return shouldRecirculate;
+        }
+        
+        /**
+         * Cross-area content circulation
+         * Posts from other areas can reappear when user engagement changes
+         */
+        function applyContentRecirculation(displayPosts, userId) {
+            const userArea = getCurrentUserArea();
+            const userPrefs = tagSystem.userTagPreferences[userId] || {};
+            
+            // Score posts for recirculation potential
+            const recirculated = displayPosts.map(post => {
+                let recircScore = 0;
+                
+                // Posts from different areas that match user's tag preferences
+                if (post.county !== userArea && post.customTags) {
+                    post.customTags.forEach(tag => {
+                        if (userPrefs[tag] && userPrefs[tag] > 0.5) {
+                            recircScore += 0.3; // Boost posts matching preferences
+                        }
+                    });
+                }
+                
+                // Old posts with high engagement can recirculate
+                const postAge = Date.now() - (post.timestamp || 0);
+                const hoursOld = postAge / (60 * 60 * 1000);
+                if (hoursOld > 6) {
+                    const engagement = (post.likes || 0) - (post.dislikes || 0);
+                    if (engagement > 5) {
+                        recircScore += 0.2; // Boost popular old posts
+                    }
+                }
+                
+                return { ...post, recircScore };
+            });
+            
+            // Inject recirculated content throughout grid (not all at end)
+            return recirculated;
+        }
+        
+        /**
+         * Get post distribution metrics
+         */
+        function getDistributionMetrics() {
+            const metrics = {
+                totalPostsTracked: Object.keys(distributionSystem.postDistributionHistory).length,
+                usersWithRecirculation: Object.keys(distributionSystem.userPostRecirculation).length,
+                totalRecirculations: Object.values(distributionSystem.userPostRecirculation)
+                    .reduce((sum, userPosts) => 
+                        sum + Object.values(userPosts).reduce((s, p) => s + (p.timesShown || 0), 0), 0)
+            };
+            
+            return metrics;
+        }
+        
+        // Expose distribution system globally
+        window.distributionSystem = distributionSystem;
+        window.calculatePostTargetAreas = calculatePostTargetAreas;
+        window.getDistributionMetrics = getDistributionMetrics;
+        window.applyPostDistributionRouting = applyPostDistributionRouting;
+
         function renderGrid() {
             if (!isConnected) return;
             
@@ -9317,6 +9548,12 @@
             // ========================================================================
             displayPosts = applyGeographicFiltering(displayPosts, currentUserId);
             console.log(`🗺️ Geographic filtering applied - 80% local, 15% regional, 5% distant`);
+            
+            // ========================================================================
+            // POST DISTRIBUTION ROUTING: Route posts by area tags + recirculate user content
+            // ========================================================================
+            displayPosts = applyPostDistributionRouting(displayPosts, currentUserId);
+            console.log(`📡 Post distribution routing applied - targeted areas + user content recirculation`);
             
             // ========================================================================
             // CUSTOM TAG FILTERING: Learn user preferences, boost nearby custom tags
@@ -9488,6 +9725,11 @@
                     if (post.engagementTier && post.engagementTier !== 'NORMAL' && post.engagementTier !== 'LIKED') {
                         box.classList.add(`badge-${post.engagementTier.toLowerCase()}`);
                     }
+                    
+                    // DISTRIBUTION TRACKING: Track when user's own posts are shown (for recirculation)
+                    if (post.userId === currentUserId && window.distributionSystem) {
+                        window.distributionSystem.trackOwnPostShown(post.id, currentUserId);
+                    }
                 }
                 gridPosition++;
             });
@@ -9573,6 +9815,11 @@
                             // Apply engagement tier badge (HOT, PODIUM, DISLIKED, NEW)
                             if (post.engagementTier && post.engagementTier !== 'NORMAL' && post.engagementTier !== 'LIKED') {
                                 box.classList.add(`badge-${post.engagementTier.toLowerCase()}`);
+                            }
+                            
+                            // DISTRIBUTION TRACKING: Track when user's own lazy-loaded posts are shown
+                            if (post.userId === currentUserId && window.distributionSystem) {
+                                window.distributionSystem.trackOwnPostShown(post.id, currentUserId);
                             }
                         }
                         lazyGridPosition++;
