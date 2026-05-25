@@ -2373,6 +2373,12 @@
                 <span id="locationStatusIcon">⏳</span>
                 <span id="locationStatusText">Checking location cache...</span>
             </div>
+            <div id="postCountDisplay" style="font-size: 10px; color: #888; margin-top: 3px; display: flex; align-items: center; gap: 8px;">
+                <span>📊</span>
+                <span id="postCountValue">Posts: Loading...</span>
+                <span id="postAgeBreakdown" style="color: #666;"></span>
+                <span id="debugDeleteBtn" style="cursor: pointer; color: #666; font-size: 9px; padding: 2px 6px; border: 1px solid #555; border-radius: 3px; margin-left: 4px;" onclick="testManualDelete()" title="Test delete oldest post">Test Delete</span>
+            </div>
             <div id="zoneDropdown" style="display: none; position: absolute; top: 60px; left: 12px; background: #222; border: 1px solid #4ade80; border-radius: 6px; padding: 8px 0; min-width: 240px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
                 <div style="padding: 8px 12px; color: #888; font-size: 11px; border-bottom: 1px solid #333;">�️ Network Zone (Balanced Location + POI)</div>
                 <div id="zoneList" style="padding: 8px 12px; color: #ccc; font-size: 10px; line-height: 1.6;"></div>
@@ -2819,6 +2825,34 @@
                     </div>
                 </div>
                 <div style="margin-top: 12px; font-size: 11px; color: #64748b;">Updates every 2 seconds • Last updated: <span id="adminLastUpdate">now</span></div>
+            </div>
+
+            <!-- Post Cleanup & Deletion Monitor -->
+            <div style="margin-bottom: 24px; padding: 16px; background: linear-gradient(135deg, #7c2d12 0%, #92400e 100%); border-radius: 6px; border: 1px solid #b45309;">
+                <h3 style="margin-bottom: 16px; color: #fff; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px;">🗑️ Post Cleanup Monitor</h3>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 12px;">
+                    <div style="background-color: rgba(0,0,0,0.3); padding: 12px; border-radius: 4px; border-left: 3px solid #10b981;">
+                        <div style="font-size: 11px; color: #a0aec0; margin-bottom: 4px;">Total Posts</div>
+                        <div style="font-size: 24px; font-weight: 700; color: #fff;" id="adminTotalPosts">0</div>
+                    </div>
+                    <div style="background-color: rgba(0,0,0,0.3); padding: 12px; border-radius: 4px; border-left: 3px solid #ef4444;">
+                        <div style="font-size: 11px; color: #a0aec0; margin-bottom: 4px;">24h+ Old</div>
+                        <div style="font-size: 24px; font-weight: 700; color: #fca5a5;" id="adminOlderThan24h">0</div>
+                    </div>
+                    <div style="background-color: rgba(0,0,0,0.3); padding: 12px; border-radius: 4px; border-left: 3px solid #f59e0b;">
+                        <div style="font-size: 11px; color: #a0aec0; margin-bottom: 4px;">12-24h Old</div>
+                        <div style="font-size: 24px; font-weight: 700; color: #fcd34d;" id="adminOlderThan12h">0</div>
+                    </div>
+                    <div style="background-color: rgba(0,0,0,0.3); padding: 12px; border-radius: 4px; border-left: 3px solid #3b82f6;">
+                        <div style="font-size: 11px; color: #a0aec0; margin-bottom: 4px;">6-12h Old</div>
+                        <div style="font-size: 24px; font-weight: 700; color: #93c5fd;" id="adminOlderThan6h">0</div>
+                    </div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <button onclick="testManualDelete()" style="padding: 10px; background-color: #ef4444; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px;">🧪 Test Delete Oldest</button>
+                    <button onclick="manuallyTriggerCleanup()" style="padding: 10px; background-color: #10b981; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px;">⚡ Force Cleanup Now</button>
+                </div>
+                <div style="margin-top: 8px; font-size: 11px; color: #a0aec0;">⚙️ Automatic cleanup runs every 10 seconds • Last check: <span id="adminLastCleanupCheck">never</span></div>
             </div>
 
             <!-- Location Management -->
@@ -6449,9 +6483,13 @@
                     
                     // Clean up old posts on startup
                     cleanupOldPosts();
+                    updatePostCountDisplay();
                     
                     // Set up periodic cleanup (every 10 seconds for instant 24h deletion)
                     setInterval(cleanupOldPosts, 10 * 1000);
+                    
+                    // Update post count display frequently
+                    setInterval(updatePostCountDisplay, 5 * 1000);
                     
                     // Set up REAL-TIME grid checking (every 500ms = 5Hz) - detect when user moves to different POI
                     // Increased frequency for more responsive POI/grid detection
@@ -6472,7 +6510,11 @@
                     
                     // Clean up old posts
                     cleanupOldPosts();
+                    updatePostCountDisplay();
                     setInterval(cleanupOldPosts, 10 * 1000);
+                    
+                    // Update post count display frequently
+                    setInterval(updatePostCountDisplay, 5 * 1000);
                     
                     // Real-time grid checking (every 500ms = 5Hz for responsive POI detection)
                     setInterval(checkGridUpdate, 500);
@@ -7678,6 +7720,66 @@
                 console.error('❌ Error updating admin metrics:', error);
             }
         }
+
+        // Update admin cleanup metrics
+        async function updateAdminCleanupMetrics() {
+            if (!currentWiFiNetwork) return;
+            
+            try {
+                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
+                const snapshot = await get(postsRef);
+                
+                let totalPosts = 0;
+                let olderThan24h = 0;
+                let olderThan12h = 0;
+                let olderThan6h = 0;
+                
+                const now = new Date().getTime();
+                const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+                const TWELVE_HOURS = 12 * 60 * 60 * 1000;
+                const SIX_HOURS = 6 * 60 * 60 * 1000;
+                
+                if (snapshot.exists()) {
+                    const posts = snapshot.val();
+                    totalPosts = Object.keys(posts).length;
+                    
+                    Object.values(posts).forEach(post => {
+                        const timestamp = post.timestamp || post.createdAt || 0;
+                        const age = now - timestamp;
+                        if (age >= TWENTY_FOUR_HOURS) olderThan24h++;
+                        else if (age >= TWELVE_HOURS) olderThan12h++;
+                        else if (age >= SIX_HOURS) olderThan6h++;
+                    });
+                }
+                
+                // Update UI elements
+                const totalEl = document.getElementById('adminTotalPosts');
+                const old24El = document.getElementById('adminOlderThan24h');
+                const old12El = document.getElementById('adminOlderThan12h');
+                const old6El = document.getElementById('adminOlderThan6h');
+                const lastCheckEl = document.getElementById('adminLastCleanupCheck');
+                
+                if (totalEl) totalEl.textContent = totalPosts;
+                if (old24El) {
+                    old24El.textContent = olderThan24h;
+                    old24El.parentElement.style.opacity = olderThan24h > 0 ? '1' : '0.6';
+                }
+                if (old12El) old12El.textContent = olderThan12h;
+                if (old6El) old6El.textContent = olderThan6h;
+                if (lastCheckEl) lastCheckEl.textContent = new Date().toLocaleTimeString();
+                
+            } catch (error) {
+                console.error('Error updating admin cleanup metrics:', error);
+            }
+        }
+
+        // Force manual cleanup from admin page
+        async function manuallyTriggerCleanup() {
+            console.log('⚡ Admin triggered manual cleanup...');
+            await cleanupOldPosts();
+            await updateAdminCleanupMetrics();
+            alert('✅ Cleanup cycle completed - check console for details');
+        }
         
         // Start updating admin metrics every 2 seconds when admin page is open
         let adminMetricsInterval = null;
@@ -7704,9 +7806,11 @@
             updateAdminMetrics(); // Update immediately
             updateAdminLocationDisplay(); // Update location display
             updateCEOInsightsDisplay(); // Update CEO insights
+            updateAdminCleanupMetrics(); // Update cleanup metrics
             adminMetricsInterval = setInterval(() => {
                 updateAdminMetrics();
                 updateCEOInsightsDisplay();
+                updateAdminCleanupMetrics();
             }, 2000);
             console.log('Started admin metrics updates every 2 seconds');
         };
@@ -7722,11 +7826,6 @@
                 return;
             }
             
-            if (!isConnected) {
-                console.error('❌ Cannot update activity: not connected');
-                return;
-            }
-            
             if (!database) {
                 console.error('❌ Cannot update activity: database not initialized');
                 return;
@@ -7734,10 +7833,13 @@
             
             try {
                 const userRef = ref(database, `onlineUsers/${currentUserId}`);
+                const now = new Date().getTime();
                 
                 set(userRef, {
                     uid: currentUserId,
-                    lastSeen: new Date().getTime()
+                    lastSeen: now
+                }).then(() => {
+                    console.log(`✅ [${new Date(now).toLocaleTimeString()}] User activity updated`);
                 }).catch((error) => {
                     console.error('❌ Error updating online status:', error.message);
                 });
@@ -7748,7 +7850,7 @@
             // Reset the inactivity timeout
             if (userInactivityTimeout) clearTimeout(userInactivityTimeout);
             userInactivityTimeout = setTimeout(() => {
-                console.log('⏱️ User inactive - removing from online list');
+                console.log('⏱️ User inactive for 5min - removing from online list');
                 removeUserFromOnline();
             }, INACTIVITY_TIMEOUT);
         }
@@ -7764,18 +7866,26 @@
         function subscribeToOnlineUserCount() {
             try {
                 const onlineUsersRef = ref(database, 'onlineUsers');
-                console.log('✅ Subscribed to online users');
+                console.log('✅ Setting up real-time listener for online users...');
                 onlineUsersUnsubscribe = onValue(onlineUsersRef, (snapshot) => {
                     let count = 0;
+                    let totalUsers = 0;
+                    const activeUsers = [];
+                    
                     if (snapshot.exists()) {
                         const users = snapshot.val();
                         const now = new Date().getTime();
+                        totalUsers = Object.keys(users).length;
                         
                         // Count only users who have been active in the last 5 minutes
                         Object.keys(users).forEach(uid => {
                             const lastSeen = users[uid].lastSeen || 0;
-                            if (now - lastSeen < INACTIVITY_TIMEOUT) {
+                            const timeSinceLastSeen = now - lastSeen;
+                            const secondsSinceLastSeen = Math.round(timeSinceLastSeen / 1000);
+                            
+                            if (timeSinceLastSeen < INACTIVITY_TIMEOUT) {
                                 count++;
+                                activeUsers.push(`${uid.substring(0,6)}(${secondsSinceLastSeen}s ago)`);
                             }
                         });
                     }
@@ -7787,6 +7897,7 @@
                     const countElement = document.getElementById('onlineUserCount');
                     if (countElement) {
                         countElement.textContent = count + ' online';
+                        console.log(`👥 ONLINE COUNT UPDATE: ${count}/${totalUsers} active (${activeUsers.slice(0,3).join(', ')}${totalUsers > 3 ? '...' : ''})`);
                     }
                 });
             } catch (error) {
@@ -7801,8 +7912,16 @@
                 console.error('Cannot initialize online tracking: no currentUserId');
                 return;
             }
+            
+            // Immediately update activity
             updateUserActivity();
             subscribeToOnlineUserCount();
+            
+            // Add periodic heartbeat every 30 seconds to keep user in online list
+            setInterval(() => {
+                console.log('💓 Heartbeat: Refreshing online status');
+                updateUserActivity();
+            }, 30 * 1000);
             
             // Update activity on user interaction
             document.addEventListener('mousemove', updateUserActivity, { passive: true });
@@ -7810,7 +7929,8 @@
             document.addEventListener('click', updateUserActivity, { passive: true });
             document.addEventListener('scroll', updateUserActivity, { passive: true });
             document.addEventListener('touchmove', updateUserActivity, { passive: true });
-            console.log('✅ Online tracking initialized');
+            
+            console.log('✅ Online tracking initialized with 30s heartbeat');
         }
 
         // Clean up when user leaves
@@ -9064,6 +9184,124 @@
             console.log('Firebase real-time sync active - no manual refresh needed');
         }
 
+        // Update post count display on UI
+        async function updatePostCountDisplay() {
+            if (!currentWiFiNetwork) return;
+            
+            try {
+                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
+                const snapshot = await get(postsRef);
+                
+                let totalPosts = 0;
+                let olderThan24h = 0;
+                let olderThan12h = 0;
+                let olderThan6h = 0;
+                
+                const now = new Date().getTime();
+                const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+                const TWELVE_HOURS = 12 * 60 * 60 * 1000;
+                const SIX_HOURS = 6 * 60 * 60 * 1000;
+                
+                if (snapshot.exists()) {
+                    const posts = snapshot.val();
+                    totalPosts = Object.keys(posts).length;
+                    
+                    Object.values(posts).forEach(post => {
+                        const timestamp = post.timestamp || post.createdAt || 0;
+                        const age = now - timestamp;
+                        if (age >= TWENTY_FOUR_HOURS) olderThan24h++;
+                        else if (age >= TWELVE_HOURS) olderThan12h++;
+                        else if (age >= SIX_HOURS) olderThan6h++;
+                    });
+                }
+                
+                const countEl = document.getElementById('postCountValue');
+                const breakdownEl = document.getElementById('postAgeBreakdown');
+                
+                if (countEl) {
+                    countEl.textContent = `Posts: ${totalPosts}`;
+                    if (olderThan24h > 0) {
+                        countEl.style.color = '#ef4444';
+                        countEl.textContent += ` ⚠️`;
+                    } else {
+                        countEl.style.color = '#888';
+                    }
+                }
+                
+                if (breakdownEl) {
+                    breakdownEl.textContent = `[24h+: ${olderThan24h} | 12-24h: ${olderThan12h} | 6-12h: ${olderThan6h}]`;
+                }
+            } catch (error) {
+                console.error('Error updating post count:', error);
+            }
+        }
+
+        // Test manual deletion of oldest post
+        async function testManualDelete() {
+            if (!currentWiFiNetwork) {
+                alert('No network connected');
+                return;
+            }
+            
+            console.log('🧪 TEST DELETE: Finding oldest post to delete...');
+            
+            try {
+                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
+                const snapshot = await get(postsRef);
+                
+                if (!snapshot.exists()) {
+                    alert('No posts to delete');
+                    return;
+                }
+                
+                const posts = snapshot.val();
+                let oldestPostId = null;
+                let oldestTimestamp = Infinity;
+                
+                Object.keys(posts).forEach(postId => {
+                    const timestamp = posts[postId].timestamp || posts[postId].createdAt || Infinity;
+                    if (timestamp < oldestTimestamp) {
+                        oldestTimestamp = timestamp;
+                        oldestPostId = postId;
+                    }
+                });
+                
+                if (!oldestPostId) {
+                    alert('Could not find oldest post');
+                    return;
+                }
+                
+                const ageMs = Date.now() - oldestTimestamp;
+                const ageHours = ageMs / (60 * 60 * 1000);
+                
+                console.log(`🧪 TEST DELETE: Attempting to delete oldest post:`);
+                console.log(`  Post ID: ${oldestPostId}`);
+                console.log(`  Timestamp: ${new Date(oldestTimestamp).toLocaleString()}`);
+                console.log(`  Age: ${ageHours.toFixed(2)} hours`);
+                
+                // Try to delete
+                await deletePostFromFirebase(currentWiFiNetwork, oldestPostId);
+                
+                // Verify deletion
+                await new Promise(r => setTimeout(r, 1000)); // Wait 1 second
+                const verifyRef = ref(database, `networks/${currentWiFiNetwork}/posts/${oldestPostId}`);
+                const verifySnapshot = await get(verifyRef);
+                
+                if (verifySnapshot.exists()) {
+                    console.error('❌ TEST FAILED: Post still exists after deletion!');
+                    alert('❌ DELETION FAILED: Post still exists in database!');
+                } else {
+                    console.log('✅ TEST PASSED: Post successfully deleted and verified gone!');
+                    alert('✅ DELETION SUCCESS: Post was removed!');
+                }
+                
+                updatePostCountDisplay();
+            } catch (error) {
+                console.error('Error in test delete:', error);
+                alert('Error during test: ' + error.message);
+            }
+        }
+
         // Clean up posts older than 24 hours - runs very frequently (every 10 seconds)
         async function cleanupOldPosts() {
             if (!currentWiFiNetwork) {
@@ -9079,13 +9317,16 @@
                 const snapshot = await get(postsRef);
                 
                 if (!snapshot.exists()) {
-                    console.log('ℹ️ No posts found to clean up');
+                    console.log('ℹ️ No posts in database');
+                    updatePostCountDisplay();
                     return;
                 }
                 
                 const posts = snapshot.val();
+                const totalBefore = Object.keys(posts).length;
                 let deletedCount = 0;
                 let keptCount = 0;
+                let deletedPostIds = [];
                 
                 // Check each post's age
                 Object.keys(posts).forEach(postId => {
@@ -9099,14 +9340,25 @@
                         console.log(`🗑️ INSTANT DELETE: Post "${postId.substring(0, 8)}..." is ${Math.round(ageHours)}h old - DELETING NOW`);
                         deletePostFromFirebase(currentWiFiNetwork, postId);
                         deletedCount++;
+                        deletedPostIds.push(postId.substring(0, 8));
                     } else {
                         keptCount++;
                     }
                 });
                 
+                // Show post count summary
+                const totalAfter = totalBefore - deletedCount;
+                
                 if (deletedCount > 0) {
-                    console.log(`✅ Cleaned up ${deletedCount} posts (${keptCount} kept)`);
+                    console.log(`📊 POST COUNT: ${totalBefore} → ${totalAfter} (deleted ${deletedCount}, kept ${keptCount})`);
+                    console.log(`🗂️ Deleted posts: ${deletedPostIds.join(', ')}`);
+                    console.log(`%c📉 POSTS DROPPED BY ${deletedCount}`, 'color: #ef4444; font-weight: bold; font-size: 14px;');
+                } else if (totalBefore > 0) {
+                    console.log(`📊 POST COUNT: ${totalBefore} total (all fresh - none old enough to delete yet)`);
                 }
+                
+                // Update UI display
+                updatePostCountDisplay();
             } catch (error) {
                 console.error('Error cleaning up old posts:', error);
             }
