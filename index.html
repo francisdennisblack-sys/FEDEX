@@ -2365,7 +2365,7 @@
         <div class="wifi-info" id="wifiInfo">
             <div class="wifi-name" id="wifiName"></div>
             <div id="zoneInfo" style="font-size: 12px; color: #4ade80; margin-top: 4px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px;" onclick="showZoneSelector()">
-                <span id="zoneLabel">POI: Loading...</span>
+                <span id="zoneLabel">Zone: Loading...</span>
                 <span style="font-size: 10px;">▼</span>
             </div>
             <div id="locationStatus" style="font-size: 11px; color: #888; margin-top: 3px; display: flex; align-items: center; gap: 4px;">
@@ -2373,7 +2373,7 @@
                 <span id="locationStatusText">Checking location cache...</span>
             </div>
             <div id="zoneDropdown" style="display: none; position: absolute; top: 60px; left: 12px; background: #222; border: 1px solid #4ade80; border-radius: 6px; padding: 8px 0; min-width: 240px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
-                <div style="padding: 8px 12px; color: #888; font-size: 11px; border-bottom: 1px solid #333;">📍 POI Grid Status</div>
+                <div style="padding: 8px 12px; color: #888; font-size: 11px; border-bottom: 1px solid #333;">�️ Network Zone (Balanced Location + POI)</div>
                 <div id="zoneList" style="padding: 8px 12px; color: #ccc; font-size: 10px; line-height: 1.6;"></div>
                 <div style="padding: 8px 12px; color: #888; font-size: 11px; border-top: 1px solid #333; cursor: pointer;" onclick="closeZoneSelector()">Close</div>
             </div>
@@ -3052,7 +3052,8 @@
             },
             
             /**
-             * Score posts using ML model (user preferences + geographic + engagement)
+             * Score posts using ML model (BALANCED: Location + POI + Engagement)
+             * Hybrid scoring: 35% Engagement, 30% Location, 20% Recency, 15% POI/Tag
              */
             scorePostsForCache(posts, userProfile = {}) {
                 if (!posts || posts.length === 0) return [];
@@ -3062,30 +3063,38 @@
                 return posts.map(post => {
                     let score = 0;
                     
-                    // 1. ENGAGEMENT SCORE (40% weight)
+                    // 1. ENGAGEMENT SCORE (35% weight) - core user interaction signal
                     const engagement = (post.likes || 0) - (post.dislikes || 0);
-                    score += Math.min(engagement * 40, 400); // Cap at 400
+                    score += Math.min(engagement * 35, 350); // Cap at 350
                     
-                    // 2. RECENCY SCORE (30% weight)
-                    const ageHours = (now - (post.timestamp || 0)) / (60 * 60 * 1000);
-                    const recencyScore = Math.max(0, 300 - ageHours * 10); // Decay with age
-                    score += recencyScore;
-                    
-                    // 3. CONTENT TYPE PREFERENCE (20% weight)
-                    if (post.photoURL || post.imageData) {
-                        // Media posts slightly boosted
-                        score += (userProfile.prefersMedia ? 200 : 100);
-                    } else {
-                        score += (userProfile.prefersText ? 200 : 100);
+                    // 2. LOCATION RELEVANCE (30% weight) - NEW: emphasize actual network location
+                    // Posts from the same WiFi network get a boost
+                    if (post.networkId === userProfile.currentNetwork) {
+                        score += 300; // Strong boost for same-network posts
+                    } else if (post.networkId && userProfile.currentNetwork) {
+                        // Posts from other networks get small penalty (but still visible)
+                        score += 50; // Cross-network posts still welcome
                     }
                     
-                    // 4. AREA TAG MATCHING (10% weight)
+                    // 3. RECENCY SCORE (20% weight) - reduced from 30%
+                    const ageHours = (now - (post.timestamp || 0)) / (60 * 60 * 1000);
+                    const recencyScore = Math.max(0, 200 - ageHours * 8); // Slower decay
+                    score += recencyScore;
+                    
+                    // 4. CONTENT TYPE PREFERENCE (10% weight)
+                    if (post.photoURL || post.imageData) {
+                        score += (userProfile.prefersMedia ? 100 : 50);
+                    } else {
+                        score += (userProfile.prefersText ? 100 : 50);
+                    }
+                    
+                    // 5. POI/AREA TAG MATCHING (5% weight) - reduced from 10%, balanced with location
                     if (userProfile.preferredAreas && post.customTags) {
                         const tagsArray = (post.customTags || []).map(t => t.toLowerCase());
                         const hasPreferred = userProfile.preferredAreas.some(area => 
                             tagsArray.some(tag => tag.includes(area.toLowerCase()))
                         );
-                        if (hasPreferred) score += 100;
+                        if (hasPreferred) score += 50;
                     }
                     
                     return { ...post, mlScore: score };
@@ -4555,31 +4564,74 @@
         }
 
         // ============================================
-        // GET GRID FOR USER (using POI keyword-based sizing)
+        // GET GRID FOR USER (BALANCED: 50% Location + 50% POI)
         // ============================================
         function getGridForUser(userLat, userLon) {
-            const nearestPOIData = findNearestPOI(userLat, userLon);
-            if (!nearestPOIData) return null;
-
-            const { poi, distance } = nearestPOIData;
+            // 🎯 HYBRID APPROACH: Balance WiFi Network Location with POI Enrichment
             
-            // Get all POIs for context (needed for density-based scaling)
-            let allPOIs = [];
-            if (poiDatabase && Array.isArray(poiDatabase)) {
-                allPOIs = poiDatabase;
+            // FACTOR 1: WiFi NETWORK LOCATION (50% weight)
+            // Use a moderate default radius for the actual WiFi network zone
+            const wifiNetworkBaseRadius = 0.5; // ~500m - reasonable WiFi hotspot range
+            
+            // FACTOR 2: POI ENRICHMENT (50% weight)
+            // If nearby POI exists, factor it in to enhance the zone description
+            const nearestPOIData = findNearestPOI(userLat, userLon);
+            
+            let primaryLocation = {
+                lat: userLat,
+                lon: userLon,
+                type: 'wifi_network',
+                source: 'location_based'
+            };
+            
+            let enrichmentData = null;
+            let gridRadius = wifiNetworkBaseRadius;
+            let contentScope = 'NETWORK';
+            let displayName = 'WiFi Network';
+            
+            if (nearestPOIData) {
+                const { poi, distance } = nearestPOIData;
+                
+                // Only use POI if it's reasonably close (within 200m)
+                if (distance <= 0.2) {
+                    enrichmentData = poi;
+                    
+                    // Get all POIs for context
+                    let allPOIs = [];
+                    if (poiDatabase && Array.isArray(poiDatabase)) {
+                        allPOIs = poiDatabase;
+                    }
+                    
+                    // Calculate POI-specific grid sizing
+                    const poiGridData = calculateGridRadiusByPOI(poi, allPOIs);
+                    
+                    // BALANCED BLEND: Average the two radius sources
+                    gridRadius = (wifiNetworkBaseRadius + poiGridData.gridRadius) / 2;
+                    
+                    contentScope = `NETWORK + ${poiGridData.contentScope}`;
+                    displayName = `${poi.name || poi.category || 'Network'} Zone`;
+                } else {
+                    // POI is too far - don't skew the zone
+                    enrichmentData = null;
+                    displayName = `Network (${distance.toFixed(2)}km from ${poi.name})`;
+                }
             }
             
-            // Calculate grid based on POI type
-            const gridData = calculateGridRadiusByPOI(poi, allPOIs);
-            
             return {
-                poi: poi,
-                distance: distance,
-                city: poi.city || 'Unknown',
-                gridRadius: gridData.gridRadius,
-                contentScope: gridData.contentScope,
-                nearbyPOIs: gridData.nearbyPOIs,
-                boundary: calculateCircleBoundary(poi.lat, poi.lon, gridData.gridRadius)
+                // Primary: WiFi Network location
+                location: primaryLocation,
+                
+                // Secondary: POI enrichment (if applicable)
+                enrichment: enrichmentData,
+                
+                // Grid parameters
+                distance: enrichmentData ? calculateDistance(userLat, userLon, enrichmentData.lat, enrichmentData.lon) : 0,
+                city: enrichmentData?.city || 'Unknown',
+                gridRadius: gridRadius,
+                contentScope: contentScope,
+                displayName: displayName,
+                poiFocused: enrichmentData !== null,
+                boundary: enrichmentData ? calculateCircleBoundary(enrichmentData.lat, enrichmentData.lon, gridRadius) : calculateCircleBoundary(userLat, userLon, gridRadius)
             };
         }
 
@@ -6045,7 +6097,7 @@
             }
         }, 1500);
 
-        // Periodic grid check: detect if user has moved to a different POI/grid
+        // Periodic grid check: detect if user has moved to a different zone (balanced location + POI)
         async function checkGridUpdate() {
             // Only run if we have valid location
             if (!userLocation || typeof userLocation.lat !== 'number' || typeof userLocation.lon !== 'number') {
@@ -6053,40 +6105,49 @@
             }
             
             try {
-                // Check if user has moved to a different POI
+                // Check if user has moved to a different zone (HYBRID: location-based with POI enrichment)
                 const newGrid = getGridForUser(userLocation.lat, userLocation.lon);
                 
                 if (!newGrid) {
-                    return; // No POI data available
+                    return; // No location data available
                 }
                 
-                // Check if POI has changed
-                if (currentGrid && currentGrid.poi.id !== newGrid.poi.id) {
-                    console.log(`🔄 User moved to different POI: ${newGrid.poi.name}`);
+                // Check if zone has changed (compare enrichment if available, else location)
+                const oldGridId = currentGrid ? (currentGrid.enrichment?.id || 'location-based') : null;
+                const newGridId = newGrid.enrichment?.id || 'location-based';
+                
+                if (currentGrid && oldGridId !== newGridId) {
+                    console.log(`🔄 User moved: ${newGrid.displayName}`);
                     
                     // Update grid
                     currentGrid = newGrid;
-                    currentNearestPOI = newGrid.poi;
+                    currentNearestPOI = newGrid.enrichment; // May be null if POI too far
                     currentGridRadius = newGrid.gridRadius;
                     currentContentScope = newGrid.contentScope;
-                    currentZoneTag = `${newGrid.poi.name} (${newGrid.city})`;
+                    currentZoneTag = newGrid.displayName;
                     
-                    // Update display
+                    // Update display with balanced info
                     const label = document.getElementById('zoneLabel');
                     if (label) {
-                        label.textContent = `📍 ${currentZoneTag}`;
+                        const enrichStatus = newGrid.poiFocused ? '🗺️📍' : '🗺️';
+                        label.textContent = `${enrichStatus} ${currentZoneTag}`;
                     }
                     
-                    // Update dropdown
+                    // Update dropdown with hybrid info
                     const zoneList = document.getElementById('zoneList');
                     if (zoneList) {
-                        zoneList.innerHTML = `
-                            <strong>POI:</strong> ${currentGrid.poi.name}<br>
-                            <strong>City:</strong> ${currentGrid.city}<br>
-                            <strong>Density:</strong> ${currentGrid.density}/sq km<br>
-                            <strong>Grid Radius:</strong> ${currentGrid.gridRadius} km<br>
-                            <strong>Content Scope:</strong> ${currentGrid.contentScope}
-                        `;
+                        let zoneInfo = `<strong>Location Type:</strong> WiFi Network<br>`;
+                        zoneInfo += `<strong>Grid Radius:</strong> ${newGrid.gridRadius.toFixed(3)} km<br>`;
+                        zoneInfo += `<strong>Scope:</strong> ${newGrid.contentScope}<br>`;
+                        
+                        if (newGrid.enrichment) {
+                            zoneInfo += `<strong>Nearby POI:</strong> ${newGrid.enrichment.name || 'N/A'}<br>`;
+                            zoneInfo += `<strong>Category:</strong> ${newGrid.enrichment.category || 'N/A'}<br>`;
+                        } else {
+                            zoneInfo += `<strong>POI Status:</strong> No nearby POI enrichment<br>`;
+                        }
+                        
+                        zoneList.innerHTML = zoneInfo;
                     }
                 }
             } catch (error) {
