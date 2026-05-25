@@ -10308,75 +10308,69 @@
             /**
              * Generate ML recommendations for where user should post
              * 100% FOCUSED ON GEOGRAPHIC PROXIMITY
-             * Returns areas ranked ONLY by distance to user's location
-             * Closest areas get highest recommendations
+             * Returns TOP 5 CLOSEST POIs ranked by pure distance
              */
             generateRecommendations(userId, allPosts, userLocation) {
                 this.analyzePostDistribution(allPosts);
                 
                 const recommendations = [];
                 
-                // PROXIMITY ONLY: Score each area by distance
-                Object.entries(this.areaNeedsAnalysis).forEach(([area, analysis]) => {
-                    let score = 0;
-                    let distance = null;
-                    let reason = [];
+                // PURE DISTANCE SCORING: Find closest POIs to user
+                if (userLocation && poiDatabase && poiDatabase.length > 0) {
+                    const poiWithDistances = [];
                     
-                    // 100% GEOGRAPHIC PROXIMITY SCORING
-                    // Find nearest POI matching this area
-                    if (userLocation && poiDatabase && poiDatabase.length > 0) {
-                        let nearestDistance = Infinity;
-                        let nearestPOI = null;
-                        
-                        // Find POIs matching this area
-                        poiDatabase.forEach(poi => {
-                            // Check if POI matches area name
-                            if (poi.name && poi.name.toLowerCase().includes(area.toLowerCase())) {
-                                const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
-                                if (dist < nearestDistance) {
-                                    nearestDistance = dist;
-                                    nearestPOI = poi;
-                                }
-                            }
+                    // Calculate distance to EVERY POI
+                    poiDatabase.forEach(poi => {
+                        const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                        poiWithDistances.push({
+                            poi,
+                            distance: Math.round(dist * 10) / 10,  // Round to 1 decimal
+                            score: Math.round(100 * (1 / (1 + dist)) * 10) / 10  // Inverse distance score
                         });
-                        
-                        if (nearestPOI && nearestDistance < Infinity) {
-                            distance = Math.round(nearestDistance * 10) / 10;  // Round to 1 decimal
-                            
-                            // PURE PROXIMITY SCORING: Inverse distance function
-                            // Closer = Higher score (max 100)
-                            // Score = 100 * (1 / (1 + distance))
-                            score = Math.round(100 * (1 / (1 + distance)) * 10) / 10;
-                            
-                            reason.push(`🏠 ${distance}mi`);
-                        } else {
-                            // Area not found in POI database, lowest score
-                            score = 0;
-                            reason.push(`📍 Distance unknown`);
-                        }
-                    } else {
-                        // No user location available, score = 0
-                        score = 0;
-                    }
-                    
-                    recommendations.push({
-                        area,
-                        score: score,
-                        urgency: analysis.urgency,
-                        postCount: analysis.postCount,
-                        engagement: analysis.avgEngagement,
-                        distance,
-                        reason: reason.join(' • ')
                     });
-                });
-                
-                // Sort by score (descending) - CLOSEST FIRST
-                recommendations.sort((a, b) => b.score - a.score);
+                    
+                    // Sort by distance (closest first)
+                    poiWithDistances.sort((a, b) => a.distance - b.distance);
+                    
+                    // Take top 5 closest POIs
+                    const topPOIs = poiWithDistances.slice(0, 5);
+                    
+                    topPOIs.forEach(item => {
+                        // Check if this POI's location matches any area in our analysis
+                        let matchedArea = null;
+                        for (let area of Object.keys(this.areaNeedsAnalysis)) {
+                            if (item.poi.name.toLowerCase().includes(area.toLowerCase()) ||
+                                area.toLowerCase().includes(item.poi.name.toLowerCase()) ||
+                                item.poi.city === area) {
+                                matchedArea = area;
+                                break;
+                            }
+                        }
+                        
+                        // Use POI name if no area match
+                        const displayName = matchedArea || item.poi.name || item.poi.city || 'Location';
+                        const analysis = this.areaNeedsAnalysis[displayName] || { urgency: 0, postCount: 0, avgEngagement: 0 };
+                        
+                        recommendations.push({
+                            area: displayName,
+                            poiName: item.poi.name,
+                            score: item.score,
+                            urgency: analysis.urgency || 0,
+                            postCount: analysis.postCount || 0,
+                            engagement: analysis.avgEngagement || 0,
+                            distance: item.distance,
+                            reason: `📍 ${item.distance}mi from you`
+                        });
+                    });
+                    
+                    console.log(`✅ Generated ${recommendations.length} closest area recommendations:`, recommendations);
+                } else {
+                    console.log(`⚠️  Cannot generate recommendations: userLocation=${!!userLocation}, poiDatabase=${!!poiDatabase}`);
+                }
                 
                 this.recommendations[userId] = recommendations;
-                console.log(`🎯 Generated ${recommendations.length} area recommendations (PROXIMITY ONLY - closest first)`);
                 
-                return recommendations.slice(0, 5);  // Top 5 closest areas
+                return recommendations;  // Return all recommendations (already filtered to top 5 POIs)
             },
             
             /**
