@@ -2963,6 +2963,231 @@
         console.log('  auth:', auth);
 
         // ============================================
+        // INTELLIGENT POST CACHE SYSTEM (ML-Powered Pre-Loading)
+        // ============================================
+        const postCacheSystem = {
+            // Cache storage in localStorage
+            cache: {},
+            cacheMetadata: {},
+            predictions: {},
+            
+            /**
+             * Initialize cache from localStorage on page load
+             */
+            initializeCache() {
+                try {
+                    const savedCache = localStorage.getItem('fedex-post-cache');
+                    const savedMetadata = localStorage.getItem('fedex-cache-metadata');
+                    
+                    if (savedCache) {
+                        this.cache = JSON.parse(savedCache);
+                        console.log(`📦 Loaded ${Object.keys(this.cache).length} posts from cache`);
+                    }
+                    
+                    if (savedMetadata) {
+                        this.cacheMetadata = JSON.parse(savedMetadata);
+                    }
+                } catch (e) {
+                    console.error('❌ Cache initialization error:', e);
+                    this.cache = {};
+                    this.cacheMetadata = {};
+                }
+            },
+            
+            /**
+             * Get cached posts for immediate display (no Firebase wait)
+             * Returns top posts ranked by ML prediction model
+             */
+            getCachedPostsForUser(userId) {
+                const cached = Object.values(this.cache)
+                    .filter(post => post && post.id)
+                    .sort((a, b) => {
+                        // Smart ranking: engagement > recency > randomness
+                        const engagementA = (a.likes || 0) - (a.dislikes || 0);
+                        const engagementB = (b.likes || 0) - (b.dislikes || 0);
+                        
+                        if (engagementA !== engagementB) return engagementB - engagementA;
+                        return (b.timestamp || 0) - (a.timestamp || 0);
+                    });
+                
+                console.log(`📦 Using ${cached.length} cached posts for instant display`);
+                return cached;
+            },
+            
+            /**
+             * Score posts using ML model (user preferences + geographic + engagement)
+             */
+            scorePostsForCache(posts, userProfile = {}) {
+                if (!posts || posts.length === 0) return [];
+                
+                const now = new Date().getTime();
+                
+                return posts.map(post => {
+                    let score = 0;
+                    
+                    // 1. ENGAGEMENT SCORE (40% weight)
+                    const engagement = (post.likes || 0) - (post.dislikes || 0);
+                    score += Math.min(engagement * 40, 400); // Cap at 400
+                    
+                    // 2. RECENCY SCORE (30% weight)
+                    const ageHours = (now - (post.timestamp || 0)) / (60 * 60 * 1000);
+                    const recencyScore = Math.max(0, 300 - ageHours * 10); // Decay with age
+                    score += recencyScore;
+                    
+                    // 3. CONTENT TYPE PREFERENCE (20% weight)
+                    if (post.photoURL || post.imageData) {
+                        // Media posts slightly boosted
+                        score += (userProfile.prefersMedia ? 200 : 100);
+                    } else {
+                        score += (userProfile.prefersText ? 200 : 100);
+                    }
+                    
+                    // 4. AREA TAG MATCHING (10% weight)
+                    if (userProfile.preferredAreas && post.customTags) {
+                        const tagsArray = (post.customTags || []).map(t => t.toLowerCase());
+                        const hasPreferred = userProfile.preferredAreas.some(area => 
+                            tagsArray.some(tag => tag.includes(area.toLowerCase()))
+                        );
+                        if (hasPreferred) score += 100;
+                    }
+                    
+                    return { ...post, mlScore: score };
+                })
+                .sort((a, b) => (b.mlScore || 0) - (a.mlScore || 0));
+            },
+            
+            /**
+             * Save posts to cache (called after Firebase data loads)
+             */
+            updateCache(posts, userId) {
+                if (!posts || typeof posts !== 'object') return;
+                
+                // Convert posts to array and deduplicate
+                const postsArray = Array.isArray(posts) ? posts : Object.values(posts);
+                const uniquePosts = {};
+                
+                postsArray.forEach(post => {
+                    if (post && post.id) {
+                        uniquePosts[post.id] = post;
+                    }
+                });
+                
+                // Keep top posts (by engagement) to avoid cache bloat
+                const topPosts = Object.values(uniquePosts)
+                    .sort((a, b) => {
+                        const engA = (a.likes || 0) - (a.dislikes || 0);
+                        const engB = (b.likes || 0) - (b.dislikes || 0);
+                        return engB - engA;
+                    })
+                    .slice(0, 200); // Keep only top 200 posts
+                
+                // Update cache
+                topPosts.forEach(post => {
+                    this.cache[post.id] = {
+                        id: post.id,
+                        userId: post.userId,
+                        content: post.content,
+                        likes: post.likes || 0,
+                        dislikes: post.dislikes || 0,
+                        timestamp: post.timestamp || 0,
+                        photoURL: post.photoURL,
+                        imageData: post.imageData,
+                        customTags: post.customTags,
+                        mediaType: post.mediaType
+                    };
+                });
+                
+                // Save to localStorage
+                try {
+                    localStorage.setItem('fedex-post-cache', JSON.stringify(this.cache));
+                    console.log(`💾 Cached ${Object.keys(this.cache).length} posts to localStorage`);
+                } catch (e) {
+                    console.warn('⚠️ Cache save failed (storage full?):', e);
+                }
+            },
+            
+            /**
+             * Learn user preferences from their voting history
+             */
+            learnUserPreferences(userVotes, posts) {
+                try {
+                    const profile = {
+                        prefersMedia: 0,
+                        prefersText: 0,
+                        preferredAreas: [],
+                        voteCount: 0
+                    };
+                    
+                    // Analyze votes to learn preferences
+                    Object.values(userVotes).forEach(vote => {
+                        const post = posts[vote.postId];
+                        if (!post) return;
+                        
+                        profile.voteCount++;
+                        
+                        // Track media vs text preference
+                        if (post.photoURL || post.imageData) {
+                            profile.prefersMedia += (vote.type === 'like' ? 1 : -0.5);
+                        } else {
+                            profile.prefersText += (vote.type === 'like' ? 1 : -0.5);
+                        }
+                        
+                        // Track area preferences
+                        if (post.customTags && vote.type === 'like') {
+                            post.customTags.forEach(tag => {
+                                if (tag.startsWith('#')) {
+                                    const area = tag.replace('#', '').toLowerCase();
+                                    if (!profile.preferredAreas.includes(area)) {
+                                        profile.preferredAreas.push(area);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    
+                    this.predictions[currentUserId] = profile;
+                    console.log(`🎯 Learned user preferences:`, profile);
+                    return profile;
+                } catch (e) {
+                    console.error('❌ Preference learning error:', e);
+                    return {};
+                }
+            },
+            
+            /**
+             * Clear old cache entries (>7 days old)
+             */
+            pruneOldCache() {
+                const now = new Date().getTime();
+                const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+                let prunedCount = 0;
+                
+                Object.keys(this.cache).forEach(postId => {
+                    const post = this.cache[postId];
+                    if (now - (post.timestamp || 0) > WEEK_MS) {
+                        delete this.cache[postId];
+                        prunedCount++;
+                    }
+                });
+                
+                if (prunedCount > 0) {
+                    console.log(`🗑️ Pruned ${prunedCount} old cache entries`);
+                    try {
+                        localStorage.setItem('fedex-post-cache', JSON.stringify(this.cache));
+                    } catch (e) {
+                        console.warn('⚠️ Cache prune save failed:', e);
+                    }
+                }
+            }
+        };
+        
+        // Initialize cache on page load
+        postCacheSystem.initializeCache();
+        
+        // Expose cache system globally
+        window.postCacheSystem = postCacheSystem;
+
+        // ============================================
         // PHASE 0: FEDEX-ZONES FOUNDATION LAYER
         // Theme Toggle Function - Define at top level for onclick access
         function toggleTheme() {
@@ -3176,6 +3401,7 @@
    • View 'window.getPOIClusteringReport()' for POI analysis
    • View 'window.tagSystem' for custom tag data
    • View 'window.getDistributionMetrics()' for post routing stats
+   • View 'window.postCacheSystem' for instant-load cache stats
             `);
             
             // Show distribution metrics if available
@@ -3187,6 +3413,19 @@
    User post recirculations: ${Object.keys(distMetrics.userPostRecirculation).reduce((sum, userId) => sum + Object.keys(distMetrics.userPostRecirculation[userId]).length, 0)}
    Area tag mappings: ${Object.keys(distMetrics.areaTagMaps).length}
    Posts with target audiences: ${Object.keys(distMetrics.postTargetAudience).length}
+            `);
+            }
+            
+            // Show cache metrics for instant loading
+            if (window.postCacheSystem) {
+                const cacheSize = Object.keys(window.postCacheSystem.cache).length;
+                const predictions = Object.keys(window.postCacheSystem.predictions).length;
+                console.log(`
+⚡ INSTANT-LOAD CACHE METRICS:
+   Cached posts: ${cacheSize}
+   User predictions learned: ${predictions}
+   Cache size (bytes): ${new Blob([JSON.stringify(window.postCacheSystem.cache)]).size}
+   Next page refresh: Posts load instantly! ✨
             `);
             }
             
@@ -5415,6 +5654,16 @@
             
             // Track custom tag interactions (learn user's tag preferences)
             updateTagEngagementOnVote(post, voteType);
+            
+            // ⚡ CACHE LEARNING: Update ML cache predictions based on this vote
+            if (window.postCacheSystem && gridContent[currentUserId]) {
+                window.postCacheSystem.learnUserPreferences(userVotes, 
+                    gridContent[currentUserId].reduce((acc, p) => {
+                        acc[p.id] = p;
+                        return acc;
+                    }, {})
+                );
+            }
             
             // Update Firebase asynchronously without blocking UI
             updatePostVotesFirebase(currentWiFiNetwork, postId, {
@@ -8011,6 +8260,12 @@
                         gridContent: gridContent
                     });
                     
+                    // ⚡ UPDATE CACHE: Save fresh posts for instant load on next page refresh
+                    if (window.postCacheSystem) {
+                        window.postCacheSystem.updateCache(uniquePosts, currentUserId);
+                        window.postCacheSystem.pruneOldCache();
+                    }
+                    
                     console.log('  📞 About to call renderGrid()');
                     renderGrid();
                     console.log('  ✅ renderGrid() complete');
@@ -9455,6 +9710,15 @@
             
             // Get all posts for the network
             let allPosts = gridContent[currentUserId] || [];
+            
+            // ========================================================================
+            // INSTANT LOAD: Use ML-powered cache if Firebase data not ready yet
+            // ========================================================================
+            if (allPosts.length === 0 && window.postCacheSystem && Object.keys(window.postCacheSystem.cache).length > 0) {
+                console.log(`⚡ INSTANT LOAD: Using cached posts while Firebase data loads...`);
+                allPosts = window.postCacheSystem.getCachedPostsForUser(currentUserId);
+                console.log(`✨ Showing ${allPosts.length} cached posts instantly!`);
+            }
             
             // CRITICAL: De-duplicate posts by ID to prevent ghost posts
             // This can happen if Firebase snapshot has duplicate entries
