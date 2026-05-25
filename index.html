@@ -2429,9 +2429,28 @@
                     </div>
                 </div>
                 <div style="margin-top: 8px;">
-                    <label style="font-size: 11px; color: #888; display: block; margin-bottom: 4px; font-weight: 500;">Find & select a zone...</label>
+                    <label style="font-size: 11px; color: #888; display: block; margin-bottom: 4px; font-weight: 500;">📡 Send post to area...</label>
                     <div style="position: relative;">
-                        <input type="text" id="customZoneTag" placeholder="Search POI database or city (e.g., Starbucks, New York, Paris)" style="
+                        <div id="mlRecommendationContainer" style="
+                            width: 100%;
+                            padding: 8px 12px;
+                            background-color: #222;
+                            border: 1px solid #667eea;
+                            border-radius: 4px;
+                            color: #fff;
+                            font-size: 12px;
+                            cursor: pointer;
+                            transition: all 0.2s;
+                            display: none;
+                        " onclick="toggleRecommendationDropdown()">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <span id="mlRecommendationText">Loading recommendations...</span>
+                                <span style="color: #667eea;">▼</span>
+                            </div>
+                            <div id="mlRecommendationReason" style="font-size: 10px; color: #999; margin-top: 4px;"></div>
+                        </div>
+                        
+                        <input type="text" id="customZoneTag" placeholder="Or search POI database..." style="
                             width: 100%;
                             padding: 8px 12px;
                             background-color: #222;
@@ -2441,7 +2460,9 @@
                             font-size: 12px;
                             box-sizing: border-box;
                             transition: border-color 0.2s;
+                            display: none;
                         " onfocus="this.style.borderColor='#667eea'" onblur="this.style.borderColor='#444'" maxlength="100" autocomplete="off">
+                        
                         <div id="autocompleteDropdown" style="
                             position: absolute;
                             top: 100%;
@@ -2454,6 +2475,21 @@
                             max-height: 200px;
                             overflow-y: auto;
                             z-index: 1000;
+                            display: none;
+                        "></div>
+                        
+                        <div id="mlRecommendationDropdown" style="
+                            position: absolute;
+                            top: 100%;
+                            left: 0;
+                            right: 0;
+                            background-color: #1a1a1a;
+                            border: 1px solid #667eea;
+                            border-top: none;
+                            border-radius: 0 0 4px 4px;
+                            max-height: 250px;
+                            overflow-y: auto;
+                            z-index: 1001;
                             display: none;
                         "></div>
                     </div>
@@ -3427,6 +3463,29 @@
    Cache size (bytes): ${new Blob([JSON.stringify(window.postCacheSystem.cache)]).size}
    Next page refresh: Posts load instantly! ✨
             `);
+            }
+            
+            // Show ML recommendation metrics
+            if (window.postRecommendationSystem) {
+                const recSys = window.postRecommendationSystem;
+                const userHistory = recSys.userPostingHistory[currentUserId] || [];
+                const recommendations = recSys.recommendations[currentUserId] || [];
+                const areaCount = Object.keys(recSys.areaPostDensity).length;
+                
+                console.log(`
+🎯 ML POST RECOMMENDATION METRICS:
+   Areas analyzed: ${areaCount}
+   User post history: ${userHistory.length} posts
+   Recommendations generated: ${recommendations.length}
+   Areas underserved: ${Object.values(recSys.areaNeedsAnalysis || {}).filter(a => a.underserved).length}
+            `);
+                
+                if (recommendations.length > 0) {
+                    console.log(`   Top 3 recommendations:`);
+                    recommendations.slice(0, 3).forEach((rec, idx) => {
+                        console.log(`      ${idx + 1}. ${rec.area}: ${rec.score}/100 - ${rec.reason}`);
+                    });
+                }
             }
             
             return metrics;
@@ -9641,6 +9700,276 @@
         window.getDistributionMetrics = getDistributionMetrics;
         window.applyPostDistributionRouting = applyPostDistributionRouting;
 
+        // ============================================
+        // ML POST RECOMMENDATION SYSTEM (Suggest Best Areas to Post)
+        // ============================================
+        const postRecommendationSystem = {
+            // Track where user posts and area coverage
+            userPostingHistory: {},  // { userId: [{ area, timestamp, engagement }] }
+            areaPostDensity: {},     // { area: { postCount, avgEngagement, lastPostTime } }
+            areaNeedsAnalysis: {},   // { area: { underserved, urgency, recommendation } }
+            recommendations: {},     // { userId: [{ area, score, reason }] }
+            
+            /**
+             * Analyze post distribution and identify underserved areas
+             */
+            analyzePostDistribution(allPosts) {
+                if (!allPosts || allPosts.length === 0) return;
+                
+                const areaStats = {};
+                const now = new Date().getTime();
+                const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+                
+                // Aggregate posts by area
+                allPosts.forEach(post => {
+                    const area = post.county || post.zone || post.areaTag || 'Unknown';
+                    if (!areaStats[area]) {
+                        areaStats[area] = {
+                            count: 0,
+                            engagement: 0,
+                            lastPost: 0,
+                            recentCount: 0  // Posts in last 7 days
+                        };
+                    }
+                    
+                    areaStats[area].count++;
+                    areaStats[area].engagement += ((post.likes || 0) - (post.dislikes || 0));
+                    areaStats[area].lastPost = Math.max(areaStats[area].lastPost, post.timestamp || 0);
+                    
+                    if (now - (post.timestamp || 0) < WEEK_MS) {
+                        areaStats[area].recentCount++;
+                    }
+                });
+                
+                // Identify underserved areas
+                this.areaPostDensity = areaStats;
+                
+                // Calculate needs based on post frequency and recency
+                Object.entries(areaStats).forEach(([area, stats]) => {
+                    const daysSinceLastPost = (now - stats.lastPost) / (24 * 60 * 60 * 1000);
+                    const avgEngagement = stats.count > 0 ? stats.engagement / stats.count : 0;
+                    
+                    // Urgency score: how badly this area needs content
+                    let urgency = 0;
+                    if (stats.recentCount === 0) urgency += 50;  // No recent posts
+                    if (daysSinceLastPost > 7) urgency += 30;    // No posts in a week
+                    if (stats.count < 5) urgency += 20;          // Very few posts total
+                    
+                    this.areaNeedsAnalysis[area] = {
+                        postCount: stats.count,
+                        recentPostCount: stats.recentCount,
+                        avgEngagement: Math.round(avgEngagement * 10) / 10,
+                        daysSinceLastPost: Math.round(daysSinceLastPost),
+                        urgency: Math.min(100, urgency),
+                        underserved: stats.recentCount < 3 || stats.count < 5
+                    };
+                });
+                
+                console.log(`📊 Area analysis: ${Object.keys(areaStats).length} areas analyzed`);
+            },
+            
+            /**
+             * Track user's posting history to learn their patterns
+             */
+            trackUserPost(userId, area, engagement = 0) {
+                if (!this.userPostingHistory[userId]) {
+                    this.userPostingHistory[userId] = [];
+                }
+                
+                this.userPostingHistory[userId].push({
+                    area,
+                    timestamp: new Date().getTime(),
+                    engagement
+                });
+                
+                // Keep only last 50 posts per user
+                if (this.userPostingHistory[userId].length > 50) {
+                    this.userPostingHistory[userId] = this.userPostingHistory[userId].slice(-50);
+                }
+            },
+            
+            /**
+             * Generate ML recommendations for where user should post
+             * Returns ranked areas based on:
+             * - User's posting history (where they usually post)
+             * - Area urgency (where posts are needed)
+             * - Engagement potential (areas with high engagement)
+             */
+            generateRecommendations(userId, allPosts, userLocation) {
+                this.analyzePostDistribution(allPosts);
+                
+                const recommendations = [];
+                const userHistory = this.userPostingHistory[userId] || [];
+                
+                // Extract user's favorite areas
+                const favoriteAreas = {};
+                userHistory.forEach(post => {
+                    favoriteAreas[post.area] = (favoriteAreas[post.area] || 0) + 1;
+                });
+                
+                // Score each area
+                Object.entries(this.areaNeedsAnalysis).forEach(([area, analysis]) => {
+                    let score = 0;
+                    let reason = [];
+                    
+                    // 1. USER PREFERENCE (30% weight)
+                    if (favoriteAreas[area]) {
+                        score += 30 * Math.min(1, favoriteAreas[area] / 5);  // Max 30
+                        reason.push(`Your favorite area`);
+                    }
+                    
+                    // 2. AREA URGENCY (40% weight) - Posts needed here
+                    score += (analysis.urgency / 100) * 40;  // 0-40
+                    if (analysis.urgency > 70) reason.push(`Posts needed`);
+                    else if (analysis.underserved) reason.push(`Underserved`);
+                    
+                    // 3. ENGAGEMENT POTENTIAL (20% weight)
+                    const normalizedEngagement = Math.min(20, Math.max(0, analysis.avgEngagement + 10));
+                    score += normalizedEngagement;
+                    if (analysis.avgEngagement > 5) reason.push(`High engagement area`);
+                    
+                    // 4. RECENT ACTIVITY (10% weight)
+                    if (analysis.recentPostCount > 0) {
+                        score += 10;
+                        reason.push(`Active area`);
+                    }
+                    
+                    recommendations.push({
+                        area,
+                        score: Math.round(score * 10) / 10,
+                        urgency: analysis.urgency,
+                        postCount: analysis.postCount,
+                        engagement: analysis.avgEngagement,
+                        reason: reason.join(' • ')
+                    });
+                });
+                
+                // Sort by score (descending)
+                recommendations.sort((a, b) => b.score - a.score);
+                
+                this.recommendations[userId] = recommendations;
+                console.log(`🎯 Generated ${recommendations.length} area recommendations for user`);
+                
+                return recommendations.slice(0, 5);  // Top 5 recommendations
+            },
+            
+            /**
+             * Get top recommendation for immediate display
+             */
+            getTopRecommendation(userId) {
+                const recs = this.recommendations[userId] || [];
+                if (recs.length === 0) return null;
+                return recs[0];
+            },
+            
+            /**
+             * Get all recommendations as formatted options
+             */
+            getRecommendedAreas(userId) {
+                const recs = this.recommendations[userId] || [];
+                return recs.map(r => ({
+                    label: `${r.area} (${r.score}/100)`,
+                    value: r.area,
+                    score: r.score,
+                    reason: r.reason
+                }));
+            }
+        };
+        
+        // Expose recommendation system globally
+        window.postRecommendationSystem = postRecommendationSystem;
+
+        // ============================================
+        // ML RECOMMENDATION UI FUNCTIONS
+        // ============================================
+        
+        function updatePostRecommendationUI(recommendation) {
+            if (!recommendation) return;
+            
+            try {
+                const container = document.getElementById('mlRecommendationContainer');
+                const text = document.getElementById('mlRecommendationText');
+                const reason = document.getElementById('mlRecommendationReason');
+                
+                if (container && text && reason) {
+                    text.textContent = `🎯 ${recommendation.area}`;
+                    reason.textContent = recommendation.reason;
+                    container.style.display = 'block';
+                    
+                    // Also populate the hidden input with the recommended area
+                    document.getElementById('customZoneTag').value = recommendation.area;
+                }
+            } catch (e) {
+                console.warn('❌ Error updating recommendation UI:', e);
+            }
+        }
+        
+        function toggleRecommendationDropdown() {
+            const dropdown = document.getElementById('mlRecommendationDropdown');
+            if (!dropdown) return;
+            
+            // Generate dropdown items from recommendations
+            if (dropdown.style.display === 'none') {
+                populateRecommendationDropdown();
+                dropdown.style.display = 'block';
+            } else {
+                dropdown.style.display = 'none';
+            }
+        }
+        
+        function populateRecommendationDropdown() {
+            const dropdown = document.getElementById('mlRecommendationDropdown');
+            if (!dropdown) return;
+            
+            const recs = window.postRecommendationSystem.getRecommendedAreas(currentUserId) || [];
+            
+            if (recs.length === 0) {
+                dropdown.innerHTML = '<div style="padding: 12px; color: #999; text-align: center;">No recommendations available</div>';
+                return;
+            }
+            
+            let html = '';
+            recs.forEach((rec, idx) => {
+                const scorePercent = Math.round(rec.score);
+                const scoreColor = scorePercent > 70 ? '#4ade80' : scorePercent > 50 ? '#fbbf24' : '#ef4444';
+                
+                html += `
+                    <div style="
+                        padding: 12px;
+                        border-bottom: 1px solid #333;
+                        cursor: pointer;
+                        transition: background-color 0.2s;
+                    " onmouseover="this.style.backgroundColor='#2a2a2a'" onmouseout="this.style.backgroundColor='transparent'" onclick="selectRecommendedArea('${rec.value}', event)">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-weight: 500;">${rec.value}</span>
+                            <span style="color: ${scoreColor}; font-weight: 600;">${scorePercent}%</span>
+                        </div>
+                        <div style="font-size: 10px; color: #999; margin-top: 4px;">${rec.reason}</div>
+                    </div>
+                `;
+            });
+            
+            dropdown.innerHTML = html;
+        }
+        
+        function selectRecommendedArea(area, event) {
+            event.stopPropagation();
+            
+            document.getElementById('customZoneTag').value = area;
+            document.getElementById('mlRecommendationText').textContent = `🎯 ${area}`;
+            document.getElementById('mlRecommendationDropdown').style.display = 'none';
+            
+            console.log(`✅ User selected recommended area: ${area}`);
+        }
+        
+        // Close dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (e.target.id !== 'mlRecommendationContainer' && e.target.id !== 'mlRecommendationDropdown') {
+                const dropdown = document.getElementById('mlRecommendationDropdown');
+                if (dropdown) dropdown.style.display = 'none';
+            }
+        });
+
         function renderGrid() {
             if (!isConnected) return;
             
@@ -9718,6 +10047,18 @@
                 console.log(`⚡ INSTANT LOAD: Using cached posts while Firebase data loads...`);
                 allPosts = window.postCacheSystem.getCachedPostsForUser(currentUserId);
                 console.log(`✨ Showing ${allPosts.length} cached posts instantly!`);
+            }
+            
+            // ========================================================================
+            // ML POST RECOMMENDATIONS: Analyze where posts are needed + user preferences
+            // ========================================================================
+            if (window.postRecommendationSystem && allPosts.length > 0) {
+                window.postRecommendationSystem.generateRecommendations(currentUserId, allPosts, userLocation);
+                const topRec = window.postRecommendationSystem.getTopRecommendation(currentUserId);
+                if (topRec) {
+                    console.log(`🎯 Top post recommendation: ${topRec.area} (Score: ${topRec.score}/100) - ${topRec.reason}`);
+                    updatePostRecommendationUI(topRec);
+                }
             }
             
             // CRITICAL: De-duplicate posts by ID to prevent ghost posts
@@ -11172,6 +11513,12 @@
                 const networkIdForPost = currentWiFiNetwork || 'shared-network-1';
                 console.log('  ✅ Using networkId for post:', networkIdForPost);
                 await savePostToFirebase(networkIdForPost, postId, postData);
+
+                // 🎯 TRACK USER POST FOR ML RECOMMENDATIONS
+                if (window.postRecommendationSystem) {
+                    window.postRecommendationSystem.trackUserPost(currentUserId, areaTag, 0);
+                    console.log(`📊 Tracked user post to area: ${areaTag}`);
+                }
 
                 // DO NOT update local grid - let Firebase listener handle it
                 // The listener will fire when post appears in Firebase
