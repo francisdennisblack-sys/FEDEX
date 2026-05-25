@@ -2378,6 +2378,7 @@
                 <span id="postCountValue">Posts: Loading...</span>
                 <span id="postAgeBreakdown" style="color: #666;"></span>
                 <span id="debugDeleteBtn" style="cursor: pointer; color: #666; font-size: 9px; padding: 2px 6px; border: 1px solid #555; border-radius: 3px; margin-left: 4px;" onclick="if(typeof testManualDelete==='function') testManualDelete(); else alert('Function loading...')" title="Test delete oldest post">Test Delete</span>
+                <span style="cursor: pointer; color: #ef4444; font-size: 9px; padding: 2px 6px; border: 1px solid #ef4444; border-radius: 3px;" onclick="if(typeof forceDeleteAllPosts==='function') forceDeleteAllPosts(); else alert('Function loading...')" title="Force delete ALL posts">🔥 Delete All</span>
             </div>
             <div id="zoneDropdown" style="display: none; position: absolute; top: 60px; left: 12px; background: #222; border: 1px solid #4ade80; border-radius: 6px; padding: 8px 0; min-width: 240px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
                 <div style="padding: 8px 12px; color: #888; font-size: 11px; border-bottom: 1px solid #333;">�️ Network Zone (Balanced Location + POI)</div>
@@ -7775,10 +7776,64 @@
 
         // Force manual cleanup from admin page
         async function manuallyTriggerCleanup() {
-            console.log('⚡ Admin triggered manual cleanup...');
-            await cleanupOldPosts();
-            await updateAdminCleanupMetrics();
-            alert('✅ Cleanup cycle completed - check console for details');
+            console.log('⚡ FORCE DELETE ALL POSTS - INITIATED');
+            
+            if (!currentWiFiNetwork) {
+                alert('❌ No network connected');
+                return;
+            }
+            
+            try {
+                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
+                const snapshot = await get(postsRef);
+                
+                if (!snapshot.exists()) {
+                    console.log('✅ No posts to delete');
+                    alert('✅ Database empty - no posts to delete');
+                    updateAdminCleanupMetrics();
+                    return;
+                }
+                
+                const posts = snapshot.val();
+                const allPostIds = Object.keys(posts);
+                const totalToDelete = allPostIds.length;
+                
+                console.log(`🔥 FORCE DELETE: Deleting ${totalToDelete} posts...`);
+                console.log(`📍 Network: ${currentWiFiNetwork}`);
+                
+                // Create deletion promises for ALL posts
+                const deletionPromises = allPostIds.map((postId, index) => {
+                    return deletePostFromFirebase(currentWiFiNetwork, postId)
+                        .then(() => {
+                            console.log(`✅ [${index + 1}/${totalToDelete}] Deleted: ${postId.substring(0, 8)}`);
+                        })
+                        .catch(err => {
+                            console.error(`❌ [${index + 1}/${totalToDelete}] Failed: ${postId.substring(0, 8)} - ${err.message}`);
+                        });
+                });
+                
+                console.log(`⏳ Waiting for ${totalToDelete} deletions to complete...`);
+                await Promise.all(deletionPromises);
+                
+                // Verify all posts are gone
+                const verifySnapshot = await get(postsRef);
+                const remaining = verifySnapshot.exists() ? Object.keys(verifySnapshot.val()).length : 0;
+                
+                if (remaining === 0) {
+                    console.log(`%c🎉 SUCCESS: All ${totalToDelete} posts deleted!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
+                    alert(`✅ FORCE DELETE COMPLETE: ${totalToDelete} posts removed\n✓ Database now empty`);
+                } else {
+                    console.warn(`⚠️ WARNING: ${remaining} posts still remain after deletion attempt`);
+                    alert(`⚠️ Deleted ${totalToDelete - remaining}/${totalToDelete} posts\n⚠️ ${remaining} posts still in database`);
+                }
+                
+                updateAdminCleanupMetrics();
+                updatePostCountDisplay();
+                
+            } catch (error) {
+                console.error('❌ Error during force delete:', error);
+                alert(`❌ Force delete failed: ${error.message}`);
+            }
         }
         
         // Start updating admin metrics every 2 seconds when admin page is open
@@ -9302,7 +9357,68 @@
             }
         }
 
-        // Clean up posts older than 24 hours - runs very frequently (every 10 seconds)
+        // Force delete ALL posts from Firebase
+        async function forceDeleteAllPosts() {
+            if (!currentWiFiNetwork) {
+                alert('❌ No network connected');
+                return;
+            }
+            
+            const confirm = window.confirm('⚠️ Are you sure? This will DELETE ALL posts in the database.\n\nClick OK to proceed.');
+            if (!confirm) return;
+            
+            console.log('🔥 FORCE DELETE ALL - Starting...');
+            
+            try {
+                const postsRef = ref(database, `networks/${currentWiFiNetwork}/posts`);
+                const snapshot = await get(postsRef);
+                
+                if (!snapshot.exists()) {
+                    alert('✅ No posts to delete');
+                    updatePostCountDisplay();
+                    return;
+                }
+                
+                const posts = snapshot.val();
+                const allPostIds = Object.keys(posts);
+                const totalToDelete = allPostIds.length;
+                
+                console.log(`🔥 FORCE DELETE ALL: ${totalToDelete} posts scheduled for deletion`);
+                
+                // Delete all posts in parallel
+                const deletionPromises = allPostIds.map((postId, index) => {
+                    return deletePostFromFirebase(currentWiFiNetwork, postId)
+                        .then(() => {
+                            const progress = Math.round(((index + 1) / totalToDelete) * 100);
+                            console.log(`✅ [${progress}%] Deleted: ${postId.substring(0, 8)}`);
+                        })
+                        .catch(err => {
+                            console.error(`❌ Failed: ${postId.substring(0, 8)}`);
+                        });
+                });
+                
+                await Promise.all(deletionPromises);
+                
+                // Verify deletion
+                const verify = await get(postsRef);
+                const remaining = verify.exists() ? Object.keys(verify.val()).length : 0;
+                
+                if (remaining === 0) {
+                    console.log(`%c✅ ALL POSTS DELETED SUCCESSFULLY!`, 'color: #10b981; font-weight: bold; font-size: 14px;');
+                    alert(`✅ SUCCESS!\n${totalToDelete} posts permanently deleted\n✓ Database is now clean`);
+                } else {
+                    console.warn(`⚠️ ${remaining} posts remain`);
+                    alert(`⚠️ Deleted ${totalToDelete - remaining}/${totalToDelete}\n⚠️ ${remaining} still remain`);
+                }
+                
+                updatePostCountDisplay();
+            } catch (error) {
+                console.error('Error in forceDeleteAllPosts:', error);
+                alert('❌ Error: ' + error.message);
+            }
+        }
+
+
         async function cleanupOldPosts() {
             if (!currentWiFiNetwork) {
                 console.warn('⚠️ cleanupOldPosts: currentWiFiNetwork not set, skipping');
