@@ -6754,6 +6754,7 @@
         let maxGridSize = 2000; // Pre-create 2000 boxes total for virtually unlimited scrolling
         let isConnected = false;
         let gridContent = {}; // Store posts by user ID instead of WiFi
+        let postCache = {}; // BACKUP CACHE: Keep posts safe from gridContent clears, indexed by post.id
         let selectedFile = null;
         let selectedMediaType = null; // Track if media is 'video' or 'image'
         let lastModerationRejectionTime = 0; // Track when moderation last rejected a file
@@ -8926,14 +8927,45 @@
             
             console.log('');
             if (!targetPost) {
-                console.error(`❌ POST NOT FOUND: "${postId}"`);
-                console.log('This post ID does not exist in gridContent!');
-                console.log('Possible issues:');
-                console.log('  1. Posts not loaded from Firebase yet');
-                console.log('  2. Post ID in HTML does not match post.id in gridContent');
-                console.log('  3. Posts loaded under different key than expected');
-                console.log('='.repeat(60));
-                return;
+                console.error(`❌ POST NOT FOUND IN GRIDCONTENT: "${postId}"`);
+                console.log('FALLBACK 1: Checking postCache for post...');
+                
+                // FALLBACK 1: Check postCache (backup cache of recently loaded posts)
+                if (postCache[postId]) {
+                    console.log(`✅ FOUND IN CACHE! Post recovered from postCache`);
+                    targetPost = postCache[postId];
+                } else {
+                    console.log(`❌ Not in postCache either`);
+                    console.log('FALLBACK 2: Searching all rendered grid boxes for post ID...');
+                    
+                    // FALLBACK SEARCH: Look through all grid boxes to find the one with this postId
+                    const allBoxes = document.querySelectorAll('.grid-box[data-post-id]');
+                    console.log(`Found ${allBoxes.length} boxes with data-post-id attribute`);
+                    
+                    let foundBox = null;
+                    for (const box of allBoxes) {
+                        if (box.getAttribute('data-post-id') === postId) {
+                            foundBox = box;
+                            console.log(`✅ Found box with postId: "${postId}"`);
+                            break;
+                        }
+                    }
+                    
+                    if (!foundBox) {
+                        console.error(`❌ POST NOT FOUND anywhere: "${postId}"`);
+                        console.log('This post ID does not exist in gridContent, postCache, or rendered boxes!');
+                        console.log('Possible issues:');
+                        console.log('  1. Posts not loaded from Firebase yet (Firebase listener may be offline)');
+                        console.log('  2. Post ID in HTML does not match post.id in data structures');
+                        console.log('  3. gridContent AND postCache both cleared');
+                        console.log('  4. Post was deleted from Firebase after being rendered');
+                        console.log('Debugging info:');
+                        console.log('  postCache keys:', Object.keys(postCache).slice(0, 5));
+                        console.log('  gridContent keys:', Object.keys(gridContent));
+                        console.log('='.repeat(60));
+                        return;
+                    }
+                }
             }
             
             console.log(`✅ OPENING MODAL FOR POST`);
@@ -9766,6 +9798,13 @@
                         allKeys: Object.keys(gridContent),
                         allKeysWithCounts: Object.keys(gridContent).map(k => `"${k}": ${(gridContent[k] || []).length}`)
                     });
+                    
+                    // 💾 BACKUP CACHE: Also store all posts in postCache by ID for modal lookups
+                    // This ensures posts are always findable even if gridContent is cleared
+                    uniquePosts.forEach(post => {
+                        postCache[post.id] = post;
+                    });
+                    console.log(`  💾 postCache updated: ${Object.keys(postCache).length} posts cached`);
                     
                     // ⚡ UPDATE CACHE: Save fresh posts for instant load on next page refresh
                     if (window.postCacheSystem) {
