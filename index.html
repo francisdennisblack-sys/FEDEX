@@ -3052,8 +3052,8 @@
             },
             
             /**
-             * Score posts using ML model (BALANCED: Location + POI + Engagement)
-             * Hybrid scoring: 35% Engagement, 30% Location, 20% Recency, 15% POI/Tag
+             * Score posts using ML model (POI-focused when close + Area-name when far)
+             * Scoring: 35% Engagement, 30% Zone Matching, 20% Recency, 15% Content
              */
             scorePostsForCache(posts, userProfile = {}) {
                 if (!posts || posts.length === 0) return [];
@@ -3067,34 +3067,33 @@
                     const engagement = (post.likes || 0) - (post.dislikes || 0);
                     score += Math.min(engagement * 35, 350); // Cap at 350
                     
-                    // 2. LOCATION RELEVANCE (30% weight) - NEW: emphasize actual network location
-                    // Posts from the same WiFi network get a boost
-                    if (post.networkId === userProfile.currentNetwork) {
-                        score += 300; // Strong boost for same-network posts
-                    } else if (post.networkId && userProfile.currentNetwork) {
-                        // Posts from other networks get small penalty (but still visible)
-                        score += 50; // Cross-network posts still welcome
+                    // 2. ZONE MATCHING (30% weight) - posts from your current POI or AREA
+                    // Check if post matches user's current zone (POI or Area name)
+                    if (userProfile.currentZone && post.customTags) {
+                        const tagsArray = (post.customTags || []).map(t => t.toLowerCase());
+                        const currentZone = userProfile.currentZone.toLowerCase();
+                        
+                        const hasZoneMatch = tagsArray.some(tag => 
+                            tag.includes(currentZone) || currentZone.includes(tag)
+                        );
+                        
+                        if (hasZoneMatch) {
+                            score += 300; // Strong boost for posts in your zone
+                        } else {
+                            score += 30; // Small boost for cross-zone posts (still welcome)
+                        }
                     }
                     
-                    // 3. RECENCY SCORE (20% weight) - reduced from 30%
+                    // 3. RECENCY SCORE (20% weight)
                     const ageHours = (now - (post.timestamp || 0)) / (60 * 60 * 1000);
                     const recencyScore = Math.max(0, 200 - ageHours * 8); // Slower decay
                     score += recencyScore;
                     
-                    // 4. CONTENT TYPE PREFERENCE (10% weight)
+                    // 4. CONTENT TYPE PREFERENCE (15% weight)
                     if (post.photoURL || post.imageData) {
-                        score += (userProfile.prefersMedia ? 100 : 50);
+                        score += (userProfile.prefersMedia ? 150 : 75);
                     } else {
-                        score += (userProfile.prefersText ? 100 : 50);
-                    }
-                    
-                    // 5. POI/AREA TAG MATCHING (5% weight) - reduced from 10%, balanced with location
-                    if (userProfile.preferredAreas && post.customTags) {
-                        const tagsArray = (post.customTags || []).map(t => t.toLowerCase());
-                        const hasPreferred = userProfile.preferredAreas.some(area => 
-                            tagsArray.some(tag => tag.includes(area.toLowerCase()))
-                        );
-                        if (hasPreferred) score += 50;
+                        score += (userProfile.prefersText ? 150 : 75);
                     }
                     
                     return { ...post, mlScore: score };
@@ -4564,74 +4563,85 @@
         }
 
         // ============================================
-        // GET GRID FOR USER (BALANCED: 50% Location + 50% POI)
+        // GET GRID FOR USER (POI for close range + Area names for distance)
         // ============================================
         function getGridForUser(userLat, userLon) {
-            // 🎯 HYBRID APPROACH: Balance WiFi Network Location with POI Enrichment
+            // 🎯 DISTANCE-BASED LOGIC:
+            // - 0-45 feet: Use POI name (you're AT the location)
+            // - 45 feet+: Use saved AREA NAME (you're IN an area)
             
-            // FACTOR 1: WiFi NETWORK LOCATION (50% weight)
-            // Use a moderate default radius for the actual WiFi network zone
-            const wifiNetworkBaseRadius = 0.5; // ~500m - reasonable WiFi hotspot range
+            const POI_CLOSE_RANGE = 0.015; // 45 feet in km
             
-            // FACTOR 2: POI ENRICHMENT (50% weight)
-            // If nearby POI exists, factor it in to enhance the zone description
-            const nearestPOIData = findNearestPOI(userLat, userLon);
+            // STEP 1: Check for nearby POI (within 45 feet)
+            let nearestPOI = null;
+            let poiDistance = Infinity;
             
-            let primaryLocation = {
-                lat: userLat,
-                lon: userLon,
-                type: 'wifi_network',
-                source: 'location_based'
-            };
-            
-            let enrichmentData = null;
-            let gridRadius = wifiNetworkBaseRadius;
-            let contentScope = 'NETWORK';
-            let displayName = 'WiFi Network';
-            
-            if (nearestPOIData) {
-                const { poi, distance } = nearestPOIData;
-                
-                // Only use POI if it's reasonably close (within 200m)
-                if (distance <= 0.2) {
-                    enrichmentData = poi;
-                    
-                    // Get all POIs for context
-                    let allPOIs = [];
-                    if (poiDatabase && Array.isArray(poiDatabase)) {
-                        allPOIs = poiDatabase;
+            if (poiDatabase && Array.isArray(poiDatabase) && poiDatabase.length > 0) {
+                poiDatabase.forEach(poi => {
+                    const distance = calculateDistance(userLat, userLon, poi.lat, poi.lon);
+                    if (distance < poiDistance) {
+                        poiDistance = distance;
+                        nearestPOI = poi;
                     }
-                    
-                    // Calculate POI-specific grid sizing
-                    const poiGridData = calculateGridRadiusByPOI(poi, allPOIs);
-                    
-                    // BALANCED BLEND: Average the two radius sources
-                    gridRadius = (wifiNetworkBaseRadius + poiGridData.gridRadius) / 2;
-                    
-                    contentScope = `NETWORK + ${poiGridData.contentScope}`;
-                    displayName = `${poi.name || poi.category || 'Network'} Zone`;
-                } else {
-                    // POI is too far - don't skew the zone
-                    enrichmentData = null;
-                    displayName = `Network (${distance.toFixed(2)}km from ${poi.name})`;
-                }
+                });
+            }
+            
+            // STEP 2: Determine what to display based on distance
+            let displayName = 'Unknown Location';
+            let isAtPOI = false;
+            let gridRadius = 0.5; // Default WiFi network radius
+            let contentScope = 'NETWORK_AREA';
+            
+            if (nearestPOI && poiDistance <= POI_CLOSE_RANGE) {
+                // ✅ CLOSE: Within 45 feet - use POI name
+                displayName = `${nearestPOI.name || nearestPOI.category}`;
+                isAtPOI = true;
+                
+                // For POI: use POI-specific smaller grid radius
+                const POI_RADII = {
+                    'cafe': 0.008,
+                    'coffee_shop': 0.008,
+                    'restaurant': 0.02,
+                    'bar': 0.015,
+                    'retail': 0.012,
+                    'supermarket': 0.025,
+                    'hotel': 0.035,
+                    'museum': 0.06,
+                    'park': 0.15,
+                    'default': 0.03
+                };
+                
+                const category = (nearestPOI.category || nearestPOI.type || 'default').toLowerCase();
+                gridRadius = POI_RADII[category] || POI_RADII['default'];
+                contentScope = `POI_${category.toUpperCase()}`;
+                
+            } else {
+                // ❌ FAR: Beyond 45 feet - find AREA name from saved locations
+                const areaName = getLocationName(userLat, userLon);
+                displayName = areaName;
+                isAtPOI = false;
+                gridRadius = 0.5; // Default area grid radius
+                contentScope = 'AREA_NAME';
             }
             
             return {
-                // Primary: WiFi Network location
-                location: primaryLocation,
+                // Location info
+                location: {
+                    lat: userLat,
+                    lon: userLon,
+                    type: isAtPOI ? 'poi' : 'area'
+                },
                 
-                // Secondary: POI enrichment (if applicable)
-                enrichment: enrichmentData,
+                // Display info
+                displayName: displayName,
+                isAtPOI: isAtPOI,
+                poiData: isAtPOI ? nearestPOI : null,
+                poiDistance: isAtPOI ? poiDistance : null,
                 
                 // Grid parameters
-                distance: enrichmentData ? calculateDistance(userLat, userLon, enrichmentData.lat, enrichmentData.lon) : 0,
-                city: enrichmentData?.city || 'Unknown',
                 gridRadius: gridRadius,
                 contentScope: contentScope,
-                displayName: displayName,
-                poiFocused: enrichmentData !== null,
-                boundary: enrichmentData ? calculateCircleBoundary(enrichmentData.lat, enrichmentData.lon, gridRadius) : calculateCircleBoundary(userLat, userLon, gridRadius)
+                boundary: calculateCircleBoundary(userLat, userLon, gridRadius)
             };
         }
 
@@ -6097,7 +6107,7 @@
             }
         }, 1500);
 
-        // Periodic grid check: detect if user has moved to a different zone (balanced location + POI)
+        // Periodic grid check: detect if user has moved between POI or AREA
         async function checkGridUpdate() {
             // Only run if we have valid location
             if (!userLocation || typeof userLocation.lat !== 'number' || typeof userLocation.lon !== 'number') {
@@ -6105,46 +6115,45 @@
             }
             
             try {
-                // Check if user has moved to a different zone (HYBRID: location-based with POI enrichment)
+                // Check if user has moved to different POI or AREA
                 const newGrid = getGridForUser(userLocation.lat, userLocation.lon);
                 
                 if (!newGrid) {
-                    return; // No location data available
+                    return;
                 }
                 
-                // Check if zone has changed (compare enrichment if available, else location)
-                const oldGridId = currentGrid ? (currentGrid.enrichment?.id || 'location-based') : null;
-                const newGridId = newGrid.enrichment?.id || 'location-based';
+                // Check if zone has changed (either POI or Area name changed)
+                const oldZoneId = currentGrid ? currentGrid.displayName : null;
+                const newZoneId = newGrid.displayName;
                 
-                if (currentGrid && oldGridId !== newGridId) {
-                    console.log(`🔄 User moved: ${newGrid.displayName}`);
+                if (currentGrid && oldZoneId !== newZoneId) {
+                    console.log(`🔄 Zone changed: ${newGrid.displayName} (${newGrid.isAtPOI ? 'POI' : 'AREA'})`);
                     
                     // Update grid
                     currentGrid = newGrid;
-                    currentNearestPOI = newGrid.enrichment; // May be null if POI too far
+                    currentNearestPOI = newGrid.poiData; // May be null if in area
                     currentGridRadius = newGrid.gridRadius;
                     currentContentScope = newGrid.contentScope;
                     currentZoneTag = newGrid.displayName;
                     
-                    // Update display with balanced info
+                    // Update display label
                     const label = document.getElementById('zoneLabel');
                     if (label) {
-                        const enrichStatus = newGrid.poiFocused ? '🗺️📍' : '🗺️';
-                        label.textContent = `${enrichStatus} ${currentZoneTag}`;
+                        const icon = newGrid.isAtPOI ? '📍' : '🗺️';
+                        label.textContent = `${icon} ${currentZoneTag}`;
                     }
                     
-                    // Update dropdown with hybrid info
+                    // Update dropdown with zone info
                     const zoneList = document.getElementById('zoneList');
                     if (zoneList) {
-                        let zoneInfo = `<strong>Location Type:</strong> WiFi Network<br>`;
+                        let zoneInfo = `<strong>Zone Type:</strong> ${newGrid.isAtPOI ? 'POI (Point of Interest)' : 'Area Name'}<br>`;
+                        zoneInfo += `<strong>Location:</strong> ${newGrid.displayName}<br>`;
                         zoneInfo += `<strong>Grid Radius:</strong> ${newGrid.gridRadius.toFixed(3)} km<br>`;
                         zoneInfo += `<strong>Scope:</strong> ${newGrid.contentScope}<br>`;
                         
-                        if (newGrid.enrichment) {
-                            zoneInfo += `<strong>Nearby POI:</strong> ${newGrid.enrichment.name || 'N/A'}<br>`;
-                            zoneInfo += `<strong>Category:</strong> ${newGrid.enrichment.category || 'N/A'}<br>`;
-                        } else {
-                            zoneInfo += `<strong>POI Status:</strong> No nearby POI enrichment<br>`;
+                        if (newGrid.isAtPOI && newGrid.poiData) {
+                            zoneInfo += `<strong>POI Category:</strong> ${newGrid.poiData.category || 'N/A'}<br>`;
+                            zoneInfo += `<strong>Distance to POI:</strong> ${(newGrid.poiDistance * 1000).toFixed(0)}m<br>`;
                         }
                         
                         zoneList.innerHTML = zoneInfo;
