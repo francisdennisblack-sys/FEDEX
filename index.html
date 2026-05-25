@@ -8106,22 +8106,35 @@
         }
 
         // 📊 Update admin dashboard metrics in real-time
-        function updateAdminMetrics() {
+        async function updateAdminMetrics() {
             try {
-                // Get all posts first
-                const allPosts = (gridContent[currentUserId] || []);
+                let totalActivePosts = 0;
+                let allPostIds = new Set();
                 
-                // Get hidden/reported/deleted posts
-                const hiddenForThisWiFi = JSON.parse(localStorage.getItem('hiddenPostsForThisWiFi') || '[]');
+                // Query Firebase to get ALL posts from ALL users
+                const usersRef = ref(database, `users`);
+                const usersSnapshot = await get(usersRef);
+                
+                if (usersSnapshot.exists()) {
+                    const users = usersSnapshot.val();
+                    // For each user, count their posts
+                    Object.keys(users).forEach(userId => {
+                        if (users[userId].posts) {
+                            Object.keys(users[userId].posts).forEach(postId => {
+                                allPostIds.add(postId);
+                            });
+                        }
+                    });
+                }
+                
+                // Get hidden/reported/deleted posts from localStorage
                 const hiddenReported = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
                 const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
                 
-                // Count only ACTIVE posts (not hidden, reported, or deleted)
-                const activePosts = allPosts.filter(post => 
-                    !hiddenForThisWiFi.includes(post.id) && 
-                    !hiddenReported.includes(post.id) && 
-                    !deletedOwnPosts.includes(post.id)
-                ).length;
+                // Count active posts (total minus hidden/reported/deleted)
+                const totalPostsInDB = allPostIds.size;
+                const hiddenPostIds = new Set([...hiddenReported, ...deletedOwnPosts]);
+                const activePosts = totalPostsInDB - hiddenPostIds.size;
                 
                 // Get online users from UI
                 const onlineUsersEl = document.getElementById('onlineUserCount');
@@ -8132,7 +8145,7 @@
                 const reportedCount = hiddenReported.length;
                 
                 // Get hidden/deleted posts count
-                const totalHidden = hiddenForThisWiFi.length + deletedOwnPosts.length;
+                const totalHidden = hiddenReported.length + deletedOwnPosts.length;
                 
                 // Update dashboard display
                 const activePostsEl = document.getElementById('adminActivePosts');
@@ -8150,7 +8163,7 @@
                     lastUpdateEl.textContent = now.toLocaleTimeString();
                 }
                 
-                console.log(`📊 Admin metrics updated: ${activePosts} active posts, ${onlineUsers} users, ${reportedCount} reported, ${totalHidden} hidden`);
+                console.log(`📊 Admin metrics: ${activePosts}/${totalPostsInDB} posts active (${reportedCount} reported, ${totalHidden} hidden), ${onlineUsers} users online`);
             } catch (error) {
                 console.error('❌ Error updating admin metrics:', error);
             }
