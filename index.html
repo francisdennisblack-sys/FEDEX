@@ -3161,12 +3161,23 @@
             });
             console.log(`   Clustering distribution: ${clusterReport.clusteringDistribution.highClustering} high | ${clusterReport.clusteringDistribution.mediumClustering} medium | ${clusterReport.clusteringDistribution.lowClustering} low`);
             
+            // Custom tag recommendations
+            const tagRecs = getCustomTagRecommendations(currentUserId, 5);
+            if (tagRecs.length > 0) {
+                console.log(`
+🏷️ CUSTOM TAG RECOMMENDATIONS:`);
+                tagRecs.forEach(t => {
+                    console.log(`   • ${t.tag}: ${t.count} posts, ${t.likes} likes (nearby)`);
+                });
+            }
+            
             console.log(`
 📈 NEXT STEPS:
    • Run 'window.trackUserActivity()' to update metrics
    • Check 'window.adaptiveSystem' for detailed profiles
    • Monitor 'window.calculateContentBudget()' per user
    • View 'window.getPOIClusteringReport()' for POI analysis
+   • View 'window.tagSystem' for custom tag data
             `);
             
             return metrics;
@@ -5391,6 +5402,9 @@
             // Update ML preferences based on this vote (real-time learning)
             updateUserPreferences(currentUserId);
             updateMLScores();
+            
+            // Track custom tag interactions (learn user's tag preferences)
+            updateTagEngagementOnVote(post, voteType);
             
             // Update Firebase asynchronously without blocking UI
             updatePostVotesFirebase(currentWiFiNetwork, postId, {
@@ -8946,6 +8960,204 @@
         window.getPOIClusteringReport = getPOIClusteringReport;
         window.calculateContentIntensityMultiplier = calculateContentIntensityMultiplier;
 
+        // ============================================================================
+        // CUSTOM TAG ML SYSTEM - Learn user tag preferences & nearby tag discovery
+        // ============================================================================
+        
+        const tagSystem = {
+            userTagPreferences: {}, // { userId: { tagName: score, ... } }
+            customTagsByArea: {}, // { area: [tags] }
+            tagEngagementMetrics: {}, // { tagName: { likes, dislikes, usageCount } }
+            userTagHistory: {}, // { userId: [{ tag, timestamp, area, voteType }] }
+            nearbyTags: {}, // { homeArea: [{ tag, distance, engagement }] }
+        };
+        
+        /**
+         * Track when user interacts with a custom-tagged post
+         */
+        function trackTagInteraction(userId, post, voteType) {
+            if (!post.customTags || post.customTags.length === 0) return;
+            
+            if (!tagSystem.userTagHistory[userId]) {
+                tagSystem.userTagHistory[userId] = [];
+            }
+            
+            // Record interaction for each custom tag
+            post.customTags.forEach(tag => {
+                tagSystem.userTagHistory[userId].push({
+                    tag: tag,
+                    timestamp: Date.now(),
+                    area: post.county,
+                    poi: post.poiName,
+                    voteType: voteType, // 'like' or 'dislike'
+                    contentType: post.photoURL ? 'photo' : 'text'
+                });
+                
+                // Update tag engagement metrics
+                if (!tagSystem.tagEngagementMetrics[tag]) {
+                    tagSystem.tagEngagementMetrics[tag] = { likes: 0, dislikes: 0, usageCount: 0 };
+                }
+                tagSystem.tagEngagementMetrics[tag][voteType === 'like' ? 'likes' : 'dislikes']++;
+                tagSystem.tagEngagementMetrics[tag].usageCount++;
+            });
+            
+            updateUserTagPreferences(userId);
+        }
+        
+        /**
+         * Build user's tag preference profile from voting history
+         * Learns: which tags does user like, which tags/areas they engage with
+         */
+        function updateUserTagPreferences(userId) {
+            const history = tagSystem.userTagHistory[userId] || [];
+            const preferences = {};
+            
+            history.forEach(entry => {
+                const score = entry.voteType === 'like' ? 1 : -0.5;
+                preferences[entry.tag] = (preferences[entry.tag] || 0) + score;
+            });
+            
+            tagSystem.userPreferences[userId] = preferences;
+            
+            console.log(`🏷️ Updated tag preferences for ${userId}:`, preferences);
+        }
+        
+        /**
+         * Collect nearby custom tags for user
+         * Finds custom tags in user's area and nearby areas
+         */
+        function discoverNearbyCustomTags(userId, area) {
+            if (!area) return [];
+            
+            const homeBase = geoSystem.userHomeBase[userId];
+            const allPosts = gridContent[currentUserId] || [];
+            
+            const nearbyTags = {};
+            
+            // Collect tags from user's home area
+            allPosts.forEach(post => {
+                const isNearby = post.county === area || 
+                               (homeBase && post.poiName === homeBase.primaryPoi);
+                
+                if (isNearby && post.customTags && post.customTags.length > 0) {
+                    post.customTags.forEach(tag => {
+                        if (!nearbyTags[tag]) {
+                            nearbyTags[tag] = { count: 0, likes: 0, dislikes: 0 };
+                        }
+                        nearbyTags[tag].count++;
+                        nearbyTags[tag].likes += post.likes || 0;
+                        nearbyTags[tag].dislikes += post.dislikes || 0;
+                    });
+                }
+            });
+            
+            // Sort by popularity
+            const sorted = Object.entries(nearbyTags)
+                .map(([tag, metrics]) => ({
+                    tag,
+                    ...metrics,
+                    score: (metrics.likes - metrics.dislikes) / Math.max(1, metrics.count)
+                }))
+                .sort((a, b) => b.score - a.score);
+            
+            tagSystem.nearbyTags[area] = sorted;
+            console.log(`🏷️ Discovered ${sorted.length} nearby custom tags for ${area}`);
+            
+            return sorted;
+        }
+        
+        /**
+         * Score posts based on custom tag matching
+         * Matches user's preferred tags, boosts if nearby
+         */
+        function scorePostByCustomTags(post, userId) {
+            if (!post.customTags || post.customTags.length === 0) return 0;
+            
+            const userPrefs = tagSystem.userTagPreferences[userId] || {};
+            let score = 0;
+            const homeBase = geoSystem.userHomeBase[userId];
+            
+            post.customTags.forEach(tag => {
+                const prefScore = userPrefs[tag] || 0;
+                
+                // Base score from preference
+                score += Math.max(0, prefScore / 5); // Normalize to 0-1 range
+                
+                // Boost if tag is in nearby area
+                if (homeBase && post.poiName === homeBase.primaryPoi) {
+                    score += 0.3; // Strong boost for home POI
+                } else if (post.county === getCurrentUserArea()) {
+                    score += 0.2; // Moderate boost for home area
+                } else {
+                    score += 0; // No boost for distant areas
+                }
+            });
+            
+            return Math.min(1, score / post.customTags.length);
+        }
+        
+        /**
+         * Apply custom tag filtering to grid
+         * Prioritize user's preferred tags, boost nearby tags
+         */
+        function applyCustomTagFiltering(displayPosts, userId) {
+            if (!userId) return displayPosts;
+            
+            // Score all posts by custom tags
+            const tagScoredPosts = displayPosts.map(post => ({
+                ...post,
+                customTagScore: scorePostByCustomTags(post, userId)
+            }));
+            
+            // Separate by tag presence
+            const taggedPosts = tagScoredPosts.filter(p => p.customTagScore > 0);
+            const untaggedPosts = tagScoredPosts.filter(p => p.customTagScore === 0);
+            
+            // Reorder: preferred tags first, then others
+            const reordered = [
+                ...taggedPosts.sort((a, b) => b.customTagScore - a.customTagScore),
+                ...untaggedPosts
+            ];
+            
+            console.log(`🏷️ Custom tag filtering: ${taggedPosts.length} tagged + ${untaggedPosts.length} untagged = ${reordered.length} total`);
+            
+            return reordered;
+        }
+        
+        /**
+         * Get custom tag recommendations for user
+         * Suggests tags they might like based on area + engagement
+         */
+        function getCustomTagRecommendations(userId, limit = 5) {
+            const homeBase = geoSystem.userHomeBase[userId];
+            if (!homeBase) return [];
+            
+            const nearbyTags = discoverNearbyCustomTags(userId, getCurrentUserArea());
+            const userPrefs = tagSystem.userTagPreferences[userId] || {};
+            
+            // Filter tags user hasn't seen much
+            const newTags = nearbyTags.filter(t => !userPrefs[t.tag] || userPrefs[t.tag] < 0.5);
+            
+            return newTags.slice(0, limit);
+        }
+        
+        /**
+         * Update tag interaction on vote
+         * Called when user likes/dislikes a tagged post
+         */
+        function updateTagEngagementOnVote(post, voteType) {
+            if (post.customTags && post.customTags.length > 0) {
+                trackTagInteraction(currentUserId, post, voteType);
+            }
+        }
+        
+        // Expose tag system globally
+        window.tagSystem = tagSystem;
+        window.trackTagInteraction = trackTagInteraction;
+        window.discoverNearbyCustomTags = discoverNearbyCustomTags;
+        window.getCustomTagRecommendations = getCustomTagRecommendations;
+        window.updateTagEngagementOnVote = updateTagEngagementOnVote;
+
         function renderGrid() {
             if (!isConnected) return;
             
@@ -9108,6 +9320,12 @@
             // ========================================================================
             displayPosts = applyGeographicFiltering(displayPosts, currentUserId);
             console.log(`🗺️ Geographic filtering applied - 80% local, 15% regional, 5% distant`);
+            
+            // ========================================================================
+            // CUSTOM TAG FILTERING: Learn user preferences, boost nearby custom tags
+            // ========================================================================
+            displayPosts = applyCustomTagFiltering(displayPosts, currentUserId);
+            console.log(`🏷️ Custom tag filtering applied - preferred tags prioritized`);
             
             // Filter hidden/deleted posts from display list
             const sortedPosts = displayPosts.filter(post => {
