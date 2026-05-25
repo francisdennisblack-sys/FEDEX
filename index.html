@@ -3118,6 +3118,47 @@
         };
         window.initializeTheme = initializeTheme;
         window.fixMobileGridLayout = fixMobileGridLayout;
+        
+        // ========================================================================
+        // APP READINESS CHECK - Console command for launch metrics
+        // ========================================================================
+        window.checkReadiness = function() {
+            const metrics = getReadinessMetrics();
+            console.log(`
+╔════════════════════════════════════════════════════════╗
+║           📊 APP READINESS DASHBOARD                   ║
+╠════════════════════════════════════════════════════════╣
+║ Total Users:              ${String(metrics.totalUsers).padEnd(5)} / 100          ║
+║ Active Users (24h):       ${String(metrics.activeUsers).padEnd(5)} / ${String(metrics.totalUsers).padEnd(5)}           ║
+║ Total Posts:              ${String(metrics.totalPosts).padEnd(5)} / 500          ║
+║ Avg Posts/User:           ${String(metrics.averagePostsPerUser).padEnd(5)}                    ║
+║ Avg Visits/User:          ${String(metrics.averageVisitsPerUser).padEnd(5)}                    ║
+║ ─────────────────────────────────────────────────────  ║
+║ 🎯 READINESS SCORE:       ${String(metrics.readinessScore + '%').padEnd(5)}  (${metrics.readinessScore < 30 ? '🔴 Too early' : metrics.readinessScore < 60 ? '🟡 Getting close' : '🟢 Ready!'})          ║
+╚════════════════════════════════════════════════════════╝
+
+💡 USER PROFILES BREAKDOWN:
+            `);
+            
+            Object.entries(adaptiveSystem.userProfiles).slice(0, 5).forEach(([userId, profile]) => {
+                const budget = adaptiveSystem.contentBudgets[userId] || '?';
+                console.log(`   👤 ${userId.substring(0, 8)}... | Visits: ${profile.visits} | Posts: ${Object.keys(userVotes).filter(k => k.startsWith(userId)).length} votes | Budget: ${Math.floor(budget)} posts | ${profile.isNewUser ? '🆕 NEW' : '✅ Returning'}`);
+            });
+            
+            console.log(`
+🎯 INTERPRETATION:
+   • Score 0-30%:   Too early to launch (need more users/content)
+   • Score 30-60%:  Getting close (continue user acquisition)
+   • Score 60%+:    Ready for public launch
+   
+📈 NEXT STEPS:
+   • Run 'window.trackUserActivity()' to update metrics
+   • Check 'window.adaptiveSystem' for detailed profiles
+   • Monitor 'window.calculateContentBudget()' per user
+            `);
+            
+            return metrics;
+        };
 
         // WiFi-based zone detection with geolocation
         // ============================================
@@ -8276,6 +8317,213 @@
         window.generateRecommendations = generateRecommendations;
         window.updateMLScores = updateMLScores;
 
+        // ============================================================================
+        // ADAPTIVE CONTENT DELIVERY SYSTEM - Optimize first-time & sparse grids
+        // ============================================================================
+        
+        const adaptiveSystem = {
+            userProfiles: {}, // { userId: { postCount, visits, totalEngagementTime, lastVisit, isNewUser } }
+            contentBudgets: {}, // { userId: recommendedGridSize }
+            visitorMetrics: {}, // Global metrics
+        };
+        
+        /**
+         * Track user activity (posts, visits, engagement time)
+         * Called on auth and periodically
+         */
+        function trackUserActivity(userId) {
+            if (!adaptiveSystem.userProfiles[userId]) {
+                adaptiveSystem.userProfiles[userId] = {
+                    firstVisit: Date.now(),
+                    visits: 1,
+                    totalPostsCreated: 0,
+                    totalEngagementTime: 0,
+                    lastVisit: Date.now(),
+                    sessionStart: Date.now(),
+                    votesCount: 0,
+                    isNewUser: true, // Becomes false after 3 visits
+                    lastContentBudget: null
+                };
+            } else {
+                const profile = adaptiveSystem.userProfiles[userId];
+                profile.visits++;
+                profile.lastVisit = Date.now();
+                profile.sessionStart = Date.now();
+                if (profile.visits >= 3) {
+                    profile.isNewUser = false;
+                }
+            }
+            
+            console.log(`📊 User activity tracked:`, adaptiveSystem.userProfiles[userId]);
+        }
+        
+        /**
+         * Calculate content budget for user
+         * Determines how many posts they should see based on behavior
+         * Min: 15 posts (sparse content safety), Max: 200 posts (full engagement)
+         */
+        function calculateContentBudget(userId) {
+            const profile = adaptiveSystem.userProfiles[userId];
+            if (!profile) return 50; // Default
+            
+            let budget = 50; // Base budget
+            
+            // Factor 1: Visit frequency (more visits = more content)
+            // 1 visit: 30 posts, 10 visits: 80 posts, 50+ visits: 150 posts
+            const visitScore = Math.min(profile.visits, 50);
+            budget += (visitScore / 50) * 100; // +0 to +100 based on visits
+            
+            // Factor 2: Posts created by user (power users deserve fuller grid)
+            // Each post adds +15 posts to budget (they contributed, see more)
+            const userPostsCount = gridContent[userId]?.length || 0;
+            budget += userPostsCount * 15;
+            
+            // Factor 3: Engagement time (if tracked - voting, scrolling)
+            // More votes = more engaged = more content
+            const votesCount = Object.keys(userVotes)
+                .filter(key => key.startsWith(userId)).length;
+            budget += votesCount * 2; // +2 per vote
+            
+            // Factor 4: New user bonus (first-time visitors get curated best content)
+            // Quality > Quantity for new users
+            if (profile.isNewUser) {
+                budget = Math.min(budget, 30); // Cap at 30 for new users (quality focus)
+            }
+            
+            // Hard limits
+            budget = Math.max(15, Math.min(200, budget)); // 15-200 posts
+            
+            adaptiveSystem.contentBudgets[userId] = budget;
+            console.log(`📊 Content budget for ${userId}: ${Math.floor(budget)} posts (visits: ${profile.visits}, posts: ${userPostsCount}, votes: ${votesCount})`);
+            
+            return budget;
+        }
+        
+        /**
+         * Curate content for first-time user
+         * Shows BEST posts first, spreads mediocre content across multiple visits
+         */
+        function curateForFirstTimeUser(posts, userId) {
+            const profile = adaptiveSystem.userProfiles[userId];
+            if (!profile || !profile.isNewUser) return posts; // Not a new user
+            
+            // First-time users see: top-quality posts only
+            const qualityThreshold = 0.5; // Posts must have good engagement ratio
+            
+            const qualityPosts = posts.filter(post => {
+                const likes = post.likes || 0;
+                const dislikes = post.dislikes || 0;
+                const totalVotes = likes + dislikes;
+                
+                // Quality score: likes/total votes ratio (high ratio = quality)
+                if (totalVotes === 0) return false; // No votes yet
+                const engagementRatio = likes / totalVotes;
+                return engagementRatio >= qualityThreshold;
+            });
+            
+            // If we have enough quality posts, use them. Otherwise use all posts.
+            if (qualityPosts.length >= 15) {
+                console.log(`🎯 First-time UX: Showing ${qualityPosts.length} quality posts (filtered from ${posts.length})`);
+                return qualityPosts;
+            }
+            
+            console.log(`🎯 First-time UX: Not enough quality posts (${qualityPosts.length}), showing all ${posts.length}`);
+            return posts;
+        }
+        
+        /**
+         * Smart content pacing
+         * For sparse grids: don't show ALL content on first visit
+         * Save some for next visit to keep it fresh
+         */
+        function paceContentForReturn(posts, userId) {
+            const profile = adaptiveSystem.userProfiles[userId];
+            if (!profile || profile.visits === 1) return posts; // First visit, show all
+            
+            // Return visitors: show 70% of content, hold back 30% for freshness
+            if (profile.visits <= 5) {
+                const keepFresh = Math.ceil(posts.length * 0.7);
+                console.log(`🔄 Return visitor: Showing ${keepFresh}/${posts.length} posts (holding back for freshness)`);
+                return posts.slice(0, keepFresh);
+            }
+            
+            // Regular visitors (5+ visits): show all content
+            return posts;
+        }
+        
+        /**
+         * Apply adaptive content delivery
+         * Main function called during grid render
+         */
+        function applyAdaptiveContentDelivery(displayPosts, userId) {
+            if (!userId) return displayPosts;
+            
+            // Track activity
+            trackUserActivity(userId);
+            
+            // Calculate ideal content budget for this user
+            const budget = calculateContentBudget(userId);
+            
+            // Curate for first-time users (quality filter)
+            let adaptedPosts = curateForFirstTimeUser(displayPosts, userId);
+            
+            // Pace content for return visitors (freshness)
+            adaptedPosts = paceContentForReturn(adaptedPosts, userId);
+            
+            // Trim to budget
+            adaptedPosts = adaptedPosts.slice(0, Math.ceil(budget));
+            
+            console.log(`🧠 Adaptive delivery: ${adaptedPosts.length} posts (budget: ${Math.floor(budget)}, original: ${displayPosts.length})`);
+            
+            return adaptedPosts;
+        }
+        
+        /**
+         * Get readiness metrics for launch dashboard
+         */
+        function getReadinessMetrics() {
+            const allPosts = gridContent[currentUserId] || [];
+            const userCount = Object.keys(adaptiveSystem.userProfiles).length;
+            const activeUsers = Object.values(adaptiveSystem.userProfiles)
+                .filter(p => (Date.now() - p.lastVisit) < 24 * 60 * 60 * 1000).length; // Active in last 24h
+            
+            const metrics = {
+                totalUsers: userCount,
+                activeUsers: activeUsers,
+                totalPosts: allPosts.length,
+                averagePostsPerUser: userCount > 0 ? (allPosts.length / userCount).toFixed(1) : 0,
+                averageVisitsPerUser: userCount > 0 ? 
+                    (Object.values(adaptiveSystem.userProfiles).reduce((sum, p) => sum + p.visits, 0) / userCount).toFixed(1) : 0,
+                readinessScore: calculateReadinessScore(allPosts, userCount, activeUsers)
+            };
+            
+            return metrics;
+        }
+        
+        /**
+         * Calculate launch readiness (0-100%)
+         */
+        function calculateReadinessScore(allPosts, userCount, activeUsers) {
+            let score = 0;
+            
+            // User count factor (target: 100 users)
+            score += Math.min(50, (userCount / 100) * 50);
+            
+            // Post volume factor (target: 500 posts)
+            score += Math.min(30, (allPosts.length / 500) * 30);
+            
+            // Active engagement factor (target: 50% of users active daily)
+            const engagementRate = userCount > 0 ? (activeUsers / userCount) * 100 : 0;
+            score += Math.min(20, (engagementRate / 50) * 20);
+            
+            return Math.floor(score);
+        }
+        
+        // Expose adaptive system globally
+        window.adaptiveSystem = adaptiveSystem;
+        window.calculateContentBudget = calculateContentBudget;
+        window.getReadinessMetrics = getReadinessMetrics;
+
         function renderGrid() {
             if (!isConnected) return;
             
@@ -8426,6 +8674,12 @@
             displayPosts = applyMLReordering(displayPosts);
             updateMLScores(); // Update ML scores in real-time
             console.log(`🧠 ML reordering applied, generating recommendations...`);
+            
+            // ========================================================================
+            // ADAPTIVE CONTENT DELIVERY: Optimize for user behavior & first-time UX
+            // ========================================================================
+            displayPosts = applyAdaptiveContentDelivery(displayPosts, currentUserId);
+            console.log(`🎯 Adaptive delivery applied - tailored to user profile`);
             
             // Filter hidden/deleted posts from display list
             const sortedPosts = displayPosts.filter(post => {
