@@ -4711,69 +4711,96 @@
             }
         }
         
-        // Load comprehensive US locations database (3000+ cities, towns, neighborhoods)
+        // Load comprehensive US locations database (700K+ cities, neighborhoods across all 50 states)
         async function loadUSLocationDatabase() {
             try {
-                console.log('🔄 Step 2 Fallback: Attempting to load US locations database...');
-                const response = await fetch('/us_locations_database.json');
+                console.log('🔄 Step 2 PRIMARY: Attempting to load US locations production database...');
+                // Use production database by default (724K locations, ~67MB)
+                // Falls back to fast version if production fails
+                let response = await fetch('/us_locations_production.json');
+                if (!response.ok) {
+                    console.warn('⚠️ Production database not found, trying fast version...');
+                    response = await fetch('/us_locations_fast.json');
+                }
                 if (!response.ok) throw new Error('Failed to load US locations database');
                 
                 const data = await response.json();
-                console.log(`📊 US Database version: ${data.version}, Total in file: ${data.totalLocations}`);
+                const version = data.v || data.version;
+                const total = data.n || data.totalLocations;
+                console.log(`📊 US Database version: ${version}, Total locations: ${total?.toLocaleString?.() || total}`);
                 
-                // Flatten all locations from all states and regions
+                // Support both old hierarchical format and new flat format
                 const allLocations = [];
-                let stateCount = 0;
-                let regionCount = 0;
                 
-                if (data.locations && Array.isArray(data.locations)) {
-                    console.log(`🗺️  Processing ${data.locations.length} states...`);
+                // NEW FORMAT: Flat array (production & fast databases)
+                if (data.l && Array.isArray(data.l)) {
+                    console.log(`🚀 Loading optimized flat format with ${data.l.length.toLocaleString()} locations...`);
+                    data.l.forEach((loc, idx) => {
+                        if (loc.name && loc.lat && loc.lon) {
+                            allLocations.push({
+                                name: loc.name,
+                                lat: loc.lat,
+                                lon: loc.lon,
+                                type: loc.type || 'neighborhood',
+                                population: loc.population || 0,
+                                source: 'us_production_database'
+                            });
+                        }
+                        if ((idx + 1) % 100000 === 0) {
+                            console.log(`   ⏳ Loaded ${(idx + 1).toLocaleString()} locations...`);
+                        }
+                    });
+                } 
+                // OLD FORMAT: Hierarchical (legacy databases)
+                else if (data.locations && Array.isArray(data.locations)) {
+                    console.log(`🗺️  Loading hierarchical format from ${data.locations.length} states...`);
+                    let stateCount = 0;
+                    let regionCount = 0;
+                    let locationCount = 0;
                     
-                    data.locations.forEach((state, stateIdx) => {
+                    data.locations.forEach((state) => {
                         stateCount++;
                         if (state.regions && Array.isArray(state.regions)) {
                             state.regions.forEach(region => {
                                 regionCount++;
                                 if (region.areas && Array.isArray(region.areas)) {
-                                    region.areas.forEach((area, areaIdx) => {
-                                        if (!area.name || !area.lat || !area.lon) {
-                                            console.warn(`   ⚠️  Invalid area in ${state.state} region ${region.name}: missing name/coords`, area);
+                                    region.areas.forEach((area) => {
+                                        if (area.name && area.lat && area.lon) {
+                                            locationCount++;
+                                            allLocations.push({
+                                                name: area.name,
+                                                state: state.state,
+                                                stateCode: state.stateCode,
+                                                lat: area.lat,
+                                                lon: area.lon,
+                                                type: area.type || 'city',
+                                                population: area.population,
+                                                region: region.name,
+                                                source: 'us_database'
+                                            });
                                         }
-                                        
-                                        allLocations.push({
-                                            name: area.name,
-                                            state: state.state,
-                                            stateCode: state.stateCode,
-                                            lat: area.lat,
-                                            lon: area.lon,
-                                            type: area.type || 'city',
-                                            population: area.population,
-                                            region: region.name,
-                                            source: 'us_database'
-                                        });
                                     });
                                 }
                             });
                         }
                     });
+                    console.log(`   ✅ Processed: ${stateCount} states, ${regionCount} regions, ${locationCount} locations`);
                 }
                 
                 // Merge with existing worldwide data instead of replacing it
                 if (globalLocationDatabase.length > 0) {
-                    console.log(`📍 Merging ${allLocations.length} US locations with existing ${globalLocationDatabase.length} worldwide locations...`);
+                    console.log(`📍 Merging ${allLocations.length.toLocaleString()} US locations with existing ${globalLocationDatabase.length.toLocaleString()} worldwide locations...`);
                     globalLocationDatabase.push(...allLocations);
                 } else {
                     globalLocationDatabase = allLocations;
                 }
                 
-                console.log(`✅ US locations merged!`);
-                console.log(`   📍 Total locations now: ${globalLocationDatabase.length}`);
-                console.log(`   🗺️  States in US DB: ${stateCount}`);
-                console.log(`   📍 Regions: ${regionCount}`);
+                console.log(`✅ US locations loaded & merged!`);
+                console.log(`   📍 Total locations now: ${globalLocationDatabase.length.toLocaleString()}`);
                 
             } catch (error) {
-                console.error('⚠️ Could not load US locations database as fallback:', error);
-                console.log('✅ Continuing with worldwide POI data only...');
+                console.error('⚠️ Could not load US locations database:', error);
+                console.log('✅ Continuing with worldwide POI data...');
             }
         }
 
@@ -4786,10 +4813,12 @@
                 
                 const data = await response.json();
                 const primaryLocations = [];
+                const allPOIs = [];
                 
-                // Extract city names from POI database as PRIMARY locations
+                // Extract BOTH city names AND individual POIs for influence zone checking
                 if (data.cities && typeof data.cities === 'object') {
                     Object.entries(data.cities).forEach(([cityName, cityData]) => {
+                        // Add city as location
                         primaryLocations.push({
                             name: cityName,
                             state: cityData.country || 'International',
@@ -4800,12 +4829,31 @@
                             region: cityData.country || 'World',
                             source: 'worldwide_poi_database'
                         });
+                        
+                        // Extract individual POIs for influence zone checking
+                        if (cityData.pois && Array.isArray(cityData.pois)) {
+                            cityData.pois.forEach(poi => {
+                                allPOIs.push({
+                                    name: poi.name,
+                                    lat: poi.lat,
+                                    lon: poi.lon,
+                                    type: poi.type || poi.category || 'poi',
+                                    category: poi.category || poi.type,
+                                    city: cityName,
+                                    country: cityData.country || 'International',
+                                    emoji: poi.emoji || '📍'
+                                });
+                            });
+                        }
                     });
                 }
                 
                 globalLocationDatabase = primaryLocations;
+                globalPOIDatabase = allPOIs;
+                
                 console.log(`✅ Loaded worldwide POI database as PRIMARY location source!`);
                 console.log(`   📍 Total cities extracted: ${primaryLocations.length}`);
+                console.log(`   🏢 Total POIs loaded: ${allPOIs.length}`);
                 console.log(`   🌍 Cities: ${primaryLocations.map(l => `${l.name} (${l.state})`).join(', ')}`);
                 
                 // Now try to enhance with US database
@@ -4815,16 +4863,89 @@
             } catch (error) {
                 console.error('❌ Could not load worldwide POI database:', error);
                 globalLocationDatabase = [];
+                globalPOIDatabase = [];
                 console.log('🔴 Location detection will use coordinates only');
             }
         }
 
         // ============================================
+        // FIND CLOSEST POI WITH INTELLIGENT SCORING
+        // Uses size, distance, and confidence scoring
+        // ============================================
+        function findClosestPOIInZone(userLat, userLon) {
+            if (!globalPOIDatabase || globalPOIDatabase.length === 0) {
+                console.log('   ℹ️  POI database empty - will use location database');
+                return null;
+            }
+
+            const poiSearchStart = performance.now();
+            let closestPOI = null;
+            let closestDistance = Infinity;
+            let poiType = null;
+            let bestScore = null;
+            let allScores = [];
+
+            // Search all POIs and score them all
+            for (let i = 0; i < globalPOIDatabase.length; i++) {
+                const poi = globalPOIDatabase[i];
+                const distance = calculateDistance(userLat, userLon, poi.lat, poi.lon);
+                
+                // Track closest POI
+                if (distance < closestDistance) {
+                    closestDistance = distance;
+                    closestPOI = poi;
+                    poiType = poi.type || poi.category || 'poi';
+                }
+                
+                // Early exit if found VERY close POI (within 50m)
+                if (closestDistance < 0.05) break;
+            }
+
+            const poiSearchTime = (performance.now() - poiSearchStart).toFixed(1);
+
+            if (!closestPOI) {
+                console.log(`   ℹ️  No POI found in search`);
+                return null;
+            }
+
+            // Get POI category data
+            const poiCategoryData = POI_CATEGORIES[poiType] || POI_CATEGORIES['default'];
+            
+            // Calculate score using robust scoring algorithm
+            const poiScore = calculatePOIScore(closestPOI, closestDistance, poiCategoryData);
+            
+            // Decide if POI should be used
+            const decision = shouldUsePOI(poiScore);
+
+            if (decision.use) {
+                console.log(`✨ POI AREA TAG SELECTED: "${closestPOI.name}"`);
+                console.log(`   🏢 Type: ${poiType} (Size: ${poiCategoryData.size}/5)`);
+                console.log(`   📍 Distance: ${closestDistance.toFixed(3)}km | Influence: ${poiCategoryData.radius}km`);
+                console.log(`   📊 Score: ${poiScore.score.toFixed(1)} (${decision.reason})`);
+                console.log(`   ⏱️  Search: ${poiSearchTime}ms\n`);
+                
+                return {
+                    poi: closestPOI,
+                    distance: closestDistance,
+                    influenceRadius: poiCategoryData.radius,
+                    size: poiCategoryData.size,
+                    confidence: poiCategoryData.confidence,
+                    score: poiScore,
+                    type: poiType
+                };
+            } else {
+                console.log(`   ℹ️  POI NOT SELECTED: "${closestPOI.name}"`);
+                console.log(`   📊 Score: ${poiScore.score.toFixed(1)} - ${decision.reason}\n`);
+                return null;
+            }
+        }
+        
+        // ============================================
         // FIND NEAREST POI
         // ============================================
         function findNearestPOI(userLat, userLon) {
             // Ensure we have POI data
-            if (!poiDatabase || poiDatabase.length === 0) {
+            if (!globalPOIDatabase || globalPOIDatabase.length === 0) {
                 console.warn('⚠️ POI database empty - using fallback');
                 return createFallbackPOI(userLat, userLon);
             }
@@ -4832,13 +4953,14 @@
             let nearest = null;
             let minDistance = Infinity;
 
-            poiDatabase.forEach(poi => {
+            for (let i = 0; i < globalPOIDatabase.length; i++) {
+                const poi = globalPOIDatabase[i];
                 const distance = calculateDistance(userLat, userLon, poi.lat, poi.lon);
                 if (distance < minDistance) {
                     minDistance = distance;
                     nearest = { poi, distance };
                 }
-            });
+            }
 
             // Fallback if no nearest found
             if (!nearest) {
@@ -6127,35 +6249,38 @@
         }
         
         // Helper function: Find the absolute closest location from the entire database
+        // Optimized to find nearest neighbor efficiently from 724K+ locations
         function findClosestLocation(userLat, userLon) {
             if (!globalLocationDatabase || globalLocationDatabase.length === 0) {
-                console.warn('⚠️ Location database empty! globalLocationDatabase:', {
-                    exists: !!globalLocationDatabase,
-                    isArray: Array.isArray(globalLocationDatabase),
-                    length: globalLocationDatabase?.length
-                });
+                console.warn('⚠️ Location database empty!');
                 return null;
             }
             
-            console.log(`🔍 findClosestLocation: Searching ${globalLocationDatabase.length} locations...`);
+            const startTime = performance.now();
+            const dbSize = globalLocationDatabase.length;
             
             let closestLoc = null;
             let minDistance = Infinity;
             
-            globalLocationDatabase.forEach(loc => {
+            // Find absolute closest location from entire database
+            for (let i = 0; i < globalLocationDatabase.length; i++) {
+                const loc = globalLocationDatabase[i];
                 const distance = calculateDistance(userLat, userLon, loc.lat, loc.lon);
+                
                 if (distance < minDistance) {
                     minDistance = distance;
                     closestLoc = loc;
+                    
+                    // Early termination if found something VERY close
+                    if (minDistance < 0.1) break;
                 }
-            });
-            
-            if (!closestLoc) {
-                console.warn('⚠️ No closest location found');
-                return null;
             }
             
-            console.log(`✅ Found closest location: ${closestLoc.name} at ${minDistance.toFixed(2)} km`);
+            const searchTime = (performance.now() - startTime).toFixed(1);
+            
+            if (!closestLoc) return null;
+            
+            console.log(`✅ CLOSEST: "${closestLoc.name}" | ${minDistance.toFixed(3)} km | ${searchTime}ms from ${dbSize.toLocaleString()} locations`);
             return { location: closestLoc, distance: minDistance };
         }
         
@@ -6908,288 +7033,606 @@
         let spotlightInterval = null; // Spotlight rotation timer
         let onlineUserCount = 0; // Track current online user count for dynamic NEW badge duration
         let globalLocationDatabase = []; // CRITICAL: Initialize location database array
+        let globalPOIDatabase = []; // All POIs with influence radius data
         
         // ============================================================================
-        // FEDEX v3: TIER SYSTEM FOR CONTENT DISTRIBUTION
+        // POI CATEGORIZATION SYSTEM - Size, Influence & Scoring
         // ============================================================================
-        // Tier 1 (1-100 users): Mixed local + major zone best posts
-        // Tier 2 (100-1M users): Mostly local + sprinkled major zone posts
-        // Tier 3 (1M+ users): Mostly local + rare major zone featured posts
+        // Each POI type has: influence radius, size rating, and confidence factors
+        // Size Rating: 1=tiny, 2=small, 3=medium, 4=large, 5=major
+        // Influence increases with size - users inside get POI tag instead of location
         // ============================================================================
-        
-        let zoneStats = {}; // Track per-zone: {zoneName: {postCount, activeUsers, bestPosts: []}}
-        let outOfAreaPostCache = {}; // Cache rotated out-of-area posts per zone
-        let lastOutOfAreaRotation = {}; // Track last rotation time per zone
-        const OUT_OF_AREA_ROTATION_INTERVAL = 60000; // 1 minute in milliseconds
-        
-        // Define muted badge colors for out-of-area posts
-        const MUTED_BADGE_COLORS = {
-            'new': '#666666',        // Muted gray instead of bright green
-            'liked': '#999999',      // Muted gray instead of gold
-            'trending': '#777777',   // Muted gray instead of orange
-            'featured': '#888888',   // Muted gray instead of purple
+        const POI_CATEGORIES = {
+            // TIER 1: MAJOR INFRASTRUCTURE (Size 5 - Largest areas, highest confidence)
+            // These dominate their areas and should always be used when nearby
+            'university': { radius: 2.0, size: 5, confidence: 0.95, emoji: '🎓', priority: 100 },
+            'airport': { radius: 2.0, size: 5, confidence: 0.95, emoji: '✈️', priority: 100 },
+            'major_park': { radius: 2.0, size: 5, confidence: 0.92, emoji: '🌳', priority: 95 },
+            'hospital': { radius: 1.5, size: 5, confidence: 0.93, emoji: '🏥', priority: 95 },
+            
+            // TIER 2: LARGE PUBLIC FACILITIES (Size 4 - Large influence zones)
+            // Parks, museums, train stations, entertainment venues
+            'park': { radius: 1.5, size: 4, confidence: 0.90, emoji: '🌲', priority: 90 },
+            'museum': { radius: 1.2, size: 4, confidence: 0.88, emoji: '🏛️', priority: 88 },
+            'train_station': { radius: 1.3, size: 4, confidence: 0.90, emoji: '🚂', priority: 90 },
+            'sports_facility': { radius: 1.3, size: 4, confidence: 0.88, emoji: '🏟️', priority: 88 },
+            'entertainment': { radius: 1.3, size: 4, confidence: 0.87, emoji: '🎭', priority: 87 },
+            'library': { radius: 1.1, size: 4, confidence: 0.86, emoji: '📚', priority: 86 },
+            'shopping_mall': { radius: 1.2, size: 4, confidence: 0.85, emoji: '🛍️', priority: 85 },
+            
+            // TIER 3: MEDIUM BUSINESSES (Size 3 - Medium influence, moderate confidence)
+            // Restaurants, hotels, supermarkets, markets
+            'restaurant': { radius: 0.8, size: 3, confidence: 0.80, emoji: '🍽️', priority: 80 },
+            'hotel': { radius: 0.8, size: 3, confidence: 0.80, emoji: '🏨', priority: 80 },
+            'supermarket': { radius: 0.8, size: 3, confidence: 0.82, emoji: '🛒', priority: 82 },
+            'market': { radius: 0.8, size: 3, confidence: 0.78, emoji: '🏪', priority: 78 },
+            'office': { radius: 0.8, size: 3, confidence: 0.75, emoji: '🏢', priority: 75 },
+            
+            // TIER 4: SMALL BUSINESSES (Size 2 - Small influence, moderate confidence)
+            // Gyms, pharmacies, electronics stores, banks
+            'pharmacy': { radius: 0.6, size: 2, confidence: 0.75, emoji: '💊', priority: 75 },
+            'bank': { radius: 0.6, size: 2, confidence: 0.70, emoji: '🏦', priority: 70 },
+            'gym': { radius: 0.6, size: 2, confidence: 0.72, emoji: '🏋️', priority: 72 },
+            'electronics': { radius: 0.6, size: 2, confidence: 0.70, emoji: '📱', priority: 70 },
+            'shop': { radius: 0.5, size: 2, confidence: 0.65, emoji: '🏬', priority: 65 },
+            
+            // TIER 5: TINY LOCAL (Size 1 - Tiny areas, lower confidence for area tags)
+            // Coffee shops, bars, salons - used only when very close
+            'cafe': { radius: 0.15, size: 1, confidence: 0.50, emoji: '☕', priority: 50 },
+            'coffee_shop': { radius: 0.15, size: 1, confidence: 0.50, emoji: '☕', priority: 50 },
+            'bar': { radius: 0.20, size: 1, confidence: 0.55, emoji: '🍺', priority: 55 },
+            'fast_food': { radius: 0.20, size: 1, confidence: 0.55, emoji: '🍔', priority: 55 },
+            'salon': { radius: 0.15, size: 1, confidence: 0.50, emoji: '💇', priority: 50 },
+            
+            // Default for unknown types
+            'default': { radius: 0.5, size: 2, confidence: 0.60, emoji: '📍', priority: 60 }
         };
         
-        /**
-         * FedEx v3: Calculate user tier based on global online user count
-         * @param {number} userCount - Current global online user count
-         * @returns {number} - Tier 1, 2, or 3
-         */
-        function calculateTier(userCount) {
-            if (userCount <= 100) return 1;
-            if (userCount <= 1000000) return 2;
-            return 3;
-        }
-        
-        /**
-         * FedEx v3: Identify major zones (top zones by post count + active users)
-         * @returns {Array} - Array of zone names sorted by importance
-         */
-        function identifyMajorZones() {
-            // Score zones by: (postCount * 0.6) + (activeUsers * 0.4)
-            const zonedScores = Object.entries(zoneStats).map(([zone, stats]) => ({
-                zone,
-                score: (stats.postCount || 0) * 0.6 + (stats.activeUsers || 0) * 0.4
-            }));
+        // ============================================================================
+        // POI SCORING ALGORITHM
+        // Evaluates whether a POI should override the location database
+        // ============================================================================
+        function calculatePOIScore(poi, userDistance, poiData) {
+            if (!poi || !poiData) return { score: 0, reason: 'Invalid POI data' };
             
-            // Return top 10 zones as "major zones"
-            return zonedScores
-                .sort((a, b) => b.score - a.score)
-                .slice(0, 10)
-                .map(z => z.zone);
+            const { radius, size, confidence, priority } = poiData;
+            
+            // DISTANCE SCORE: 0 at influence radius edge, 1 at POI center
+            // Closer = higher score
+            const distanceScore = Math.max(0, 1 - (userDistance / radius));
+            
+            // PROXIMITY BONUS: Extra points for being VERY close
+            let proximityBonus = 0;
+            if (userDistance < 0.05) proximityBonus = 0.3;        // Within 50m = strong signal
+            else if (userDistance < 0.1) proximityBonus = 0.2;    // Within 100m = good signal
+            else if (userDistance < 0.2) proximityBonus = 0.1;    // Within 200m = weak signal
+            
+            // SIZE FACTOR: Larger POIs are more reliable (5=major, 1=tiny)
+            // Normalized to 0.5-1.0 range for multiplier
+            const sizeFactor = 0.5 + (size * 0.1);
+            
+            // FINAL SCORE: distance * size * confidence + proximity bonus + priority
+            const baseScore = distanceScore * sizeFactor * confidence;
+            const finalScore = (baseScore + proximityBonus) * 100;
+            
+            return {
+                score: finalScore,
+                distanceScore: distanceScore,
+                proximityBonus: proximityBonus,
+                sizeFactor: sizeFactor,
+                confidence: confidence,
+                reason: `Size(${size}) × Distance(${distanceScore.toFixed(2)}) × Confidence(${confidence}) + Proximity(${proximityBonus.toFixed(2)})`
+            };
+        }
+        
+        // ============================================================================
+        // POI DECISION ENGINE
+        // Determines if POI should be used over location database
+        // ============================================================================
+        function shouldUsePOI(poiScore, locationScore = null) {
+            // MINIMUM THRESHOLD: POI score must be at least 40 to be considered
+            if (poiScore.score < 40) {
+                return { use: false, reason: `POI score too low (${poiScore.score.toFixed(1)} < 40)` };
+            }
+            
+            // If no location score provided, use POI if above threshold
+            if (!locationScore) {
+                return { use: true, reason: `POI score (${poiScore.score.toFixed(1)}) above minimum threshold` };
+            }
+            
+            // Compare POI score vs location score
+            // POI wins if it's significantly better (at least 20% higher)
+            const scoreRatio = poiScore.score / (locationScore + 1);
+            const minimumWinRatio = 1.2;
+            
+            if (scoreRatio >= minimumWinRatio) {
+                return { 
+                    use: true, 
+                    reason: `POI score (${poiScore.score.toFixed(1)}) >> Location (${locationScore.toFixed(1)})` 
+                };
+            } else {
+                return { 
+                    use: false, 
+                    reason: `Location score preferred (POI: ${poiScore.score.toFixed(1)} vs Location: ${locationScore.toFixed(1)})` 
+                };
+            }
+        }
+        
+        // Legacy: POI_INFLUENCE_RADIUS for backward compatibility
+        const POI_INFLUENCE_RADIUS = Object.fromEntries(
+            Object.entries(POI_CATEGORIES).map(([key, data]) => [key, data.radius])
+        );
+        
+        // ============================================================================
+        // ADAPTIVE CONTENT DISTRIBUTION ALGORITHM
+        // Scales content mix based on total online user count
+        // 1 user → 10 users → 100 users → 1K → 10K → 100K → 1M users
+        // ============================================================================
+        
+        let areaStats = {}; // Track per-area: {areaTag: {postCount, activeUsers, lastPostTime}}
+        let externalPostCache = {}; // Cache for rotation: {areaTag: [topPosts]}
+        let lastExternalRotation = {}; // Track rotation time per area
+        const EXTERNAL_ROTATION_INTERVAL = 60000; // Rotate external content every minute
+        
+        /**
+         * CONTENT DISTRIBUTION ALGORITHM
+         * Determines how much LOCAL vs EXTERNAL content user should see
+         * Based on total online users and area post count
+         */
+        function calculateContentMix(userAreaTag, totalOnlineUsers, areaPostCount) {
+            // Define scaling phases based on total user count
+            let localPercent = 50; // Default
+            let externalPercent = 50;
+            
+            if (totalOnlineUsers <= 1) {
+                // 1 user: No other content available
+                localPercent = 100;
+                externalPercent = 0;
+            } else if (totalOnlineUsers <= 10) {
+                // 2-10 users: Mostly external to fill grid
+                localPercent = 30;
+                externalPercent = 70;
+            } else if (totalOnlineUsers <= 50) {
+                // 11-50 users: Balanced but lean external
+                localPercent = 40;
+                externalPercent = 60;
+            } else if (totalOnlineUsers <= 100) {
+                // 51-100 users: Balanced mix
+                localPercent = 50;
+                externalPercent = 50;
+            } else if (totalOnlineUsers <= 500) {
+                // 101-500 users: Lean local
+                localPercent = 65;
+                externalPercent = 35;
+            } else if (totalOnlineUsers <= 5000) {
+                // 501-5K users: Mostly local
+                localPercent = 75;
+                externalPercent = 25;
+            } else if (totalOnlineUsers <= 50000) {
+                // 5K-50K users: Very mostly local
+                localPercent = 85;
+                externalPercent = 15;
+            } else if (totalOnlineUsers <= 500000) {
+                // 50K-500K users: Almost all local
+                localPercent = 92;
+                externalPercent = 8;
+            } else {
+                // 500K+ users: Nearly pure local
+                localPercent = 97;
+                externalPercent = 3;
+            }
+            
+            // ADJUSTMENT: If area has few posts, boost external to fill grid
+            if (areaPostCount < 20 && totalOnlineUsers > 50) {
+                // Area is starving for content
+                externalPercent += 20;
+                localPercent -= 20;
+            }
+            
+            return {
+                localPercent: Math.max(0, Math.min(100, localPercent)),
+                externalPercent: Math.max(0, Math.min(100, externalPercent)),
+                phase: calculatePhase(totalOnlineUsers),
+                reason: `${totalOnlineUsers} online users, ${areaPostCount} local posts`
+            };
         }
         
         /**
-         * FedEx v3: Score a post for relevance to user's tier and zone
-         * @param {Object} post - Post object
-         * @param {string} userZone - User's zone
-         * @param {number} tier - User's tier (1, 2, or 3)
-         * @returns {number} - Relevance score
+         * Identify growth phase for content strategy
          */
-        function scorePost(post, userZone, tier) {
+        function calculatePhase(totalOnlineUsers) {
+            if (totalOnlineUsers <= 10) return 'BOOTSTRAP'; // Desperate for content
+            if (totalOnlineUsers <= 100) return 'EARLY'; // Building content
+            if (totalOnlineUsers <= 5000) return 'GROWTH'; // Balanced
+            if (totalOnlineUsers <= 50000) return 'SCALE'; // Local dominant
+            if (totalOnlineUsers <= 500000) return 'MATURE'; // Almost pure local
+            return 'MASSIVE'; // Hyperlocal at scale
+        }
+        
+        /**
+         * Define what counts as "TOP TIER" for external posts
+         * Only these badges qualify as external content to show other areas
+         */
+        const TOP_TIER_BADGES = ['hot', 'trending', 'featured', 'crowned'];
+        
+        function isTopTierPost(post) {
+            // Post must have one of these badges AND positive engagement
+            if (!post.badges) return false;
+            
+            const hasTopBadge = TOP_TIER_BADGES.some(badge => post.badges.includes(badge));
+            const isPositive = (post.likes || 0) > (post.dislikes || 0);
+            
+            return hasTopBadge && isPositive;
+        }
+        
+        /**
+         * Score external posts by quality for content rotation
+         * Criteria: Engagement, sentiment shift, time decay
+         */
+        function scoreExternalPost(post) {
             let score = 0;
-            const isLocalPost = post.county === userZone;
-            const likes = post.likes || 0;
-            const dislikes = post.dislikes || 0;
-            const netEngagement = likes - dislikes; // PRIMARY METRIC: Net engagement
-            const isMajorZonePost = identifyMajorZones().includes(post.county);
             
-            // Base score: NET ENGAGEMENT (likes - dislikes) is primary metric
-            score += netEngagement * 10;
+            // Primary: Engagement (likes - dislikes)
+            const engagement = (post.likes || 0) - (post.dislikes || 0);
+            score += engagement * 10;
             
-            // Local posts get priority boost
-            if (isLocalPost) {
-                score += 100; // Strong boost for local
-                
-                // New local posts get extra boost
-                if (post.isNew) score += 50;
+            // Bonus: Posts that shifted from negative to positive
+            if (post.sentimentShift === 'negative_to_positive') {
+                score += 50;
             }
             
-            // Out-of-area posts from major zones get consideration
-            if (!isLocalPost && isMajorZonePost) {
-                // Major zone posts get boost based on net engagement
-                score += (netEngagement * 5);
-                
-                // Very well-engaged posts from major zones get high priority
-                if (netEngagement > 50) score += 150;
-                if (netEngagement > 100) score += 300;
+            // Bonus: Hot/Trending/Featured badges
+            if (post.badges) {
+                if (post.badges.includes('hot')) score += 100;
+                if (post.badges.includes('trending')) score += 75;
+                if (post.badges.includes('featured')) score += 60;
             }
             
-            // Badge bonus (posts with badges are higher quality)\n            if (post.badge) score += 30;
-            
-            // Tiebreaker: Add small timestamp component for newer posts to win on ties
-            // More recent posts get slight bonus (1 point per second of recency, normalized)
-            const postAge = Date.now() - (post.timestamp || 0);
-            const recencyBonus = Math.max(0, 1000 - (postAge / 1000000)); // Newer = higher score
-            score += recencyBonus;
-            
-            // Tier-specific scoring
-            switch (tier) {
-                case 1:
-                    // Tier 1: More out-of-area content to fill grid
-                    if (!isLocalPost && isMajorZonePost) score += 50;
-                    break;
-                case 2:
-                    // Tier 2: Less out-of-area, mostly local
-                    if (!isLocalPost && isMajorZonePost) score += 20;
-                    break;
-                case 3:
-                    // Tier 3: Rarely show out-of-area unless extremely well-engaged
-                    if (!isLocalPost && isMajorZonePost && netEngagement < 100) score -= 100;
-                    break;
-            }
+            // Decay: Older posts score less
+            const ageMinutes = (Date.now() - (post.timestamp || Date.now())) / (1000 * 60);
+            const ageDecay = Math.max(0, 1 - (ageMinutes / 1440)); // Decay over 24 hours
+            score *= ageDecay;
             
             return score;
         }
         
         /**
-         * FedEx v3: Track zone statistics from all posts
-         * Called whenever posts are loaded/updated
+         * DENSITY METRICS SYSTEM
+         * Calculates local, nearby, regional, and platform-wide content density
          */
-        function updateZoneStats(allPosts) {
-            zoneStats = {};
+        function calculateDensityMetrics(userAreaTag, userCoordinates = null) {
+            // Get posts in this area
+            const localPosts = (gridContent[userAreaTag] || []).length;
             
-            allPosts.forEach(post => {
-                const zone = post.county || 'Unknown';
-                
-                if (!zoneStats[zone]) {
-                    zoneStats[zone] = {
-                        postCount: 0,
-                        activeUsers: new Set(),
-                        bestPosts: [],
-                        allPosts: []
-                    };
-                }
-                
-                zoneStats[zone].postCount++;
-                zoneStats[zone].activeUsers.add(post.userId);
-                zoneStats[zone].allPosts.push(post);
-                
-                // Track top 20 posts per zone
-                zoneStats[zone].bestPosts = zoneStats[zone].allPosts
-                    .sort((a, b) => (b.likes || 0) - (a.likes || 0))
-                    .slice(0, 20);
-            });
-            
-            // Convert Sets to counts
-            Object.keys(zoneStats).forEach(zone => {
-                zoneStats[zone].activeUsers = zoneStats[zone].activeUsers.size;
-            });
-            
-            console.log('📊 Zone Stats Updated:', Object.keys(zoneStats).length, 'zones tracked');
-        }
-        
-        /**
-         * FedEx v3: Get out-of-area posts for grid mixing
-         * Rotates every 1 minute based on server time
-         */
-        function getOutOfAreaPosts(userZone, tier, neededCount) {
-            const now = Date.now();
-            const majorZones = identifyMajorZones();
-            const outOfAreaPosts = [];
-            
-            // Check if rotation needed (1 min = 60000ms)
-            const shouldRotate = !lastOutOfAreaRotation[userZone] || 
-                                (now - lastOutOfAreaRotation[userZone]) > OUT_OF_AREA_ROTATION_INTERVAL;
-            
-            if (shouldRotate) {
-                lastOutOfAreaRotation[userZone] = now;
-                
-                // Build pool of best posts from major zones
-                const candidatePosts = [];
-                
-                majorZones.forEach(majorZone => {
-                    if (majorZone !== userZone && zoneStats[majorZone]) {
-                        // Get best posts from this major zone
-                        const zonePosts = zoneStats[majorZone].bestPosts || [];
-                        candidatePosts.push(...zonePosts.slice(0, 10));
+            // Count posts in nearby areas (find areas geographically close)
+            let nearbyPosts = 0;
+            let nearbyAreas = [];
+            for (const [otherArea, posts] of Object.entries(gridContent)) {
+                if (otherArea !== userAreaTag) {
+                    // Simple heuristic: areas with similar names are nearby
+                    if (isNearbyArea(userAreaTag, otherArea)) {
+                        nearbyPosts += posts.length;
+                        nearbyAreas.push(otherArea);
                     }
-                });
-                
-                // Shuffle and select random sample (provides rotation effect)
-                const rotatedPosts = candidatePosts
-                    .sort(() => Math.random() - 0.5)
-                    .slice(0, neededCount);
-                
-                outOfAreaPostCache[userZone] = rotatedPosts;
-                console.log(`🔄 Rotated out-of-area posts for ${userZone}: ${rotatedPosts.length} posts`);
+                }
             }
             
-            return outOfAreaPostCache[userZone] || [];
-        }
-        
-        /**
-         * FedEx v3: Create muted badge for out-of-area posts
-         */
-        function createOutOfAreaBadge(originalBadge, zone) {
-            if (!originalBadge) return null;
+            // Count all platform posts
+            let platformPosts = 0;
+            for (const posts of Object.values(gridContent)) {
+                platformPosts += posts.length;
+            }
             
-            // Extract badge type and create muted version
-            let badgeType = 'featured';
-            let badgeText = originalBadge;
-            let emoji = '📌';
+            // Calculate density score (0-100)
+            const localDensity = Math.min(100, (localPosts / 100) * 50); // 50 posts = 50% density
+            const nearbyDensity = Math.min(100, (nearbyPosts / 500) * 50); // 500 posts = 50% density
+            const platformDensity = Math.min(100, (platformPosts / 1000) * 100); // 1000 posts = 100% density
             
-            if (originalBadge.includes('🆕')) { badgeType = 'new'; emoji = '🆕'; }
-            else if (originalBadge.includes('❤️')) { badgeType = 'liked'; emoji = '❤️'; }
-            else if (originalBadge.includes('🔥')) { badgeType = 'trending'; emoji = '🔥'; }
-            
-            const muteColor = MUTED_BADGE_COLORS[badgeType] || '#888888';
+            const densityLevel = 
+                localPosts > 200 ? 'SATURATED' :
+                localPosts > 50 ? 'HEALTHY' :
+                localPosts > 10 ? 'SPARSE' :
+                'CRITICAL';
             
             return {
-                type: 'outOfArea',
-                emoji,
-                text: badgeText.replace(/\s*\(\w+\)/g, ''), // Remove zone from original
-                zone,
-                color: muteColor
+                localPosts: localPosts,
+                nearbyPosts: nearbyPosts,
+                platformPosts: platformPosts,
+                nearbyAreas: nearbyAreas,
+                localDensity: localDensity,
+                nearbyDensity: nearbyDensity,
+                platformDensity: platformDensity,
+                densityLevel: densityLevel,
+                isRural: localPosts < 10 && nearbyPosts < 50
             };
         }
         
         /**
-         * FedEx v3: Get grid content with tier-aware content mixing
-         * Returns hundreds of posts mixed by tier strategy
+         * Check if area is geographically nearby (simple heuristic)
          */
-        function getGridContent(userZone, tier) {
-            if (!zoneStats[userZone]) {
-                console.warn(`⚠️ No posts found for zone: ${userZone}`);
-                return [];
+        function isNearbyArea(area1, area2) {
+            // Extract city/region names and compare
+            const getMainArea = (tag) => tag.split(' ')[tag.split(' ').length - 1]; // Last word often the city
+            return getMainArea(area1) === getMainArea(area2) && area1 !== area2;
+        }
+        
+        /**
+         * CASCADING CONTENT RETRIEVER
+         * Tries multiple tiers to fill grid: local → nearby → regional → platform
+         */
+        function getExternalContentWithFallbacks(userAreaTag, slotsNeeded, densityMetrics) {
+            let externalPosts = [];
+            let sourceTier = 'TIER_1';
+            
+            // TIER 1: Top-tier from same area
+            if (densityMetrics.densityLevel !== 'CRITICAL') {
+                externalPosts = getTopTierExternalPosts(userAreaTag, slotsNeeded);
+                if (externalPosts.length >= slotsNeeded) {
+                    console.log(`   ✅ TIER 1: Got ${externalPosts.length} top-tier from ${userAreaTag}`);
+                    return externalPosts;
+                }
+                sourceTier = 'TIER_1_PARTIAL';
             }
             
-            const localPosts = zoneStats[userZone].allPosts || [];
-            const tierRequirement = {
-                1: 500,  // Try to get 500 posts for tier 1
-                2: 400,  // 400 for tier 2
-                3: 350   // 350 for tier 3
+            // TIER 2: Top-tier from nearby areas (same city/region)
+            if (densityMetrics.nearbyPosts > 0) {
+                for (const nearbyArea of densityMetrics.nearbyAreas) {
+                    const nearby = getTopTierExternalPosts(nearbyArea, slotsNeeded - externalPosts.length);
+                    externalPosts.push(...nearby);
+                    if (externalPosts.length >= slotsNeeded) {
+                        console.log(`   ✅ TIER 2: Got ${externalPosts.length} from nearby areas`);
+                        return externalPosts;
+                    }
+                }
+                sourceTier = 'TIER_2_PARTIAL';
+            }
+            
+            // TIER 3: Top-tier from ENTIRE PLATFORM (less location-specific)
+            const platformTopTier = [];
+            for (const [otherArea, posts] of Object.entries(gridContent)) {
+                if (otherArea !== userAreaTag && !densityMetrics.nearbyAreas.includes(otherArea)) {
+                    const topTier = posts.filter(isTopTierPost);
+                    platformTopTier.push(...topTier);
+                }
+            }
+            
+            // Sort by quality and take top ones
+            platformTopTier.forEach(post => {
+                post.externalScore = scoreExternalPost(post);
+            });
+            platformTopTier.sort((a, b) => b.externalScore - a.externalScore);
+            
+            const tier3Posts = platformTopTier.slice(0, slotsNeeded - externalPosts.length);
+            externalPosts.push(...tier3Posts);
+            if (externalPosts.length >= slotsNeeded) {
+                console.log(`   ✅ TIER 3: Got ${externalPosts.length} from platform top-tier`);
+                return externalPosts;
+            }
+            sourceTier = 'TIER_3_PARTIAL';
+            
+            // TIER 4: EMERGENCY - ALL external posts (not top-tier filtered)
+            // For rural areas with no content nearby - pull from anywhere that has activity
+            if (densityMetrics.isRural) {
+                const allExternal = [];
+                for (const [otherArea, posts] of Object.entries(gridContent)) {
+                    if (otherArea !== userAreaTag) {
+                        allExternal.push(...posts);
+                    }
+                }
+                
+                // Prioritize by engagement even without badges
+                allExternal.forEach(post => {
+                    post.emergencyScore = (post.likes || 0) - (post.dislikes || 0);
+                });
+                allExternal.sort((a, b) => b.emergencyScore - a.emergencyScore);
+                
+                const tier4Posts = allExternal.slice(0, slotsNeeded - externalPosts.length);
+                externalPosts.push(...tier4Posts);
+                console.log(`   🚨 TIER 4 (RURAL): Got ${externalPosts.length} from emergency pool`);
+                sourceTier = 'TIER_4_EMERGENCY';
+            }
+            
+            return externalPosts;
+        }
+        
+        /**
+         * CHECK GRID FILLABILITY
+         * Returns whether we can fill 12 slots
+         */
+        function calculateFillableSlots(userAreaTag, displayPosts, densityMetrics) {
+            const localAvailable = getLocalPosts(userAreaTag, 999).length;
+            const externalAvailable = getExternalContentWithFallbacks(userAreaTag, 999, densityMetrics).length;
+            const totalAvailable = localAvailable + externalAvailable;
+            
+            const missingSlots = Math.max(0, 12 - totalAvailable);
+            
+            return {
+                canFill: totalAvailable >= 12,
+                availableSlots: totalAvailable,
+                missingSlots: missingSlots,
+                criticallyLow: totalAvailable < 6,
+                sufficient: totalAvailable >= 12
             };
-            const targetCount = tierRequirement[tier] || 400;
+        }
+        
+        /**
+         * STARVATION RECOVERY
+         * Dynamically boost external % until grid can be filled
+         */
+        function calculateContentMixWithStarvationRecovery(userAreaTag, totalOnlineUsers, areaPostCount, densityMetrics) {
+            let mix = calculateContentMix(userAreaTag, totalOnlineUsers, areaPostCount);
+            let boostLevel = 0;
             
-            // Sort local posts by score
-            const scoredLocalPosts = localPosts.map(post => ({
+            // Adjust for density: sparse areas pull more external
+            if (densityMetrics.densityLevel === 'CRITICAL') {
+                mix.externalPercent += 30;
+                mix.localPercent -= 30;
+                boostLevel = 1;
+                console.log(`   ⚠️ CRITICAL DENSITY: Boosting external by 30%`);
+            } else if (densityMetrics.densityLevel === 'SPARSE') {
+                mix.externalPercent += 15;
+                mix.localPercent -= 15;
+                boostLevel = 1;
+                console.log(`   ⚠️ SPARSE DENSITY: Boosting external by 15%`);
+            }
+            
+            // Rural areas get aggressive boost
+            if (densityMetrics.isRural) {
+                mix.externalPercent += 20;
+                mix.localPercent -= 20;
+                boostLevel += 1;
+                console.log(`   🏜️ RURAL AREA: Boosting external by 20% more (total boost: ${boostLevel})`);
+            }
+            
+            // Ensure percentages are valid
+            mix.localPercent = Math.max(0, Math.min(100, mix.localPercent));
+            mix.externalPercent = Math.max(0, Math.min(100, mix.externalPercent));
+            
+            return {
+                ...mix,
+                boostLevel: boostLevel,
+                adjusted: boostLevel > 0,
+                densityLevel: densityMetrics.densityLevel,
+                isRural: densityMetrics.isRural
+            };
+        }
+        
+        /**
+         * Get grid content for user - MIX of LOCAL and EXTERNAL based on user count AND DENSITY
+         */
+        function getAdaptiveGridContent(userAreaTag, totalOnlineUsers, gridSize = 12) {
+            // Calculate density metrics
+            const densityMetrics = calculateDensityMetrics(userAreaTag);
+            
+            // Get content mix with density and starvation recovery
+            const mix = calculateContentMixWithStarvationRecovery(userAreaTag, totalOnlineUsers, getAreaPostCount(userAreaTag), densityMetrics);
+            
+            // Calculate how many local vs external posts to show
+            const localSlots = Math.floor(gridSize * (mix.localPercent / 100));
+            const externalSlots = gridSize - localSlots;
+            
+            // Get local posts first (ALL types, full diversity)
+            const localPosts = getLocalPosts(userAreaTag, localSlots);
+            
+            // Get external posts WITH FALLBACK TIERS
+            const externalPosts = getExternalContentWithFallbacks(userAreaTag, externalSlots, densityMetrics);
+            
+            // Combine
+            const gridContent = [...localPosts, ...externalPosts];
+            
+            // Check fillability
+            const fillability = calculateFillableSlots(userAreaTag, gridContent, densityMetrics);
+            
+            // Log results
+            console.log(`📊 ADAPTIVE CONTENT MIX for ${userAreaTag}:`);
+            console.log(`   👥 Online: ${totalOnlineUsers} | Phase: ${mix.phase}`);
+            console.log(`   📍 Density: ${densityMetrics.densityLevel} (Local: ${densityMetrics.localPosts}, Nearby: ${densityMetrics.nearbyPosts}, Platform: ${densityMetrics.platformPosts})`);
+            if (mix.adjusted) {
+                console.log(`   🔄 Boost Level: ${mix.boostLevel} (Density/Rural adjustment)`);
+            }
+            console.log(`   📈 Local: ${localPosts.length}/${localSlots} posts (${mix.localPercent}%)`);
+            console.log(`   🌍 External: ${externalPosts.length}/${externalSlots} posts (${mix.externalPercent}%)`);
+            console.log(`   ✅ Grid fillability: ${fillability.availableSlots} slots available`);
+            if (densityMetrics.isRural) {
+                console.log(`   🏜️ RURAL MODE: Using cascading fallbacks (Tier 1→2→3→4)`);
+            }
+            console.log(`   💡 Reason: ${mix.reason}`);
+            
+            return gridContent;
+        }
+        
+        /**
+         * Get all local posts from user's area (all content types)
+         */
+        function getLocalPosts(areaTag, limit) {
+            if (!gridContent[areaTag]) return [];
+            
+            const posts = gridContent[areaTag].slice(0, limit);
+            return posts.map(post => ({
                 ...post,
-                score: scorePost(post, userZone, tier),
-                isLocal: true
+                contentSource: 'LOCAL',
+                displayAreaTag: areaTag // Show user's area
             }));
+        }
+        
+        /**
+         * Get top-tier external posts from other areas
+         * These are rebadged with CITY level instead of neighborhood
+         */
+        function getTopTierExternalPosts(userAreaTag, limit) {
+            const externalPosts = [];
             
-            scoredLocalPosts.sort((a, b) => b.score - a.score);
-            
-            // Calculate how many out-of-area posts we need
-            const outOfAreaCount = Math.ceil(targetCount * {1: 0.3, 2: 0.15, 3: 0.05}[tier]);
-            const outOfAreaPosts = getOutOfAreaPosts(userZone, tier, outOfAreaCount)
-                .map(post => ({
-                    ...post,
-                    score: scorePost(post, userZone, tier),
-                    isLocal: false,
-                    outOfAreaBadge: createOutOfAreaBadge(post.badge, post.county)
-                }));
-            
-            // Combine and shuffle to get natural feel
-            let gridPosts = [...scoredLocalPosts];
-            
-            // Inject out-of-area posts throughout the grid (not all at bottom)
-            if (outOfAreaPosts.length > 0) {
-                // Insert every Nth position
-                const insertInterval = Math.ceil(gridPosts.length / outOfAreaPosts.length);
-                outOfAreaPosts.forEach((post, idx) => {
-                    const insertPos = Math.min((idx + 1) * insertInterval, gridPosts.length);
-                    gridPosts.splice(insertPos, 0, post);
+            // Iterate through all other areas, collect top-tier posts
+            for (const [otherArea, posts] of Object.entries(gridContent)) {
+                if (otherArea === userAreaTag) continue; // Skip user's own area
+                
+                // Filter for top-tier only
+                const topTierPosts = posts.filter(isTopTierPost);
+                
+                // Add to external pool with rebadging
+                topTierPosts.forEach(post => {
+                    externalPosts.push({
+                        ...post,
+                        contentSource: 'EXTERNAL_TOP_TIER',
+                        displayAreaTag: extractCity(post.county), // "Seattle" not "Capitol Hill"
+                        originalAreaTag: post.county
+                    });
                 });
             }
             
-            // Random new post placement - sometimes at top, sometimes at bottom
-            const newPosts = gridPosts.filter(p => p.isNew);
-            const nonNewPosts = gridPosts.filter(p => !p.isNew);
-            
-            newPosts.forEach(newPost => {
-                const randomPos = Math.random() < 0.4 
-                    ? Math.floor(nonNewPosts.length * Math.random() * 0.2) // Top 20%
-                    : Math.floor(nonNewPosts.length * (0.7 + Math.random() * 0.3)); // Bottom 30%
-                nonNewPosts.splice(randomPos, 0, newPost);
+            // Score all external posts
+            externalPosts.forEach(post => {
+                post.externalScore = scoreExternalPost(post);
             });
             
-            gridPosts = nonNewPosts;
+            // Sort by quality score and return top N
+            return externalPosts
+                .sort((a, b) => b.externalScore - a.externalScore)
+                .slice(0, limit);
+        }
+        
+        /**
+         * Extract city name from area tag for rebadging
+         * "Capitol Hill Seattle" → "Seattle"
+         * "South Bridge District 12" → try to extract city
+         */
+        function extractCity(areaTag) {
+            if (!areaTag) return 'Unknown';
             
-            console.log(`📱 Tier ${tier} Grid: ${gridPosts.length} posts (${scoredLocalPosts.length} local, ${outOfAreaPosts.length} out-of-area)`);
+            // Simple extraction: last meaningful word
+            const parts = areaTag.split(' ');
             
-            return gridPosts.slice(0, targetCount);
+            // If looks like "District 12" → try to use previous part
+            if (parts[parts.length - 2]?.toLowerCase() === 'district') {
+                return parts.slice(0, -2).join(' ') || areaTag;
+            }
+            
+            // Otherwise return full tag (will be improved with real location data)
+            return areaTag;
+        }
+        
+        /**
+         * Helper: Count posts in an area
+         */
+        function getAreaPostCount(areaTag) {
+            return (gridContent[areaTag] || []).length;
+        }
+        
+        /**
+         * Helper: Track area statistics
+         */
+        function updateAreaStats(areaTag, activeUsers) {
+            if (!areaStats[areaTag]) {
+                areaStats[areaTag] = {
+                    postCount: 0,
+                    activeUsers: 0,
+                    lastPostTime: Date.now()
+                };
+            }
+            
+            areaStats[areaTag].postCount = getAreaPostCount(areaTag);
+            areaStats[areaTag].activeUsers = activeUsers;
+            areaStats[areaTag].lastPostTime = Date.now();
         }
         
         // Determine API URL - only used for WiFi network detection
@@ -12295,73 +12738,38 @@
             // }
             
             // ========================================================================
-            // FEDEX v3: UPDATE ZONE STATS AND APPLY TIER-BASED CONTENT MIXING
+            // ADAPTIVE CONTENT DISTRIBUTION ALGORITHM v2
+            // WITH DENSITY METRICS & RURAL AREA STARVATION RECOVERY
+            // 1 user → 10 users → 100 users → 1K → 10K → 100K → 1M users
+            // PLUS: Smart density detection + cascading fallbacks for rural areas
             // ========================================================================
-            updateZoneStats(allPosts); // Track statistics for all posts
             
-            const userTier = calculateTier(onlineUserCount); // Determine tier
-            console.log(`📊 FedEx v3: Online users = ${onlineUserCount}, User Tier = ${userTier}`);
-            
-            // DEBUG: Show what zone we're filtering by
-            console.log(`🔍 DEBUG renderGrid():`, {
-                currentZoneTag: currentZoneTag,
-                allPosts: allPosts.length,
-                userLocation: userLocation,
-                hiddenForThisWiFi: hiddenForThisWiFi.length,
-                hiddenReported: hiddenReported.length,
-                deletedOwnPosts: deletedOwnPosts.length
+            // Organize posts by area for the algorithm
+            gridContent = {};
+            allPosts.forEach(post => {
+                const area = post.county || 'Unknown Area';
+                if (!gridContent[area]) {
+                    gridContent[area] = [];
+                }
+                gridContent[area].push(post);
             });
             
-            // Show each post's zone
-            allPosts.forEach(p => {
-                console.log(`  Post ${p.id.substring(0, 8)}: zone="${p.county || 'Unknown County'}" likes=${p.likes} dislikes=${p.dislikes}`);
-            });
+            // Apply adaptive algorithm for THIS user's area
+            const userAreaTag = currentZoneTag || 'Default Area';
+            updateAreaStats(userAreaTag, onlineUserCount);
             
-            // ========================================================================
-            // OVERRIDE: SHOW ALL POSTS ON ONE GRID - DISABLE ZONE/GEOGRAPHIC FILTERING
-            // ========================================================================
-            // Instead of using getGridContent() which filters by zone and tier,
-            // we'll use ALL posts directly to show everything on one grid
-            let displayPosts = allPosts;
-            console.log(`🎯 OVERRIDE MODE: Showing ALL ${displayPosts.length} posts on one grid (zone filtering disabled)`);
-            console.log(`   Original allPosts count: ${allPosts.length}`);
-            console.log(`   Geographic filtering: DISABLED`);
-            console.log(`   Zone-based content mixing: DISABLED`);
-            console.log(`   Tier system: DISABLED`);
+            console.log(`📊 ADAPTIVE DISTRIBUTION v2 (with Density & Rural Recovery):`);
+            console.log(`   👥 Online users: ${onlineUserCount}`);
+            console.log(`   📍 User area: ${userAreaTag}`);
+            
+            // Get content mix for user (now with density metrics & starvation recovery)
+            let displayPosts = getAdaptiveGridContent(userAreaTag, onlineUserCount, 999); // Get up to 999 posts
+            
+            console.log(`✅ ADAPTIVE MODE v2: ${displayPosts.length} posts available`);
+            console.log(`   📊 Local: ${displayPosts.filter(p => p.contentSource === 'LOCAL').length} | External: ${displayPosts.filter(p => p.contentSource === 'EXTERNAL_TOP_TIER').length}`);
             
             // Add proximity badges to all posts
             displayPosts = displayPosts.map(post => addProximityBadge(post, currentGrid));
-            
-            // ========================================================================
-            // MACHINE LEARNING: DISABLED - Showing all posts without ML filtering
-            // ========================================================================
-            // displayPosts = applyMLReordering(displayPosts);
-            // updateMLScores(); // Update ML scores in real-time
-            console.log(`✅ ALL POSTS SHOWN - ML filtering disabled for maximum visibility`);
-            
-            // ========================================================================
-            // ADAPTIVE CONTENT DELIVERY: DISABLED - Show all content
-            // ========================================================================
-            // displayPosts = applyAdaptiveContentDelivery(displayPosts, currentUserId);
-            console.log(`✅ Showing all content without adaptive filtering`);
-            
-            // ========================================================================
-            // GEOGRAPHIC FILTERING: DISABLED - Show posts from all distances
-            // ========================================================================
-            // displayPosts = applyGeographicFiltering(displayPosts, currentUserId);
-            console.log(`✅ Geographic filtering disabled - showing posts from all distances`);
-            
-            // ========================================================================
-            // POST DISTRIBUTION ROUTING: DISABLED - Show unrouted posts
-            // ========================================================================
-            // displayPosts = applyPostDistributionRouting(displayPosts, currentUserId);
-            console.log(`✅ Post routing disabled - showing original posts`);
-            
-            // ========================================================================
-            // CUSTOM TAG FILTERING: DISABLED - Show all tags
-            // ========================================================================
-            // displayPosts = applyCustomTagFiltering(displayPosts, currentUserId);
-            console.log(`✅ Tag filtering disabled - showing all tags`);
             
             // Filter hidden/deleted posts from display list
             let sortedPosts = displayPosts.filter(post => {
@@ -13779,50 +14187,77 @@
                 const customTagInput = document.getElementById('customZoneTag');
                 const customTag = customTagInput ? customTagInput.value.trim() : '';
                 
-                // Find area tag using NEARBY LOCATION NAMES (not POIs)
+                // Find area tag: CHECK POI FIRST, then LOCATION DATABASE
                 let areaTag = currentZoneTag;
+                let areaTagSource = 'zone'; // 'poi', 'location', or 'zone'
                 
-                // ONLY USE: Real US location database (accurate coordinates, 5,478 locations)
-                // NO POI fallback - use only geographic location names
-                if (userLocation && userLocation.lat && userLocation.lon && globalLocationDatabase && globalLocationDatabase.length > 0) {
-                    let closestRealLoc = null;
-                    let minDistance = Infinity;
+                if (userLocation && userLocation.lat && userLocation.lon) {
+                    const tagStart = performance.now();
+                    console.log(`\n🔍 AREA TAG GENERATION:`);
+                    console.log(`   📍 User: ${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
                     
-                    globalLocationDatabase.forEach(loc => {
-                        const dist = calculateDistance(userLocation.lat, userLocation.lon, loc.lat, loc.lon);
-                        if (dist < minDistance) {
-                            minDistance = dist;
-                            closestRealLoc = loc;
+                    // STEP 1: Check if user is near a POI (with influence zone)
+                    console.log(`\n   STEP 1: Checking nearby POIs with influence zones...`);
+                    const poiResult = findClosestPOIInZone(userLocation.lat, userLocation.lon);
+                    
+                    if (poiResult && poiResult.poi) {
+                        // User is within POI's influence zone - use POI name
+                        areaTag = poiResult.poi.name;
+                        areaTagSource = 'poi';
+                        const tagTime = (performance.now() - tagStart).toFixed(1);
+                        console.log(`\n   ✅ USING POI: "${areaTag}" (Distance: ${poiResult.distance.toFixed(3)}km, Influence: ${poiResult.influenceRadius}km, Time: ${tagTime}ms)\n`);
+                    } else {
+                        // STEP 2: Not near any POI - fall back to location database
+                        console.log(`   STEP 2: Not near POI - checking location database...`);
+                        
+                        if (globalLocationDatabase && globalLocationDatabase.length > 0) {
+                            let closestRealLoc = null;
+                            let minDistance = Infinity;
+                            
+                            // Find ABSOLUTE closest location from entire database
+                            for (let i = 0; i < globalLocationDatabase.length; i++) {
+                                const loc = globalLocationDatabase[i];
+                                const dist = calculateDistance(userLocation.lat, userLocation.lon, loc.lat, loc.lon);
+                                if (dist < minDistance) {
+                                    minDistance = dist;
+                                    closestRealLoc = loc;
+                                    if (minDistance < 0.1) break;  // Early exit if very close
+                                }
+                            }
+                            
+                            const tagTime = (performance.now() - tagStart).toFixed(1);
+                            
+                            if (closestRealLoc) {
+                                areaTag = closestRealLoc.name;
+                                areaTagSource = 'location';
+                                console.log(`   ✅ USING LOCATION: "${areaTag}" (${closestRealLoc.type}, ${minDistance.toFixed(3)} km, ${tagTime}ms)`);
+                            }
+                        } else {
+                            console.warn('   ⚠️  Location database empty');
                         }
-                    });
-                    
-                    // Use closest location regardless of distance (it's the best we have)
-                    if (closestRealLoc) {
-                        areaTag = closestRealLoc.name;
-                        console.log(`✅ Area tag from location database: ${areaTag} (${minDistance.toFixed(2)} km away, type: ${closestRealLoc.type})`);
-                        console.log(`   This is a geographic location, not a POI`);
                     }
                 } else {
-                    console.warn('⚠️ Location database unavailable - using generic zone tag');
+                    console.warn('⚠️ Cannot generate area tag - location data missing');
                 }
                 
-                // 🔍 DEBUG: Check zone tag values before saving
-                console.log(`\n📝 POST CREATION - Zone Details:`);
-                console.log(`   userLocation: ${userLocation ? `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}` : 'Not available'}`);
-                console.log(`   currentZoneTag: "${currentZoneTag}"`);
-                console.log(`   Area tag (nearest POI): "${areaTag}"`);
-                console.log(`   customZoneTag input: "${customTag}"`);
-                console.log(`   Zone will be saved as: "${areaTag}"`);
+                // 🔍 DEBUG: Confirm area tag before saving
+                console.log(`📝 POST CREATION - AREA TAG CONFIRMED:`);
+                console.log(`   📍 User Location: ${userLocation ? `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}` : 'N/A'}`);
+                console.log(`   🏘️  Area Tag: "${areaTag}"`);
+                console.log(`   📊 Source: ${areaTagSource} | POIs: ${globalPOIDatabase?.length?.toLocaleString()} | Locations: ${globalLocationDatabase?.length?.toLocaleString()}`);
+                console.log(`   💾 SAVING WITH AREA TAG: "${areaTag}"`);
                 
                 const postData = {
                     id: postId,
-                    networkId: currentUserId,  // FIXED: Use network ID, not user ID
+                    networkId: currentUserId,
                     content: postText,
                     photoURL: photoURL,
-                    mediaType: selectedMediaType, // Track if 'video' or 'image'
-                    linkURL: postLink || null, // Store link if provided
-                    county: areaTag, // Store nearest POI name as the area tag
-                    customTag: customTag || null, // User-provided override tag
+                    mediaType: selectedMediaType,
+                    linkURL: postLink || null,
+                    county: areaTag,  // Area tag from 724K location database
+                    neighborhood: areaTag,  // Same as county for compatibility
+                    customTag: customTag || null,
+                    geolocation: userLocation ? {lat: userLocation.lat, lon: userLocation.lon} : null,
                     timestamp: new Date().getTime(),
                     likes: 0,
                     dislikes: 0,
