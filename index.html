@@ -7293,6 +7293,138 @@
         let selectedMediaType = null; // Track if media is 'video' or 'image'
         let lastModerationRejectionTime = 0; // Track when moderation last rejected a file
         let lastRejectedFileName = null; // Track the filename that was rejected
+        
+        // ============================================================================
+        // ML-BASED POST RETENTION SYSTEM - Adaptive Content Duration
+        // Posts with high engagement stay 2-7 days, low-engagement rotate out 1-3 days
+        // ============================================================================
+        const ML_POST_RETENTION = {
+            // Engagement thresholds determine visibility duration
+            thresholds: {
+                viral: 100,           // 100+ engagement = stays 7 days (viral)
+                hot: 50,              // 50-99 engagement = stays 5 days (hot)
+                trending: 20,         // 20-49 engagement = stays 4 days
+                normal: 5,            // 5-19 engagement = stays 3 days
+                low: 0                // 0-4 engagement = stays 1-2 days (rotate quickly)
+            },
+            
+            // ML scoring: How to calculate engagement (votes + interactions)
+            calculateEngagementScore: function(post) {
+                if (!post) return 0;
+                const likes = post.likes || 0;
+                const dislikes = post.dislikes || 0;
+                const comments = post.comments || 0;
+                const screens = post.screenCount || 0;
+                
+                // Weighted scoring: likes matter most, then dislikes, then visibility
+                return (likes * 3) + (dislikes * 1) + (comments * 5) + (Math.min(screens, 100) * 0.1);
+            },
+            
+            // Calculate how many days post should stay visible
+            calculateVisibilityDuration: function(post) {
+                const engagement = this.calculateEngagementScore(post);
+                
+                if (engagement >= this.thresholds.viral) {
+                    return 7; // 7 days for viral posts
+                } else if (engagement >= this.thresholds.hot) {
+                    return 5; // 5 days for hot posts
+                } else if (engagement >= this.thresholds.trending) {
+                    return 4; // 4 days for trending
+                } else if (engagement >= this.thresholds.normal) {
+                    return 3; // 3 days for normal
+                } else {
+                    return Math.random() < 0.5 ? 1 : 2; // 1-2 days for low engagement
+                }
+            },
+            
+            // Check if post should still be visible based on age and engagement
+            shouldKeepPost: function(post) {
+                if (!post || !post.timestamp) return true; // Keep posts without timestamp
+                
+                const now = Date.now();
+                const postAge = now - post.timestamp;
+                const maxAgeMs = this.calculateVisibilityDuration(post) * 24 * 60 * 60 * 1000;
+                
+                const shouldKeep = postAge < maxAgeMs;
+                
+                if (!shouldKeep) {
+                    const daysOld = (postAge / (24*60*60*1000)).toFixed(1);
+                    const engagement = this.calculateEngagementScore(post).toFixed(0);
+                    console.log(`🗑️ Post ${post.id.substring(0, 8)}... retired (${daysOld}d old, engagement: ${engagement})`);
+                }
+                
+                return shouldKeep;
+            },
+            
+            // Get retention tier for analytics
+            getRetentionTier: function(engagement) {
+                if (engagement >= this.thresholds.viral) return 'VIRAL (7d)';
+                if (engagement >= this.thresholds.hot) return 'HOT (5d)';
+                if (engagement >= this.thresholds.trending) return 'TRENDING (4d)';
+                if (engagement >= this.thresholds.normal) return 'NORMAL (3d)';
+                return 'LOW (1-2d)';
+            }
+        };
+        
+        // ============================================================================
+        // POST ROTATION SYSTEM - Continuously refresh grid with engagement-based selection
+        // ============================================================================
+        async function rotatePostsBasedOnEngagement() {
+            console.log('🔄 POST ROTATION: Applying ML-based engagement retention...');
+            
+            try {
+                // Get all available posts across all areas
+                let allAvailablePosts = [];
+                for (const key in gridContent) {
+                    if (Array.isArray(gridContent[key])) {
+                        allAvailablePosts = allAvailablePosts.concat(gridContent[key]);
+                    }
+                }
+                
+                console.log(`📊 Evaluating ${allAvailablePosts.length} posts for retention...`);
+                
+                // Filter posts: keep high-engagement ones, rotate out low-engagement
+                const retainedPosts = allAvailablePosts.filter(post => ML_POST_RETENTION.shouldKeepPost(post));
+                const rotatedOutCount = allAvailablePosts.length - retainedPosts.length;
+                
+                if (rotatedOutCount > 0) {
+                    console.log(`✅ POST ROTATION: Keeping ${retainedPosts.length}, rotating out ${rotatedOutCount} low-engagement posts`);
+                    
+                    // Remove expired posts from gridContent
+                    for (const key in gridContent) {
+                        if (Array.isArray(gridContent[key])) {
+                            gridContent[key] = gridContent[key].filter(p => ML_POST_RETENTION.shouldKeepPost(p));
+                        }
+                    }
+                    
+                    // Also remove from Firebase if they're time-expired
+                    const expiredPosts = allAvailablePosts.filter(p => !ML_POST_RETENTION.shouldKeepPost(p));
+                    for (const post of expiredPosts) {
+                        if (post.networkId && post.id) {
+                            try {
+                                const postRef = ref(database, `users/${post.networkId}/posts/${post.id}`);
+                                await remove(postRef);
+                                console.log(`🗑️ Removed expired post from Firebase: ${post.id.substring(0, 8)}`);
+                            } catch (err) {
+                                console.warn(`Could not remove expired post from Firebase:`, err.message);
+                            }
+                        }
+                    }
+                }
+                
+                return retainedPosts;
+            } catch (error) {
+                console.error('Error during post rotation:', error);
+                return [];
+            }
+        }
+        
+        // Run post rotation every 5 minutes
+        setInterval(() => {
+            if (isConnected && currentUserId) {
+                rotatePostsBasedOnEngagement().catch(err => console.error('Post rotation failed:', err));
+            }
+        }, 5 * 60 * 1000);
         let isMediaProcessing = false; // Prevent posting while media is being processed/checked
         let selectedBoxIndex = -1;
         let userPostBoxes = []; // Array to track up to 5 user posts
@@ -14903,7 +15035,31 @@
             console.log(`   📍 User area: ${userAreaTag}`);
             
             // Get content mix for user (now with density metrics & starvation recovery)
-            let displayPosts = getAdaptiveGridContent(userAreaTag, onlineUserCount, 999); // Get up to 999 posts
+            // 🚀 ML ENHANCEMENT: Request 2000 posts for better engagement-based filtering
+            let displayPosts = getAdaptiveGridContent(userAreaTag, onlineUserCount, 2000); // Get up to 2000 posts
+            
+            // ========================================================================
+            // 🤖 ML-BASED POST RETENTION FILTERING
+            // Keep high-engagement posts longer, rotate low-engagement posts faster
+            // ========================================================================
+            let retainedPosts = [];
+            let retiredPostCount = 0;
+            for (const post of displayPosts) {
+                // Apply ML retention logic: check if post should still be visible
+                if (ML_POST_RETENTION.shouldKeepPost(post)) {
+                    retainedPosts.push(post);
+                } else {
+                    retiredPostCount++;
+                    const engagement = ML_POST_RETENTION.calculateEngagementScore(post);
+                    const retentionTier = ML_POST_RETENTION.getRetentionTier(engagement);
+                    const postAge = (Date.now() - post.timestamp) / (1000 * 60 * 60 * 24); // Days
+                    console.log(`🔄 POST RETIRED: ${post.id.substring(0, 8)}... (Tier: ${retentionTier}, Age: ${postAge.toFixed(1)}d, Engagement: ${engagement.toFixed(0)})`);
+                }
+            }
+            displayPosts = retainedPosts;
+            if (retiredPostCount > 0) {
+                console.log(`📊 POST RETENTION: Kept ${displayPosts.length} posts, rotated ${retiredPostCount} low-engagement posts`);
+            }
             
             // 🔴 CRITICAL: Deduplicate posts by ID before rendering
             const gridSeenPostIds = new Set();
