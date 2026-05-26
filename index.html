@@ -1798,19 +1798,19 @@
             justify-content: center;
             flex-direction: column;
             gap: 8px;
-            background-color: #000000;
+            background-color: #1a1a1a;
             box-shadow: 0 0 15px rgba(102, 126, 234, 0.2);
         }
 
         .upload-area:hover {
             border-color: #8b9aff;
-            background-color: #0a0a0a;
+            background-color: #252525;
             box-shadow: 0 0 20px rgba(102, 126, 234, 0.4);
         }
 
         .upload-area.dragover {
             border-color: #888;
-            background-color: #2a2a2a;
+            background-color: #333333;
         }
 
         .upload-icon {
@@ -14452,28 +14452,66 @@
                 return currentZoneTag;
             }
             
+            // AGGRESSIVE DEBUG: Log the actual coordinates we're working with
+            console.log(`🎯 AUTO-DETECT START: User at (${userLocation.lat}, ${userLocation.lon}) accuracy: ${userLocation.accuracy}m`);
+            
             // PRIORITY 1: Try to use real US location database (75K+ real locations with accurate coordinates)
             if (globalLocationDatabase && globalLocationDatabase.length > 0) {
+                console.log(`   📊 Database has ${globalLocationDatabase.length} locations`);
+                
                 // OPTIMIZATION: Use fast approximate search to narrow down candidates
                 // Instead of checking all 724K locations, narrow to nearby candidates first
                 let candidates = [];
                 
-                // FAST FILTER: Bounding box search (much faster than distance calc on all)
-                // Search in a ~25km box first (more precise than 100km)
-                const BOUNDING_BOX_KM = 25;
-                const LAT_OFFSET = BOUNDING_BOX_KM / 111; // ~1 degree latitude = 111km
-                const LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(userLocation.lat * Math.PI / 180));
+                // EXPANDED SEARCH: Start with 50km, then fall back to 100km if needed
+                let BOUNDING_BOX_KM = 50;
+                let LAT_OFFSET = BOUNDING_BOX_KM / 111;
+                let LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(userLocation.lat * Math.PI / 180));
+                
+                // Sample first 5 locations to debug
+                console.log(`   Sample DB locations: ${globalLocationDatabase.slice(0, 5).map(l => `${l.name} (${l.lat}, ${l.lon})`).join(' | ')}`);
                 
                 globalLocationDatabase.forEach(loc => {
-                    // Quick bounding box check first - only consider locations with valid coordinates
-                    if (loc.lat && loc.lon && 
-                        Math.abs(loc.lat - userLocation.lat) < LAT_OFFSET && 
-                        Math.abs(loc.lon - userLocation.lon) < LON_OFFSET) {
-                        candidates.push(loc);
+                    // Validate coordinates are numbers
+                    const locLat = parseFloat(loc.lat);
+                    const locLon = parseFloat(loc.lon);
+                    
+                    if (!isNaN(locLat) && !isNaN(locLon)) {
+                        const latDiff = Math.abs(locLat - userLocation.lat);
+                        const lonDiff = Math.abs(locLon - userLocation.lon);
+                        
+                        if (latDiff < LAT_OFFSET && lonDiff < LON_OFFSET) {
+                            candidates.push({...loc, lat: locLat, lon: locLon});
+                        }
                     }
                 });
                 
-                // Now find closest from candidates (should be <500 locations instead of 724K)
+                console.log(`   ✅ Found ${candidates.length} candidates within ${BOUNDING_BOX_KM}km`);
+                
+                // If no candidates found in 50km, expand search
+                if (candidates.length === 0) {
+                    console.log(`   ⚠️ No candidates in 50km, expanding to 100km...`);
+                    BOUNDING_BOX_KM = 100;
+                    LAT_OFFSET = BOUNDING_BOX_KM / 111;
+                    LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(userLocation.lat * Math.PI / 180));
+                    
+                    globalLocationDatabase.forEach(loc => {
+                        const locLat = parseFloat(loc.lat);
+                        const locLon = parseFloat(loc.lon);
+                        
+                        if (!isNaN(locLat) && !isNaN(locLon)) {
+                            const latDiff = Math.abs(locLat - userLocation.lat);
+                            const lonDiff = Math.abs(locLon - userLocation.lon);
+                            
+                            if (latDiff < LAT_OFFSET && lonDiff < LON_OFFSET) {
+                                candidates.push({...loc, lat: locLat, lon: locLon});
+                            }
+                        }
+                    });
+                    console.log(`   ✅ Expanded search found ${candidates.length} candidates within 100km`);
+                }
+                
+                // Now find closest from candidates
                 let closestLoc = null;
                 let minDistance = Infinity;
                 
@@ -14485,8 +14523,12 @@
                     }
                 });
                 
-                // IMPROVED: Reduce threshold from 50km to 25km for more accurate local detection
-                if (closestLoc && minDistance < 25) {  // Within 25 km (15.5 miles) - actual neighborhood distance
+                if (closestLoc) {
+                    console.log(`   🎯 Closest: ${closestLoc.name}, ${closestLoc.state} at ${minDistance.toFixed(2)}km away`);
+                }
+                
+                // EXPANDED THRESHOLD: Use 50km instead of 25km to catch more areas
+                if (closestLoc && minDistance < 50) {
                     const area = closestLoc.name;
                     const distMiles = minDistance * 0.621371;
                     const distStr = Math.round(distMiles * 10) / 10;
@@ -14498,8 +14540,10 @@
                         displayText = `✓ ${area} (${distStr}mi away)`;
                     } else if (distMiles < 5) {
                         displayText = `✓ Near ${area} (${distStr}mi)`;
-                    } else {
+                    } else if (distMiles < 15) {
                         displayText = `📍 Near ${area} (${distStr}mi)`;
+                    } else {
+                        displayText = `📍 ${area} (${distStr}mi)`;
                     }
                     
                     const autoDisplay = document.getElementById('autoAreaText');
@@ -14513,17 +14557,10 @@
                         input.value = area;
                     }
                     
-                    console.log(`🏘️ Auto-detected area (${candidates.length} candidates): ${displayText} (min dist: ${minDistance.toFixed(2)}km, total DB: ${globalLocationDatabase.length})`);
+                    console.log(`✅ SUCCESS: Auto-detected ${area} at ${distStr}mi (${minDistance.toFixed(2)}km)`);
                     return area;
-                }
-                
-                // DEBUG: If no close match found in 25km, try wider search to understand why
-                if (candidates.length === 0) {
-                    console.log(`⚠️ No candidates in 25km bounding box. DB has ${globalLocationDatabase.length} locations. User at (${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)})`);
-                    // Sample first few locations to debug
-                    if (globalLocationDatabase.length > 0) {
-                        console.log('   Sample locations from DB:', globalLocationDatabase.slice(0, 3).map(l => `${l.name} (${l.lat}, ${l.lon})`));
-                    }
+                } else if (closestLoc) {
+                    console.log(`⚠️ Closest location too far: ${closestLoc.name} at ${minDistance.toFixed(2)}km (threshold: 50km)`);
                 }
             }
             
@@ -15302,7 +15339,7 @@
                         if (post.outOfAreaBadge) {
                             // Out-of-area post with muted badge
                             const badge = post.outOfAreaBadge;
-                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${badge.text} - Out of Area</div>`;
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">🌍 ${badge.text} - Out of Area</div>`;
                             console.log(`    📸 MEDIA POST (OUT-OF-AREA) - Zone: ${badge.zone}, Badge: ${badge.text}`);
                         } else {
                             // Use enhanced zone tag with area hierarchy
@@ -15328,7 +15365,7 @@
                         if (post.outOfAreaBadge) {
                             // Out-of-area post with muted badge
                             const badge = post.outOfAreaBadge;
-                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${badge.text} - Out of Area</div>`;
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">🌍 ${badge.text} - Out of Area</div>`;
                             console.log(`    📝 TEXT POST (OUT-OF-AREA) - Zone: ${badge.zone}, Badge: ${badge.text}`);
                         } else {
                             // Use enhanced zone tag with area hierarchy
@@ -15426,7 +15463,7 @@
                                 
                                 if (post.outOfAreaBadge) {
                                     const badge = post.outOfAreaBadge;
-                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${badge.text} - Out of Area</div>`;
+                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">🌍 ${badge.text} - Out of Area</div>`;
                                 } else {
                                     zoneTagHTML = generateZoneTagHTML(post, zoneContext);
                                 }
