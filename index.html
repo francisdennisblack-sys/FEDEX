@@ -10528,25 +10528,58 @@
                 console.log(`   🧭 Finding areas near "${primaryMatch.name}"...`);
                 
                 // First, add sub-areas/neighborhoods within the primary match
-                const subAreas = findSubAreasWithin(primaryMatch, 6);
+                const subAreas = findSubAreasWithin(primaryMatch, 8);
                 if (subAreas.length > 0) {
                     console.log(`   🏘️ Adding ${subAreas.length} sub-areas/neighborhoods within "${primaryMatch.name}"`);
                     results.push({ display: '─ Neighborhoods ─', type: 'separator', disabled: true });
                     subAreas.forEach(area => results.push(area));
                 }
                 
-                // Then add nearby areas within radius
-                const nearbyAreas = findNearbyAreas(primaryMatch, 50, 8);
+                // Then add nearby areas within radius - EXPANDED to get more results
+                const nearbyAreas = findNearbyAreas(primaryMatch, 50, 12);
                 if (nearbyAreas.length > 0) {
                     console.log(`   🧭 Adding ${nearbyAreas.length} nearby areas around "${primaryMatch.name}"`);
-                    // Add a visual separator
                     results.push({ display: '─ Nearby areas ─', type: 'separator', disabled: true });
                     nearbyAreas.forEach(area => results.push(area));
                 }
             }
             
-            // Return comprehensive results (up to 150 total - all locations + POIs + cities + nearby)
-            const finalResults = results.slice(0, 150);
+            // FIFTH PRIORITY: Also search for nearby areas from SECONDARY matches (if user is near multiple results)
+            // This provides more comprehensive results when searching in populated areas
+            if (results.length > 1) {
+                // Get the top 2-3 results and find areas near them
+                const secondaryMatches = results.filter(r => r.data && r.data.lat && r.data.lon).slice(1, 3);
+                
+                secondaryMatches.forEach(secondResult => {
+                    const secondaryData = secondResult.data;
+                    if (secondaryData && secondaryData.lat && secondaryData.lon) {
+                        console.log(`   🔍 Finding additional areas near "${secondaryData.name}"`);
+                        
+                        // Find nearby areas for secondary match
+                        const additionalNearby = findNearbyAreas(secondaryData, 50, 6);
+                        if (additionalNearby.length > 0) {
+                            console.log(`   📍 Adding ${additionalNearby.length} additional areas near "${secondaryData.name}"`);
+                            
+                            // Only add separator once
+                            if (!results.find(r => r.display && r.display.includes('More nearby'))) {
+                                results.push({ display: '─ More nearby areas ─', type: 'separator', disabled: true });
+                            }
+                            
+                            // Add these nearby areas
+                            additionalNearby.forEach(area => {
+                                // Avoid duplicates
+                                if (!results.find(r => r.display === area.display)) {
+                                    results.push(area);
+                                }
+                            });
+                        }
+                    }
+                });
+            }
+            
+            // Return comprehensive results (up to 250 total - expanded for richer suggestions)
+            // Includes: locations + POIs + cities + neighborhoods + nearby + secondary nearby
+            const finalResults = results.slice(0, 250);
             console.log(`🔍 SEARCH END: Returning ${finalResults.length} total suggestions`);
             
             return finalResults;
@@ -10720,25 +10753,46 @@
         // Get popular cities for initial recommendations
         function getPopularCitiesSuggestions() {
             // Show popular locations from database as recommendations when field is empty
+            // Priority: Major US cities first (New York, LA, Chicago, etc)
             const suggestions = [];
             
+            // Define major US cities to prioritize
+            const majorCities = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose', 'Miami', 'Boston', 'Denver', 'Seattle', 'Atlanta'];
+            
             if (typeof globalLocationDatabase !== 'undefined' && globalLocationDatabase && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
-                // Get popular locations (sample from the flat array)
-                const popularLocations = globalLocationDatabase
+                // FIRST: Add major cities
+                majorCities.forEach(cityName => {
+                    const found = globalLocationDatabase.find(loc => loc.name === cityName);
+                    if (found) {
+                        suggestions.push({
+                            display: `🌍 ${found.name}, ${found.state}`,
+                            type: 'location',
+                            value: found.name,
+                            data: found,
+                            state: found.state,
+                            priority: 0 // Highest priority
+                        });
+                    }
+                });
+                
+                // THEN: Add other popular locations (sample from database)
+                const otherLocations = globalLocationDatabase
                     .filter((loc, idx) => idx % 50 === 0) // Sample every 50th location
-                    .slice(0, 20) // Top 20 sampled locations
+                    .filter(loc => !majorCities.includes(loc.name)) // Exclude major cities already added
+                    .slice(0, 10) // Additional 10 locations
                     .map(location => {
                         return {
-                            display: `📍 ${location.name}, ${location.state}`,
+                            display: `🌍 ${location.name}, ${location.state}`,
                             type: 'location',
                             value: location.name,
                             data: location,
-                            state: location.state
+                            state: location.state,
+                            priority: 1
                         };
                     })
                     .filter(item => item !== null);
                 
-                suggestions.push(...popularLocations);
+                suggestions.push(...otherLocations);
             }
             
             // Fallback to POI cities if available
@@ -10747,15 +10801,16 @@
                     .sort((a, b) => (b[1].poiCount || 0) - (a[1].poiCount || 0))
                     .slice(0, 8)
                     .map(([name, city]) => ({
-                        display: `📍 ${name}, ${city.country}`,
+                        display: `🌍 ${name}, ${city.country}`,
                         type: 'city',
-                        value: name
+                        value: name,
+                        priority: 2
                     }));
                 
                 suggestions.push(...cities);
             }
             
-            return suggestions.slice(0, 15);
+            return suggestions.slice(0, 20);
         }
         
         function updateZonePredictorWithCustom(value) {
