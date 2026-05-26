@@ -7508,7 +7508,7 @@
                 cleanupOldPosts();
                 updatePostCountDisplay();
                 
-                // Set up periodic cleanup (every 10 seconds for instant 24h deletion)
+                // Set up periodic cleanup (every 10 seconds for instant 36h deletion)
                 setInterval(cleanupOldPosts, 10 * 1000);
                 
                 // Update post count display frequently
@@ -12717,7 +12717,8 @@
             }
         }
 
-        // Force delete ALL posts from Firebase (from all networks)
+        // Force delete posts/photos from Firebase.
+        // If global admin access is denied by rules, fallback to current-user scoped deletion.
         async function forceDeleteAllPosts() {
             const confirm = window.confirm('⚠️ FORCE DELETE ALL\n\nThis will DELETE EVERYTHING from Firebase:\n✓ All posts\n✓ All photos\n✓ All votes\n✓ All user tracking\n\nThis action cannot be undone!\n\nClick OK to proceed.');
             if (!confirm) return;
@@ -12725,9 +12726,18 @@
             console.log('🔥 FORCE DELETE ALL FIREBASE - Starting...');
             
             try {
+                const scopedUserId = (auth && auth.currentUser && auth.currentUser.uid) || currentUserId || localStorage.getItem('userId');
+                const isPermissionDenied = (err) => {
+                    if (!err) return false;
+                    const code = String(err.code || '').toUpperCase();
+                    const message = String(err.message || '').toLowerCase();
+                    return code.includes('PERMISSION_DENIED') || message.includes('permission denied');
+                };
+
                 let totalPostsDeleted = 0;
                 let totalPhotosDeleted = 0;
                 let totalDeleted = 0;
+                let usedScopedFallback = false;
                 
                 // STRATEGY 1: Delete all posts at root level (if stored there)
                 console.log('🔥 STRATEGY 1: Checking root-level posts...');
@@ -12826,7 +12836,40 @@
                         });
                     }
                 } catch (usersErr) {
-                    console.log('❌ Error with users deletion:', usersErr);
+                    if (isPermissionDenied(usersErr)) {
+                        usedScopedFallback = true;
+                        console.warn('⚠️ Global delete denied by Firebase rules. Falling back to current-user scoped deletion.');
+
+                        if (!scopedUserId) {
+                            throw new Error('Permission denied for global delete and no authenticated user for scoped fallback');
+                        }
+
+                        // Scoped: delete only current authenticated user's posts/photos
+                        const scopedPostsRef = ref(database, `users/${scopedUserId}/posts`);
+                        const scopedPhotosRef = ref(database, `users/${scopedUserId}/photos`);
+
+                        const scopedPostsSnapshot = await get(scopedPostsRef);
+                        if (scopedPostsSnapshot.exists()) {
+                            const posts = scopedPostsSnapshot.val();
+                            const postIds = Object.keys(posts);
+                            await Promise.all(postIds.map(postId => remove(ref(database, `users/${scopedUserId}/posts/${postId}`)).catch(() => {})));
+                            totalPostsDeleted += postIds.length;
+                        }
+
+                        const scopedPhotosSnapshot = await get(scopedPhotosRef);
+                        if (scopedPhotosSnapshot.exists()) {
+                            const photos = scopedPhotosSnapshot.val();
+                            const photoIds = Object.keys(photos);
+                            await Promise.all(photoIds.map(photoId => remove(ref(database, `users/${scopedUserId}/photos/${photoId}`)).catch(() => {})));
+                            totalPhotosDeleted += photoIds.length;
+                        }
+
+                        // Scoped votes/online entries (best effort)
+                        await remove(ref(database, `user-votes/${scopedUserId}`)).catch(() => {});
+                        await remove(ref(database, `onlineUsers/${scopedUserId}`)).catch(() => {});
+                    } else {
+                        console.log('❌ Error with users deletion:', usersErr);
+                    }
                 }
                 
                 // 4. CLEAR ALL VOTES
@@ -12855,8 +12898,12 @@
                     const totalDeletedCount = totalPostsDeleted + totalPhotosDeleted;
                     
                     console.log(`%c🎉 COMPLETE DATABASE WIPE SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
-                    
-                    alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${totalPostsDeleted}\n• Photos: ${totalPhotosDeleted}\n• Votes: cleared\n• Users: cleared\n\n✓ Firebase completely wiped`);
+
+                    if (usedScopedFallback) {
+                        alert(`✅ SCOPED FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Your posts: ${totalPostsDeleted}\n• Your photos: ${totalPhotosDeleted}\n• Your votes/online: cleared (best effort)\n\nFirebase rules blocked global delete, but your test data was deleted successfully.`);
+                    } else {
+                        alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${totalPostsDeleted}\n• Photos: ${totalPhotosDeleted}\n• Votes: cleared\n• Users: cleared\n\n✓ Firebase completely wiped`);
+                    }
                     console.log(`✅ Total deleted: ${totalDeletedCount} items`);
                 } catch (verifyErr) {
                     console.log('ℹ️ Could not verify final state:', verifyErr.message);
@@ -12884,7 +12931,7 @@
                 return;
             }
             
-            const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+            const THIRTY_SIX_HOURS = 36 * 60 * 60 * 1000; // 36 hours in milliseconds
             const now = new Date().getTime();
             
             try {
@@ -12914,8 +12961,8 @@
                     const postAge = now - postTimestamp;
                     const ageHours = postAge / (60 * 60 * 1000);
                     
-                    // If post is older than or equal to 24 hours, delete it immediately
-                    if (postAge >= TWENTY_FOUR_HOURS) {
+                    // If post is older than or equal to 36 hours, delete it immediately
+                    if (postAge >= THIRTY_SIX_HOURS) {
                         console.log(`🗑️ SCHEDULED FOR DELETE: Post "${postId.substring(0, 8)}..." is ${Math.round(ageHours)}h old`);
                         
                         // Push deletion promise to array
@@ -15581,17 +15628,17 @@
             }
             
             // ========================================================================
-            // AUTO-DELETE: Remove posts older than 24 hours
+            // AUTO-DELETE: Remove posts older than 36 hours
             // ========================================================================
             const now = Date.now();
-            const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+            const THIRTY_SIX_HOURS = 36 * 60 * 60 * 1000;
             const expiredPosts = [];
             
             allPosts = allPosts.filter(post => {
                 if (!post.timestamp) return true; // Keep posts without timestamps (shouldn't happen)
                 
                 const postAge = now - post.timestamp;
-                if (postAge > TWENTY_FOUR_HOURS) {
+                if (postAge > THIRTY_SIX_HOURS) {
                     expiredPosts.push(post);
                     console.log(`🗑️ AUTO-DELETE: Post "${post.id.substring(0, 8)}..." is ${Math.round(postAge / (60*60*1000))}h old - removing from grid`);
                     
