@@ -6850,18 +6850,36 @@
                 return;
             }
             
-            // Search for post in gridContent[currentUserId], then postCache, then other users' content
-            let post = (gridContent[currentUserId] || []).find(p => p.id === postId);
+            // Search for post in gridContent - need to track which array it's in
+            let post = null;
+            let foundInKey = null;
+            
+            // Try to find in currentUserId first
+            if (gridContent[currentUserId]) {
+                const idx = gridContent[currentUserId].findIndex(p => p.id === postId);
+                if (idx !== -1) {
+                    post = gridContent[currentUserId][idx];
+                    foundInKey = currentUserId;
+                }
+            }
+            
+            // If not found, try postCache
             if (!post && postCache[postId]) {
                 post = postCache[postId];
             }
+            
+            // If still not found, search all gridContent keys
             if (!post) {
-                // Search all gridContent for this post
                 for (let userId in gridContent) {
-                    post = (gridContent[userId] || []).find(p => p.id === postId);
-                    if (post) break;
+                    const idx = gridContent[userId].findIndex(p => p.id === postId);
+                    if (idx !== -1) {
+                        post = gridContent[userId][idx];
+                        foundInKey = userId;
+                        break;
+                    }
                 }
             }
+            
             if (!post) {
                 console.warn(`Post ${postId} not found in any gridContent cache`);
                 return;
@@ -6869,9 +6887,9 @@
             
             // 🔍 DEBUG: Check post state before vote
             console.log(`📝 voteOnPost START - Post ${postId}:`);
+            console.log(`   Found in key: ${foundInKey || 'postCache'}`);
             console.log(`   Content: "${(post.content || '').substring(0, 50)}"...`);
             console.log(`   Likes: ${post.likes} | Dislikes: ${post.dislikes}`);
-            console.log(`   Post keys: ${Object.keys(post).join(', ')}`);
             
             const voteKey = `${currentUserId}_${postId}`;
             const currentVote = userVotes[voteKey];
@@ -6915,10 +6933,25 @@
                 console.log(`🧠 Tracked ${voteType} for ML tag rewriting at distance from post origin`);
             }
             
-            // Update UI immediately for instant feedback (optimistic update)
+            // CRITICAL: Update ALL references to this post in gridContent to keep them in sync
             console.log(`   Updating post votes: ${newLikes} likes, ${newDislikes} dislikes`);
             post.likes = newLikes;
             post.dislikes = newDislikes;
+            
+            // Update the same post in all gridContent keys (by reference)
+            if (postCache[postId]) {
+                postCache[postId].likes = newLikes;
+                postCache[postId].dislikes = newDislikes;
+            }
+            
+            // Update in all gridContent arrays to maintain consistency
+            for (let key in gridContent) {
+                const postInKey = gridContent[key].find(p => p.id === postId);
+                if (postInKey) {
+                    postInKey.likes = newLikes;
+                    postInKey.dislikes = newDislikes;
+                }
+            }
             
             // 🔍 DEBUG: Check post state after vote but before renderGrid
             console.log(`📝 voteOnPost AFTER UPDATE:`);
