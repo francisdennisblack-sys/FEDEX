@@ -4647,6 +4647,8 @@
                         console.log('📍 Using cached location from localStorage (previously granted permission)');
                         console.log(`  Lat: ${userLocation.lat.toFixed(4)}`);
                         console.log(`  Lon: ${userLocation.lon.toFixed(4)}`);
+                        persistContinuousLocationConsent('cached location');
+                        localStorage.setItem('lastLocationTimestamp', Date.now().toString());
                         // Update status display
                         updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
                         resolve(userLocation);
@@ -4685,6 +4687,8 @@
                                         accuracy: position.coords.accuracy
                                     };
                                     localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+                                    localStorage.setItem('lastLocationTimestamp', Date.now().toString());
+                                    persistContinuousLocationConsent('browser granted');
                                     console.log('💾 Location cached in localStorage');
                                     console.log('📍 User Location Acquired');
                                     updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
@@ -4716,6 +4720,8 @@
                                         accuracy: position.coords.accuracy
                                     };
                                     localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+                                    localStorage.setItem('lastLocationTimestamp', Date.now().toString());
+                                    persistContinuousLocationConsent('browser prompt');
                                     console.log('💾 Location cached in localStorage');
                                     console.log('📍 User Location Acquired & Cached');
                                     updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
@@ -4745,6 +4751,8 @@
                                 accuracy: position.coords.accuracy
                             };
                             localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+                            localStorage.setItem('lastLocationTimestamp', Date.now().toString());
+                            persistContinuousLocationConsent('permissions api unavailable');
                             console.log('💾 Location cached in localStorage');
                             console.log('📍 User Location Acquired');
                             resolve(userLocation);
@@ -4773,6 +4781,12 @@
         let lastLocationUpdateTime = 0;
         const ZONE_UPDATE_THROTTLE = 3000; // Update zone every 3 seconds minimum
         let isContinuousTrackingPermitted = localStorage.getItem('wifiContentContinuousLocation') === 'true';
+
+        function persistContinuousLocationConsent(source = 'unknown') {
+            isContinuousTrackingPermitted = true;
+            localStorage.setItem('wifiContentContinuousLocation', 'true');
+            console.log(`📍 Continuous location consent persisted (${source})`);
+        }
 
         function showContinuousLocationPermissionUI() {
             // Check if user already has continuous location permission saved
@@ -4847,8 +4861,7 @@
             allowBtn.onmouseout = () => allowBtn.style.transform = 'scale(1)';
             allowBtn.onclick = () => {
                 console.log('✅ User allowed continuous location tracking for this session');
-                isContinuousTrackingPermitted = true;
-                localStorage.setItem('wifiContentContinuousLocation', 'true');
+                persistContinuousLocationConsent('banner approval');
                 banner.classList.add('hide');
                 setTimeout(() => banner.remove(), 300);
                 // Already tracking due to requestGeolocation() startup
@@ -7145,14 +7158,14 @@
                     }
                 }
                 
-                zonePredictorElement.textContent = displayZone;
+                zonePredictorElement.textContent = formatEarthAreaTag(displayZone);
                 
                 // Match auto-generated tag styling
                 zonePredictorElement.style.background = '#1a1a1a';
                 zonePredictorElement.style.color = '#fff';
                 zonePredictorElement.style.fontWeight = '900';
                 zonePredictorElement.style.fontSize = '12px';
-                zonePredictorElement.style.fontFamily = "'Courier New', monospace";
+                zonePredictorElement.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
                 zonePredictorElement.style.padding = '0 8px 6px 8px';
                 
                 console.log(`✅ Hyper-local zone: "${displayZone}" (Users can change in "Move post to" field)`);
@@ -9506,12 +9519,18 @@
 
         async function deletePostFromFirebase(networkId, postId) {
             try {
+                const ownerUserId = networkId || (auth && auth.currentUser && auth.currentUser.uid) || currentUserId || localStorage.getItem('userId');
+                if (!ownerUserId) {
+                    throw new Error('No authenticated user ID available for deletion');
+                }
+
                 console.log('🗑️ DELETING FROM FIREBASE:');
                 console.log('  networkId:', networkId);
+                console.log('  ownerUserId:', ownerUserId);
                 console.log('  postId:', postId);
-                console.log('  Firebase path: users/' + networkId + '/posts/' + postId);
+                console.log('  Firebase path: users/' + ownerUserId + '/posts/' + postId);
                 
-                const postRef = ref(database, `users/${networkId}/posts/${postId}`);
+                const postRef = ref(database, `users/${ownerUserId}/posts/${postId}`);
                 await remove(postRef);
                 console.log('✅ Post successfully deleted from Firebase:', postId);
             } catch (error) {
@@ -11008,8 +11027,39 @@
             hidePostFromMyView();
         }
 
+        /**
+         * Backward-compatible combined action handler.
+         * If the selected post belongs to the current user, delete it permanently.
+         * Otherwise, hide it from the current user's view only.
+         */
+        function deleteAndHidePost() {
+            if (!selectedPostId) {
+                console.warn('⚠️ deleteAndHidePost: no selectedPostId');
+                return;
+            }
+
+            let targetPost = null;
+            const userPosts = gridContent[currentUserId] || [];
+            targetPost = userPosts.find(post => post.id === selectedPostId) || null;
+
+            if (!targetPost && postCache[selectedPostId]) {
+                targetPost = postCache[selectedPostId];
+            }
+
+            const isOwnPost = !!targetPost && (targetPost.userId === currentUserId || targetPost.networkId === currentUserId);
+
+            if (isOwnPost) {
+                console.log('🗑️ deleteAndHidePost: deleting own post');
+                deleteOwnPost();
+            } else {
+                console.log('🙈 deleteAndHidePost: hiding post from my view');
+                hidePostFromMyView();
+            }
+        }
+
         // Make post control functions globally accessible for onclick handlers
         window.deleteOwnPost = deleteOwnPost;
+        window.deleteAndHidePost = deleteAndHidePost;
         window.hidePost = hidePost;
 
         // View modal functions
@@ -12033,7 +12083,7 @@
                 suggestions.push(...cities);
             }
             
-            return suggestions.slice(0, 20);
+            return suggestions.slice(0, 100);
         }
         
         function updateZonePredictorWithCustom(value) {
@@ -12106,7 +12156,7 @@
                 }
                 
                 console.log(`   Setting display text: "${displayText}"`);
-                zonePredictor.textContent = displayText;
+                zonePredictor.textContent = formatEarthAreaTag(displayText);
                 
                 // Match auto-generated tag styling
                 zonePredictor.style.color = '#fff';
@@ -12767,7 +12817,8 @@
 
 
         async function cleanupOldPosts() {
-            if (!currentUserId) {
+            const cleanupUserId = (auth && auth.currentUser && auth.currentUser.uid) || currentUserId || localStorage.getItem('userId');
+            if (!cleanupUserId) {
                 console.warn('⚠️ cleanupOldPosts: currentUserId not set, skipping');
                 return;
             }
@@ -12776,7 +12827,7 @@
             const now = new Date().getTime();
             
             try {
-                const postsRef = ref(database, `users/${currentUserId}/posts`);
+                const postsRef = ref(database, `users/${cleanupUserId}/posts`);
                 const snapshot = await get(postsRef);
                 
                 if (!snapshot.exists()) {
@@ -12808,7 +12859,7 @@
                         
                         // Push deletion promise to array
                         deletionPromises.push(
-                            deletePostFromFirebase(currentUserId, postId)
+                            deletePostFromFirebase(cleanupUserId, postId)
                                 .then(() => {
                                     deletedCount++;
                                     deletedPostIds.push(postId.substring(0, 8));
@@ -12847,6 +12898,10 @@
                 // Update UI display
                 updatePostCountDisplay();
             } catch (error) {
+                if (error && (error.code === 'PERMISSION_DENIED' || String(error.message || '').includes('Permission denied'))) {
+                    console.warn('⚠️ cleanupOldPosts: permission denied, skipping cleanup until auth is ready');
+                    return;
+                }
                 console.error('Error cleaning up old posts:', error);
             }
         }
@@ -13085,6 +13140,14 @@
             // Fallback to user's detected county if available
             if (window.userDetectedCounty) return window.userDetectedCounty;
             return 'Unknown';
+        }
+
+        function formatEarthAreaTag(areaName) {
+            if (!areaName) return '🌍 Local Area';
+            const cleaned = String(areaName)
+                .replace(/^[🌍🌎🌏📍✓🏙️🏘️🗺️🧭☕]\s*/u, '')
+                .trim();
+            return cleaned ? `🌍 ${cleaned}` : '🌍 Local Area';
         }
         
         /**
@@ -15273,7 +15336,7 @@
             }
             
             // All zone tags use consistent formatting: white text on dark background, system font
-            return `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${areaName}</div>`;
+            return `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${formatEarthAreaTag(areaName)}</div>`;
         }
 
         function renderGrid() {
@@ -15931,7 +15994,7 @@
                                 
                                 if (post.outOfAreaBadge) {
                                     const badge = post.outOfAreaBadge;
-                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${badge.text} - Out of Area</div>`;
+                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">🌍 ${badge.text} - Out of Area</div>`;
                                 } else {
                                     zoneTagHTML = generateZoneTagHTML(post, zoneContext);
                                 }
@@ -16004,10 +16067,11 @@
             if (!window.spotlightRotator) {
                 window.spotlightRotator = setInterval(() => {
                     // Get all posts from other areas (different county than current user)
+                    const currentCounty = (userLocation && userLocation.county) || window.userDetectedCounty || getCurrentUserArea();
                     const otherAreaPosts = sortedPosts.filter(p => {
                         // Exclude current user posts and posts already shown
                         if (p.userId === currentUserId) return false;
-                        if (p.county === userLocation.county) return false;
+                        if (currentCounty && p.county === currentCounty) return false;
                         return true;
                     });
                     
@@ -16040,7 +16104,7 @@
                         
                         if (randomPost.outOfAreaBadge) {
                             const badge = randomPost.outOfAreaBadge;
-                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${badge.text} - Out of Area</div>`;
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">🌍 ${badge.text} - Out of Area</div>`;
                         } else {
                             zoneTagHTML = generateZoneTagHTML(randomPost, zoneContext);
                         }
