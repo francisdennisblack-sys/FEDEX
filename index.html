@@ -11878,11 +11878,9 @@
                             distMi = (km || 0) * 0.621371;
                         }
 
-                        // Display: "☕ Starbucks - Brooklyn · 1.2 mi · School" (only includes parts we have)
-                        const parts = [`${emoji} ${poi.name}`];
-                        if (distMi !== null) parts.push(`${distMi.toFixed(1)} mi`);
-                        if (poi.category && poi.category !== 'other') parts.push(poi.category);
-                        const display = parts.join(' · ');
+                        // Display: just "<emoji> <name>" — no distance, no category clutter.
+                        // (distMi is kept on the object purely for proximity sorting below.)
+                        const display = `${emoji} ${poi.name}`;
 
                         poiMatches[key] = {
                             display,
@@ -12061,6 +12059,10 @@
                         ">${s.display}</div>
                     `;
                 }
+                // For POIs, click should set the input to the clean POI name (no emoji prefix)
+                // so downstream lookups + final post tag are stable. For locations/cities we keep
+                // the existing 'Name, State' display value.
+                const clickValue = (s.type === 'poi' && s.value) ? s.value : s.display;
                 return `
                     <div style="
                         padding: 10px 12px;
@@ -12074,7 +12076,7 @@
                         gap: 8px;
                         background-color: transparent;
                         user-select: none;
-                    " onmouseover="this.style.backgroundColor='#2d3748'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='transparent'; this.style.color='#ddd'" onclick="selectAutocomplete('${s.display.replace(/'/g, "\\'")}')" title="Click to select: ${s.display}">
+                    " onmouseover="this.style.backgroundColor='#2d3748'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='transparent'; this.style.color='#ddd'" onmousedown="event.preventDefault();" onclick="selectAutocomplete('${clickValue.replace(/'/g, "\\'")}')" title="Click to select: ${s.display.replace(/"/g, '&quot;')}">
                     ${s.display}</div>
                 `;
             }).join('');
@@ -12335,10 +12337,22 @@
                     }
                     
                     if (!found) {
+                        // Try POI database before falling back to unknown
+                        if (typeof globalPOIDatabase !== 'undefined' && Array.isArray(globalPOIDatabase) && globalPOIDatabase.length) {
+                            const vLower = String(value).toLowerCase().trim();
+                            const poiHit = globalPOIDatabase.find(p => p && p.name && String(p.name).toLowerCase() === vLower);
+                            if (poiHit) {
+                                console.log(`   ✅ FOUND POI MATCH: ${poiHit.name}`);
+                                displayText = `${poiHit.emoji || '📍'} ${poiHit.name}`;
+                                found = true;
+                            }
+                        }
+                    }
+                    if (!found) {
                         console.warn(`   ⚠️  No location found in database for "${value}"`);
                         console.log(`      Searched ${searchCount} locations`);
                         // If not found, just use the value as-is (handles custom neighborhoods)
-                        displayText = `� ${value}`;
+                        displayText = `📍 ${value}`;
                     }
                 } else {
                     console.error(`   ❌ globalLocationDatabase not available or empty!`);
