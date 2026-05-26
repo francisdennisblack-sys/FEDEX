@@ -10309,6 +10309,58 @@
             // Sort by distance and return closest ones
             return nearby.sort((a, b) => a.distance - b.distance).slice(0, maxResults);
         }
+        
+        /**
+         * Find sub-areas/neighborhoods within a city
+         * Looks for locations that share the same state and are within a small radius (1-3 miles)
+         */
+        function findSubAreasWithin(cityLocation, maxResults = 6) {
+            if (!cityLocation || !globalLocationDatabase) return [];
+            
+            const subAreas = [];
+            const radiusKm = 5; // 3 miles radius for neighborhoods
+            
+            globalLocationDatabase.forEach(loc => {
+                // Skip the main city itself
+                if (loc.name === cityLocation.name && loc.state === cityLocation.state) return;
+                
+                // Must be in the same state
+                if (loc.state !== cityLocation.state) return;
+                
+                // If we have coordinates, use distance calculation for accuracy
+                if (loc.lat && loc.lon && cityLocation.lat && cityLocation.lon) {
+                    const dist = calculateDistance(cityLocation.lat, cityLocation.lon, loc.lat, loc.lon);
+                    if (dist > 0.1 && dist <= radiusKm) {
+                        subAreas.push({
+                            distance: dist,
+                            display: `  🏘️ ${loc.name} (neighborhood)`,
+                            type: 'subarea',
+                            value: `${loc.name}, ${loc.state}`,
+                            data: loc,
+                            state: loc.state,
+                            priority: 2.5 // Between exact match and nearby areas
+                        });
+                    }
+                } else {
+                    // If no coordinates, just add nearby communities in same state with similar type
+                    if (loc.type === 'neighborhood' || loc.type === 'community' || loc.type === 'town') {
+                        subAreas.push({
+                            display: `  🏘️ ${loc.name} (community)`,
+                            type: 'subarea',
+                            value: `${loc.name}, ${loc.state}`,
+                            data: loc,
+                            state: loc.state,
+                            priority: 2.5
+                        });
+                    }
+                }
+            });
+            
+            // Sort by distance (if available) and return
+            return subAreas
+                .sort((a, b) => (a.distance || 0) - (b.distance || 0))
+                .slice(0, maxResults);
+        }
 
         function getAutocompleteSuggestions(query) {
             if (!query || query.length < 1) {
@@ -10474,6 +10526,16 @@
             
             if (primaryMatch) {
                 console.log(`   🧭 Finding areas near "${primaryMatch.name}"...`);
+                
+                // First, add sub-areas/neighborhoods within the primary match
+                const subAreas = findSubAreasWithin(primaryMatch, 6);
+                if (subAreas.length > 0) {
+                    console.log(`   🏘️ Adding ${subAreas.length} sub-areas/neighborhoods within "${primaryMatch.name}"`);
+                    results.push({ display: '─ Neighborhoods ─', type: 'separator', disabled: true });
+                    subAreas.forEach(area => results.push(area));
+                }
+                
+                // Then add nearby areas within radius
                 const nearbyAreas = findNearbyAreas(primaryMatch, 50, 8);
                 if (nearbyAreas.length > 0) {
                     console.log(`   🧭 Adding ${nearbyAreas.length} nearby areas around "${primaryMatch.name}"`);
@@ -10709,7 +10771,7 @@
             
             if (value && value.trim()) {
                 // Parse the display value to extract and properly format the location
-                // Format: "🏙️ Huntington Beach, California" or "☕ Starbucks" etc
+                // Format: "🏙️ Huntington Beach, California" or "☕ Starbucks" or "🏘️ Downtown, Los Angeles"
                 let displayText = value;
                 let found = false;
                 
@@ -10743,12 +10805,20 @@
                             foundLocation = locData;
                             found = true;
                             break;
+                        } else if (`${locName}, ${locState}` === value) {
+                            console.log(`   ✅ FOUND EXACT MATCH (by name, state): ${locName}, ${locState}`);
+                            displayText = locDisplay;
+                            foundLocation = locData;
+                            found = true;
+                            break;
                         }
                     }
                     
                     if (!found) {
                         console.warn(`   ⚠️  No location found in database for "${value}"`);
                         console.log(`      Searched ${searchCount} locations`);
+                        // If not found, just use the value as-is (handles custom neighborhoods)
+                        displayText = `🏘️ ${value}`;
                     }
                 } else {
                     console.error(`   ❌ globalLocationDatabase not available or empty!`);
