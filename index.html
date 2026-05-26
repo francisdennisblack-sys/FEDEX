@@ -2469,7 +2469,7 @@
                     box-sizing: border-box;
                     transition: box-shadow 0.3s ease;
                     box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
-                " type="text" onfocus="this.style.boxShadow='0 8px 20px rgba(102, 126, 234, 0.25)'" onblur="this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.1)'"/>
+                " type="text" onfocus="this.style.boxShadow='0 8px 20px rgba(102, 126, 234, 0.25)'; handleCustomZoneInput();" oninput="handleCustomZoneInput();" onblur="this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.1)'"/>
                 <!-- Autocomplete dropdown for area suggestions -->
                 <div id="autocompleteDropdown" style="
                     position: absolute;
@@ -10750,17 +10750,41 @@
             }
         });
         
+        /**
+         * Handle custom zone input - show dropdown with all suggestions
+         * Called on focus and as user types
+         */
+        function handleCustomZoneInput() {
+            const customTagInput = document.getElementById('customZoneTag');
+            if (!customTagInput) return;
+            
+            const val = customTagInput.value.trim();
+            let suggestions = [];
+            
+            if (val.length === 0) {
+                // When empty, show ALL popular cities and locations - not just top cities
+                suggestions = getPopularCitiesSuggestions();
+                console.log(`📍 Showing ${suggestions.length} popular locations for empty input`);
+            } else {
+                // When typing, search entire database
+                suggestions = getAutocompleteSuggestions(val);
+                console.log(`🔍 Showing ${suggestions.length} matching results for "${val}"`);
+            }
+            
+            updateAutocompleteDropdown(suggestions);
+        }
+        
         // Get popular cities for initial recommendations
         function getPopularCitiesSuggestions() {
-            // Show popular locations from database as recommendations when field is empty
-            // Priority: Major US cities first (New York, LA, Chicago, etc)
+            // When field is empty, show ALL available locations from database
+            // Return thousands of results so users can browse and select
             const suggestions = [];
             
             // Define major US cities to prioritize
             const majorCities = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose', 'Miami', 'Boston', 'Denver', 'Seattle', 'Atlanta'];
             
             if (typeof globalLocationDatabase !== 'undefined' && globalLocationDatabase && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
-                // FIRST: Add major cities
+                // FIRST: Add major cities (highest priority)
                 majorCities.forEach(cityName => {
                     const found = globalLocationDatabase.find(loc => loc.name === cityName);
                     if (found) {
@@ -10775,11 +10799,10 @@
                     }
                 });
                 
-                // THEN: Add other popular locations (sample from database)
+                // THEN: Add ALL other locations from database (thousands of results)
                 const otherLocations = globalLocationDatabase
-                    .filter((loc, idx) => idx % 50 === 0) // Sample every 50th location
                     .filter(loc => !majorCities.includes(loc.name)) // Exclude major cities already added
-                    .slice(0, 10) // Additional 10 locations
+                    .sort((a, b) => a.name.localeCompare(b.name)) // Sort alphabetically
                     .map(location => {
                         return {
                             display: `${location.name}, ${location.state}`,
@@ -10790,16 +10813,18 @@
                             priority: 1
                         };
                     })
-                    .filter(item => item !== null);
+                    .filter(item => item !== null)
+                    .slice(0, 950); // Leave room for major cities (15) + some buffer
                 
                 suggestions.push(...otherLocations);
+                console.log(`📍 Added ${suggestions.length} total locations to dropdown (${majorCities.length} major + ${otherLocations.length} others)`);
             }
             
             // Fallback to POI cities if available
-            if (window.poiDatabase && window.poiDatabase.cities && suggestions.length < 5) {
+            if (window.poiDatabase && window.poiDatabase.cities && suggestions.length < 50) {
                 const cities = Object.entries(window.poiDatabase.cities)
                     .sort((a, b) => (b[1].poiCount || 0) - (a[1].poiCount || 0))
-                    .slice(0, 8)
+                    .slice(0, 30) // Add more POI cities
                     .map(([name, city]) => ({
                         display: `${name}, ${city.country}`,
                         type: 'city',
