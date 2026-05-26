@@ -7206,6 +7206,18 @@
                 // Load user's previous votes from Firebase
                 loadUserVotesFromFirebase(currentUserId);
                 
+                // Load worldwide locations and POIs for search/dropdown (1M+ locations)
+                console.log('🌐 Loading worldwide location database for search...');
+                loadWorldwideLocationsAndPOIs().then(success => {
+                    if (success) {
+                        console.log(`✅ Search system ready with ${globalLocationDatabase.length.toLocaleString()} locations`);
+                    } else {
+                        console.warn('⚠️ Some location databases failed to load, search may be limited');
+                    }
+                }).catch(err => {
+                    console.error('❌ Failed to load location databases:', err);
+                });
+                
                 // Initialize grid and Firebase subscription
                 initializeGrid();
                 
@@ -7296,6 +7308,134 @@
         let onlineUserCount = 0; // Track current online user count for dynamic NEW badge duration
         let globalLocationDatabase = []; // CRITICAL: Initialize location database array
         let globalPOIDatabase = []; // All POIs with influence radius data
+        
+        // ============================================================================
+        // WORLDWIDE LOCATION & POI LOADING SYSTEM - Loads 1M+ locations
+        // ============================================================================
+        async function loadWorldwideLocationsAndPOIs() {
+            console.log('🌍 Loading worldwide locations and POIs for search...');
+            try {
+                // STEP 1: Load US locations database (75K+ cities/towns)
+                console.log('📍 STEP 1: Loading US locations database...');
+                try {
+                    const usResponse = await fetch('/us_locations_database.json');
+                    if (usResponse.ok) {
+                        const usData = await usResponse.json();
+                        let usLocations = [];
+                        if (usData.states) {
+                            Object.values(usData.states).forEach(state => {
+                                if (state.cities && Array.isArray(state.cities)) {
+                                    state.cities.forEach(city => {
+                                        usLocations.push({
+                                            name: city.name,
+                                            state: state.name || 'Unknown',
+                                            lat: city.lat || 0,
+                                            lon: city.lon || 0,
+                                            type: city.type || 'city',
+                                            country: 'USA'
+                                        });
+                                    });
+                                }
+                            });
+                        }
+                        globalLocationDatabase.push(...usLocations);
+                        console.log(`   ✅ Loaded ${usLocations.length.toLocaleString()} US locations`);
+                    }
+                } catch (err) {
+                    console.warn('   ⚠️ US locations load failed:', err.message);
+                }
+                
+                // STEP 2: Load worldwide POI database (8,500+ POIs)
+                console.log('🏢 STEP 2: Loading worldwide POI database...');
+                try {
+                    const poiResponse = await fetch('/poi_database_worldwide.json');
+                    if (poiResponse.ok) {
+                        const poiData = await poiResponse.json();
+                        let poiLocations = [];
+                        let poiCount = 0;
+                        if (poiData.cities) {
+                            Object.values(poiData.cities).forEach(city => {
+                                if (city.pois && Array.isArray(city.pois)) {
+                                    city.pois.forEach(poi => {
+                                        poiLocations.push({
+                                            name: poi.name,
+                                            lat: poi.lat || 0,
+                                            lon: poi.lon || 0,
+                                            type: poi.type || 'poi',
+                                            category: poi.category || 'other',
+                                            country: city.country || 'Unknown',
+                                            isPOI: true
+                                        });
+                                        poiCount++;
+                                    });
+                                }
+                            });
+                        }
+                        globalLocationDatabase.push(...poiLocations);
+                        globalPOIDatabase.push(...poiLocations);
+                        console.log(`   ✅ Loaded ${poiCount.toLocaleString()} worldwide POIs`);
+                    }
+                } catch (err) {
+                    console.warn('   ⚠️ POI database load failed:', err.message);
+                }
+                
+                // STEP 3: Load expanded POI database (300K+ locations)
+                console.log('🌐 STEP 3: Loading expanded POI database...');
+                try {
+                    const expandedResponse = await fetch('/poi_database_expanded.json');
+                    if (expandedResponse.ok) {
+                        const expandedData = await expandedResponse.json();
+                        let expandedLocations = [];
+                        if (Array.isArray(expandedData)) {
+                            expandedLocations = expandedData.map(loc => ({
+                                name: loc.name,
+                                lat: loc.lat || 0,
+                                lon: loc.lon || 0,
+                                type: loc.type || 'poi',
+                                category: loc.category || 'other',
+                                country: loc.country || 'Unknown'
+                            }));
+                        } else if (expandedData.locations) {
+                            expandedLocations = expandedData.locations.map(loc => ({
+                                name: loc.name,
+                                lat: loc.lat || 0,
+                                lon: loc.lon || 0,
+                                type: loc.type || 'poi',
+                                category: loc.category || 'other',
+                                country: loc.country || 'Unknown'
+                            }));
+                        }
+                        globalLocationDatabase.push(...expandedLocations);
+                        console.log(`   ✅ Loaded ${expandedLocations.length.toLocaleString()} expanded locations`);
+                    }
+                } catch (err) {
+                    console.warn('   ⚠️ Expanded POI database load failed:', err.message);
+                }
+                
+                // Remove duplicates while preserving order
+                console.log(`🔄 De-duplicating ${globalLocationDatabase.length.toLocaleString()} total locations...`);
+                const seen = new Set();
+                globalLocationDatabase = globalLocationDatabase.filter(loc => {
+                    const key = `${(loc.name || '').toLowerCase()}_${(loc.lat || 0).toFixed(2)}_${(loc.lon || 0).toFixed(2)}`;
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                });
+                
+                // Sort by name for binary search
+                globalLocationDatabase.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+                
+                console.log(`✅ WORLDWIDE LOCATION SYSTEM READY:`);
+                console.log(`   📍 Total Locations: ${globalLocationDatabase.length.toLocaleString()}`);
+                console.log(`   🏢 POIs: ${globalPOIDatabase.length.toLocaleString()}`);
+                console.log(`   🌍 Ready for autocomplete search`);
+                
+                return true;
+            } catch (error) {
+                console.error('❌ Error loading worldwide locations:', error);
+                return false;
+            }
+        }
         
         // ============================================================================
         // POI CATEGORIZATION SYSTEM - Size, Influence & Scoring
@@ -11026,11 +11166,21 @@
                         return a.data.name.length - b.data.name.length;
                     });
                 
-                // Add ALL location matches - no artificial limit (will be limited later at end)
-                const locationsToAdd = sortedMatches;
+                // Add location matches with soft limit for UI performance
+                // Show top 50 results, but all are available for browsing
+                const locationsToAdd = sortedMatches.slice(0, 50);
                 locationsToAdd.forEach(item => results.push(item));
                 
-                console.log(`   🎯 Adding ALL ${locationsToAdd.length} location suggestions from entire database`);
+                if (sortedMatches.length > 50) {
+                    console.log(`   🎯 Showing top 50 of ${sortedMatches.length} location results (${sortedMatches.length - 50} more available)`);
+                    results.push({ 
+                        display: `+ ${sortedMatches.length - 50} more results`, 
+                        type: 'separator',
+                        disabled: true 
+                    });
+                } else {
+                    console.log(`   🎯 Showing all ${sortedMatches.length} location results from entire database`);
+                }
             } else {
                 console.warn(`   ❌ globalLocationDatabase not available or empty`);
             }
