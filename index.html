@@ -10206,26 +10206,48 @@
             stopTrackingStatusUpdates(); // Stop continuous tracking status updates
         }
 
+        function isPermissionDeniedError(error) {
+            if (!error) return false;
+            const code = String(error.code || '').toUpperCase();
+            const message = String(error.message || '').toLowerCase();
+            return code.includes('PERMISSION_DENIED') || message.includes('permission denied');
+        }
+
         // 📊 Update admin dashboard metrics in real-time
         async function updateAdminMetrics() {
             try {
-                let totalActivePosts = 0;
                 let allPostIds = new Set();
+                let usingFallbackScope = false;
                 
                 // Query Firebase to get ALL posts from ALL users
-                const usersRef = ref(database, `users`);
-                const usersSnapshot = await get(usersRef);
-                
-                if (usersSnapshot.exists()) {
-                    const users = usersSnapshot.val();
-                    // For each user, count their posts
-                    Object.keys(users).forEach(userId => {
-                        if (users[userId].posts) {
-                            Object.keys(users[userId].posts).forEach(postId => {
-                                allPostIds.add(postId);
-                            });
+                try {
+                    const usersRef = ref(database, `users`);
+                    const usersSnapshot = await get(usersRef);
+
+                    if (usersSnapshot.exists()) {
+                        const users = usersSnapshot.val();
+                        // For each user, count their posts
+                        Object.keys(users).forEach(userId => {
+                            if (users[userId].posts) {
+                                Object.keys(users[userId].posts).forEach(postId => {
+                                    allPostIds.add(postId);
+                                });
+                            }
+                        });
+                    }
+                } catch (error) {
+                    if (!isPermissionDeniedError(error)) throw error;
+
+                    usingFallbackScope = true;
+                    const scopedUserId = (auth && auth.currentUser && auth.currentUser.uid) || currentUserId || localStorage.getItem('userId');
+                    if (scopedUserId) {
+                        const ownPostsRef = ref(database, `users/${scopedUserId}/posts`);
+                        const ownPostsSnapshot = await get(ownPostsRef);
+                        if (ownPostsSnapshot.exists()) {
+                            const ownPosts = ownPostsSnapshot.val();
+                            Object.keys(ownPosts).forEach(postId => allPostIds.add(postId));
                         }
-                    });
+                    }
                 }
                 
                 // Total posts that actually exist in database
@@ -10260,8 +10282,16 @@
                     lastUpdateEl.textContent = now.toLocaleTimeString();
                 }
                 
-                console.log(`📊 Admin metrics: ${activePosts}/${totalPostsInDB} posts (${reportedCount} reported), ${onlineUsers} users online`);
+                if (usingFallbackScope) {
+                    console.log(`📊 Admin metrics (scoped): ${activePosts}/${totalPostsInDB} posts (${reportedCount} reported), ${onlineUsers} users online`);
+                } else {
+                    console.log(`📊 Admin metrics: ${activePosts}/${totalPostsInDB} posts (${reportedCount} reported), ${onlineUsers} users online`);
+                }
             } catch (error) {
+                if (isPermissionDeniedError(error)) {
+                    console.warn('⚠️ Admin metrics access denied by rules; waiting for broader permissions or scoped fallback');
+                    return;
+                }
                 console.error('❌ Error updating admin metrics:', error);
             }
         }
@@ -10273,6 +10303,7 @@
                 let olderThan24h = 0;
                 let olderThan12h = 0;
                 let olderThan6h = 0;
+                let usingFallbackScope = false;
                 
                 const now = new Date().getTime();
                 const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
@@ -10280,16 +10311,38 @@
                 const SIX_HOURS = 6 * 60 * 60 * 1000;
                 
                 // Query Firebase to get ALL posts from ALL users (like updateAdminMetrics does)
-                const usersRef = ref(database, `users`);
-                const usersSnapshot = await get(usersRef);
-                
-                if (usersSnapshot.exists()) {
-                    const users = usersSnapshot.val();
-                    
-                    // For each user, count their posts and check ages
-                    Object.keys(users).forEach(userId => {
-                        if (users[userId].posts) {
-                            Object.values(users[userId].posts).forEach(post => {
+                try {
+                    const usersRef = ref(database, `users`);
+                    const usersSnapshot = await get(usersRef);
+
+                    if (usersSnapshot.exists()) {
+                        const users = usersSnapshot.val();
+
+                        // For each user, count their posts and check ages
+                        Object.keys(users).forEach(userId => {
+                            if (users[userId].posts) {
+                                Object.values(users[userId].posts).forEach(post => {
+                                    totalPosts++;
+                                    const timestamp = post.timestamp || post.createdAt || 0;
+                                    const age = now - timestamp;
+                                    if (age >= TWENTY_FOUR_HOURS) olderThan24h++;
+                                    else if (age >= TWELVE_HOURS) olderThan12h++;
+                                    else if (age >= SIX_HOURS) olderThan6h++;
+                                });
+                            }
+                        });
+                    }
+                } catch (error) {
+                    if (!isPermissionDeniedError(error)) throw error;
+
+                    usingFallbackScope = true;
+                    const scopedUserId = (auth && auth.currentUser && auth.currentUser.uid) || currentUserId || localStorage.getItem('userId');
+                    if (scopedUserId) {
+                        const ownPostsRef = ref(database, `users/${scopedUserId}/posts`);
+                        const ownPostsSnapshot = await get(ownPostsRef);
+                        if (ownPostsSnapshot.exists()) {
+                            const ownPosts = ownPostsSnapshot.val();
+                            Object.values(ownPosts).forEach(post => {
                                 totalPosts++;
                                 const timestamp = post.timestamp || post.createdAt || 0;
                                 const age = now - timestamp;
@@ -10298,7 +10351,7 @@
                                 else if (age >= SIX_HOURS) olderThan6h++;
                             });
                         }
-                    });
+                    }
                 }
                 
                 // Update UI elements
@@ -10317,9 +10370,17 @@
                 if (old6El) old6El.textContent = olderThan6h;
                 if (lastCheckEl) lastCheckEl.textContent = new Date().toLocaleTimeString();
                 
-                console.log(`🗑️ Admin cleanup metrics: ${totalPosts} total posts, ${olderThan24h} 24h+ old, ${olderThan12h} 12-24h old, ${olderThan6h} 6-12h old`);
+                if (usingFallbackScope) {
+                    console.log(`🗑️ Admin cleanup metrics (scoped): ${totalPosts} total posts, ${olderThan24h} 24h+ old, ${olderThan12h} 12-24h old, ${olderThan6h} 6-12h old`);
+                } else {
+                    console.log(`🗑️ Admin cleanup metrics: ${totalPosts} total posts, ${olderThan24h} 24h+ old, ${olderThan12h} 12-24h old, ${olderThan6h} 6-12h old`);
+                }
                 
             } catch (error) {
+                if (isPermissionDeniedError(error)) {
+                    console.warn('⚠️ Admin cleanup metrics access denied by rules; waiting for broader permissions or scoped fallback');
+                    return;
+                }
                 console.error('Error updating admin cleanup metrics:', error);
             }
         }
