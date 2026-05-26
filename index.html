@@ -9438,14 +9438,9 @@
             }
         }
 
-        // Update admin cleanup metrics
+        // Update admin cleanup metrics - queries ALL posts from ALL users
         async function updateAdminCleanupMetrics() {
-            if (!currentUserId) return;
-            
             try {
-                const postsRef = ref(database, `users/${currentUserId}/posts`);
-                const snapshot = await get(postsRef);
-                
                 let totalPosts = 0;
                 let olderThan24h = 0;
                 let olderThan12h = 0;
@@ -9456,16 +9451,25 @@
                 const TWELVE_HOURS = 12 * 60 * 60 * 1000;
                 const SIX_HOURS = 6 * 60 * 60 * 1000;
                 
-                if (snapshot.exists()) {
-                    const posts = snapshot.val();
-                    totalPosts = Object.keys(posts).length;
+                // Query Firebase to get ALL posts from ALL users (like updateAdminMetrics does)
+                const usersRef = ref(database, `users`);
+                const usersSnapshot = await get(usersRef);
+                
+                if (usersSnapshot.exists()) {
+                    const users = usersSnapshot.val();
                     
-                    Object.values(posts).forEach(post => {
-                        const timestamp = post.timestamp || post.createdAt || 0;
-                        const age = now - timestamp;
-                        if (age >= TWENTY_FOUR_HOURS) olderThan24h++;
-                        else if (age >= TWELVE_HOURS) olderThan12h++;
-                        else if (age >= SIX_HOURS) olderThan6h++;
+                    // For each user, count their posts and check ages
+                    Object.keys(users).forEach(userId => {
+                        if (users[userId].posts) {
+                            Object.values(users[userId].posts).forEach(post => {
+                                totalPosts++;
+                                const timestamp = post.timestamp || post.createdAt || 0;
+                                const age = now - timestamp;
+                                if (age >= TWENTY_FOUR_HOURS) olderThan24h++;
+                                else if (age >= TWELVE_HOURS) olderThan12h++;
+                                else if (age >= SIX_HOURS) olderThan6h++;
+                            });
+                        }
                     });
                 }
                 
@@ -9484,6 +9488,8 @@
                 if (old12El) old12El.textContent = olderThan12h;
                 if (old6El) old6El.textContent = olderThan6h;
                 if (lastCheckEl) lastCheckEl.textContent = new Date().toLocaleTimeString();
+                
+                console.log(`🗑️ Admin cleanup metrics: ${totalPosts} total posts, ${olderThan24h} 24h+ old, ${olderThan12h} 12-24h old, ${olderThan6h} 6-12h old`);
                 
             } catch (error) {
                 console.error('Error updating admin cleanup metrics:', error);
