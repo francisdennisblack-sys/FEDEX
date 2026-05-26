@@ -10670,6 +10670,8 @@
                 // First box is always the add content button
                 if (i === 0) {
                     box.innerHTML = '<div style="text-align: center; line-height: 1.2;"><div style="font-size: 48px; margin-bottom: 8px; font-weight: 700;">+</div><div style="font-size: 13px; color: #4ade80; font-weight: 600;">Add content to grid</div></div>';
+                    box.setAttribute('data-reserved-box', 'add-content');
+                    box.classList.add('add-content-box');
                     box.style.cursor = 'pointer';
                     box.style.background = 'linear-gradient(135deg, #1a3a1a 0%, #0d2d0d 100%)';
                     box.style.borderColor = '#4ade80';
@@ -15458,6 +15460,36 @@
             
             const grid = document.getElementById('grid');
             if (!grid) return;
+
+            // Hard-reserve box-0 as Add Content square (self-healing against any overwrite)
+            const addContentBox = document.getElementById('box-0');
+            if (addContentBox) {
+                addContentBox.innerHTML = '<div style="text-align: center; line-height: 1.2;"><div style="font-size: 48px; margin-bottom: 8px; font-weight: 700;">+</div><div style="font-size: 13px; color: #4ade80; font-weight: 600;">Add content to grid</div></div>';
+                addContentBox.setAttribute('data-reserved-box', 'add-content');
+                addContentBox.className = 'grid-box add-content-box';
+                addContentBox.classList.remove('filled');
+                addContentBox.removeAttribute('data-post-id');
+                addContentBox.style.cursor = 'pointer';
+                addContentBox.style.background = 'linear-gradient(135deg, #1a3a1a 0%, #0d2d0d 100%)';
+                addContentBox.style.borderColor = '#4ade80';
+                addContentBox.style.borderWidth = '2px';
+                addContentBox.style.transition = 'all 0.3s ease';
+                addContentBox.onmouseover = () => {
+                    addContentBox.style.background = 'linear-gradient(135deg, #2d5a2d 0%, #1a3a1a 100%)';
+                    addContentBox.style.boxShadow = '0 0 20px rgba(74, 222, 128, 0.3)';
+                };
+                addContentBox.onmouseout = () => {
+                    addContentBox.style.background = 'linear-gradient(135deg, #1a3a1a 0%, #0d2d0d 100%)';
+                    addContentBox.style.boxShadow = 'none';
+                };
+                addContentBox.onclick = () => {
+                    if (isConnected) {
+                        openModal(0);
+                    } else {
+                        alert('Connect to WiFi first');
+                    }
+                };
+            }
             
             // CRITICAL: Force mobile layout on small screens
             fixMobileGridLayout();
@@ -15843,6 +15875,149 @@
                                 deletedOwnPosts.includes(post.id);
                 return !isHidden;
             });
+
+            // ========================================================================
+            // FEED VOLUME TARGET: Keep active feed between 50 and 2000 posts
+            // ========================================================================
+            const FEED_MIN_POSTS = 50;
+            const FEED_MAX_POSTS = Math.min(2000, maxGridSize - 1);
+
+            if (sortedPosts.length < FEED_MIN_POSTS && allPosts.length > sortedPosts.length) {
+                const existingIds = new Set(sortedPosts.map(p => p.id));
+                const fallbackPool = allPosts.filter(post => {
+                    if (!post || !post.id) return false;
+                    if (existingIds.has(post.id)) return false;
+                    const isHidden = hiddenForThisWiFi.includes(post.id) ||
+                                    hiddenReported.includes(post.id) ||
+                                    deletedOwnPosts.includes(post.id);
+                    return !isHidden;
+                });
+
+                for (const post of fallbackPool) {
+                    if (sortedPosts.length >= FEED_MIN_POSTS) break;
+                    sortedPosts.push(post);
+                    existingIds.add(post.id);
+                }
+
+                console.log(`📈 FEED BACKFILL: boosted feed from fallback pool to ${sortedPosts.length} posts`);
+            }
+
+            if (sortedPosts.length > FEED_MAX_POSTS) {
+                sortedPosts = sortedPosts.slice(0, FEED_MAX_POSTS);
+            }
+
+            // ========================================================================
+            // NEARBY BOOST + HOT/TRENDING REBADGE SYSTEM
+            // - Refresh selection every 30s
+            // - Rebadge window rotates every 15min
+            // ========================================================================
+            const nowMs = Date.now();
+            const rebadgeRefreshBucket = Math.floor(nowMs / 30000); // refresh every 30s
+            const rebadgeWindowBucket = Math.floor(nowMs / (15 * 60 * 1000)); // 15 minute window
+
+            const hotTrendingNearby = sortedPosts.filter(post => {
+                const tier = String(post.engagementTier || '').toLowerCase();
+                const likes = post.likes || 0;
+                const isHotOrTrending = tier === 'hot' || tier === 'trending' || likes >= 8;
+                const isNearby = post.county === userAreaTag ||
+                                post.proximityClass === 'nearby' ||
+                                post.proximityClass === 'community' ||
+                                (post.county && isNearbyArea(userAreaTag, post.county));
+                return isHotOrTrending && isNearby;
+            });
+
+            const rebadgedIds = new Set();
+            if (hotTrendingNearby.length > 0) {
+                const rotatingPoolSize = Math.min(12, hotTrendingNearby.length);
+                const startIndex = (rebadgeRefreshBucket + rebadgeWindowBucket) % hotTrendingNearby.length;
+                for (let i = 0; i < rotatingPoolSize; i++) {
+                    const post = hotTrendingNearby[(startIndex + i) % hotTrendingNearby.length];
+                    if (post && post.id) {
+                        rebadgedIds.add(post.id);
+                        post.rebadgedAt = nowMs;
+                        post.rebadgeReason = 'hot-trending-nearby';
+                    }
+                }
+            }
+
+            // Rank with nearby bias + rotating rebadge boost
+            sortedPosts = sortedPosts
+                .map((post, index) => {
+                    const likes = post.likes || 0;
+                    const dislikes = post.dislikes || 0;
+                    const tier = String(post.engagementTier || '').toLowerCase();
+                    const ageHours = post.timestamp ? Math.max(0, (nowMs - post.timestamp) / (1000 * 60 * 60)) : 0;
+
+                    const isLocal = post.county === userAreaTag;
+                    const isNearby = post.proximityClass === 'nearby' ||
+                                    post.proximityClass === 'community' ||
+                                    (post.county && isNearbyArea(userAreaTag, post.county));
+
+                    let score = 0;
+                    if (isLocal) score += 220;
+                    else if (isNearby) score += 150;
+
+                    if (tier === 'podium') score += 130;
+                    else if (tier === 'hot') score += 110;
+                    else if (tier === 'trending') score += 95;
+                    else if (tier === 'rising') score += 70;
+
+                    score += Math.min(80, likes * 4);
+                    score -= Math.min(45, dislikes * 3);
+                    score -= Math.min(24, ageHours * 0.8);
+
+                    if (rebadgedIds.has(post.id)) {
+                        score += 140;
+                    }
+
+                    return {
+                        post,
+                        score,
+                        index
+                    };
+                })
+                .sort((a, b) => b.score - a.score || a.index - b.index)
+                .map(item => item.post);
+
+            // ========================================================================
+            // BADGE DIVERSITY BALANCE
+            // Ensure disliked local + disliked far content appears in early feed window
+            // ========================================================================
+            const topWindow = 30;
+            const topWindowIds = new Set(sortedPosts.slice(0, topWindow).map(p => p.id));
+
+            const localDisliked = sortedPosts.find(post =>
+                (post.dislikes || 0) > (post.likes || 0) &&
+                (post.county === userAreaTag || post.proximityClass === 'nearby' || post.proximityClass === 'community')
+            );
+
+            const farDisliked = sortedPosts.find(post =>
+                (post.dislikes || 0) > (post.likes || 0) &&
+                post.county !== userAreaTag &&
+                post.proximityClass !== 'nearby' &&
+                post.proximityClass !== 'community'
+            );
+
+            const injectPostIntoIndex = (post, targetIndex) => {
+                if (!post || !post.id) return;
+                const currentIndex = sortedPosts.findIndex(p => p.id === post.id);
+                if (currentIndex === -1) return;
+                const [item] = sortedPosts.splice(currentIndex, 1);
+                const clampedTarget = Math.max(0, Math.min(targetIndex, sortedPosts.length));
+                sortedPosts.splice(clampedTarget, 0, item);
+            };
+
+            if (localDisliked && !topWindowIds.has(localDisliked.id)) {
+                injectPostIntoIndex(localDisliked, Math.min(8, sortedPosts.length - 1));
+            }
+
+            if (farDisliked && !topWindowIds.has(farDisliked.id)) {
+                injectPostIntoIndex(farDisliked, Math.min(16, sortedPosts.length - 1));
+            }
+
+            // Keep latest feed snapshot available for timed rotators/refresher systems
+            window.latestSortedPosts = [...sortedPosts];
+            window.latestUserAreaTag = userAreaTag;
             
             // ========================================================================
             // MACHINE LEARNING: ENSURE USER'S OWN POST IS ALWAYS VISIBLE
@@ -15863,6 +16038,70 @@
                 
                 console.log(`✅ ML CHECK: User has ${userPosts.length} posts, ${sortedPosts.slice(0, initialVisibleCount).filter(p => p.networkId === currentUserId || p.userId === currentUserId).length} visible in first 12 boxes`);
             }
+
+            // ========================================================================
+            // POSITION-1 ROTATION: Promote badge-rich posts every 15 seconds
+            // ========================================================================
+            if (sortedPosts.length > 1) {
+                const badgePool = sortedPosts.filter(post => {
+                    const tier = String(post.engagementTier || '').toLowerCase();
+                    const likes = post.likes || 0;
+                    const dislikes = post.dislikes || 0;
+                    return (
+                        tier === 'hot' ||
+                        tier === 'trending' ||
+                        tier === 'rising' ||
+                        tier === 'podium' ||
+                        tier === 'disliked' ||
+                        likes >= 5 ||
+                        dislikes > likes
+                    );
+                });
+
+                const nearbyBadgePool = badgePool.filter(post =>
+                    post.county === userAreaTag ||
+                    post.county === currentAreaName ||
+                    post.proximityClass === 'nearby' ||
+                    post.proximityClass === 'community'
+                );
+
+                const positionOnePool = nearbyBadgePool.length > 0 ? nearbyBadgePool : badgePool;
+                if (positionOnePool.length > 0) {
+                    const bucket = Math.floor(Date.now() / 15000); // rotate every 15s
+                    const selected = positionOnePool[bucket % positionOnePool.length];
+                    sortedPosts = [selected, ...sortedPosts.filter(p => p.id !== selected.id)];
+                }
+            }
+
+            // ========================================================================
+            // 🥇 GOLD MEDAL PRIORITY SYSTEM
+            // 1) Gold-medal (crowned/top-net-like) posts always load first (position 1)
+            // 2) Rotate to a new gold post every 5 minutes
+            // ========================================================================
+            const maxNetLikes = sortedPosts.reduce((maxValue, post) => {
+                const net = (post.likes || 0) - (post.dislikes || 0);
+                return Math.max(maxValue, net);
+            }, -Infinity);
+
+            const goldMedalPool = sortedPosts.filter(post => {
+                const net = (post.likes || 0) - (post.dislikes || 0);
+                return maxNetLikes > 0 && net === maxNetLikes;
+            });
+
+            if (goldMedalPool.length > 0) {
+                const goldRotationBucket = Math.floor(Date.now() / (5 * 60 * 1000)); // 5 min rotation
+                const selectedGoldPost = goldMedalPool[goldRotationBucket % goldMedalPool.length];
+                sortedPosts = [selectedGoldPost, ...sortedPosts.filter(p => p.id !== selectedGoldPost.id)];
+
+                window.activeGoldMedalPostId = selectedGoldPost.id;
+                window.goldMedalRotationBucket = goldRotationBucket;
+            } else {
+                window.activeGoldMedalPostId = null;
+                window.goldMedalRotationBucket = Math.floor(Date.now() / (5 * 60 * 1000));
+            }
+
+            // Refresh latest snapshot after position-1 rotation
+            window.latestSortedPosts = [...sortedPosts];
             
             // ========================================================================
             // LEGACY CODE BELOW (For compatibility, some filtering remains)
@@ -16171,7 +16410,7 @@
                 console.log('✅ First render complete - subsequent renders will show debug info');
             }
             
-            // 🎯 SPOTLIGHT ROTATION SYSTEM: Inject spotlight posts every 500ms (INCREASED) from other areas
+            // 🎯 SPOTLIGHT ROTATION SYSTEM: Inject spotlight posts every 30s from other areas
             if (!window.spotlightRotator) {
                 window.spotlightRotator = setInterval(() => {
                     // Get all posts from other areas (different county than current user)
@@ -16184,17 +16423,45 @@
                     });
                     
                     if (otherAreaPosts.length === 0) return;
+
+                    // Build set of currently visible post IDs to avoid duplicate rendering by post ID
+                    const visiblePostIds = new Set(
+                        Array.from(document.querySelectorAll('.grid-box[data-post-id]'))
+                            .map(box => box.getAttribute('data-post-id'))
+                            .filter(Boolean)
+                    );
+
+                    // Enforce total spotlight cap of 5 boxes on the current grid
+                    const currentSpotlightBoxes = Array.from(document.querySelectorAll('.grid-box.badge-spotlight'))
+                        .filter(box => box.id !== 'box-0');
+                    const remainingSpotlightSlots = Math.max(0, 5 - currentSpotlightBoxes.length);
+                    if (remainingSpotlightSlots <= 0) return;
+
+                    // Avoid spotlighting posts already visible in the grid
+                    const candidatePosts = otherAreaPosts.filter(post => !visiblePostIds.has(post.id));
+                    if (candidatePosts.length === 0) return;
                     
-                    // Inject 2-3 spotlight posts per rotation for more external content
-                    const spotlightCount = Math.min(3, Math.max(2, Math.floor(otherAreaPosts.length / 50)));
+                    // Inject 1 spotlight post per cycle (30s) for controlled balance
+                    const spotlightCount = Math.min(
+                        remainingSpotlightSlots,
+                        Math.min(1, candidatePosts.length)
+                    );
+                    const cycleInjectedIds = new Set();
                     
                     for (let i = 0; i < spotlightCount; i++) {
-                        // Get a random post from other areas
-                        const randomPost = otherAreaPosts[Math.floor(Math.random() * otherAreaPosts.length)];
+                        // Get a random non-duplicate candidate post
+                        const availableCandidates = candidatePosts.filter(post => !cycleInjectedIds.has(post.id));
+                        if (availableCandidates.length === 0) break;
+                        const randomPost = availableCandidates[Math.floor(Math.random() * availableCandidates.length)];
+                        cycleInjectedIds.add(randomPost.id);
                         
                         // Find an empty or non-critical grid box to inject spotlight
                         const allBoxes = document.querySelectorAll('.grid-box');
-                        const emptyBoxes = Array.from(allBoxes).filter(box => !box.classList.contains('filled'));
+                        const emptyBoxes = Array.from(allBoxes).filter(box => {
+                            if (box.id === 'box-0') return false; // never use add-content square
+                            if (box.getAttribute('data-reserved-box') === 'add-content') return false;
+                            return !box.classList.contains('filled');
+                        });
                         
                         if (emptyBoxes.length === 0) break; // No more empty boxes
                         
@@ -16242,9 +16509,131 @@
                         
                         console.log(`✨ SPOTLIGHT: Injected post from ${randomPost.county || 'unknown area'}`);
                     }
-                }, 500); // Every 500ms - FASTER ROTATION FOR MORE EXTERNAL CONTENT
+                }, 30000); // Every 30s
                 
-                console.log('🎯 Spotlight rotation system initialized (every 500ms, 2-3 posts per cycle, from other areas)');
+                console.log('🎯 Spotlight rotation system initialized (every 30s, max 1 post per cycle, max 5 spotlight posts total)');
+            }
+
+            // Keep all non-spotlight post types actively loading into grid while site runs
+            if (!window.nonSpotlightRefresher) {
+                window.nonSpotlightRefresher = setInterval(() => {
+                    if (document.visibilityState === 'visible') {
+                        console.log('🔄 Non-spotlight refresher tick (30s)');
+                        renderGrid();
+                    }
+                }, 30000);
+                console.log('✅ Non-spotlight refresher initialized (every 30s)');
+            }
+
+            // Position-1 badge rotation refresh tick (every 15s)
+            if (!window.positionOneRotator) {
+                window.positionOneRotator = setInterval(() => {
+                    if (document.visibilityState === 'visible') {
+                        console.log('🥇 Position-1 rotator tick (15s)');
+                        renderGrid();
+                    }
+                }, 15000);
+                console.log('✅ Position-1 rotator initialized (every 15s)');
+            }
+
+            // Gold medal first-slot supervisor (1s)
+            if (!window.goldMedalPriorityTick) {
+                window.goldMedalPriorityTick = setInterval(() => {
+                    if (document.visibilityState !== 'visible') return;
+
+                    const currentBucket = Math.floor(Date.now() / (5 * 60 * 1000));
+                    const firstBox = document.getElementById('box-1');
+                    const firstPostId = firstBox ? firstBox.getAttribute('data-post-id') : null;
+                    const activeGoldId = window.activeGoldMedalPostId || null;
+
+                    // Trigger re-render every 5min bucket boundary to rotate gold post
+                    if (window.goldMedalRotationBucket !== undefined && currentBucket !== window.goldMedalRotationBucket) {
+                        console.log('🥇 Gold medal rotation window changed (5m) - refreshing priority post');
+                        renderGrid();
+                        return;
+                    }
+
+                    // Enforce gold post in first slot quickly (within 1s)
+                    if (activeGoldId && firstPostId !== activeGoldId) {
+                        console.log('🥇 Gold medal priority correction (1s) - enforcing first slot');
+                        renderGrid();
+                        return;
+                    }
+
+                    // If grid is still empty, force another attempt
+                    if (!firstPostId) {
+                        renderGrid();
+                    }
+                }, 1000);
+
+                console.log('✅ Gold medal priority supervisor initialized (every 1s, rotate every 5m)');
+            }
+
+            // Server/database hydration loop to keep runtime feed immediately fresh
+            if (!window.databaseHydrator) {
+                window.databaseHydratorBusy = false;
+                window.databaseHydrator = setInterval(async () => {
+                    if (window.databaseHydratorBusy) return;
+                    if (!isConnected || !currentUserId) return;
+
+                    try {
+                        window.databaseHydratorBusy = true;
+
+                        const postsRef = ref(database, `users/${currentUserId}/posts`);
+                        const snapshot = await get(postsRef);
+                        const hydratedPostsObj = snapshot.exists() ? snapshot.val() : {};
+                        const hydratedPosts = Object.entries(hydratedPostsObj).map(([id, post]) => ({
+                            id,
+                            ...post
+                        }));
+
+                        const existingPosts = gridContent[currentUserId] || [];
+                        const existingById = new Map(existingPosts.map(post => [post.id, post]));
+                        let changed = false;
+
+                        hydratedPosts.forEach(post => {
+                            const existing = existingById.get(post.id);
+                            if (!existing) {
+                                existingById.set(post.id, post);
+                                changed = true;
+                            } else {
+                                const oldLikes = existing.likes || 0;
+                                const oldDislikes = existing.dislikes || 0;
+                                const newLikes = post.likes || 0;
+                                const newDislikes = post.dislikes || 0;
+                                if (oldLikes !== newLikes || oldDislikes !== newDislikes || existing.timestamp !== post.timestamp) {
+                                    existingById.set(post.id, { ...existing, ...post });
+                                    changed = true;
+                                }
+                            }
+                        });
+
+                        if (changed) {
+                            const merged = Array.from(existingById.values())
+                                .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                            gridContent[currentUserId] = merged;
+
+                            merged.forEach(post => {
+                                postCache[post.id] = post;
+                            });
+
+                            if (window.postCacheSystem) {
+                                window.postCacheSystem.updateCache(merged, currentUserId);
+                            }
+
+                            console.log(`💧 DATABASE HYDRATION: merged ${hydratedPosts.length} posts from server for ${currentUserId}`);
+                            if (document.visibilityState === 'visible') {
+                                renderGrid();
+                            }
+                        }
+                    } catch (hydrationError) {
+                        console.error('❌ DATABASE HYDRATION ERROR:', hydrationError);
+                    } finally {
+                        window.databaseHydratorBusy = false;
+                    }
+                }, 30000);
+
+                console.log('✅ Database hydrator initialized (every 30s)');
             }
         }
 
@@ -17261,6 +17650,7 @@
             // Use selected box or find first empty
             let boxIndex = selectedBoxIndex;
             if (boxIndex === -1 || boxIndex === 0) {
+                boxIndex = -1;
                 for (let i = 1; i < maxGridSize; i++) {
                     const box = document.getElementById(`box-${i}`);
                     if (box && !box.classList.contains('filled')) {
@@ -17270,7 +17660,7 @@
                 }
             }
 
-            if (boxIndex === -1) {
+            if (boxIndex <= 0) {
                 alert('Grid is full');
                 return;
             }
@@ -17310,6 +17700,11 @@
             const postId = `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             
             try {
+                // Safety guard: reserved Add Content square can never be used for post placement
+                if (!boxIndex || boxIndex <= 0) {
+                    throw new Error('Reserved add-content box cannot be used for post placement.');
+                }
+
                 // SECURITY FIX: Prevent moderation bypass
                 // If moderation just failed, require the user to select a NEW file
                 const timeSinceRejection = Date.now() - lastModerationRejectionTime;
