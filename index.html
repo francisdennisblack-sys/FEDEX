@@ -11073,26 +11073,52 @@
             
             const nearby = [];
             const radiusKm = radiusMiles * 1.60934;
+            const locLat = parseFloat(location.lat);
+            const locLon = parseFloat(location.lon);
+            
+            // Use bounding box optimization to avoid checking all locations
+            const LAT_OFFSET = radiusKm / 111;
+            const LON_OFFSET = radiusKm / (111 * Math.cos(locLat * Math.PI / 180));
             
             globalLocationDatabase.forEach(loc => {
-                if (loc.lat && loc.lon) {
-                    const dist = calculateDistance(location.lat, location.lon, loc.lat, loc.lon);
-                    if (dist > 0.5 && dist <= radiusKm) { // Within radius but not the same location
-                        nearby.push({
-                            distance: dist,
-                            display: `${loc.name}, ${loc.state}`,
-                            type: 'location',
-                            value: loc.name,
-                            data: loc,
-                            state: loc.state,
-                            priority: 4 // Lower priority than exact matches
-                        });
+                const locLocLat = parseFloat(loc.lat);
+                const locLocLon = parseFloat(loc.lon);
+                
+                if (!isNaN(locLocLat) && !isNaN(locLocLon)) {
+                    const latDiff = Math.abs(locLocLat - locLat);
+                    const lonDiff = Math.abs(locLocLon - locLon);
+                    
+                    if (latDiff < LAT_OFFSET && lonDiff < LON_OFFSET) {
+                        const dist = calculateDistance(locLat, locLon, locLocLat, locLocLon);
+                        
+                        // Include: within radius, at least 0.5km away, different location
+                        if (dist > 0.5 && dist <= radiusKm && !(loc.name === location.name && loc.state === location.state)) {
+                            // Score based on distance and population
+                            const score = (loc.population ? Math.log(loc.population + 1) : 5) / (1 + dist);
+                            
+                            nearby.push({
+                                distance: dist,
+                                display: `${loc.name}, ${loc.state}`,
+                                type: 'location',
+                                value: loc.name,
+                                data: loc,
+                                state: loc.state,
+                                priority: score,
+                                population: loc.population
+                            });
+                        }
                     }
                 }
             });
             
-            // Sort by distance and return closest ones
-            return nearby.sort((a, b) => a.distance - b.distance).slice(0, maxResults);
+            // Smart sort: First by importance (population/score), then by distance
+            return nearby
+                .sort((a, b) => {
+                    const scoreDiff = (b.priority || 0) - (a.priority || 0);
+                    if (scoreDiff !== 0) return scoreDiff;
+                    return a.distance - b.distance;
+                })
+                .slice(0, maxResults);
         }
         
         /**
@@ -14493,12 +14519,11 @@
                 return currentZoneTag;
             }
             
-            // AGGRESSIVE DEBUG: Log the actual coordinates we're working with
             console.log(`🎯 AUTO-DETECT START: User at (${userLocation.lat}, ${userLocation.lon}) accuracy: ${userLocation.accuracy}m`);
             
-            // PRIORITY 1: Try to use real US location database (75K+ real locations with accurate coordinates)
+            // ENHANCED ML: Use intelligent 3-tier search on 383K+ location database
             if (globalLocationDatabase && globalLocationDatabase.length > 0) {
-                console.log(`   📊 Database has ${globalLocationDatabase.length} locations`);
+                console.log(`   📊 ML Database: ${globalLocationDatabase.length.toLocaleString()} locations available`);
                 
                 // OPTIMIZATION: Use fast approximate search to narrow down candidates
                 // Instead of checking all 724K locations, narrow to nearby candidates first
