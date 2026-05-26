@@ -8600,16 +8600,47 @@
         
         /**
          * Get all local posts from user's area (all content types)
+         * 🔧 BUG FIX: Always include user's own posts even if area doesn't match
          */
         function getLocalPosts(areaTag, limit) {
-            if (!gridContent[areaTag]) return [];
+            const posts = [];
+            const seenIds = new Set();
             
-            const posts = gridContent[areaTag].slice(0, limit);
-            return posts.map(post => ({
-                ...post,
-                contentSource: 'LOCAL',
-                displayAreaTag: areaTag // Show user's area
-            }));
+            // FIRST: Always include user's own posts (CRITICAL FIX for disappearing posts)
+            // Posts indexed by currentUserId guarantee user always sees their own content
+            if (currentUserId && gridContent[currentUserId]) {
+                console.log(`🔐 OWN POSTS CHECK: User has ${gridContent[currentUserId].length} posts indexed by currentUserId`);
+                gridContent[currentUserId].forEach(post => {
+                    if (!seenIds.has(post.id)) {
+                        seenIds.add(post.id);
+                        posts.push({
+                            ...post,
+                            contentSource: 'OWN_POST',
+                            displayAreaTag: post.county || areaTag,
+                            isOwnPost: true
+                        });
+                    }
+                });
+                console.log(`✅ OWN POSTS ADDED: ${posts.length} of user's own posts included in grid`);
+            } else {
+                console.log(`⚠️ NO OWN POSTS FOUND: gridContent["${currentUserId}"] is empty or undefined`);
+            }
+            
+            // SECOND: Add area-tagged posts (general local content)
+            if (gridContent[areaTag]) {
+                gridContent[areaTag].forEach(post => {
+                    if (!seenIds.has(post.id) && posts.length < limit) {
+                        seenIds.add(post.id);
+                        posts.push({
+                            ...post,
+                            contentSource: 'LOCAL',
+                            displayAreaTag: areaTag
+                        });
+                    }
+                });
+            }
+            
+            return posts.slice(0, limit);
         }
         
         /**
