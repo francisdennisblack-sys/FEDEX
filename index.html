@@ -8938,20 +8938,38 @@
         // Load user votes from Firebase
         async function loadUserVotesFromFirebase(userId) {
             try {
+                // FIRST: Try to load from localStorage (instant, no network latency)
+                const cachedVotes = localStorage.getItem(`userVotes_${userId}`);
+                if (cachedVotes) {
+                    try {
+                        userVotes = JSON.parse(cachedVotes);
+                        console.log(`✅ Loaded ${Object.keys(userVotes).length} user votes from localStorage cache`);
+                    } catch (e) {
+                        console.error('Failed to parse cached votes:', e);
+                        userVotes = {};
+                    }
+                }
+                
+                // THEN: Load from Firebase in background to sync any new votes
                 const votesRef = ref(database, `user-votes/${userId}`);
                 const snapshot = await get(votesRef);
                 
                 if (snapshot.exists()) {
                     const votes = snapshot.val();
                     userVotes = votes;
-                    console.log(`✅ Loaded ${Object.keys(votes).length} user votes from Firebase`);
-                } else {
+                    // Update localStorage with fresh Firebase data
+                    localStorage.setItem(`userVotes_${userId}`, JSON.stringify(votes));
+                    console.log(`✅ Loaded ${Object.keys(votes).length} user votes from Firebase and cached to localStorage`);
+                } else if (!cachedVotes) {
                     userVotes = {};
                     console.log('📝 No previous votes found - starting fresh');
                 }
             } catch (error) {
                 console.error('Error loading user votes:', error);
-                userVotes = {};
+                // Keep whatever we loaded from localStorage, don't reset to empty
+                if (!userVotes || Object.keys(userVotes).length === 0) {
+                    userVotes = {};
+                }
             }
         }
 
@@ -8962,16 +8980,29 @@
             
             try {
                 const voteKey = `${currentUserId}_${postId}`;
+                
+                // IMMEDIATELY save to localStorage for persistence across refreshes
+                if (voteType === null) {
+                    // Remove vote
+                    delete userVotes[voteKey];
+                } else {
+                    userVotes[voteKey] = voteType;
+                }
+                // Always persist to localStorage
+                localStorage.setItem(`userVotes_${userId}`, JSON.stringify(userVotes));
+                console.log(`💾 Vote saved to localStorage for post ${postId}`);
+                
+                // THEN save to Firebase
                 const voteRef = ref(database, `user-votes/${userId}/${voteKey}`);
                 
                 if (voteType === null) {
                     // Remove vote
                     await remove(voteRef);
-                    console.log(`🗑️  Removed vote for post ${postId}`);
+                    console.log(`🗑️  Removed vote for post ${postId} from Firebase`);
                 } else {
                     // Save vote (like or dislike)
                     await set(voteRef, voteType);
-                    console.log(`💾 Saved ${voteType} vote for post ${postId}`);
+                    console.log(`✅ Saved ${voteType} vote for post ${postId} to Firebase`);
                 }
             } catch (error) {
                 console.error(`❌ Error saving vote to Firebase (attempt ${retryCount + 1}):`, error);
@@ -8983,24 +9014,81 @@
                         saveVoteToFirebase(userId, postId, voteType, retryCount + 1);
                     }, RETRY_DELAY);
                 } else if (retryCount >= MAX_RETRIES) {
-                    console.error(`❌ Failed to save vote after ${MAX_RETRIES} attempts. Storing offline...`);
-                    // Store vote locally for later sync
-                    const offlineVotes = JSON.parse(localStorage.getItem('offlineVotes') || '{}');
-                    offlineVotes[`${userId}_${postId}`] = voteType;
-                    localStorage.setItem('offlineVotes', JSON.stringify(offlineVotes));
-                    console.log('💾 Vote stored offline for later sync');
+                    console.error(`❌ Failed to save vote after ${MAX_RETRIES} attempts.`);
+                    // Vote is already saved to localStorage so it won't be lost
+                    // It will sync to Firebase when connection is restored
+                    console.log('✅ Vote persisted to localStorage - will sync to Firebase when online');
                 }
             }
         }
 
-        async function updatePostVotesFirebase(userId, postId, updates, retryCount = 0) {
+        // Sync any votes that were stored offline when connection is restored
+        async function syncOfflineVotes() {
+            try {
+                if (!currentUserId) return;
+                
+                const offlineVotes = JSON.parse(localStorage.getItem('offlineVotes') || '{}');
+                if (Object.keys(offlineVotes).length === 0) return;
+                
+                console.log(`🔄 Syncing ${Object.keys(offlineVotes).length} offline votes to Firebase...`);
+                
+                for (const [voteKey, voteType] of Object.entries(offlineVotes)) {
+                    try {
+                        const voteRef = ref(database, `user-votes/${currentUserId}/${voteKey}`);
+                        await set(voteRef, voteType);
+                        delete offlineVotes[voteKey];
+                        console.log(`✅ Synced offline vote: ${voteKey}`);
+                    } catch (error) {
+                        console.error(`Failed to sync vote ${voteKey}:`, error);
+                    }
+                }
+                
+                // Update localStorage with remaining unsent votes
+                localStorage.setItem('offlineVotes', JSON.stringify(offlineVotes));
+                if (Object.keys(offlineVotes).length === 0) {
+                    console.log('✅ All offline votes synced successfully');
+                }
+            } catch (error) {
+                console.error('Error syncing offline votes:', error);
+            }
+        }
+        
+        // Listen for connection restoration
+        window.addEventListener('online', () => {
+            console.log('🌐 Connection restored - syncing offline votes...');
+            syncOfflineVotes();
+        });
+
+        async function updatePostVotesFirebase(userId, postId, updates, retryCount = 0, postOwner = null) {
             const MAX_RETRIES = 3;
             const RETRY_DELAY = 1000 * Math.pow(2, retryCount); // Exponential backoff
             
+            // CRITICAL: Find the actual post owner if not provided
+            let ownerUserId = postOwner;
+            if (!ownerUserId) {
+                // Search for the post in gridContent to find its owner
+                for (let key in gridContent) {
+                    const foundPost = gridContent[key].find(p => p.id === postId);
+                    if (foundPost && (foundPost.networkId || foundPost.userId)) {
+                        ownerUserId = foundPost.networkId || foundPost.userId;
+                        break;
+                    }
+                }
+                // Fallback: check postCache
+                if (!ownerUserId && postCache[postId]) {
+                    ownerUserId = postCache[postId].networkId || postCache[postId].userId;
+                }
+            }
+            
+            if (!ownerUserId) {
+                console.error(`❌ Cannot update post votes - post owner not found for ${postId}`);
+                return;
+            }
+            
             try {
-                const postRef = ref(database, `users/${userId}/posts/${postId}`);
+                const postRef = ref(database, `users/${ownerUserId}/posts/${postId}`);
                 await update(postRef, updates);
-                console.log('✅ Votes updated successfully:', postId);
+                console.log(`✅ Votes updated successfully for post ${postId} owned by ${ownerUserId.substring(0,8)}`);
             } catch (error) {
                 console.error(`❌ Error updating votes (attempt ${retryCount + 1}):`, error);
                 
@@ -9008,13 +9096,13 @@
                 if (retryCount < MAX_RETRIES && (error.code === 'NETWORK_ERROR' || error.code === 'PERMISSION_DENIED' || !navigator.onLine)) {
                     console.log(`🔄 Retrying vote update in ${RETRY_DELAY}ms...`);
                     setTimeout(() => {
-                        updatePostVotesFirebase(userId, postId, updates, retryCount + 1);
+                        updatePostVotesFirebase(userId, postId, updates, retryCount + 1, ownerUserId);
                     }, RETRY_DELAY);
                 } else if (retryCount >= MAX_RETRIES) {
                     console.error(`❌ Failed to update votes after ${MAX_RETRIES} attempts`);
                     // Queue for later sync
                     const queuedUpdates = JSON.parse(localStorage.getItem('queuedVoteUpdates') || '{}');
-                    queuedUpdates[postId] = { userId, updates, timestamp: Date.now() };
+                    queuedUpdates[postId] = { userId: ownerUserId, updates, timestamp: Date.now() };
                     localStorage.setItem('queuedVoteUpdates', JSON.stringify(queuedUpdates));
                     console.log('💾 Vote update queued for later sync');
                 }
