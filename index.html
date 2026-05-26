@@ -6936,11 +6936,44 @@
          * Vote on a post (like or dislike)
          * Called from grid onclick handlers - MUST be defined globally before onAuthStateChanged
          */
+        // Vote debouncing - prevent double-clicks on same post
+        const voteDebounceMap = {}; // Track {postId_voteType: timestamp}
+        const VOTE_DEBOUNCE_TIME = 500; // milliseconds - prevent same vote within 500ms
+        
         function voteOnPost(postId, voteType) {
             if (!isConnected) {
                 alert('Please connect to WiFi first');
                 return;
             }
+            
+            // DEBOUNCE CHECK: Prevent duplicate votes within 500ms
+            const voteKey = `${postId}_${voteType}`;
+            const lastVoteTime = voteDebounceMap[voteKey] || 0;
+            const now = Date.now();
+            
+            if (now - lastVoteTime < VOTE_DEBOUNCE_TIME) {
+                console.log(`⏳ Vote debounced - same ${voteType} already submitted for ${postId.substring(0,8)} within 500ms`);
+                return;
+            }
+            
+            voteDebounceMap[voteKey] = now;
+            
+            // DISABLE VOTE BUTTONS: Prevent clicks during submission
+            const allVoteButtons = document.querySelectorAll(`[onclick*="voteOnPost('${postId}'"]`);
+            allVoteButtons.forEach(btn => {
+                btn.disabled = true;
+                btn.style.opacity = '0.5';
+                btn.style.cursor = 'not-allowed';
+            });
+            
+            // Re-enable buttons after 1 second (or when response comes back)
+            const reenableTimeout = setTimeout(() => {
+                allVoteButtons.forEach(btn => {
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                    btn.style.cursor = 'pointer';
+                });
+            }, 1000);
             
             // Search for post in gridContent - need to track which array it's in
             let post = null;
@@ -6983,8 +7016,8 @@
             console.log(`   Content: "${(post.content || '').substring(0, 50)}"...`);
             console.log(`   Likes: ${post.likes} | Dislikes: ${post.dislikes}`);
             
-            const voteKey = `${currentUserId}_${postId}`;
-            const currentVote = userVotes[voteKey];
+            const userVoteKey = `${currentUserId}_${postId}`;
+            const currentVote = userVotes[userVoteKey];
             let newLikes = post.likes || 0;
             let newDislikes = post.dislikes || 0;
             
@@ -6994,10 +7027,10 @@
                 } else if (currentVote === 'dislike') {
                     newDislikes--;
                     newLikes++;
-                    userVotes[voteKey] = 'like';
+                    userVotes[userVoteKey] = 'like';
                 } else {
                     newLikes++;
-                    userVotes[voteKey] = 'like';
+                    userVotes[userVoteKey] = 'like';
                 }
             } else if (voteType === 'dislike') {
                 if (currentVote === 'dislike') {
@@ -7005,10 +7038,10 @@
                 } else if (currentVote === 'like') {
                     newLikes--;
                     newDislikes++;
-                    userVotes[voteKey] = 'dislike';
+                    userVotes[userVoteKey] = 'dislike';
                 } else {
                     newDislikes++;
-                    userVotes[voteKey] = 'dislike';
+                    userVotes[userVoteKey] = 'dislike';
                 }
             }
             
@@ -7119,7 +7152,7 @@
             });
             
             // Save the user's vote preference to Firebase
-            saveVoteToFirebase(currentUserId, postId, userVotes[voteKey]);
+            saveVoteToFirebase(currentUserId, postId, userVotes[userVoteKey]);
         }
         
         /**
