@@ -7884,6 +7884,33 @@
                         });
                     }
 
+                    // 2a-bis — neighborhoods/towns from OSM (small file, drives recommended-areas dropdown)
+                    // places.json is built by merge_osm_into_shards.js — graceful fallback if missing.
+                    try {
+                        const placesResp = await fetch('/pois/places.json');
+                        if (placesResp.ok) {
+                            const placesPayload = await placesResp.json();
+                            const places = placesPayload.places || [];
+                            window.osmPlaces = places;
+                            places.forEach(pl => {
+                                // Add to both globalLocationDatabase (via poiLocations dual-push below) AND
+                                // surface them as low-priority POI entries so search picks them up immediately
+                                // even before the user's state shard is loaded.
+                                poiLocations.push({
+                                    name: pl.name, lat: pl.lat || 0, lon: pl.lon || 0,
+                                    type: pl.kind || 'place', category: 'Place',
+                                    country: 'United States', state: pl.state,
+                                    isPOI: true, emoji: pl.kind === 'city' ? '🌆' : (pl.kind === 'town' ? '🏙️' : '🏘️'),
+                                    scope: pl.kind === 'city' ? 'large' : (pl.kind === 'town' ? 'medium' : 'small'),
+                                    radiusMi: pl.kind === 'city' ? 8 : (pl.kind === 'town' ? 4 : 1.5),
+                                    weight: 1.0, source: 'osm-place'
+                                });
+                                poiCount++;
+                            });
+                            console.log(`   🏘️  OSM places loaded: ${places.length.toLocaleString()} neighborhoods/towns`);
+                        }
+                    } catch (e) { /* places.json optional — silently skip */ }
+
                     // 2b — user's state shard (full records)
                     const userStateGuess = (userLocation && typeof reverseGeocodeState === 'function')
                         ? reverseGeocodeState(userLocation.lat, userLocation.lon)
@@ -11737,78 +11764,60 @@
             const q = query.toLowerCase();
             const results = [];
             
-            // SPECIAL CASE: If searching for "Seattle", prioritize Seattle + top 4 nearby Washington areas
-            if (q === 'seattle' || q.startsWith('seattle')) {
-                console.log(`🌟 SPECIAL SEATTLE SEARCH DETECTED - prioritizing Seattle + nearby Washington areas`);
-                
-                if (typeof globalLocationDatabase !== 'undefined' && globalLocationDatabase && Array.isArray(globalLocationDatabase)) {
-                    // Find Seattle first
-                    const seattleArea = globalLocationDatabase.find(loc => loc.name.toLowerCase() === 'seattle');
-                    if (seattleArea) {
-                        results.push({
-                            display: `${seattleArea.name}, ${seattleArea.state}`,
-                            type: 'location',
-                            value: seattleArea.name,
-                            priority: 0,
-                            data: seattleArea,
-                            state: seattleArea.state
-                        });
-                        console.log(`✅ Added Seattle to results`);
-                    }
-                    
-                    // Find top 4 nearby Washington areas (by proximity to Seattle)
-                    if (seattleArea && seattleArea.lat && seattleArea.lon) {
-                        const washingtonAreas = globalLocationDatabase
-                            .filter(loc => loc.state === 'Washington' && loc.name !== 'Seattle')
+            // GENERAL CITY-ANCHORED SEARCH: If query exactly matches any city/town in our DB,
+            // anchor the dropdown with that city + 4 nearest same-state locations + all other state locations.
+            // (Replaces the old Seattle-only special case so every city/state gets the same rich UX.)
+            if (typeof globalLocationDatabase !== 'undefined' && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length) {
+                const exactMatches = globalLocationDatabase.filter(loc => loc && loc.name && loc.name.toLowerCase() === q);
+                // Pick the most populous exact match (or first) as the anchor — only when fairly specific
+                if (exactMatches.length && q.length >= 3) {
+                    exactMatches.sort((a, b) => (b.population || 0) - (a.population || 0));
+                    const anchor = exactMatches[0];
+                    results.push({
+                        display: `${anchor.name}, ${anchor.state}`,
+                        type: 'location',
+                        value: anchor.name,
+                        priority: 0,
+                        data: anchor,
+                        state: anchor.state
+                    });
+                    if (anchor.lat && anchor.lon && anchor.state) {
+                        // 4 nearest same-state locations
+                        const nearbySameState = globalLocationDatabase
+                            .filter(loc => loc.state === anchor.state && loc.name !== anchor.name && typeof loc.lat === 'number' && typeof loc.lon === 'number')
                             .map(loc => {
-                                // Calculate distance from Seattle
-                                const lat1 = seattleArea.lat * Math.PI / 180;
+                                const lat1 = anchor.lat * Math.PI / 180;
                                 const lat2 = loc.lat * Math.PI / 180;
-                                const lon1 = seattleArea.lon * Math.PI / 180;
-                                const lon2 = loc.lon * Math.PI / 180;
-                                const dlat = lat2 - lat1;
-                                const dlon = lon2 - lon1;
+                                const dlat = (loc.lat - anchor.lat) * Math.PI / 180;
+                                const dlon = (loc.lon - anchor.lon) * Math.PI / 180;
                                 const a = Math.sin(dlat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dlon/2)**2;
-                                const distance = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)) * 3959; // miles
+                                const distance = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)) * 3959; // mi
                                 return { ...loc, distance };
                             })
                             .sort((a, b) => a.distance - b.distance)
-                            .slice(0, 4); // Top 4 nearest
-                        
-                        washingtonAreas.forEach(area => {
+                            .slice(0, 4);
+                        nearbySameState.forEach(area => {
                             results.push({
                                 display: `${area.name}, ${area.state}`,
-                                type: 'location',
-                                value: area.name,
-                                priority: 0,
-                                data: area,
-                                state: area.state
+                                type: 'location', value: area.name, priority: 0, data: area, state: area.state
                             });
                         });
-                        
-                        console.log(`✅ Added top 4 nearby Washington areas: ${washingtonAreas.map(a => a.name).join(', ')}`);
-                    }
-                    
-                    // Add a separator and then ALL remaining Washington locations
-                    results.push({ display: '─ All Washington Locations ─', type: 'separator', disabled: true });
-                    
-                    const allWashingtonAreas = globalLocationDatabase
-                        .filter(loc => loc.state === 'Washington' && loc.name !== 'Seattle' && !results.some(r => r.value === loc.name))
-                        .sort((a, b) => a.name.localeCompare(b.name));
-                    
-                    allWashingtonAreas.forEach(area => {
-                        results.push({
-                            display: `${area.name}, ${area.state}`,
-                            type: 'location',
-                            value: area.name,
-                            priority: 1,
-                            data: area,
-                            state: area.state
+                        // Separator + all remaining same-state locations alphabetically
+                        results.push({ display: `─ All ${anchor.state} Locations ─`, type: 'separator', disabled: true });
+                        const seen = new Set(results.filter(r => r.value).map(r => r.value));
+                        const allSame = globalLocationDatabase
+                            .filter(loc => loc.state === anchor.state && !seen.has(loc.name))
+                            .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+                        allSame.forEach(area => {
+                            results.push({
+                                display: `${area.name}, ${area.state}`,
+                                type: 'location', value: area.name, priority: 1, data: area, state: area.state
+                            });
                         });
-                    });
-                    
-                    console.log(`🎯 Seattle search complete: 1 Seattle + 4 nearby + ${allWashingtonAreas.length} all other Washington locations = ${results.length - 1} total results`);
-                    return results;
+                        console.log(`🎯 City-anchored search "${anchor.name}, ${anchor.state}": 1 + ${nearbySameState.length} nearby + ${allSame.length} state-wide`);
+                        // Continue down to also collect POIs matching the same query (don't `return` early —
+                        // user might also want POIs in that city to appear below).
+                    }
                 }
             }
             
@@ -11923,41 +11932,76 @@
 
                 // Cap scan for perf — prefix matches are gathered first across the full set,
                 // contains matches are gathered up to a cap so 500k POIs stay snappy.
-                const SCAN_CAP = 60000; // ~60k POI scan max per query
+                const SCAN_CAP = 60000; // ~60k POI scan max per query (raised for type-filter queries below)
+
+                // Token-aware query: split into words so "high school" matches "Lincoln High School"
+                // even though the substring "high school" isn't a prefix. Also map common queries to typeCodes
+                // so a search like "college" returns colleges/universities regardless of name.
+                const qTokens = q.split(/\s+/).filter(t => t.length >= 2);
+                const typeCodeFilter = (() => {
+                    if (/^high ?school|^h ?s$/.test(q)) return new Set(['h']);
+                    if (/^college$/.test(q)) return new Set(['c', 'u']);
+                    if (/^university|^universit/.test(q)) return new Set(['u', 'c']);
+                    if (/^cafe|^coffee/.test(q)) return new Set(['k']);
+                    if (/^restaurant|^food$/.test(q)) return new Set(['r']);
+                    if (/^shop|^mall|^store/.test(q)) return new Set(['s']);
+                    return null;
+                })();
+                const matchesQuery = (nameLower, typeCode) => {
+                    // Type-code shortcut: e.g. typing "high school" returns ALL high schools
+                    if (typeCodeFilter && typeCode && typeCodeFilter.has(typeCode)) return 'type';
+                    if (nameLower.startsWith(q)) return 'prefix';
+                    if (nameLower.includes(q)) return 'contains';
+                    // Multi-token: all tokens must appear somewhere in the name
+                    if (qTokens.length >= 2 && qTokens.every(t => nameLower.includes(t))) return 'tokens';
+                    return null;
+                };
+                const matchPriority = m => m === 'prefix' ? 1 : (m === 'contains' ? 2 : (m === 'tokens' ? 2 : 3));
 
                 // 🌍 GLOBAL INDEX SCAN — covers ALL 500k POIs (other states) once index is fetched.
                 // Rows are [name, lat, lon, stateIdx, typeCode]. Stays before local scans so cross-state matches surface.
                 if (window.globalPoiSearchIndex && Array.isArray(window.globalPoiSearchIndex.rows)) {
                     const idx = window.globalPoiSearchIndex;
                     const stateCodes = idx.stateCodes || [];
-                    const indexLimit = Math.min(idx.rows.length, 200000); // global scan budget
+                    // Broader scan when type filter is active (return all of that type)
+                    const indexLimit = typeCodeFilter ? idx.rows.length : Math.min(idx.rows.length, 200000);
+                    // Per-name dedupe so the same POI name in 50 states only appears once (nearest wins below)
+                    const seenNames = new Set();
                     for (let i = 0; i < indexLimit; i++) {
                         const row = idx.rows[i];
                         if (!row) continue;
                         const name = row[0];
+                        const typeCode = row[4];
                         const nameLower = String(name).toLowerCase();
-                        const isPrefix = nameLower.startsWith(q);
-                        const isContains = !isPrefix && nameLower.includes(q);
-                        if (!isPrefix && !isContains) continue;
-                        const lat = row[1], lon = row[2], stIdx = row[3], typeCode = row[4];
+                        const m = matchesQuery(nameLower, typeCode);
+                        if (!m) continue;
+                        const lat = row[1], lon = row[2], stIdx = row[3];
                         const stateName = (stIdx >= 0 && stIdx < stateCodes.length) ? stateCodes[stIdx] : null;
                         const emoji = ({h:'🏫',c:'🎓',u:'🎓',r:'🍽️',k:'☕',s:'🛍️'})[typeCode] || '📍';
-                        const key = `${emoji} ${name}`;
-                        if (poiMatches[key]) continue;
+                        // Dedupe by lowercase name — keep nearest (if location known) or first
                         let distMi = null;
                         if (haveLoc) {
                             const km = calculateDistance(userLat, userLon, lat, lon);
                             distMi = (km || 0) * 0.621371;
                         }
-                        poiMatches[key] = {
+                        const existing = poiMatches[`name:${nameLower}`];
+                        if (existing) {
+                            if (haveLoc && distMi !== null && (existing.distMi === null || distMi < existing.distMi)) {
+                                existing.distMi = distMi;
+                                existing.data = { name, lat, lon, emoji, state: stateName, isGlobalIndex: true };
+                            }
+                            continue;
+                        }
+                        seenNames.add(nameLower);
+                        poiMatches[`name:${nameLower}`] = {
                             display: `${emoji} ${name}`,
                             type: 'poi',
                             value: name,
-                            priority: isPrefix ? 1 : 2,
+                            priority: matchPriority(m),
                             distMi,
                             data: { name, lat, lon, emoji, state: stateName, isGlobalIndex: true }
                         };
-                        if (isPrefix) poiPrefix++; else poiContains++;
+                        if (m === 'prefix') poiPrefix++; else poiContains++;
                     }
                 }
 
@@ -11968,33 +12012,49 @@
                         if (!poi || !poi.name) continue;
                         const poiName = String(poi.name).toLowerCase();
                         const category = String(poi.category || '').toLowerCase();
-                        const isPrefix = poiName.startsWith(q);
-                        const isContains = !isPrefix && (poiName.includes(q) || category.includes(q));
-                        if (!isPrefix && !isContains) continue;
+                        // Map POI.type → single-char typeCode for typeCodeFilter
+                        const t = String(poi.type || '').toLowerCase();
+                        let tc = null;
+                        if (t === 'high_school') tc = 'h';
+                        else if (t === 'college') tc = 'c';
+                        else if (t === 'university') tc = 'u';
+                        else if (t === 'restaurant') tc = 'r';
+                        else if (t === 'cafe') tc = 'k';
+                        else if (t === 'shopping') tc = 's';
+                        let m = matchesQuery(poiName, tc);
+                        if (!m && category && (category.startsWith(q) || category.includes(q))) m = 'contains';
+                        if (!m) continue;
 
                         const emoji = poi.emoji || '📍';
-                        const key = `${emoji} ${poi.name}`;
-                        if (poiMatches[key]) continue;
+                        // Dedupe by lowercase name across local + global sources
+                        const dedupKey = `name:${poiName}`;
+                        const existing = poiMatches[dedupKey];
 
                         let distMi = null;
                         if (haveLoc && typeof poi.lat === 'number' && typeof poi.lon === 'number') {
                             const km = calculateDistance(userLat, userLon, poi.lat, poi.lon);
                             distMi = (km || 0) * 0.621371;
                         }
+                        if (existing) {
+                            // Keep nearest instance & upgrade priority if local source has richer data
+                            if (haveLoc && distMi !== null && (existing.distMi === null || distMi < existing.distMi)) {
+                                existing.distMi = distMi;
+                                existing.data = poi;
+                                existing.display = `${emoji} ${poi.name}`;
+                                existing.priority = Math.min(existing.priority, matchPriority(m));
+                            }
+                            continue;
+                        }
 
-                        // Display: just "<emoji> <name>" — no distance, no category clutter.
-                        // (distMi is kept on the object purely for proximity sorting below.)
-                        const display = `${emoji} ${poi.name}`;
-
-                        poiMatches[key] = {
-                            display,
+                        poiMatches[dedupKey] = {
+                            display: `${emoji} ${poi.name}`,
                             type: 'poi',
                             value: poi.name,
-                            priority: isPrefix ? 1 : 2,
+                            priority: matchPriority(m),
                             distMi,
                             data: poi
                         };
-                        if (isPrefix) poiPrefix++; else poiContains++;
+                        if (m === 'prefix') poiPrefix++; else poiContains++;
                     }
                 }
 
@@ -14933,70 +14993,92 @@
             
             /**
              * Generate ML recommendations for where user should post
-             * 100% FOCUSED ON GEOGRAPHIC PROXIMITY
-             * Returns TOP 5 CLOSEST POIs ranked by pure distance
+             * Geographic proximity — blends the new 500k POI shards AND nearby cities/neighborhoods.
+             * Returns up to 8 closest items ranked by distance, deduped, with neighborhoods surfaced first.
              */
             generateRecommendations(userId, allPosts, userLocation) {
                 this.analyzePostDistribution(allPosts);
-                
+
                 const recommendations = [];
-                
-                // PURE DISTANCE SCORING: Find closest POIs to user
-                if (userLocation && poiDatabase && poiDatabase.length > 0) {
-                    const poiWithDistances = [];
-                    
-                    // Calculate distance to EVERY POI
-                    poiDatabase.forEach(poi => {
-                        const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
-                        poiWithDistances.push({
-                            poi,
-                            distance: Math.round(dist * 10) / 10,  // Round to 1 decimal
-                            score: Math.round(100 * (1 / (1 + dist)) * 10) / 10  // Inverse distance score
-                        });
-                    });
-                    
-                    // Sort by distance (closest first)
-                    poiWithDistances.sort((a, b) => a.distance - b.distance);
-                    
-                    // Take top 5 closest POIs
-                    const topPOIs = poiWithDistances.slice(0, 5);
-                    
-                    topPOIs.forEach(item => {
-                        // Check if this POI's location matches any area in our analysis
-                        let matchedArea = null;
-                        for (let area of Object.keys(this.areaNeedsAnalysis)) {
-                            if (item.poi.name.toLowerCase().includes(area.toLowerCase()) ||
-                                area.toLowerCase().includes(item.poi.name.toLowerCase()) ||
-                                item.poi.city === area) {
-                                matchedArea = area;
-                                break;
-                            }
-                        }
-                        
-                        // Use POI name if no area match
-                        const displayName = matchedArea || item.poi.name || item.poi.city || 'Location';
-                        const analysis = this.areaNeedsAnalysis[displayName] || { urgency: 0, postCount: 0, avgEngagement: 0 };
-                        
-                        recommendations.push({
-                            area: displayName,
-                            poiName: item.poi.name,
-                            score: item.score,
-                            urgency: analysis.urgency || 0,
-                            postCount: analysis.postCount || 0,
-                            engagement: analysis.avgEngagement || 0,
-                            distance: item.distance,
-                            reason: `📍 ${item.distance}mi from you`
-                        });
-                    });
-                    
-                    console.log(`✅ Generated ${recommendations.length} closest area recommendations:`, recommendations);
-                } else {
-                    console.log(`⚠️  Cannot generate recommendations: userLocation=${!!userLocation}, poiDatabase=${!!poiDatabase}`);
+                if (!userLocation || typeof userLocation.lat !== 'number' || typeof userLocation.lon !== 'number') {
+                    console.log('⚠️  Cannot generate recommendations: userLocation missing/invalid');
+                    this.recommendations[userId] = [];
+                    return [];
                 }
-                
+
+                const candidates = []; // { name, lat, lon, distance, source, kind }
+
+                // SOURCE 1 — new big POI shards (globalPOIDatabase, populated by lazy loader)
+                if (typeof globalPOIDatabase !== 'undefined' && Array.isArray(globalPOIDatabase) && globalPOIDatabase.length) {
+                    for (let i = 0; i < globalPOIDatabase.length; i++) {
+                        const poi = globalPOIDatabase[i];
+                        if (!poi || !poi.name || typeof poi.lat !== 'number' || typeof poi.lon !== 'number') continue;
+                        const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                        if (dist > 25) continue; // only consider POIs within 25 km
+                        candidates.push({ name: poi.name, lat: poi.lat, lon: poi.lon, distance: dist, source: 'poi', kind: poi.type || 'poi', state: poi.state });
+                    }
+                }
+
+                // SOURCE 2 — original poiDatabase (smaller, curated)
+                if (poiDatabase && poiDatabase.length) {
+                    for (const poi of poiDatabase) {
+                        if (!poi || !poi.name || typeof poi.lat !== 'number' || typeof poi.lon !== 'number') continue;
+                        const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                        if (dist > 25) continue;
+                        candidates.push({ name: poi.name, lat: poi.lat, lon: poi.lon, distance: dist, source: 'poi', kind: poi.type || 'poi' });
+                    }
+                }
+
+                // SOURCE 3 — neighborhoods / towns / cities from globalLocationDatabase
+                if (typeof globalLocationDatabase !== 'undefined' && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length) {
+                    for (let i = 0; i < globalLocationDatabase.length; i++) {
+                        const loc = globalLocationDatabase[i];
+                        if (!loc || !loc.name || typeof loc.lat !== 'number' || typeof loc.lon !== 'number') continue;
+                        const dist = calculateDistance(userLocation.lat, userLocation.lon, loc.lat, loc.lon);
+                        if (dist > 35) continue; // wider radius for towns
+                        candidates.push({ name: loc.name, lat: loc.lat, lon: loc.lon, distance: dist, source: 'location', kind: loc.type || 'place', state: loc.state });
+                    }
+                }
+
+                // Dedupe by lowercase name — keep nearest instance
+                const byName = new Map();
+                for (const c of candidates) {
+                    const key = c.name.toLowerCase();
+                    const prev = byName.get(key);
+                    if (!prev || c.distance < prev.distance) byName.set(key, c);
+                }
+
+                // Surface neighborhoods/towns BEFORE generic POIs at the top
+                const isNeighborhoodKind = k => k === 'neighborhood' || k === 'suburb' || k === 'hamlet' || k === 'village' || k === 'town' || k === 'city' || k === 'community';
+                const ranked = Array.from(byName.values())
+                    .sort((a, b) => {
+                        // Neighborhoods/towns get a small priority boost (proximity still dominates)
+                        const aBoost = isNeighborhoodKind(a.kind) ? -0.5 : 0;
+                        const bBoost = isNeighborhoodKind(b.kind) ? -0.5 : 0;
+                        return (a.distance + aBoost) - (b.distance + bBoost);
+                    })
+                    .slice(0, 8);
+
+                for (const item of ranked) {
+                    const distMi = Math.round(item.distance * 0.621371 * 10) / 10;
+                    const score = Math.round(100 * (1 / (1 + item.distance)) * 10) / 10;
+                    const analysis = this.areaNeedsAnalysis[item.name] || { urgency: 0, postCount: 0, avgEngagement: 0 };
+                    recommendations.push({
+                        area: item.name,
+                        poiName: item.name,
+                        score,
+                        urgency: analysis.urgency || 0,
+                        postCount: analysis.postCount || 0,
+                        engagement: analysis.avgEngagement || 0,
+                        distance: distMi,
+                        kind: item.kind,
+                        reason: `📍 ${distMi}mi · ${item.kind || 'place'}${item.state ? ' · ' + item.state : ''}`
+                    });
+                }
+                console.log(`✅ Generated ${recommendations.length} nearby recommendations (POIs + neighborhoods)`);
+
                 this.recommendations[userId] = recommendations;
-                
-                return recommendations;  // Return all recommendations (already filtered to top 5 POIs)
+                return recommendations;
             },
             
             /**
