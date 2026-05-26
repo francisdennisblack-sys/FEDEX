@@ -7062,15 +7062,18 @@
             
             // 🎯 REBADGE POSTS - Adaptive Badge System ML Learning
             // When post gets voted on, recalculate what badge it SHOULD have in this area
+            // Scales from 1 user (small likes) to 100M users (millions of likes)
             const postArea = post.county || getCurrentUserArea();
             const allPostsInArea = (gridContent[currentUserId] || []).filter(p => p.county === postArea || p.county === post.county);
+            const totalOnlineUsers = onlineUserCount || 1; // Get total user count for scaling
             
             if (window.adaptiveBadgeSystem && allPostsInArea.length > 0) {
-                const badgeResult = window.adaptiveBadgeSystem.rebadgePostForArea(post, postArea, allPostsInArea);
+                // Rebadge with total user count for logarithmic scaling
+                const badgeResult = window.adaptiveBadgeSystem.rebadgePostForArea(post, postArea, allPostsInArea, totalOnlineUsers);
                 if (badgeResult.badgeChanged) {
-                    console.log(`🎯 POST REBADGED: "${post.content?.substring(0, 30)}..." changed from "${badgeResult.newBadge}" - ${badgeResult.reasoning}`);
-                    // Update badge for ALL posts in this area to learn thresholds
-                    window.adaptiveBadgeSystem.updateBadgesForArea(postArea, allPostsInArea);
+                    console.log(`🎯 POST REBADGED: "${post.content?.substring(0, 30)}..." badge changed - ${badgeResult.reasoning}`);
+                    // Update badges for ALL posts in this area with user count awareness
+                    window.adaptiveBadgeSystem.updateBadgesForArea(postArea, allPostsInArea, totalOnlineUsers);
                 }
             }
             
@@ -7704,118 +7707,147 @@
         
         /**
          * ============================================================================
-         * ADAPTIVE BADGE SYSTEM - Context-Aware Dynamic Post Badging with ML Learning
+         * ADAPTIVE BADGE SYSTEM v2 - Scales 1 User → 100M Users with Logarithmic Scoring
          * ============================================================================
-         * Problem: Posts get badges based on absolute like counts, not considering:
-         *   - Geographic context (small town vs big city)
-         *   - Relative ranking within an area
-         *   - Area-specific engagement thresholds
-         * Solution: Dynamically rebadge posts when they spread to new areas
+         * Scales from: 1 post with 0 likes → 100M users with top posts at 10M+ likes
+         * Uses: Percentile ranking + Logarithmic engagement scoring + Area normalization
          */
         const adaptiveBadgeSystem = {
             // Track what badges posts have had
             postBadgeHistory: {}, // { postId: [{ badge, timestamp, area, reasoning }] }
             
-            // Learn area-specific thresholds
-            areaEngagementMetrics: {}, // { area: { avgLikesPerPost, medianLikes, topPostLikes, userCount } }
-            
-            // Badge progression rules (what leads to next badge level)
-            badgeProgression: [
-                { badge: 'new', minAge: 0, maxAge: 2 * 60 * 60 * 1000, description: 'Posted within last 2 hours' },
-                { badge: 'rising', minLikes: 3, minArea: 'any', description: 'Gaining traction' },
-                { badge: 'hot', minLikes: 10, minRelativeRank: 0.8, description: 'Top 20% in area' },
-                { badge: 'trending', minLikes: 50, minRelativeRank: 0.9, description: 'Top 10% across areas' },
-                { badge: 'crowned', minLikes: 100, minRelativeRank: 0.95, description: 'Top post in large area' }
-            ],
+            // Learn area-specific engagement distributions
+            areaEngagementMetrics: {}, // { area: { likesDistribution, percentiles, userCount, scale } }
             
             /**
-             * Calculate what badge a post SHOULD have based on context
+             * Calculate logarithmic engagement score (scales 0 likes → 10M likes)
+             * At small scale: 1 like is impressive, 10 is amazing
+             * At large scale: 1M likes is good, 10M is amazing
              */
-            calculateContextualBadge(post, area, allPostsInArea = []) {
+            calculateEngagementScore(likes, userCount = 1) {
+                // Logarithmic scaling: log base depends on user count
+                // Small scale (1-100 users): base ~2 (1, 2, 4, 8, 16, 32 likes = tiers)
+                // Medium scale (100-1M users): base ~10 (1, 10, 100, 1k, 10k, 100k, 1M likes = tiers)
+                // Large scale (1M-100M users): base ~100 (1k, 100k, 1M, 100M likes = tiers)
+                
+                if (likes <= 0) return 0;
+                
+                // Determine scale factor based on user count
+                let scaleFactor = 2;
+                if (userCount > 100 && userCount <= 10000) scaleFactor = 3;
+                if (userCount > 10000 && userCount <= 100000) scaleFactor = 5;
+                if (userCount > 100000 && userCount <= 1000000) scaleFactor = 10;
+                if (userCount > 1000000 && userCount <= 10000000) scaleFactor = 50;
+                if (userCount > 10000000) scaleFactor = 100;
+                
+                // Logarithmic transformation
+                const score = Math.log(likes + 1) / Math.log(scaleFactor);
+                return score;
+            },
+            
+            /**
+             * Calculate what badge a post SHOULD have
+             * Uses PERCENTILE-based system instead of fixed thresholds
+             */
+            calculateContextualBadge(post, area, allPostsInArea = [], totalUserCount = 1) {
                 if (!post) return null;
                 
                 const now = Date.now();
                 const postAge = now - (post.timestamp || 0);
                 const likes = post.likes || 0;
                 const dislikes = post.dislikes || 0;
-                const engagement = likes - dislikes;
                 
-                console.log(`🎯 Badge calculation for post ${post.id.substring(0, 8)}... in area "${area}"`);
-                console.log(`   Age: ${(postAge / 1000 / 60).toFixed(0)}m, Likes: ${likes}, Engagement: ${engagement}`);
-                
-                // 1. NEW BADGE - Very fresh posts (within 2 hours)
+                // 1. NEW BADGE - Fresh posts get visibility boost (within 2 hours)
                 if (postAge < 2 * 60 * 60 * 1000) {
-                    console.log(`   → NEW badge (age: ${(postAge / 1000 / 60).toFixed(0)}m)`);
                     return 'new';
                 }
                 
-                // 2. Calculate relative ranking in this area
-                let relativeRank = 0.5; // default middle
-                if (allPostsInArea && allPostsInArea.length > 0) {
-                    const sortedByLikes = [...allPostsInArea].sort((a, b) => (b.likes || 0) - (a.likes || 0));
-                    const position = sortedByLikes.findIndex(p => p.id === post.id);
-                    if (position !== -1) {
-                        relativeRank = 1 - (position / allPostsInArea.length);
-                        console.log(`   Relative rank: ${relativeRank.toFixed(2)} (position ${position + 1}/${allPostsInArea.length})`);
-                    }
+                if (!allPostsInArea || allPostsInArea.length === 0) {
+                    return null;
                 }
                 
-                // 3. Learn area-specific thresholds
+                // 2. Calculate PERCENTILE rank (not absolute position)
+                const sortedByLikes = [...allPostsInArea].sort((a, b) => (b.likes || 0) - (a.likes || 0));
+                const position = sortedByLikes.findIndex(p => p.id === post.id);
+                const percentile = position === -1 ? 0 : (1 - (position / allPostsInArea.length)) * 100;
+                
+                // 3. Learn area-specific engagement distribution
                 if (!this.areaEngagementMetrics[area]) {
-                    this.areaEngagementMetrics[area] = this.analyzeAreaEngagement(area, allPostsInArea);
+                    this.areaEngagementMetrics[area] = this.analyzeAreaEngagement(area, allPostsInArea, totalUserCount);
                 }
-                const areaMetrics = this.areaEngagementMetrics[area];
-                console.log(`   Area metrics - avg likes: ${areaMetrics.avgLikesPerPost.toFixed(1)}, median: ${areaMetrics.medianLikes}`);
+                const metrics = this.areaEngagementMetrics[area];
                 
-                // 4. Assign badge based on contextual thresholds
-                if (relativeRank >= 0.95 && likes >= areaMetrics.medianLikes * 2) {
-                    console.log(`   → CROWNED badge (top post, ${(relativeRank * 100).toFixed(0)}% rank)`);
+                // 4. Calculate logarithmic engagement score
+                const engagementScore = this.calculateEngagementScore(likes, totalUserCount);
+                const areaMedianScore = this.calculateEngagementScore(metrics.medianLikes, totalUserCount);
+                
+                // 5. BADGE ASSIGNMENT - Percentile + Engagement Score based
+                // CROWNED: Top 1% OR engagement score 2x median
+                if (percentile >= 99 || (engagementScore >= areaMedianScore * 2 && percentile >= 95)) {
                     return 'crowned';
                 }
                 
-                if (relativeRank >= 0.9 && likes >= areaMetrics.medianLikes * 1.5) {
-                    console.log(`   → TRENDING badge (${(relativeRank * 100).toFixed(0)}% rank)`);
+                // TRENDING: Top 5% OR engagement score 1.5x median
+                if (percentile >= 95 || (engagementScore >= areaMedianScore * 1.5 && percentile >= 90)) {
                     return 'trending';
                 }
                 
-                if (relativeRank >= 0.8 && likes >= areaMetrics.medianLikes) {
-                    console.log(`   → HOT badge (${(relativeRank * 100).toFixed(0)}% rank)`);
+                // HOT: Top 20% OR engagement score 1.2x median
+                if (percentile >= 80 || (engagementScore >= areaMedianScore * 1.2 && percentile >= 50)) {
                     return 'hot';
                 }
                 
-                if (likes >= areaMetrics.avgLikesPerPost && engagement > 0) {
-                    console.log(`   → RISING badge (above average engagement)`);
+                // RISING: Top 50% AND positive engagement
+                if (percentile >= 50 && likes > 0) {
                     return 'rising';
                 }
                 
-                console.log(`   → No badge (low engagement)`);
                 return null;
             },
             
             /**
-             * Analyze area to learn engagement thresholds
+             * Analyze area engagement distribution
+             * Learns what "good engagement" means at this area's scale
              */
-            analyzeAreaEngagement(area, allPostsInArea = []) {
+            analyzeAreaEngagement(area, allPostsInArea = [], totalUserCount = 1) {
                 const likes = allPostsInArea.map(p => p.likes || 0).sort((a, b) => a - b);
+                
+                // Calculate percentiles
+                const p10 = likes[Math.floor(likes.length * 0.10)] || 0;
+                const p25 = likes[Math.floor(likes.length * 0.25)] || 0;
+                const p50 = likes[Math.floor(likes.length * 0.50)] || 0; // Median
+                const p75 = likes[Math.floor(likes.length * 0.75)] || 0;
+                const p90 = likes[Math.floor(likes.length * 0.90)] || 0;
+                const p95 = likes[Math.floor(likes.length * 0.95)] || 0;
+                
                 const avgLikes = likes.reduce((a, b) => a + b, 0) / Math.max(1, likes.length);
-                const medianLikes = likes[Math.floor(likes.length / 2)] || 0;
                 const topPostLikes = Math.max(...likes, 0);
+                
+                // Determine area scale
+                let scale = 'micro';
+                if (totalUserCount > 100) scale = 'small';
+                if (totalUserCount > 10000) scale = 'medium';
+                if (totalUserCount > 100000) scale = 'large';
+                if (totalUserCount > 1000000) scale = 'mega';
                 
                 return {
                     postCount: allPostsInArea.length,
                     avgLikesPerPost: avgLikes,
-                    medianLikes: medianLikes,
+                    medianLikes: p50,
+                    p10, p25, p75, p90, p95,
                     topPostLikes: topPostLikes,
+                    userCount: totalUserCount,
+                    scale: scale,
                     engagement: 'learned'
                 };
             },
             
             /**
              * Rebadge a post when it spreads to new area
-             * CRITICAL: Posts get rebadged based on new area context
+             * CRITICAL: Posts get rebadged based on new area's engagement distribution
              */
-            rebadgePostForArea(post, newArea, allPostsInNewArea = []) {
-                const newBadge = this.calculateContextualBadge(post, newArea, allPostsInNewArea);
+            rebadgePostForArea(post, newArea, allPostsInNewArea = [], totalUserCount = 1) {
+                const newBadge = this.calculateContextualBadge(post, newArea, allPostsInNewArea, totalUserCount);
                 
                 // Track badge change
                 if (!this.postBadgeHistory[post.id]) {
@@ -7832,14 +7864,14 @@
                         oldBadge: oldBadge,
                         timestamp: Date.now(),
                         area: newArea,
-                        reasoning: `Rebadged for area context (relative rank, area thresholds)`
+                        reasoning: `Rebadged for area scale (percentile rank, user count: ${totalUserCount})`
                     });
                 }
                 
                 post.badge = newBadge;
-                post.areaContext = newArea; // Track which area this badge applies to
+                post.areaContext = newArea;
                 
-                return { newBadge, badgeChanged, reasoning: `Area: ${newArea}, Posts: ${allPostsInNewArea.length}` };
+                return { newBadge, badgeChanged, reasoning: `Area: ${newArea}, Posts: ${allPostsInNewArea.length}, Users: ${totalUserCount}` };
             },
             
             /**
@@ -7864,14 +7896,14 @@
              * Update badges for ALL posts when votes change
              * Called after post gets a like in any area
              */
-            updateBadgesForArea(area, allPostsInArea) {
+            updateBadgesForArea(area, allPostsInArea, totalUserCount = 1) {
                 if (!allPostsInArea || allPostsInArea.length === 0) return;
                 
-                console.log(`🎯 Updating badges for ${allPostsInArea.length} posts in "${area}"`);
+                console.log(`🎯 Updating badges for ${allPostsInArea.length} posts in "${area}" (${totalUserCount} users)`);
                 
                 let badgesChanged = 0;
                 allPostsInArea.forEach(post => {
-                    const result = this.rebadgePostForArea(post, area, allPostsInArea);
+                    const result = this.rebadgePostForArea(post, area, allPostsInArea, totalUserCount);
                     if (result.badgeChanged) badgesChanged++;
                 });
                 
@@ -7888,11 +7920,10 @@
                     areasAnalyzed: Object.keys(this.areaEngagementMetrics).length,
                     postsBadged: Object.keys(this.postBadgeHistory).length,
                     badgeChanges: Object.values(this.postBadgeHistory).reduce((sum, arr) => sum + arr.length, 0),
-                    areaLearning: Object.entries(this.areaEngagementMetrics).map(([area, metrics]) => ({
-                        area,
-                        avgEngagement: metrics.avgLikesPerPost.toFixed(1),
-                        posts: metrics.postCount
-                    }))
+                    scaleDistribution: Object.values(this.areaEngagementMetrics).reduce((acc, m) => {
+                        acc[m.scale] = (acc[m.scale] || 0) + 1;
+                        return acc;
+                    }, {})
                 };
                 return stats;
             }
