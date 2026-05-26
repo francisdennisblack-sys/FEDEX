@@ -6249,7 +6249,7 @@
         }
         
         // Helper function: Find the absolute closest location from the entire database
-        // Optimized to find nearest neighbor efficiently from 724K+ locations
+        // Optimized with proximity-based concentric circle search for better local accuracy
         function findClosestLocation(userLat, userLon) {
             if (!globalLocationDatabase || globalLocationDatabase.length === 0) {
                 console.warn('⚠️ Location database empty!');
@@ -6259,29 +6259,39 @@
             const startTime = performance.now();
             const dbSize = globalLocationDatabase.length;
             
-            let closestLoc = null;
-            let minDistance = Infinity;
+            // Search in proximity layers: 5km → 15km → 50km → global
+            // This prioritizes nearby areas and prevents distant major cities from dominating
+            const proximityLayers = [5, 15, 50, Infinity];
             
-            // Find absolute closest location from entire database
-            for (let i = 0; i < globalLocationDatabase.length; i++) {
-                const loc = globalLocationDatabase[i];
-                const distance = calculateDistance(userLat, userLon, loc.lat, loc.lon);
+            for (const maxRadius of proximityLayers) {
+                let closestLoc = null;
+                let minDistance = Infinity;
                 
-                if (distance < minDistance) {
-                    minDistance = distance;
-                    closestLoc = loc;
+                // Search all locations within this radius
+                for (let i = 0; i < globalLocationDatabase.length; i++) {
+                    const loc = globalLocationDatabase[i];
+                    const distance = calculateDistance(userLat, userLon, loc.lat, loc.lon);
                     
-                    // Early termination if found something VERY close
-                    if (minDistance < 0.1) break;
+                    // Only consider locations within this radius
+                    if (distance <= maxRadius && distance < minDistance) {
+                        minDistance = distance;
+                        closestLoc = loc;
+                        
+                        // Early exit if VERY close (within 50m)
+                        if (minDistance < 0.05) break;
+                    }
+                }
+                
+                // If found in this radius, return it
+                if (closestLoc) {
+                    const searchTime = (performance.now() - startTime).toFixed(1);
+                    const layer = maxRadius === Infinity ? 'Global' : `${maxRadius}km`;
+                    console.log(`✅ CLOSEST (${layer}): "${closestLoc.name}" | ${minDistance.toFixed(3)} km | ${searchTime}ms`);
+                    return { location: closestLoc, distance: minDistance };
                 }
             }
             
-            const searchTime = (performance.now() - startTime).toFixed(1);
-            
-            if (!closestLoc) return null;
-            
-            console.log(`✅ CLOSEST: "${closestLoc.name}" | ${minDistance.toFixed(3)} km | ${searchTime}ms from ${dbSize.toLocaleString()} locations`);
-            return { location: closestLoc, distance: minDistance };
+            return null;
         }
         
         // Helper function: Detect local neighborhood from coordinates using REAL city data
