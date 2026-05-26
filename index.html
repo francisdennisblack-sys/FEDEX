@@ -12491,10 +12491,29 @@
             
             // PRIORITY 1: Try to use real US location database (5,478 real locations with accurate coordinates)
             if (globalLocationDatabase && globalLocationDatabase.length > 0) {
+                // OPTIMIZATION: Use fast approximate search to narrow down candidates
+                // Instead of checking all 724K locations, narrow to ~1000 nearby candidates first
+                let candidates = [];
+                
+                // FAST FILTER: Bounding box search (much faster than distance calc on all)
+                // Search in a ~100km box first
+                const BOUNDING_BOX_KM = 100;
+                const LAT_OFFSET = BOUNDING_BOX_KM / 111; // ~1 degree latitude = 111km
+                const LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(userLocation.lat * Math.PI / 180));
+                
+                globalLocationDatabase.forEach(loc => {
+                    // Quick bounding box check first
+                    if (Math.abs(loc.lat - userLocation.lat) < LAT_OFFSET && 
+                        Math.abs(loc.lon - userLocation.lon) < LON_OFFSET) {
+                        candidates.push(loc);
+                    }
+                });
+                
+                // Now find closest from candidates (should be <1000 locations instead of 724K)
                 let closestLoc = null;
                 let minDistance = Infinity;
                 
-                globalLocationDatabase.forEach(loc => {
+                candidates.forEach(loc => {
                     const dist = calculateDistance(userLocation.lat, userLocation.lon, loc.lat, loc.lon);
                     if (dist < minDistance) {
                         minDistance = dist;
@@ -12527,7 +12546,7 @@
                         input.value = area;
                     }
                     
-                    console.log(`🏘️ Auto-detected area from US database: ${displayText}`);
+                    console.log(`🏘️ Auto-detected area from US database: ${displayText} (checked ${candidates.length} candidates of ${globalLocationDatabase.length})`);
                     return area;
                 }
             }
