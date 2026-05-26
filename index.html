@@ -2491,6 +2491,26 @@
                 </div>
             </div>
             
+            <!-- Nearby Locations Suggestions (within 1-5 miles) -->
+            <div id="nearbyLocationsContainer" style="
+                margin-bottom: 16px;
+                padding: 12px;
+                background-color: #0a0a0a;
+                border: 1px solid #333;
+                border-radius: 6px;
+                display: none;
+            ">
+                <div style="font-size: 12px; color: #888; margin-bottom: 8px; font-weight: 600;">Nearby areas (1-5 miles):</div>
+                <div id="nearbyLocationsList" style="
+                    display: flex;
+                    gap: 6px;
+                    flex-wrap: wrap;
+                    max-height: 80px;
+                    overflow-y: auto;
+                ">
+                </div>
+            </div>
+            
             <div class="upload-area" id="uploadArea" style="position: relative;">
                 <div id="uploadPreview">
                     <div class="upload-icons" style="display: flex; gap: 24px; justify-content: center; align-items: center; font-size: 48px;">
@@ -10497,6 +10517,9 @@
             // Update zone predictor
             updateZonePredictor();
             
+            // Show nearby locations for quick selection
+            populateNearbyLocations();
+            
             // Reset form
             document.getElementById('postText').value = '';
             const preview = document.getElementById('uploadPreview');
@@ -11274,6 +11297,116 @@
             }
         }
 
+        
+        /**
+         * Populate nearby locations (1-5 miles from user) for quick selection
+         * Helps users discover areas close to them
+         */
+        function populateNearbyLocations() {
+            if (!userLocation || !globalLocationDatabase) {
+                console.log('⚠️  Nearby locations: missing location or database');
+                return;
+            }
+            
+            try {
+                // Find all locations within 1-5 miles of user
+                const NEARBY_RADIUS_MIN = 1.60934 / 0.621371; // 1 mile in km
+                const NEARBY_RADIUS_MAX = 5 * 1.60934 / 0.621371; // 5 miles in km
+                
+                const nearbyLocations = [];
+                
+                for (const location of globalLocationDatabase) {
+                    if (!location.lat || !location.lon) continue;
+                    
+                    const distance = calculateDistance(
+                        userLocation.latitude,
+                        userLocation.longitude,
+                        location.lat,
+                        location.lon
+                    );
+                    
+                    if (distance >= NEARBY_RADIUS_MIN && distance <= NEARBY_RADIUS_MAX) {
+                        nearbyLocations.push({
+                            name: location.name,
+                            state: location.state,
+                            distance: distance,
+                            type: location.type
+                        });
+                    }
+                }
+                
+                // Sort by distance (closest first)
+                nearbyLocations.sort((a, b) => a.distance - b.distance);
+                
+                // Take top 8 nearest
+                const topNearby = nearbyLocations.slice(0, 8);
+                
+                const container = document.getElementById('nearbyLocationsContainer');
+                const list = document.getElementById('nearbyLocationsList');
+                
+                if (!container || !list) {
+                    console.warn('⚠️  Nearby locations: container not found');
+                    return;
+                }
+                
+                if (topNearby.length === 0) {
+                    container.style.display = 'none';
+                    console.log('📍 No nearby locations found');
+                    return;
+                }
+                
+                // Clear previous list
+                list.innerHTML = '';
+                
+                // Add location buttons
+                topNearby.forEach(loc => {
+                    const btn = document.createElement('button');
+                    btn.style.cssText = `
+                        padding: 6px 12px;
+                        background-color: #2a2a2a;
+                        border: 1px solid #667eea;
+                        border-radius: 4px;
+                        color: #fff;
+                        font-size: 11px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        white-space: nowrap;
+                        transition: all 0.2s;
+                    `;
+                    btn.textContent = `📍 ${loc.name} (${(loc.distance * 0.621371).toFixed(1)}mi)`;
+                    
+                    btn.onmouseover = () => {
+                        btn.style.backgroundColor = '#667eea';
+                        btn.style.color = '#000';
+                    };
+                    btn.onmouseout = () => {
+                        btn.style.backgroundColor = '#2a2a2a';
+                        btn.style.color = '#fff';
+                    };
+                    
+                    btn.onclick = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        // Set the custom zone tag to this nearby location
+                        const customTagInput = document.getElementById('customZoneTag');
+                        if (customTagInput) {
+                            customTagInput.value = `${loc.name}, ${loc.state}`;
+                            // Trigger the input handler
+                            handleCustomZoneInput();
+                        }
+                    };
+                    
+                    list.appendChild(btn);
+                });
+                
+                container.style.display = 'block';
+                console.log(`✅ Showing ${topNearby.length} nearby locations`);
+                
+            } catch (error) {
+                console.error('❌ Error populating nearby locations:', error);
+            }
+        }
+        
         function closeModal() {
             document.getElementById('uploadModal').classList.remove('active');
             selectedBoxIndex = -1;
