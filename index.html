@@ -5166,21 +5166,26 @@
             }
         }
 
-        // PRIMARY: Load worldwide POI database and extract city names as locations
+        // PRIMARY: Load worldwide city locations from the lightweight cities shard
+        // (Individual POIs are loaded by the per-state shard loader in STEP 2.)
         async function loadWorldwidePOIAsLocationDatabase() {
             try {
-                console.log('🔄 Step 1 PRIMARY: Loading worldwide POI database for locations...');
-                const response = await fetch('/poi_database_worldwide.json');
-                if (!response.ok) throw new Error('Failed to load worldwide POI database');
-                
-                const data = await response.json();
+                console.log('🔄 Step 1 PRIMARY: Loading worldwide cities shard (lightweight)…');
+                const [citiesRes, manifestRes] = await Promise.all([
+                    fetch('/pois/cities.json'),
+                    fetch('/pois/manifest.json')
+                ]);
+                if (!citiesRes.ok) throw new Error('Failed to load /pois/cities.json');
+                const data = await citiesRes.json();
+                if (manifestRes.ok) {
+                    try { window.poiManifest = await manifestRes.json(); } catch (_) {}
+                }
+
                 const primaryLocations = [];
                 const allPOIs = [];
-                
-                // Extract BOTH city names AND individual POIs for influence zone checking
+
                 if (data.cities && typeof data.cities === 'object') {
                     Object.entries(data.cities).forEach(([cityName, cityData]) => {
-                        // Add city as location
                         primaryLocations.push({
                             name: cityName,
                             state: cityData.country || 'International',
@@ -5189,10 +5194,8 @@
                             type: 'city',
                             population: cityData.poiCount || 0,
                             region: cityData.country || 'World',
-                            source: 'worldwide_poi_database'
+                            source: 'worldwide_cities_shard'
                         });
-                        
-                        // Extract individual POIs for influence zone checking
                         if (cityData.pois && Array.isArray(cityData.pois)) {
                             cityData.pois.forEach(poi => {
                                 allPOIs.push({
@@ -7850,57 +7853,122 @@
                 // STEP 2: Load worldwide POI database (8,500+ POIs)
                 console.log('🏢 STEP 2: Loading worldwide POI database...');
                 try {
-                    const poiResponse = await fetch('/poi_database_worldwide.json');
-                    if (poiResponse.ok) {
-                        const poiData = await poiResponse.json();
-                        let poiLocations = [];
-                        let poiCount = 0;
-                        if (poiData.cities) {
-                            Object.values(poiData.cities).forEach(city => {
-                                if (city.pois && Array.isArray(city.pois)) {
-                                    city.pois.forEach(poi => {
-                                        poiLocations.push({
-                                            name: poi.name,
-                                            lat: poi.lat || 0,
-                                            lon: poi.lon || 0,
-                                            type: poi.type || 'poi',
-                                            category: poi.category || 'other',
-                                            country: city.country || 'Unknown',
-                                            isPOI: true,
-                                            emoji: poi.emoji
-                                        });
-                                        poiCount++;
-                                    });
-                                }
+                    // NEW LAZY-LOAD STRATEGY (replaces the 89 MB monolith):
+                    //   1) pois/manifest.json       — tiny (~9 KB) state→file map
+                    //   2) pois/cities.json         — worldwide named cities (~25 KB)
+                    //   3) pois/states/<USER_STATE>.json — full POIs for the user's state (~2 MB)
+                    //   4) pois/search-index.json   — compact GLOBAL index (~27 MB raw, ~6 MB gzipped over the wire)
+                    //                                 lazily fetched on first specify-area keystroke so search
+                    //                                 covers ALL 500k POIs in the country.
+                    let poiCount = 0;
+                    const poiLocations = [];
+
+                    // 2a — manifest + cities (always load; small)
+                    const manifestResp = await fetch('/pois/manifest.json');
+                    const manifest = manifestResp.ok ? await manifestResp.json() : { states: {} };
+                    window.poiManifest = manifest;
+
+                    const citiesResp = await fetch('/pois/cities.json');
+                    if (citiesResp.ok) {
+                        const citiesPayload = await citiesResp.json();
+                        Object.values(citiesPayload.cities || {}).forEach(city => {
+                            (city.pois || []).forEach(poi => {
+                                poiLocations.push({
+                                    name: poi.name, lat: poi.lat || 0, lon: poi.lon || 0,
+                                    type: poi.type || 'poi', category: poi.category || 'other',
+                                    country: city.country || 'Unknown', isPOI: true,
+                                    emoji: poi.emoji, scope: poi.scope, radiusMi: poi.radiusMi, weight: poi.weight,
+                                });
+                                poiCount++;
                             });
-                        }
-                        // NEW: load .states namespace (per-state expanded POIs from expand_pois_per_state.js)
-                        if (poiData.states) {
-                            Object.entries(poiData.states).forEach(([stateName, stateObj]) => {
-                                if (stateObj && Array.isArray(stateObj.pois)) {
-                                    stateObj.pois.forEach(poi => {
-                                        poiLocations.push({
-                                            name: poi.name,
-                                            lat: poi.lat || 0,
-                                            lon: poi.lon || 0,
-                                            type: poi.type || 'poi',
-                                            category: poi.category || 'other',
-                                            country: stateObj.country || 'United States',
-                                            state: stateName,
-                                            isPOI: true,
-                                            emoji: poi.emoji
-                                        });
-                                        poiCount++;
-                                    });
-                                }
-                            });
-                        }
-                        globalLocationDatabase.push(...poiLocations);
-                        globalPOIDatabase.push(...poiLocations);
-                        console.log(`   ✅ Loaded ${poiCount.toLocaleString()} worldwide POIs (incl. state namespace)`);
+                        });
                     }
+
+                    // 2b — user's state shard (full records)
+                    const userStateGuess = (userLocation && typeof reverseGeocodeState === 'function')
+                        ? reverseGeocodeState(userLocation.lat, userLocation.lon)
+                        : null;
+                    const initialStates = new Set();
+                    if (userStateGuess && manifest.states[userStateGuess]) initialStates.add(userStateGuess);
+                    // Fallback: load California + New York + Texas as anchor populations if state unknown
+                    if (initialStates.size === 0) { ['California', 'New York', 'Texas'].forEach(s => { if (manifest.states[s]) initialStates.add(s); }); }
+
+                    window.loadedPoiStates = window.loadedPoiStates || new Set();
+                    for (const stateName of initialStates) {
+                        if (window.loadedPoiStates.has(stateName)) continue;
+                        const entry = manifest.states[stateName];
+                        if (!entry) continue;
+                        try {
+                            const sResp = await fetch(`/pois/${entry.file}`);
+                            if (sResp.ok) {
+                                const sPayload = await sResp.json();
+                                (sPayload.pois || []).forEach(poi => {
+                                    poiLocations.push({
+                                        name: poi.name, lat: poi.lat || 0, lon: poi.lon || 0,
+                                        type: poi.type || 'poi', category: poi.category || 'other',
+                                        country: sPayload.country || 'United States', state: stateName,
+                                        isPOI: true, emoji: poi.emoji,
+                                        scope: poi.scope, radiusMi: poi.radiusMi, weight: poi.weight,
+                                    });
+                                    poiCount++;
+                                });
+                                window.loadedPoiStates.add(stateName);
+                                console.log(`   ✅ Loaded state shard: ${stateName} (${entry.count.toLocaleString()} POIs, ${entry.fullKB} KB)`);
+                            }
+                        } catch (e) { console.warn(`   ⚠️ Failed to load ${stateName} shard:`, e.message); }
+                    }
+
+                    // 2c — register on-demand loader so any other state can be pulled when needed
+                    window.loadStatePoiShard = async function(stateName) {
+                        if (!stateName || window.loadedPoiStates.has(stateName)) return false;
+                        const entry = (window.poiManifest && window.poiManifest.states) ? window.poiManifest.states[stateName] : null;
+                        if (!entry) return false;
+                        try {
+                            const r = await fetch(`/pois/${entry.file}`);
+                            if (!r.ok) return false;
+                            const p = await r.json();
+                            (p.pois || []).forEach(poi => {
+                                const rec = {
+                                    name: poi.name, lat: poi.lat || 0, lon: poi.lon || 0,
+                                    type: poi.type || 'poi', category: poi.category || 'other',
+                                    country: 'United States', state: stateName, isPOI: true,
+                                    emoji: poi.emoji, scope: poi.scope, radiusMi: poi.radiusMi, weight: poi.weight,
+                                };
+                                globalLocationDatabase.push(rec);
+                                globalPOIDatabase.push(rec);
+                            });
+                            window.loadedPoiStates.add(stateName);
+                            // Invalidate cached POI name index so newly fetched POIs get ranked
+                            window._poiNameIndex = null;
+                            window._poiNameIndexSize = 0;
+                            console.log(`   📦 On-demand state shard loaded: ${stateName} (+${entry.count.toLocaleString()} POIs)`);
+                            return true;
+                        } catch (e) { return false; }
+                    };
+
+                    // 2d — lazy global search index loader (called on first specify-area keystroke)
+                    window.ensureGlobalPoiSearchIndex = async function() {
+                        if (window.globalPoiSearchIndex) return window.globalPoiSearchIndex;
+                        if (window._poiSearchIndexLoading) return window._poiSearchIndexLoading;
+                        window._poiSearchIndexLoading = (async () => {
+                            try {
+                                console.log('🔎 Fetching global POI search index (one-time)…');
+                                const r = await fetch('/pois/search-index.json');
+                                if (!r.ok) return null;
+                                const data = await r.json();
+                                window.globalPoiSearchIndex = data;
+                                console.log(`   ✅ Global POI search index ready: ${data.rows.length.toLocaleString()} POIs across ${data.stateCodes.length} states`);
+                                return data;
+                            } catch (e) { console.warn('   ⚠️ Global POI search index failed:', e.message); return null; }
+                        })();
+                        return window._poiSearchIndexLoading;
+                    };
+
+                    globalLocationDatabase.push(...poiLocations);
+                    globalPOIDatabase.push(...poiLocations);
+                    console.log(`   ✅ POI shards loaded: ${poiCount.toLocaleString()} POIs (cities + initial states). Search index will lazy-load on first keystroke.`);
                 } catch (err) {
-                    console.warn('   ⚠️ POI database load failed:', err.message);
+                    console.warn('   ⚠️ POI shard load failed:', err.message);
                 }
                 
                 // STEP 3: Load expanded POI database (300K+ locations)
@@ -11857,6 +11925,42 @@
                 // contains matches are gathered up to a cap so 500k POIs stay snappy.
                 const SCAN_CAP = 60000; // ~60k POI scan max per query
 
+                // 🌍 GLOBAL INDEX SCAN — covers ALL 500k POIs (other states) once index is fetched.
+                // Rows are [name, lat, lon, stateIdx, typeCode]. Stays before local scans so cross-state matches surface.
+                if (window.globalPoiSearchIndex && Array.isArray(window.globalPoiSearchIndex.rows)) {
+                    const idx = window.globalPoiSearchIndex;
+                    const stateCodes = idx.stateCodes || [];
+                    const indexLimit = Math.min(idx.rows.length, 200000); // global scan budget
+                    for (let i = 0; i < indexLimit; i++) {
+                        const row = idx.rows[i];
+                        if (!row) continue;
+                        const name = row[0];
+                        const nameLower = String(name).toLowerCase();
+                        const isPrefix = nameLower.startsWith(q);
+                        const isContains = !isPrefix && nameLower.includes(q);
+                        if (!isPrefix && !isContains) continue;
+                        const lat = row[1], lon = row[2], stIdx = row[3], typeCode = row[4];
+                        const stateName = (stIdx >= 0 && stIdx < stateCodes.length) ? stateCodes[stIdx] : null;
+                        const emoji = ({h:'🏫',c:'🎓',u:'🎓',r:'🍽️',k:'☕',s:'🛍️'})[typeCode] || '📍';
+                        const key = `${emoji} ${name}`;
+                        if (poiMatches[key]) continue;
+                        let distMi = null;
+                        if (haveLoc) {
+                            const km = calculateDistance(userLat, userLon, lat, lon);
+                            distMi = (km || 0) * 0.621371;
+                        }
+                        poiMatches[key] = {
+                            display: `${emoji} ${name}`,
+                            type: 'poi',
+                            value: name,
+                            priority: isPrefix ? 1 : 2,
+                            distMi,
+                            data: { name, lat, lon, emoji, state: stateName, isGlobalIndex: true }
+                        };
+                        if (isPrefix) poiPrefix++; else poiContains++;
+                    }
+                }
+
                 for (const { src, label } of poiSourceCandidates) {
                     const limit = Math.min(src.length, SCAN_CAP);
                     for (let i = 0; i < limit; i++) {
@@ -12106,6 +12210,22 @@
             
             console.log(`   Calling updateZonePredictorWithCustom...`);
             updateZonePredictorWithCustom(value);
+
+            // If the selected POI lives in a state we haven't loaded yet, pull that shard
+            // so subsequent ML ranking + post routing can use the POI's full metadata.
+            try {
+                if (window.globalPoiSearchIndex && typeof window.loadStatePoiShard === 'function') {
+                    const vLower = String(value).toLowerCase().trim();
+                    const row = (window.globalPoiSearchIndex.rows || []).find(r => r && String(r[0]).toLowerCase() === vLower);
+                    if (row) {
+                        const stIdx = row[3];
+                        const stName = (stIdx >= 0) ? window.globalPoiSearchIndex.stateCodes[stIdx] : null;
+                        if (stName && window.loadedPoiStates && !window.loadedPoiStates.has(stName)) {
+                            window.loadStatePoiShard(stName);
+                        }
+                    }
+                }
+            } catch (e) { /* defensive */ }
             
             // ✅ IMMEDIATE VISUAL FEEDBACK: Brief flash to confirm update
             if (zonePredictor) {
@@ -12201,6 +12321,10 @@
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
 
+            // Lazy-load the global POI search index on first interaction so users can find ANY POI in the country.
+            if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                window.ensureGlobalPoiSearchIndex();
+            }
             const val = customTagInput.value.trim();
             if (val.length === 0) {
                 const dropdown = document.getElementById('autocompleteDropdown');
@@ -13538,41 +13662,64 @@
             const isUserPost = post.userId === userId || post.networkId === userId;
             score += isUserPost ? 10 : 0;
 
-            // ========== 5b. POI-NEAR BOOST (0-22 points) — scope-aware ==========
+            // ========== 5b. POI-NEAR BOOST (0-26 points) — scope-aware bidirectional routing ==========
             // Each POI carries a scope + influence radius (miles). A post tagged to that POI
             // gets boosted when the viewer is inside the POI's influence circle. Larger venues
             // (universities, malls) reach farther; small venues (cafes) only when very close.
+            // This is the routing layer: a post created at "Starbucks - Brooklyn" surges to the
+            // top of every user inside Starbucks's radius — making it "appear within 1s".
+            let _matchedPoi = null; // shared with capacity throttle (#8) below
             try {
                 if (typeof userLocation !== 'undefined' && userLocation && post.county &&
                     typeof globalPOIDatabase !== 'undefined' && globalPOIDatabase && globalPOIDatabase.length) {
-                    const tagLower = String(post.county).toLowerCase();
-                    let best = null; // { mi, radius, weight }
-                    const scanLimit = Math.min(globalPOIDatabase.length, 8000);
-                    for (let pi = 0; pi < scanLimit; pi++) {
-                        const poi = globalPOIDatabase[pi];
-                        if (!poi || !poi.name) continue;
-                        if (String(poi.name).toLowerCase() !== tagLower) continue;
-                        const km = (typeof calculateDistance === 'function')
-                            ? calculateDistance(userLocation.latitude || userLocation.lat, userLocation.longitude || userLocation.lon, poi.lat, poi.lon)
-                            : Infinity;
+                    // Build / reuse a fast lowercase-name → POI index (single pass, cached)
+                    if (!window._poiNameIndex || window._poiNameIndexSize !== globalPOIDatabase.length) {
+                        const idx = new Map();
+                        for (let pi = 0; pi < globalPOIDatabase.length; pi++) {
+                            const p = globalPOIDatabase[pi];
+                            if (!p || !p.name) continue;
+                            const key = String(p.name).toLowerCase();
+                            // Keep first occurrence; collisions are fine for ranking
+                            if (!idx.has(key)) idx.set(key, p);
+                        }
+                        window._poiNameIndex = idx;
+                        window._poiNameIndexSize = globalPOIDatabase.length;
+                    }
+                    const poi = window._poiNameIndex.get(String(post.county).toLowerCase());
+                    if (poi && typeof calculateDistance === 'function') {
+                        const km = calculateDistance(
+                            userLocation.latitude || userLocation.lat,
+                            userLocation.longitude || userLocation.lon,
+                            poi.lat, poi.lon
+                        );
                         const mi = (km || 0) * 0.621371;
                         const radius = poi.radiusMi || 3;
-                        if (!best || mi < best.mi) best = { mi, radius, weight: poi.weight || 1.0 };
-                        if (best && best.mi < (best.radius * 0.1)) break;
-                    }
-                    if (best) {
-                        const ratio = best.mi / Math.max(0.25, best.radius); // 0 at POI, 1 at edge
+                        const weight = poi.weight || 1.0;
+                        _matchedPoi = { poi, mi, radius, weight };
+                        const ratio = mi / Math.max(0.25, radius); // 0 at POI, 1 at edge
                         if (ratio <= 1) {
-                            // Inside influence circle — falloff from 22 → 4 across the radius, scaled by weight
-                            const raw = Math.round((22 - 18 * ratio) * best.weight);
-                            score += Math.max(2, raw);
+                            // Inside influence circle — falloff from 26 → 4 across the radius, scaled by weight
+                            const raw = Math.round((26 - 22 * ratio) * weight);
+                            score += Math.max(4, raw);
                         } else if (ratio <= 2) {
                             // Just outside — small boost so nearby content still leaks in
-                            score += Math.round(3 * best.weight);
+                            score += Math.round(3 * weight);
                         }
                     }
                 }
             } catch (e) { /* defensive: never break ranking */ }
+
+            // ========== 5c. FRESH AREA-TAGGED SURGE (0-15 points) — "appear within 1s" ==========
+            // A brand-new post tagged to an area/POI should rocket to the top of nearby feeds
+            // immediately. Surge decays over the first 5 minutes.
+            if (_matchedPoi && _matchedPoi.mi <= _matchedPoi.radius) {
+                const ageMs = Date.now() - (post.timestamp || Date.now());
+                const FIVE_MIN = 5 * 60 * 1000;
+                if (ageMs < FIVE_MIN) {
+                    const surge = Math.round(15 * (1 - ageMs / FIVE_MIN) * (_matchedPoi.weight || 1));
+                    score += Math.max(0, surge);
+                }
+            }
 
             // ========== 6. COVERAGE PRIORITY (0-5 points) ==========
             // Posts not yet shown to user should get small boost
@@ -13587,14 +13734,24 @@
                 score += 5;
             }
             
-            // ========== 8. DIVERSITY PENALTY (reduce by 0-10 points) ==========
-            // Penalty to avoid showing too many from same area/POI
-            // This is subtle to maintain overall post quality
+            // ========== 8. SCOPE-AWARE CAPACITY THROTTLE ==========
+            // Dense POIs (universities, malls) can carry more content; small POIs (cafes)
+            // should not flood the feed. Cap derived from matched POI's scope/weight.
             const areaPostCount = (gridContent[userId] || [])
                 .filter(p => p.county === post.county).length;
-            
-            if (areaPostCount > 10) {
-                score *= 0.9; // 10% penalty for area saturation
+            let capacity = 10; // default
+            if (_matchedPoi && _matchedPoi.poi) {
+                const sc = _matchedPoi.poi.scope;
+                if (sc === 'xlarge') capacity = 40;
+                else if (sc === 'large') capacity = 22;
+                else if (sc === 'medium') capacity = 12;
+                else if (sc === 'small') capacity = 6;
+                else capacity = Math.round(10 * (_matchedPoi.weight || 1));
+            }
+            if (areaPostCount > capacity) {
+                // Soft penalty proportional to overflow
+                const overflow = (areaPostCount - capacity) / capacity;
+                score *= Math.max(0.6, 1 - 0.3 * Math.min(1, overflow));
             }
             
             // Normalize to 0-100 range
