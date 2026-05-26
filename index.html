@@ -8923,7 +8923,10 @@
         }
 
         // Save a single vote to Firebase
-        async function saveVoteToFirebase(userId, postId, voteType) {
+        async function saveVoteToFirebase(userId, postId, voteType, retryCount = 0) {
+            const MAX_RETRIES = 3;
+            const RETRY_DELAY = 1000 * Math.pow(2, retryCount); // Exponential backoff: 1s, 2s, 4s
+            
             try {
                 const voteKey = `${currentUserId}_${postId}`;
                 const voteRef = ref(database, `user-votes/${userId}/${voteKey}`);
@@ -8938,17 +8941,50 @@
                     console.log(`💾 Saved ${voteType} vote for post ${postId}`);
                 }
             } catch (error) {
-                console.error('Error saving vote to Firebase:', error);
+                console.error(`❌ Error saving vote to Firebase (attempt ${retryCount + 1}):`, error);
+                
+                // Retry logic for network errors
+                if (retryCount < MAX_RETRIES && (error.code === 'NETWORK_ERROR' || error.code === 'PERMISSION_DENIED' || !navigator.onLine)) {
+                    console.log(`🔄 Retrying vote save in ${RETRY_DELAY}ms...`);
+                    setTimeout(() => {
+                        saveVoteToFirebase(userId, postId, voteType, retryCount + 1);
+                    }, RETRY_DELAY);
+                } else if (retryCount >= MAX_RETRIES) {
+                    console.error(`❌ Failed to save vote after ${MAX_RETRIES} attempts. Storing offline...`);
+                    // Store vote locally for later sync
+                    const offlineVotes = JSON.parse(localStorage.getItem('offlineVotes') || '{}');
+                    offlineVotes[`${userId}_${postId}`] = voteType;
+                    localStorage.setItem('offlineVotes', JSON.stringify(offlineVotes));
+                    console.log('💾 Vote stored offline for later sync');
+                }
             }
         }
 
-        async function updatePostVotesFirebase(userId, postId, updates) {
+        async function updatePostVotesFirebase(userId, postId, updates, retryCount = 0) {
+            const MAX_RETRIES = 3;
+            const RETRY_DELAY = 1000 * Math.pow(2, retryCount); // Exponential backoff
+            
             try {
                 const postRef = ref(database, `users/${userId}/posts/${postId}`);
                 await update(postRef, updates);
-                console.log('Votes updated:', postId);
+                console.log('✅ Votes updated successfully:', postId);
             } catch (error) {
-                console.error('Error updating votes:', error);
+                console.error(`❌ Error updating votes (attempt ${retryCount + 1}):`, error);
+                
+                // Retry logic for transient failures
+                if (retryCount < MAX_RETRIES && (error.code === 'NETWORK_ERROR' || error.code === 'PERMISSION_DENIED' || !navigator.onLine)) {
+                    console.log(`🔄 Retrying vote update in ${RETRY_DELAY}ms...`);
+                    setTimeout(() => {
+                        updatePostVotesFirebase(userId, postId, updates, retryCount + 1);
+                    }, RETRY_DELAY);
+                } else if (retryCount >= MAX_RETRIES) {
+                    console.error(`❌ Failed to update votes after ${MAX_RETRIES} attempts`);
+                    // Queue for later sync
+                    const queuedUpdates = JSON.parse(localStorage.getItem('queuedVoteUpdates') || '{}');
+                    queuedUpdates[postId] = { userId, updates, timestamp: Date.now() };
+                    localStorage.setItem('queuedVoteUpdates', JSON.stringify(queuedUpdates));
+                    console.log('💾 Vote update queued for later sync');
+                }
             }
         }
 
@@ -9126,6 +9162,74 @@
         };
         
         window.postTrackingSystem = postTrackingSystem;
+        
+        /**
+         * Sync offline votes and queued updates when connection is restored
+         * Called periodically or when online status changes
+         */
+        async function syncOfflineVotes() {
+            try {
+                // Sync offline votes
+                const offlineVotes = JSON.parse(localStorage.getItem('offlineVotes') || '{}');
+                let syncedCount = 0;
+                
+                for (const key in offlineVotes) {
+                    const [userId, postId] = key.split('_');
+                    const voteType = offlineVotes[key];
+                    
+                    try {
+                        await saveVoteToFirebase(userId, postId, voteType, 0); // No retry on sync
+                        delete offlineVotes[key];
+                        syncedCount++;
+                    } catch (error) {
+                        console.warn(`Could not sync vote for ${postId}:`, error);
+                    }
+                }
+                
+                if (syncedCount > 0) {
+                    localStorage.setItem('offlineVotes', JSON.stringify(offlineVotes));
+                    console.log(`✅ Synced ${syncedCount} offline votes`);
+                }
+                
+                // Sync queued vote updates
+                const queuedUpdates = JSON.parse(localStorage.getItem('queuedVoteUpdates') || '{}');
+                let queuedSyncedCount = 0;
+                
+                for (const postId in queuedUpdates) {
+                    const { userId, updates } = queuedUpdates[postId];
+                    
+                    try {
+                        await updatePostVotesFirebase(userId, postId, updates, 0); // No retry on sync
+                        delete queuedUpdates[postId];
+                        queuedSyncedCount++;
+                    } catch (error) {
+                        console.warn(`Could not sync queued update for ${postId}:`, error);
+                    }
+                }
+                
+                if (queuedSyncedCount > 0) {
+                    localStorage.setItem('queuedVoteUpdates', JSON.stringify(queuedUpdates));
+                    console.log(`✅ Synced ${queuedSyncedCount} queued vote updates`);
+                }
+                
+            } catch (error) {
+                console.error('Error during offline sync:', error);
+            }
+        }
+        
+        // Monitor connection status and sync when coming online
+        window.addEventListener('online', () => {
+            console.log('✅ Connection restored - syncing offline votes...');
+            syncOfflineVotes();
+        });
+        
+        // Periodic sync every 30 seconds
+        setInterval(() => {
+            if (navigator.onLine && isConnected) {
+                syncOfflineVotes();
+            }
+        }, 30000);
+        
         // Admin access functions
         function startAdminLongPress() {
             console.log('⏱️ Admin long press started - hold for 5 seconds...');
