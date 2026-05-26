@@ -7454,15 +7454,37 @@
                     if (usResponse.ok) {
                         const usData = await usResponse.json();
                         let usLocations = [];
-                        if (usData.states) {
+                        // Handle both file structures: locations[].regions[].areas[] and states[].cities[]
+                        if (usData.locations && Array.isArray(usData.locations)) {
+                            // NEW structure: locations[].regions[].areas[]
+                            usData.locations.forEach(location => {
+                                if (location.regions && Array.isArray(location.regions)) {
+                                    location.regions.forEach(region => {
+                                        if (region.areas && Array.isArray(region.areas)) {
+                                            region.areas.forEach(area => {
+                                                usLocations.push({
+                                                    name: area.name,
+                                                    state: location.state || location.stateCode || 'Unknown',
+                                                    lat: parseFloat(area.lat) || 0,
+                                                    lon: parseFloat(area.lon) || 0,
+                                                    type: area.type || 'city',
+                                                    country: location.country || 'USA'
+                                                });
+                                            });
+                                        }
+                                    });
+                                }
+                            });
+                        } else if (usData.states) {
+                            // OLD structure: states[].cities[]
                             Object.values(usData.states).forEach(state => {
                                 if (state.cities && Array.isArray(state.cities)) {
                                     state.cities.forEach(city => {
                                         usLocations.push({
                                             name: city.name,
                                             state: state.name || 'Unknown',
-                                            lat: city.lat || 0,
-                                            lon: city.lon || 0,
+                                            lat: parseFloat(city.lat) || 0,
+                                            lon: parseFloat(city.lon) || 0,
                                             type: city.type || 'city',
                                             country: 'USA'
                                         });
@@ -14430,27 +14452,28 @@
                 return currentZoneTag;
             }
             
-            // PRIORITY 1: Try to use real US location database (5,478 real locations with accurate coordinates)
+            // PRIORITY 1: Try to use real US location database (75K+ real locations with accurate coordinates)
             if (globalLocationDatabase && globalLocationDatabase.length > 0) {
                 // OPTIMIZATION: Use fast approximate search to narrow down candidates
-                // Instead of checking all 724K locations, narrow to ~1000 nearby candidates first
+                // Instead of checking all 724K locations, narrow to nearby candidates first
                 let candidates = [];
                 
                 // FAST FILTER: Bounding box search (much faster than distance calc on all)
-                // Search in a ~100km box first
-                const BOUNDING_BOX_KM = 100;
+                // Search in a ~25km box first (more precise than 100km)
+                const BOUNDING_BOX_KM = 25;
                 const LAT_OFFSET = BOUNDING_BOX_KM / 111; // ~1 degree latitude = 111km
                 const LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(userLocation.lat * Math.PI / 180));
                 
                 globalLocationDatabase.forEach(loc => {
-                    // Quick bounding box check first
-                    if (Math.abs(loc.lat - userLocation.lat) < LAT_OFFSET && 
+                    // Quick bounding box check first - only consider locations with valid coordinates
+                    if (loc.lat && loc.lon && 
+                        Math.abs(loc.lat - userLocation.lat) < LAT_OFFSET && 
                         Math.abs(loc.lon - userLocation.lon) < LON_OFFSET) {
                         candidates.push(loc);
                     }
                 });
                 
-                // Now find closest from candidates (should be <1000 locations instead of 724K)
+                // Now find closest from candidates (should be <500 locations instead of 724K)
                 let closestLoc = null;
                 let minDistance = Infinity;
                 
@@ -14462,16 +14485,19 @@
                     }
                 });
                 
-                if (closestLoc && minDistance < 50) {  // Within 50 km (31 miles) - reasonable neighborhood distance
+                // IMPROVED: Reduce threshold from 50km to 25km for more accurate local detection
+                if (closestLoc && minDistance < 25) {  // Within 25 km (15.5 miles) - actual neighborhood distance
                     const area = closestLoc.name;
                     const distMiles = minDistance * 0.621371;
                     const distStr = Math.round(distMiles * 10) / 10;
                     
                     let displayText;
-                    if (distMiles < 1) {
+                    if (distMiles < 0.5) {
                         displayText = `✓ ${area} (right here!)`;
-                    } else if (distMiles < 5) {
+                    } else if (distMiles < 2) {
                         displayText = `✓ ${area} (${distStr}mi away)`;
+                    } else if (distMiles < 5) {
+                        displayText = `✓ Near ${area} (${distStr}mi)`;
                     } else {
                         displayText = `📍 Near ${area} (${distStr}mi)`;
                     }
@@ -14487,8 +14513,17 @@
                         input.value = area;
                     }
                     
-                    console.log(`🏘️ Auto-detected area from US database: ${displayText} (checked ${candidates.length} candidates of ${globalLocationDatabase.length})`);
+                    console.log(`🏘️ Auto-detected area (${candidates.length} candidates): ${displayText} (min dist: ${minDistance.toFixed(2)}km, total DB: ${globalLocationDatabase.length})`);
                     return area;
+                }
+                
+                // DEBUG: If no close match found in 25km, try wider search to understand why
+                if (candidates.length === 0) {
+                    console.log(`⚠️ No candidates in 25km bounding box. DB has ${globalLocationDatabase.length} locations. User at (${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)})`);
+                    // Sample first few locations to debug
+                    if (globalLocationDatabase.length > 0) {
+                        console.log('   Sample locations from DB:', globalLocationDatabase.slice(0, 3).map(l => `${l.name} (${l.lat}, ${l.lon})`));
+                    }
                 }
             }
             
