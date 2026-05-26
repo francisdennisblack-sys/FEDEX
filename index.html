@@ -793,23 +793,25 @@
         @media (min-width: 600px) {
             .grid {
                 grid-template-columns: repeat(2, 1fr);
-                gap: 80px 20px;
+                gap: 40px 15px;
             }
             .grid-wrapper {
-                max-width: 95vw;
-                padding: 0 10px;
+                max-width: 90vw;
+                padding: 0 20px;
+                margin: 0 auto;
             }
         }
 
-        /* Desktop size optimization (1200px+) - 4 columns */
+        /* Desktop size optimization (1200px+) - 4 columns - COMPACT */
         @media (min-width: 1200px) {
             .grid {
                 grid-template-columns: repeat(4, 1fr);
-                gap: 175px 50px;
+                gap: 60px 25px;
             }
             .grid-wrapper {
-                max-width: 100%;
-                padding: 0;
+                max-width: 85vw;
+                padding: 0 30px;
+                margin: 0 auto;
             }
         }
 
@@ -876,17 +878,21 @@
             background-color: #555;
         }
 
-        /* Mobile optimizations */
+        /* Mobile optimizations - REDUCED VOTE BADGE HEIGHT */
         @media (max-width: 599px) {
             .vote-badge {
-                padding: 6px;
-                gap: 6px;
-                font-size: 11px;
+                padding: 4px;
+                gap: 4px;
+                font-size: 10px;
+                bottom: 16px !important;
+                height: 24px;
             }
 
             .vote-button {
-                padding: 5px 6px;
-                font-size: 10px;
+                padding: 4px 5px;
+                font-size: 9px;
+                height: 24px;
+                line-height: 1;
             }
         }
 
@@ -11524,6 +11530,37 @@
             
             mlSystem.lastUpdateTime = now;
             generateRecommendations(currentUserId, 8); // Keep top 8 recommendations
+            
+            // 📊 CRITICAL: Track post coverage to inform ML about display gaps
+            const allUserPosts = getUserActivePostsWithAreaTags(currentUserId) || [];
+            const allGridPosts = (gridContent[currentUserId] || []);
+            const allUserPostIds = new Set(allUserPosts.map(p => p.id));
+            const allGridPostIds = new Set(allGridPosts.map(p => p.id));
+            
+            // Calculate coverage metrics
+            const visibleUserPosts = allUserPosts.filter(p => allGridPostIds.has(p.id));
+            const hiddenUserPosts = allUserPosts.filter(p => !allGridPostIds.has(p.id));
+            const coveragePercent = allUserPosts.length > 0 ? (visibleUserPosts.length / allUserPosts.length) * 100 : 100;
+            
+            // Notify ML system if coverage is low
+            if (coveragePercent < 100 && hiddenUserPosts.length > 0) {
+                console.warn(`⚠️ ML ALERT: Post coverage at ${coveragePercent.toFixed(1)}% - ${hiddenUserPosts.length} posts not displayed on grid`);
+                console.warn(`   Hidden posts:`, hiddenUserPosts.slice(0,3).map(p => p.id.substring(0,8)));
+                
+                // 🎯 Mark this as coverage gap for ML optimization
+                if (!mlSystem.coverageGaps) mlSystem.coverageGaps = [];
+                mlSystem.coverageGaps.push({
+                    timestamp: now,
+                    userPostsTotal: allUserPosts.length,
+                    visibleCount: visibleUserPosts.length,
+                    hiddenCount: hiddenUserPosts.length,
+                    coveragePercent: coveragePercent
+                });
+                
+                // Keep last 10 gaps for analysis
+                mlSystem.coverageGaps = mlSystem.coverageGaps.slice(-10);
+            }
+            
             console.log('🧠 ML scores updated');
         }
         
@@ -11531,6 +11568,144 @@
         window.mlSystem = mlSystem;
         window.generateRecommendations = generateRecommendations;
         window.updateMLScores = updateMLScores;
+
+        // ============================================================================
+        // UNIFIED CONTENT RANKING SYSTEM - Blend all post ranking systems
+        // ============================================================================
+        // Combines: Area Hierarchy, Badge System, POI Detection, ML Recommendations, Zone Tags
+        // Ensures seamless user experience across all systems
+        // ============================================================================
+        
+        function generateUnifiedPostRank(post, userId) {
+            // 🎯 UNIFIED RANKING SCORE (0-100)
+            // Combines all systems into one coherent ranking for optimal display
+            
+            let score = 0;
+            
+            // ========== 1. AREA HIERARCHY COMPONENT (0-30 points) ==========
+            // Posts promoted to larger geographic areas should rank higher
+            const areaHierarchyLevel = post.areaHierarchyLevel || 'POI';
+            const areaRankMap = { 'POI': 5, 'NEIGHBORHOOD': 8, 'DISTRICT': 15, 'CITY': 25, 'REGION': 28, 'STATE': 30 };
+            const areaScore = areaRankMap[areaHierarchyLevel] || 5;
+            score += areaScore;
+            
+            // ========== 2. ENGAGEMENT TIER/BADGE COMPONENT (0-25 points) ==========
+            // Posts with strong engagement badges should rank higher
+            const likes = post.likes || 0;
+            const dislikes = post.dislikes || 0;
+            const netEngagement = likes - dislikes;
+            
+            let badgeScore = 0;
+            if (likes > 100) badgeScore = 25;        // Crowned/trending
+            else if (likes > 50) badgeScore = 20;    // Hot
+            else if (likes > 20) badgeScore = 15;    // Rising  
+            else if (likes > 5) badgeScore = 10;     // New
+            else badgeScore = Math.max(0, likes);     // Linear up to 5 likes
+            
+            // Penalize high dislikes
+            if (dislikes > likes) badgeScore *= 0.5;
+            
+            score += badgeScore;
+            
+            // ========== 3. FRESHNESS/RECENCY COMPONENT (0-15 points) ==========
+            // Newer posts should be boosted, but not dominate older viral posts
+            const postAge = Date.now() - (post.timestamp || Date.now());
+            const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+            
+            let freshnessScore = 15;
+            if (postAge > TWENTY_FOUR_HOURS * 7) freshnessScore = 2;      // 1 week+: minimal boost
+            else if (postAge > TWENTY_FOUR_HOURS) freshnessScore = 5;     // 1-7 days: low boost
+            else freshnessScore = 15;                                      // < 1 day: full boost
+            
+            score += freshnessScore;
+            
+            // ========== 4. ML RECOMMENDATION COMPONENT (0-15 points) ==========
+            // Posts matching user's demonstrated preferences
+            const mlScore = scorePostForML(post, userId) * 15; // Scale 0-1 to 0-15
+            score += mlScore;
+            
+            // ========== 5. USER OWNERSHIP BOOST (0-10 points) ==========
+            // User's own posts should always be highly visible
+            const isUserPost = post.userId === userId || post.networkId === userId;
+            score += isUserPost ? 10 : 0;
+            
+            // ========== 6. COVERAGE PRIORITY (0-5 points) ==========
+            // Posts not yet shown to user should get small boost
+            if (post.screenCount === undefined || post.screenCount < 3) {
+                score += 5;
+            }
+            
+            // ========== 7. AREA MATCH BONUS (0-5 points) ==========
+            // Posts from user's current area get slight boost
+            const currentArea = getCurrentUserArea();
+            if (post.county === currentArea) {
+                score += 5;
+            }
+            
+            // ========== 8. DIVERSITY PENALTY (reduce by 0-10 points) ==========
+            // Penalty to avoid showing too many from same area/POI
+            // This is subtle to maintain overall post quality
+            const areaPostCount = (gridContent[userId] || [])
+                .filter(p => p.county === post.county).length;
+            
+            if (areaPostCount > 10) {
+                score *= 0.9; // 10% penalty for area saturation
+            }
+            
+            // Normalize to 0-100 range
+            return Math.min(100, Math.max(0, score));
+        }
+        
+        /**
+         * Apply unified ranking to all posts
+         * Called during grid render for optimal display order
+         */
+        function applyUnifiedRanking(displayPosts) {
+            // Score all posts with unified ranking
+            const rankedPosts = displayPosts.map(post => ({
+                ...post,
+                unifiedRank: generateUnifiedPostRank(post, currentUserId)
+            }));
+            
+            // Separate by category while maintaining unified ranking
+            const userPosts = rankedPosts.filter(p => p.userId === currentUserId || p.networkId === currentUserId);
+            const localPosts = rankedPosts.filter(p => p.county === getCurrentUserArea() && !userPosts.find(u => u.id === p.id));
+            const remoteRecommended = rankedPosts.filter(p => p.county !== getCurrentUserArea() && p.unifiedRank > 70 && !userPosts.find(u => u.id === p.id));
+            const otherPosts = rankedPosts.filter(p => !userPosts.find(u => u.id === p.id) && !localPosts.find(l => l.id === p.id) && !remoteRecommended.find(r => r.id === p.id));
+            
+            // Sort each category by unified rank
+            userPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
+            localPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
+            remoteRecommended.sort((a, b) => b.unifiedRank - a.unifiedRank);
+            otherPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
+            
+            // Interleave for variety: user posts, local, recommended, other
+            // This ensures a good mix instead of clustering
+            const result = [];
+            const maxLen = Math.max(userPosts.length, localPosts.length, remoteRecommended.length, otherPosts.length);
+            
+            for (let i = 0; i < maxLen; i++) {
+                // Round-robin: user posts first (always show), then alternate
+                if (userPosts[i]) result.push(userPosts[i]);
+                
+                if (localPosts[i]) result.push(localPosts[i]);
+                if (remoteRecommended[i]) result.push(remoteRecommended[i]);
+                if (i % 2 === 0 && otherPosts[i]) result.push(otherPosts[i]);
+                else if (i % 2 === 1 && otherPosts[i]) result.push(otherPosts[i]);
+            }
+            
+            // Add any remaining posts
+            result.push(...otherPosts.slice(result.filter(p => otherPosts.find(o => o.id === p.id)).length));
+            
+            console.log(`✨ Applied unified ranking to ${rankedPosts.length} posts`);
+            console.log(`   User posts: ${userPosts.length} | Local: ${localPosts.length} | Recommended: ${remoteRecommended.length} | Other: ${otherPosts.length}`);
+            
+            return result;
+        }
+        
+        // Expose unified system globally
+        window.generateUnifiedPostRank = generateUnifiedPostRank;
+        window.applyUnifiedRanking = applyUnifiedRanking;
 
         // ============================================================================
         // ADAPTIVE CONTENT DELIVERY SYSTEM - Optimize first-time & sparse grids
@@ -13097,13 +13272,21 @@
             // This allows posts to display immediately when they arrive from Firebase
             const contentKey = currentUserId || 'temp-posts';
             
-            // CRITICAL FIX: Collect posts from ALL keys in gridContent, not just currentUserId
+            // CRITICAL FIX: Collect posts from ALL keys in gridContent with deduplication
             // This includes the user's local posts + backfilled posts from other areas
+            const seenPostIds = new Set(); // Track unique post IDs to prevent DUPLICATES
             let allPosts = [];
             
             // First add posts from the user's own key (highest priority)
             if (gridContent[contentKey]) {
-                allPosts.push(...gridContent[contentKey]);
+                gridContent[contentKey].forEach(post => {
+                    if (!seenPostIds.has(post.id)) {
+                        seenPostIds.add(post.id);
+                        allPosts.push(post);
+                    } else {
+                        console.log(`⚠️ DUPLICATE POST DETECTED IN RENDER: ${post.id.substring(0,8)} - skipping`);
+                    }
+                });
             }
             
             // Then add posts from other keys (backfilled content)
@@ -13111,7 +13294,8 @@
                 if (key !== contentKey && gridContent[key]) {
                     // Add posts from other keys that aren't already included
                     gridContent[key].forEach(post => {
-                        if (!allPosts.find(p => p.id === post.id)) {
+                        if (!seenPostIds.has(post.id)) {
+                        seenPostIds.add(post.id);
                             allPosts.push(post);
                         }
                     });
@@ -13122,9 +13306,10 @@
             // This guarantees every post appears on the user's grid regardless of area
             const userActivePosts = getUserActivePostsWithAreaTags(currentUserId);
             userActivePosts.forEach(userPost => {
-                // Check if post already in allPosts
-                if (!allPosts.find(p => p.id === userPost.id)) {
+                // Check if post already in allPosts (use seenPostIds Set for O(1) lookup)
+                if (!seenPostIds.has(userPost.id)) {
                     console.log(`📍 ADDING USER POST: "${userPost.id.substring(0,8)}" (${userPost.areaTag}) - was missing from grid`);
+                    seenPostIds.add(userPost.id); // Mark as seen
                     // Add with preserved area tag and hierarchy
                     allPosts.unshift({
                         id: userPost.id,
@@ -13136,7 +13321,7 @@
                 } else {
                     // Update existing post with area hierarchy if missing
                     const existingPost = allPosts.find(p => p.id === userPost.id);
-                    if (!existingPost.areaHierarchyLevel) {
+                    if (existingPost && !existingPost.areaHierarchyLevel) {
                         existingPost.areaHierarchyLevel = userPost.areaHierarchyLevel;
                         existingPost.areaHistory = userPost.areaHistory;
                     }
@@ -13301,6 +13486,15 @@
             
             // Add proximity badges to all posts
             displayPosts = displayPosts.map(post => addProximityBadge(post, currentGrid));
+            
+            // ========================================================================
+            // 🎯 APPLY UNIFIED RANKING SYSTEM
+            // ========================================================================
+            // Blend: Area Hierarchy, Badge System, POI Detection, ML, Zone Tags
+            // This replaces old sorting and applies consistent ranking across all systems
+            console.log(`⚡ Applying unified ranking system to ${displayPosts.length} posts...`);
+            displayPosts = applyUnifiedRanking(displayPosts);
+            console.log(`✅ Unified ranking applied - posts reordered by relevance`);
             
             // Filter hidden/deleted posts from display list
             let sortedPosts = displayPosts.filter(post => {
