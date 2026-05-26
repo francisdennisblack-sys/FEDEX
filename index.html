@@ -10736,94 +10736,139 @@
             try {
                 let totalPostsDeleted = 0;
                 let totalPhotosDeleted = 0;
+                let totalDeleted = 0;
                 
-                // Get ALL users (each user has their own posts)
-                const usersRef = ref(database, `users`);
-                const usersSnapshot = await get(usersRef);
-                
-                if (usersSnapshot.exists()) {
-                    const users = usersSnapshot.val();
-                    const userIds = Object.keys(users);
-                    
-                    console.log(`👤 Found ${userIds.length} users to process`);
-                    
-                    // Process each user
-                    for (const userId of userIds) {
-                        console.log(`👤 Processing user: ${userId.substring(0, 8)}`);
-                        
-                        // 1. DELETE ALL POSTS FOR THIS USER
-                        const postsRef = ref(database, `users/${userId}/posts`);
-                        const postsSnapshot = await get(postsRef);
-                        
-                        if (postsSnapshot.exists()) {
-                            const posts = postsSnapshot.val();
-                            const postIds = Object.keys(posts);
-                            
-                            console.log(`  📝 ${postIds.length} posts to delete`);
-                            
-                            const deletionPromises = postIds.map((postId, index) => {
-                                return remove(ref(database, `users/${userId}/posts/${postId}`))
-                                    .then(() => {
-                                        const progress = Math.round(((index + 1) / postIds.length) * 100);
-                                        console.log(`✅ [${progress}%] Post: ${postId.substring(0, 8)}`);
-                                    })
-                                    .catch(() => {});
-                            });
-                            
-                            await Promise.all(deletionPromises);
-                            totalPostsDeleted += postIds.length;
-                        }
-                        
-                        // 2. DELETE ALL PHOTOS FOR THIS USER
-                        const photosRef = ref(database, `users/${userId}/photos`);
-                        const photosSnapshot = await get(photosRef);
-                        
-                        if (photosSnapshot.exists()) {
-                            const photos = photosSnapshot.val();
-                            const photoIds = Object.keys(photos);
-                            
-                            console.log(`  📷 ${photoIds.length} photos to delete`);
-                            
-                            const photoDeletePromises = photoIds.map((photoId, index) => {
-                                return remove(ref(database, `users/${userId}/photos/${photoId}`))
-                                    .then(() => {
-                                        const progress = Math.round(((index + 1) / photoIds.length) * 100);
-                                        console.log(`✅ [${progress}%] Photo: ${photoId.substring(0, 8)}`);
-                                    })
-                                    .catch(() => {});
-                            });
-                            
-                            await Promise.all(photoDeletePromises);
-                            totalPhotosDeleted += photoIds.length;
-                        }
+                // STRATEGY 1: Delete all posts at root level (if stored there)
+                console.log('🔥 STRATEGY 1: Checking root-level posts...');
+                try {
+                    const rootPostsRef = ref(database, `posts`);
+                    const rootPostsSnapshot = await get(rootPostsRef);
+                    if (rootPostsSnapshot.exists()) {
+                        console.log('  Found root-level posts, deleting...');
+                        await remove(rootPostsRef);
+                        console.log('  ✅ Root posts deleted');
+                        totalDeleted++;
                     }
+                } catch (e) {
+                    console.log('  ℹ️ No root posts found or error:', e.message);
+                }
+                
+                // STRATEGY 2: Delete all user-scoped posts
+                console.log('🔥 STRATEGY 2: Deleting user-scoped posts...');
+                try {
+                    const usersRef = ref(database, `users`);
+                    const usersSnapshot = await get(usersRef);
                     
-                    // 3. DELETE ALL USERS DATA (including posts/photos directories)
-                    console.log(`🗑️ Deleting all user directories...`);
-                    await remove(usersRef).catch(() => {});
+                    if (usersSnapshot.exists()) {
+                        const users = usersSnapshot.val();
+                        const userIds = Object.keys(users);
+                        
+                        console.log(`👤 Found ${userIds.length} users to process`);
+                        
+                        // Process each user
+                        for (const userId of userIds) {
+                            console.log(`👤 Processing user: ${userId.substring(0, 8)}`);
+                            
+                            // 1. DELETE ALL POSTS FOR THIS USER
+                            try {
+                                const postsRef = ref(database, `users/${userId}/posts`);
+                                const postsSnapshot = await get(postsRef);
+                                
+                                if (postsSnapshot.exists()) {
+                                    const posts = postsSnapshot.val();
+                                    const postIds = Object.keys(posts);
+                                    
+                                    console.log(`  📝 ${postIds.length} posts to delete`);
+                                    
+                                    const deletionPromises = postIds.map((postId, index) => {
+                                        return remove(ref(database, `users/${userId}/posts/${postId}`))
+                                            .then(() => {
+                                                const progress = Math.round(((index + 1) / postIds.length) * 100);
+                                                console.log(`✅ [${progress}%] Post: ${postId.substring(0, 8)}`);
+                                            })
+                                            .catch((err) => {
+                                                console.error(`❌ Error deleting post ${postId}:`, err);
+                                            });
+                                    });
+                                    
+                                    await Promise.all(deletionPromises);
+                                    totalPostsDeleted += postIds.length;
+                                }
+                            } catch (postErr) {
+                                console.log(`  ℹ️ No posts for user ${userId}:`, postErr.message);
+                            }
+                            
+                            // 2. DELETE ALL PHOTOS FOR THIS USER
+                            try {
+                                const photosRef = ref(database, `users/${userId}/photos`);
+                                const photosSnapshot = await get(photosRef);
+                                
+                                if (photosSnapshot.exists()) {
+                                    const photos = photosSnapshot.val();
+                                    const photoIds = Object.keys(photos);
+                                    
+                                    console.log(`  📷 ${photoIds.length} photos to delete`);
+                                    
+                                    const photoDeletePromises = photoIds.map((photoId, index) => {
+                                        return remove(ref(database, `users/${userId}/photos/${photoId}`))
+                                            .then(() => {
+                                                const progress = Math.round(((index + 1) / photoIds.length) * 100);
+                                                console.log(`✅ [${progress}%] Photo: ${photoId.substring(0, 8)}`);
+                                            })
+                                            .catch((err) => {
+                                                console.error(`❌ Error deleting photo ${photoId}:`, err);
+                                            });
+                                    });
+                                    
+                                    await Promise.all(photoDeletePromises);
+                                    totalPhotosDeleted += photoIds.length;
+                                }
+                            } catch (photoErr) {
+                                console.log(`  ℹ️ No photos for user ${userId}:`, photoErr.message);
+                            }
+                        }
+                        
+                        // 3. DELETE ALL USERS DATA (including posts/photos directories)
+                        console.log(`🗑️ Deleting all user directories...`);
+                        await remove(usersRef).catch((err) => {
+                            console.error('Error deleting users:', err);
+                        });
+                    }
+                } catch (usersErr) {
+                    console.log('❌ Error with users deletion:', usersErr);
                 }
                 
                 // 4. CLEAR ALL VOTES
                 console.log(`🗳️ Clearing all user votes...`);
-                await remove(ref(database, `user-votes`)).catch(() => {});
+                try {
+                    await remove(ref(database, `user-votes`));
+                    console.log('  ✅ User votes cleared');
+                } catch (e) {
+                    console.log('  ℹ️ No user-votes found or error:', e.message);
+                }
                 
                 // 5. CLEAR ONLINE USERS
                 console.log(`👥 Clearing online users...`);
-                await remove(ref(database, `onlineUsers`)).catch(() => {});
+                try {
+                    await remove(ref(database, `onlineUsers`));
+                    console.log('  ✅ Online users cleared');
+                } catch (e) {
+                    console.log('  ℹ️ No onlineUsers found or error:', e.message);
+                }
                 
                 // 6. VERIFY DELETION
-                const verifyUsers = await get(usersRef);
-                const remaining = verifyUsers.exists() ? Object.keys(verifyUsers.val()).length : 0;
-                
-                const totalDeleted = totalPostsDeleted + totalPhotosDeleted;
-                
-                console.log(`%c🎉 COMPLETE DATABASE WIPE SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
-                
-                if (remaining === 0) {
+                try {
+                    const verifyUsers = await get(ref(database, `users`));
+                    const remaining = verifyUsers.exists() ? Object.keys(verifyUsers.val()).length : 0;
+                    
+                    const totalDeletedCount = totalPostsDeleted + totalPhotosDeleted;
+                    
+                    console.log(`%c🎉 COMPLETE DATABASE WIPE SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
+                    
                     alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${totalPostsDeleted}\n• Photos: ${totalPhotosDeleted}\n• Votes: cleared\n• Users: cleared\n\n✓ Firebase completely wiped`);
-                    console.log(`✅ Total deleted: ${totalDeleted} items`);
-                } else {
-                    alert(`⚠️ Partial deletion:\n• Deleted: ${totalDeleted} items\n• Users remaining: ${remaining}`);
+                    console.log(`✅ Total deleted: ${totalDeletedCount} items`);
+                } catch (verifyErr) {
+                    console.log('ℹ️ Could not verify final state:', verifyErr.message);
                 }
                 
                 // Clear local caches and refresh UI
@@ -10832,8 +10877,11 @@
                 renderGrid();
                 
             } catch (error) {
-                console.error('Error in forceDeleteAllPosts:', error);
-                alert('❌ Error: ' + error.message);
+                console.error('🔴 Error in forceDeleteAllPosts:', error);
+                console.error('  Error message:', error.message);
+                console.error('  Error code:', error.code);
+                console.error('  Full error object:', error);
+                alert('❌ Error: ' + (error.message || 'Unknown error occurred'));
             }
         }
 
