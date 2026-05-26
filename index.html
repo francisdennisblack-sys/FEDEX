@@ -10619,6 +10619,81 @@
             const q = query.toLowerCase();
             const results = [];
             
+            // SPECIAL CASE: If searching for "Seattle", prioritize Seattle + top 4 nearby Washington areas
+            if (q === 'seattle' || q.startsWith('seattle')) {
+                console.log(`🌟 SPECIAL SEATTLE SEARCH DETECTED - prioritizing Seattle + nearby Washington areas`);
+                
+                if (typeof globalLocationDatabase !== 'undefined' && globalLocationDatabase && Array.isArray(globalLocationDatabase)) {
+                    // Find Seattle first
+                    const seattleArea = globalLocationDatabase.find(loc => loc.name.toLowerCase() === 'seattle');
+                    if (seattleArea) {
+                        results.push({
+                            display: `${seattleArea.name}, ${seattleArea.state}`,
+                            type: 'location',
+                            value: seattleArea.name,
+                            priority: 0,
+                            data: seattleArea,
+                            state: seattleArea.state
+                        });
+                        console.log(`✅ Added Seattle to results`);
+                    }
+                    
+                    // Find top 4 nearby Washington areas (by proximity to Seattle)
+                    if (seattleArea && seattleArea.lat && seattleArea.lon) {
+                        const washingtonAreas = globalLocationDatabase
+                            .filter(loc => loc.state === 'Washington' && loc.name !== 'Seattle')
+                            .map(loc => {
+                                // Calculate distance from Seattle
+                                const lat1 = seattleArea.lat * Math.PI / 180;
+                                const lat2 = loc.lat * Math.PI / 180;
+                                const lon1 = seattleArea.lon * Math.PI / 180;
+                                const lon2 = loc.lon * Math.PI / 180;
+                                const dlat = lat2 - lat1;
+                                const dlon = lon2 - lon1;
+                                const a = Math.sin(dlat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dlon/2)**2;
+                                const distance = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)) * 3959; // miles
+                                return { ...loc, distance };
+                            })
+                            .sort((a, b) => a.distance - b.distance)
+                            .slice(0, 4); // Top 4 nearest
+                        
+                        washingtonAreas.forEach(area => {
+                            results.push({
+                                display: `${area.name}, ${area.state}`,
+                                type: 'location',
+                                value: area.name,
+                                priority: 0,
+                                data: area,
+                                state: area.state
+                            });
+                        });
+                        
+                        console.log(`✅ Added top 4 nearby Washington areas: ${washingtonAreas.map(a => a.name).join(', ')}`);
+                    }
+                    
+                    // Add a separator and then ALL remaining Washington locations
+                    results.push({ display: '─ All Washington Locations ─', type: 'separator', disabled: true });
+                    
+                    const allWashingtonAreas = globalLocationDatabase
+                        .filter(loc => loc.state === 'Washington' && loc.name !== 'Seattle' && !results.some(r => r.value === loc.name))
+                        .sort((a, b) => a.name.localeCompare(b.name));
+                    
+                    allWashingtonAreas.forEach(area => {
+                        results.push({
+                            display: `${area.name}, ${area.state}`,
+                            type: 'location',
+                            value: area.name,
+                            priority: 1,
+                            data: area,
+                            state: area.state
+                        });
+                    });
+                    
+                    console.log(`🎯 Seattle search complete: 1 Seattle + 4 nearby + ${allWashingtonAreas.length} all other Washington locations = ${results.length - 1} total results`);
+                    return results;
+                }
+            }
+            
             // FIRST PRIORITY: Search through US locations database (ALREADY FLATTENED)
             if (typeof globalLocationDatabase !== 'undefined' && globalLocationDatabase && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
                 console.log(`   📍 Searching through ${globalLocationDatabase.length} locations...`);
