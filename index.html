@@ -15425,16 +15425,100 @@
         });
         
         /**
-         * Generate enhanced zone tags for posts
-         * Shows hierarchy progression and area growth
+         * Area badge scope ladder (POI → Community → Big Area → City → Region → County → State → Country → Viral)
+         * Returns a numeric level so we can enforce forward-only progression for post owners.
+         */
+        function getAreaScopeLevel(scale) {
+            const levels = {
+                'POI':                    0,
+                'CUSTOM_POI':             0,
+                'NEIGHBORHOOD':           1,
+                'CUSTOM_AREA':            1,
+                'DISTRICT':               2,
+                'CITY':                   3,
+                'LOCAL_TRENDING':         3,
+                'NEIGHBORHOOD_TRENDING':  4,
+                'CITY_TRENDING':          4,
+                'CUSTOM_TRENDING':        4,
+                'METRO_TRENDING':         5,
+                'CITY_POPULAR':           5,
+                'CUSTOM_POPULAR':         5,
+                'METRO_POPULAR':          6,
+                'REGION_POPULAR':         7,
+                'COUNTRY_POPULAR':        8,
+                'CITY_VIRAL':             8,
+                'CUSTOM_VIRAL':           9,
+                'REGION_VIRAL':           9,
+                'COUNTRY_VIRAL':          10,
+            };
+            return levels[scale] !== undefined ? levels[scale] : 0;
+        }
+
+        /**
+         * Read the highest stored area scope level for a post from localStorage.
+         * Returns { level, display, scale } or null if not stored.
+         */
+        function getStoredOwnPostBadge(postId) {
+            try {
+                const raw = localStorage.getItem(`ownPostBadge_${postId}`);
+                return raw ? JSON.parse(raw) : null;
+            } catch(e) { return null; }
+        }
+
+        /**
+         * Persist the area scope badge for a post owned by the current user.
+         * Returns true if this is a NEW (higher) tier than previously stored.
+         */
+        function storeOwnPostBadge(postId, scale, display) {
+            const level = getAreaScopeLevel(scale);
+            const stored = getStoredOwnPostBadge(postId);
+            if (!stored || level > stored.level) {
+                try {
+                    localStorage.setItem(`ownPostBadge_${postId}`, JSON.stringify({ level, scale, display }));
+                } catch(e) {}
+                return true; // badge advanced to new tier
+            }
+            return false;
+        }
+
+        /**
+         * Generate enhanced zone tags for posts.
+         * For the post owner: badges only advance (never regress). Stored in localStorage.
+         * If a badge tier advances, window.ownPostBadgeUpgrades[postId] = true for this render cycle.
          */
         function generateZoneTagHTML(post, zoneContext) {
             // Get area name - prioritize custom tag if user specified one
             let areaName = zoneContext.display;
+            let activeScale = zoneContext.scale;
             if (post.customTag && post.customTag.trim()) {
                 areaName = post.customTag.trim();
             }
-            
+
+            // ── OWNER BADGE FREEZE / PROGRESSION ──────────────────────────────────
+            // Only applies when the viewer IS the post author.
+            if (post.userId && post.userId === currentUserId && post.id) {
+                const newLevel = getAreaScopeLevel(activeScale);
+                const stored   = getStoredOwnPostBadge(post.id);
+
+                if (stored && newLevel < stored.level) {
+                    // Regression detected — hold the floor: show the highest badge earned so far
+                    areaName    = stored.display;
+                    activeScale = stored.scale;
+                } else {
+                    // Equal or advancing — persist and flag if it's a new high
+                    const isUpgrade = storeOwnPostBadge(post.id, activeScale, areaName);
+                    if (isUpgrade && stored !== null) {
+                        // A genuine tier advance — mark this post for recirculation this render cycle
+                        if (!window.ownPostBadgeUpgrades) window.ownPostBadgeUpgrades = {};
+                        window.ownPostBadgeUpgrades[post.id] = true;
+                    } else if (!stored) {
+                        // First time seeing this post — just store it, no upgrade animation needed
+                        storeOwnPostBadge(post.id, activeScale, areaName);
+                    }
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────────
+
             // All zone tags use consistent formatting: white text on dark background, system font
             return `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${formatEarthAreaTag(areaName)}</div>`;
         }
@@ -16010,22 +16094,72 @@
             window.latestUserAreaTag = userAreaTag;
             
             // ========================================================================
-            // MACHINE LEARNING: ENSURE USER'S OWN POST IS ALWAYS VISIBLE
+            // MACHINE LEARNING: OWNER RECIRCULATION + BADGE UPGRADE SURFACING
             // ========================================================================
-            // Guarantee: At least 1 of the user's 5 allowed posts per 24hrs appears on screen
+            // Reset badge-upgrade map at the start of each render cycle
+            window.ownPostBadgeUpgrades = {};
+
             if (currentUserId && sortedPosts.length > 0) {
                 const userPosts = sortedPosts.filter(post => post.networkId === currentUserId || post.userId === currentUserId);
                 const initialVisibleCount = Math.min(sortedPosts.length, 12); // First 12 boxes visible on mobile
-                const hasUserPostVisible = sortedPosts.slice(0, initialVisibleCount).some(p => p.networkId === currentUserId || p.userId === currentUserId);
-                
-                // If user has posts but none are visible in first 12, promote one to top
-                if (userPosts.length > 0 && !hasUserPostVisible) {
-                    const topUserPost = userPosts[0]; // Get first user post
-                    sortedPosts = sortedPosts.filter(p => p.id !== topUserPost.id); // Remove it
-                    sortedPosts.unshift(topUserPost); // Add to top
-                    console.log(`🎯 ML PROMOTION: Moved user post "${topUserPost.id.substring(0, 8)}..." to top of grid for visibility`);
+
+                if (userPosts.length > 0) {
+                    // ── WELL-PERFORMING OWN POSTS ──────────────────────────────────
+                    // Score = net likes; secondary = any positive engagement.
+                    const scoredOwnPosts = userPosts
+                        .map(p => ({ post: p, score: (p.likes || 0) - (p.dislikes || 0) }))
+                        .sort((a, b) => b.score - a.score);
+
+                    const wellPerforming = scoredOwnPosts.filter(x => x.score > 0).map(x => x.post);
+                    const recircPool = wellPerforming.length > 0 ? wellPerforming : userPosts; // fallback to all own posts
+
+                    // ── ROTATION: cycle through own posts every 60s ─────────────────
+                    const recircBucket = Math.floor(Date.now() / 60000); // new post every 60s
+                    const recircTarget = recircPool[recircBucket % recircPool.length];
+
+                    // ── BADGE UPGRADE CHECK (before renderGrid writes to DOM) ────────
+                    // generateZoneTagHTML hasn't run yet; pre-enrich to see if any own post
+                    // is about to earn a new badge tier so we can surface it prominently.
+                    let badgeUpgradePost = null;
+                    for (const p of userPosts) {
+                        const enriched = enrichPostWithLocationData(p);
+                        const zoneCtx  = getContextualZoneTag(enriched, userLocation);
+                        const newLevel = getAreaScopeLevel(zoneCtx.scale);
+                        const stored   = getStoredOwnPostBadge(p.id);
+                        if (!stored || newLevel > stored.level) {
+                            badgeUpgradePost = p;
+                            console.log(`🏅 BADGE UPGRADE DETECTED: Post ${p.id.substring(0,8)}... advancing to "${zoneCtx.scale}"`);
+                            break; // surface the first upgrade found
+                        }
+                    }
+
+                    // ── INJECT: Badge-upgrade post gets position 2, recirculation post gets position 3+ ─
+                    // (Position 1 is the gold-medal / position-1 rotator slot — don't clobber it)
+                    const insertionBase = sortedPosts.length > 1 ? 1 : 0; // insert after slot 0
+
+                    if (badgeUpgradePost) {
+                        sortedPosts = sortedPosts.filter(p => p.id !== badgeUpgradePost.id);
+                        sortedPosts.splice(insertionBase, 0, badgeUpgradePost);
+                        console.log(`🏅 BADGE UPGRADE: Surfaced post ${badgeUpgradePost.id.substring(0,8)}... to grid position ${insertionBase + 1}`);
+                    }
+
+                    if (recircTarget && (!badgeUpgradePost || recircTarget.id !== badgeUpgradePost.id)) {
+                        const insertAt = badgeUpgradePost ? insertionBase + 1 : insertionBase;
+                        sortedPosts = sortedPosts.filter(p => p.id !== recircTarget.id);
+                        sortedPosts.splice(Math.min(insertAt, sortedPosts.length), 0, recircTarget);
+                        console.log(`🔄 OWN POST RECIRC: Surfaced post ${recircTarget.id.substring(0,8)}... to grid position ${insertAt + 1} (bucket ${recircBucket})`);
+                    }
+
+                    // ── FALLBACK: if STILL no own post in first 12, promote one ────
+                    const hasUserPostVisible = sortedPosts.slice(0, initialVisibleCount).some(p => p.networkId === currentUserId || p.userId === currentUserId);
+                    if (!hasUserPostVisible) {
+                        const topUserPost = recircPool[0];
+                        sortedPosts = sortedPosts.filter(p => p.id !== topUserPost.id);
+                        sortedPosts.unshift(topUserPost);
+                        console.log(`🎯 ML PROMOTION (fallback): Moved user post ${topUserPost.id.substring(0,8)}... to top`);
+                    }
                 }
-                
+
                 console.log(`✅ ML CHECK: User has ${userPosts.length} posts, ${sortedPosts.slice(0, initialVisibleCount).filter(p => p.networkId === currentUserId || p.userId === currentUserId).length} visible in first 12 boxes`);
             }
 
