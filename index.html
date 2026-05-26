@@ -13506,7 +13506,20 @@
             // Get content mix for user (now with density metrics & starvation recovery)
             let displayPosts = getAdaptiveGridContent(userAreaTag, onlineUserCount, 999); // Get up to 999 posts
             
-            console.log(`✅ ADAPTIVE MODE v2: ${displayPosts.length} posts available`);
+            // 🔴 CRITICAL: Deduplicate posts by ID before rendering
+            const gridSeenPostIds = new Set();
+            let deduplicatedPosts = [];
+            for (const post of displayPosts) {
+                if (!gridSeenPostIds.has(post.id)) {
+                    gridSeenPostIds.add(post.id);
+                    deduplicatedPosts.push(post);
+                } else {
+                    console.log(`⚠️  DUPLICATE DETECTED: Post ${post.id.substring(0, 8)}... already in grid, skipping`);
+                }
+            }
+            displayPosts = deduplicatedPosts;
+            
+            console.log(`✅ ADAPTIVE MODE v2: ${displayPosts.length} posts available (${Array.from(gridSeenPostIds).length} unique)`);
             console.log(`   📊 Local: ${displayPosts.filter(p => p.contentSource === 'LOCAL').length} | External: ${displayPosts.filter(p => p.contentSource === 'EXTERNAL_TOP_TIER').length}`);
             
             // Add proximity badges to all posts
@@ -13602,12 +13615,20 @@
             let gridPosition = 1;
             const postsToRenderNow = prioritizedPosts.slice(0, 75);
             const postsToLazyLoad = prioritizedPosts.slice(75);
+            const renderedPostIds = new Set(); // Track which posts have been rendered to prevent duplicates
             
             // Render immediate posts
             postsToRenderNow.forEach((post) => {
                 if (hiddenForThisWiFi.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) {
                     return;
                 }
+                
+                // 🔴 SKIP if post already rendered (duplicate prevention)
+                if (renderedPostIds.has(post.id)) {
+                    console.log(`⚠️  SKIP DUPLICATE: Post ${post.id.substring(0, 8)}... already rendered in box`);
+                    return;
+                }
+                renderedPostIds.add(post.id);
                 
                 const box = document.getElementById(`box-${gridPosition}`);
                 if (box) {
@@ -13712,8 +13733,9 @@
                     if (post.userId === currentUserId && window.distributionSystem) {
                         window.distributionSystem.trackOwnPostShown(post.id, currentUserId);
                     }
+                    
+                    gridPosition++; // Only increment when post is actually rendered
                 }
-                gridPosition++;
             });
             
             // ✅ RENDERING COMPLETE LOG
@@ -13733,6 +13755,13 @@
                         if (hiddenForThisWiFi.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) {
                             return;
                         }
+                        
+                        // 🔴 SKIP if post already rendered (duplicate prevention in lazy load)
+                        if (renderedPostIds.has(post.id)) {
+                            console.log(`⚠️  SKIP DUPLICATE (LAZY): Post ${post.id.substring(0, 8)}... already rendered`);
+                            return;
+                        }
+                        renderedPostIds.add(post.id);
                         
                         if (lazyGridPosition >= maxGridSize) return;
                         
@@ -13803,8 +13832,9 @@
                             if (post.userId === currentUserId && window.distributionSystem) {
                                 window.distributionSystem.trackOwnPostShown(post.id, currentUserId);
                             }
+                            
+                            lazyGridPosition++; // Only increment when post actually rendered
                         }
-                        lazyGridPosition++;
                     });
                 }, 50); // Minimal delay - almost instant but doesn't block UI
             }
