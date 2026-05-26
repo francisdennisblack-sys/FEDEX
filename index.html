@@ -11754,6 +11754,9 @@
                 
                 // Search flat array directly (already flattened during loadUSLocationDatabase)
                 globalLocationDatabase.forEach((location) => {
+                    // Skip POIs here — they are handled by the dedicated POI section below
+                    // (so we don't list them twice; the POI section adds emoji + distance metadata)
+                    if (location && location.isPOI) return;
                     const locName = (location.name || '').toLowerCase();
                     const state = (location.state || '').toLowerCase();
                     const stateCode = (location.stateCode || '').toLowerCase();
@@ -11832,38 +11835,85 @@
                 console.warn(`   ❌ globalLocationDatabase not available or empty`);
             }
             
-            // SECOND PRIORITY: Search through POI database (if available)
-            if (window.poiDatabase && Array.isArray(window.poiDatabase)) {
-                console.log(`   🍽️  Searching through ${window.poiDatabase.length} POIs...`);
+            // SECOND PRIORITY: Search through POI database (500k+ POIs across 50 states + worldwide)
+            // Looks at globalPOIDatabase populated by loadWorldwideLocationsAndPOIs (cities + states namespaces).
+            // When userLocation is available, results are distance-ranked so the closest matching POIs come first.
+            const poiSourceCandidates = [];
+            if (typeof globalPOIDatabase !== 'undefined' && Array.isArray(globalPOIDatabase) && globalPOIDatabase.length) {
+                poiSourceCandidates.push({ src: globalPOIDatabase, label: 'globalPOIDatabase' });
+            }
+            if (window.poiDatabase && Array.isArray(window.poiDatabase) && window.poiDatabase.length) {
+                poiSourceCandidates.push({ src: window.poiDatabase, label: 'window.poiDatabase' });
+            }
+
+            if (poiSourceCandidates.length > 0) {
                 const poiMatches = {};
-                let poiCount = 0;
-                
-                window.poiDatabase.forEach(poi => {
-                    const poiName = (poi.name || '').toLowerCase();
-                    const category = (poi.category || '').toLowerCase();
-                    
-                    // Prefix match (highest priority)
-                    if (poiName.startsWith(q)) {
-                        const key = `${poi.emoji} ${poi.name}`;
-                        poiMatches[key] = { display: key, type: 'poi', value: poi.name, priority: 1 };
-                        poiCount++;
-                    } 
-                    // Contains match (medium priority)
-                    else if (poiName.includes(q) || category.includes(q)) {
-                        const key = `${poi.emoji} ${poi.name}`;
-                        if (!poiMatches[key]) {
-                            poiMatches[key] = { display: key, type: 'poi', value: poi.name, priority: 2 };
-                            poiCount++;
+                let poiPrefix = 0, poiContains = 0;
+                const userLat = (typeof userLocation !== 'undefined' && userLocation) ? (userLocation.latitude || userLocation.lat) : null;
+                const userLon = (typeof userLocation !== 'undefined' && userLocation) ? (userLocation.longitude || userLocation.lon) : null;
+                const haveLoc = (typeof userLat === 'number' && typeof userLon === 'number' && typeof calculateDistance === 'function');
+
+                // Cap scan for perf — prefix matches are gathered first across the full set,
+                // contains matches are gathered up to a cap so 500k POIs stay snappy.
+                const SCAN_CAP = 60000; // ~60k POI scan max per query
+
+                for (const { src, label } of poiSourceCandidates) {
+                    const limit = Math.min(src.length, SCAN_CAP);
+                    for (let i = 0; i < limit; i++) {
+                        const poi = src[i];
+                        if (!poi || !poi.name) continue;
+                        const poiName = String(poi.name).toLowerCase();
+                        const category = String(poi.category || '').toLowerCase();
+                        const isPrefix = poiName.startsWith(q);
+                        const isContains = !isPrefix && (poiName.includes(q) || category.includes(q));
+                        if (!isPrefix && !isContains) continue;
+
+                        const emoji = poi.emoji || '📍';
+                        const key = `${emoji} ${poi.name}`;
+                        if (poiMatches[key]) continue;
+
+                        let distMi = null;
+                        if (haveLoc && typeof poi.lat === 'number' && typeof poi.lon === 'number') {
+                            const km = calculateDistance(userLat, userLon, poi.lat, poi.lon);
+                            distMi = (km || 0) * 0.621371;
                         }
+
+                        // Display: "☕ Starbucks - Brooklyn · 1.2 mi · School" (only includes parts we have)
+                        const parts = [`${emoji} ${poi.name}`];
+                        if (distMi !== null) parts.push(`${distMi.toFixed(1)} mi`);
+                        if (poi.category && poi.category !== 'other') parts.push(poi.category);
+                        const display = parts.join(' · ');
+
+                        poiMatches[key] = {
+                            display,
+                            type: 'poi',
+                            value: poi.name,
+                            priority: isPrefix ? 1 : 2,
+                            distMi,
+                            data: poi
+                        };
+                        if (isPrefix) poiPrefix++; else poiContains++;
                     }
+                }
+
+                const sortedPois = Object.values(poiMatches).sort((a, b) => {
+                    if (a.priority !== b.priority) return a.priority - b.priority;
+                    // Distance-rank when available
+                    if (a.distMi !== null && b.distMi !== null) return a.distMi - b.distMi;
+                    if (a.distMi !== null) return -1;
+                    if (b.distMi !== null) return 1;
+                    return String(a.value).localeCompare(String(b.value));
                 });
-                
-                console.log(`   ✅ Found ${poiCount} POI matches`);
-                
-                // Add ALL POI matches - no artificial limit (will be limited later at end)
-                const poisToAdd = Object.values(poiMatches);
-                poisToAdd.forEach(item => results.push(item));
-                console.log(`   🎯 Adding ALL ${poisToAdd.length} POI suggestions from entire database`);
+
+                // Cap displayed POI suggestions at 50 (top by relevance + proximity)
+                const poisToAdd = sortedPois.slice(0, 50);
+                if (poisToAdd.length > 0) {
+                    results.push({ display: `─ Places (${sortedPois.length} match${sortedPois.length === 1 ? '' : 'es'}) ─`, type: 'separator', disabled: true });
+                    poisToAdd.forEach(item => results.push(item));
+                }
+                console.log(`   ✅ POI search: ${poiPrefix} prefix + ${poiContains} contains across ${poiSourceCandidates.length} source(s); showing top ${poisToAdd.length} of ${sortedPois.length}`);
+            } else {
+                console.log('   ⚠️ No POI database loaded yet for autocomplete');
             }
             
             // THIRD PRIORITY: Search through cities (from globalDensityData)
