@@ -10224,6 +10224,14 @@
             selectedBoxIndex = boxIndex;
             document.getElementById('uploadModal').classList.add('active');
             
+            // Clear the area search box (start empty, not pre-filled)
+            const customTagInput = document.getElementById('customZoneTag');
+            if (customTagInput) {
+                customTagInput.value = '';
+                const dropdown = document.getElementById('autocompleteDropdown');
+                if (dropdown) dropdown.style.display = 'none';
+            }
+            
             // Update zone predictor
             updateZonePredictor();
             
@@ -10274,6 +10282,34 @@
         // ============================================
         
         // Build autocomplete suggestions from POI database (ENHANCED for 200K+ POIs)
+        // Helper function to find nearby areas to a given location
+        function findNearbyAreas(location, radiusMiles = 50, maxResults = 8) {
+            if (!location || !location.lat || !location.lon || !globalLocationDatabase) return [];
+            
+            const nearby = [];
+            const radiusKm = radiusMiles * 1.60934;
+            
+            globalLocationDatabase.forEach(loc => {
+                if (loc.lat && loc.lon) {
+                    const dist = calculateDistance(location.lat, location.lon, loc.lat, loc.lon);
+                    if (dist > 0.5 && dist <= radiusKm) { // Within radius but not the same location
+                        nearby.push({
+                            distance: dist,
+                            display: `📍 ${loc.name}, ${loc.state}`,
+                            type: 'location',
+                            value: loc.name,
+                            data: loc,
+                            state: loc.state,
+                            priority: 4 // Lower priority than exact matches
+                        });
+                    }
+                }
+            });
+            
+            // Sort by distance and return closest ones
+            return nearby.sort((a, b) => a.distance - b.distance).slice(0, maxResults);
+        }
+
         function getAutocompleteSuggestions(query) {
             if (!query || query.length < 1) {
                 console.log('🔍 Empty query - skipping search');
@@ -10430,8 +10466,25 @@
                 console.warn(`   ⚠️  globalDensityData not available`);
             }
             
-            // Return comprehensive results (up to 130 total - all locations + POIs + cities)
-            const finalResults = results.slice(0, 130);
+            // FOURTH PRIORITY: If we have a strong match, add nearby areas around it
+            let primaryMatch = null;
+            if (results.length > 0 && results[0].data && results[0].data.lat && results[0].data.lon) {
+                primaryMatch = results[0].data;
+            }
+            
+            if (primaryMatch) {
+                console.log(`   🧭 Finding areas near "${primaryMatch.name}"...`);
+                const nearbyAreas = findNearbyAreas(primaryMatch, 50, 8);
+                if (nearbyAreas.length > 0) {
+                    console.log(`   🧭 Adding ${nearbyAreas.length} nearby areas around "${primaryMatch.name}"`);
+                    // Add a visual separator
+                    results.push({ display: '─ Nearby areas ─', type: 'separator', disabled: true });
+                    nearbyAreas.forEach(area => results.push(area));
+                }
+            }
+            
+            // Return comprehensive results (up to 150 total - all locations + POIs + cities + nearby)
+            const finalResults = results.slice(0, 150);
             console.log(`🔍 SEARCH END: Returning ${finalResults.length} total suggestions`);
             
             return finalResults;
@@ -10461,20 +10514,37 @@
                 ">💡 Recommended Zones</div>
             `;
             
-            const itemsHTML = suggestions.map((s, idx) => `
-                <div style="
-                    padding: 10px 12px;
-                    border-bottom: 1px solid #333;
-                    cursor: pointer;
-                    color: #ddd;
-                    font-size: 13px;
-                    transition: background-color 0.15s;
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                " onmouseover="this.style.backgroundColor='#2d3748'" onmouseout="this.style.backgroundColor='transparent'" onclick="selectAutocomplete('${s.display.replace(/'/g, "\\'")}')"
-                >${s.display}</div>
-            `).join('');
+            const itemsHTML = suggestions.map((s, idx) => {
+                // Skip rendering separators as clickable items - just show them visually
+                if (s.type === 'separator') {
+                    return `
+                        <div style="
+                            padding: 6px 12px;
+                            background-color: #0f1419;
+                            border-bottom: 1px solid #333;
+                            color: #666;
+                            font-size: 11px;
+                            text-align: center;
+                            font-weight: 600;
+                            letter-spacing: 1px;
+                        ">${s.display}</div>
+                    `;
+                }
+                return `
+                    <div style="
+                        padding: 10px 12px;
+                        border-bottom: 1px solid #333;
+                        cursor: pointer;
+                        color: #ddd;
+                        font-size: 13px;
+                        transition: background-color 0.15s;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                    " onmouseover="this.style.backgroundColor='#2d3748'" onmouseout="this.style.backgroundColor='transparent'" onclick="selectAutocomplete('${s.display.replace(/'/g, "\\'")}')"
+                    >${s.display}</div>
+                `;
+            }).join('');
             
             dropdown.innerHTML = headerHTML + itemsHTML;
             dropdown.style.display = 'block';
