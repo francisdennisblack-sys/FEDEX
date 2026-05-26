@@ -7011,6 +7011,16 @@
             // Track custom tag interactions (learn user's tag preferences)
             updateTagEngagementOnVote(post, voteType);
             
+            // 📍 UPDATE AREA TAGS BASED ON ENGAGEMENT
+            // Posts that get likes get promoted to bigger areas
+            updatePostAreaTags(postId, {
+                likes: newLikes,
+                dislikes: newDislikes,
+                screenCount: (post.screenCount || 0) + 1,
+                uniqueUsers: new Set([currentUserId])
+            });
+            console.log(`📍 Post area tags updated based on engagement`);
+            
             // ⚡ CACHE LEARNING: Update ML cache predictions based on this vote
             if (window.postCacheSystem && gridContent[currentUserId]) {
                 window.postCacheSystem.learnUserPreferences(userVotes, 
@@ -7301,6 +7311,207 @@
         let externalPostCache = {}; // Cache for rotation: {areaTag: [topPosts]}
         let lastExternalRotation = {}; // Track rotation time per area
         const EXTERNAL_ROTATION_INTERVAL = 60000; // Rotate external content every minute
+        
+        // ============================================================================
+        // AREA HIERARCHY SYSTEM - Posts promote to bigger areas as they grow
+        // ============================================================================
+        // Hierarchy: POI (smallest, ~1 POI type) → Neighborhood (~2km) → District (~5km) 
+        //            → City (~10km) → Region (~50km) → State/Country (largest)
+        // ============================================================================
+        
+        let userOwnPostsTracker = {}; // Track all active user posts: {userId: {postId: {areaTag, areaHierarchy, reach, likes, screens}}}
+        let postReachTracker = {}; // Track post reach across areas: {postId: {screenCount, uniqueUsers, areasCovered}}
+        
+        /**
+         * Area Hierarchy Definition
+         * Each level represents geographic scale and population
+         */
+        const AREA_HIERARCHY = {
+            'POI': { scale: 1, radius: 0.5, minPopulation: 50, maxPopulation: 1000, emoji: '📍' },
+            'NEIGHBORHOOD': { scale: 2, radius: 2, minPopulation: 1000, maxPopulation: 10000, emoji: '🏘️' },
+            'DISTRICT': { scale: 3, radius: 5, minPopulation: 10000, maxPopulation: 50000, emoji: '🏙️' },
+            'CITY': { scale: 4, radius: 10, minPopulation: 50000, maxPopulation: 500000, emoji: '🌆' },
+            'REGION': { scale: 5, radius: 50, minPopulation: 500000, maxPopulation: 5000000, emoji: '🗺️' },
+            'STATE': { scale: 6, radius: 200, minPopulation: 5000000, maxPopulation: 100000000, emoji: '📍' }
+        };
+        
+        /**
+         * Get area population estimate based on type
+         * Uses POI type, location density, and historical data
+         */
+        function estimateAreaPopulation(areaTag, areaSource = 'location') {
+            // If it's a POI, use POI size rating to estimate population
+            if (areaSource === 'poi' && globalPOIDatabase) {
+                const poi = globalPOIDatabase.find(p => p.name === areaTag);
+                if (poi) {
+                    // Map POI size to population estimates
+                    const sizeMultiplier = {
+                        1: 50,      // Tiny POI: 50 people
+                        2: 200,     // Small: 200
+                        3: 800,     // Medium: 800
+                        4: 3000,    // Large: 3000
+                        5: 10000    // Major: 10000
+                    };
+                    return sizeMultiplier[poi.category?.size] || 500;
+                }
+            }
+            
+            // Default estimates by tag characteristics
+            if (areaTag.toLowerCase().includes('coffee') || areaTag.toLowerCase().includes('starbucks')) return 100;
+            if (areaTag.toLowerCase().includes('park')) return 500;
+            if (areaTag.toLowerCase().includes('mall') || areaTag.toLowerCase().includes('center')) return 2000;
+            if (areaTag.toLowerCase().includes('airport') || areaTag.toLowerCase().includes('station')) return 5000;
+            
+            // Default: assume neighborhood-scale population
+            return 1000;
+        }
+        
+        /**
+         * Determine area hierarchy level based on population and engagement
+         */
+        function getAreaHierarchyLevel(estimatedPopulation, engagementMetrics = {}) {
+            const likes = engagementMetrics.likes || 0;
+            const screens = engagementMetrics.screenCount || 0;
+            const uniqueUsers = engagementMetrics.uniqueUsers || 1;
+            
+            // Boost estimated population if post has significant engagement
+            let adjustedPopulation = estimatedPopulation;
+            
+            // Each like boosts perceived population by ~10%
+            adjustedPopulation *= (1 + likes * 0.1);
+            
+            // Heavy visibility boost population perception
+            if (screens > 100) adjustedPopulation *= 2;
+            if (screens > 1000) adjustedPopulation *= 3;
+            
+            // Determine hierarchy level
+            for (const [level, config] of Object.entries(AREA_HIERARCHY)) {
+                if (adjustedPopulation >= config.minPopulation && adjustedPopulation <= config.maxPopulation) {
+                    return level;
+                }
+            }
+            
+            // Return largest if exceeds all
+            return adjustedPopulation > AREA_HIERARCHY.STATE.maxPopulation ? 'STATE' : 'REGION';
+        }
+        
+        /**
+         * Track user's active posts and their reach
+         * Ensures all active, non-deleted posts appear on user's grid
+         */
+        function trackUserPost(userId, postId, postData) {
+            if (!userOwnPostsTracker[userId]) {
+                userOwnPostsTracker[userId] = {};
+            }
+            
+            const population = estimateAreaPopulation(postData.county, postData.areaTagSource || 'location');
+            const hierarchy = getAreaHierarchyLevel(population, { likes: postData.likes || 0 });
+            
+            userOwnPostsTracker[userId][postId] = {
+                areaTag: postData.county,
+                areaHierarchyLevel: hierarchy,
+                estimatedPopulation: population,
+                originalAreaTag: postData.county,
+                areaHistory: [postData.county], // Track area tag changes
+                reach: {
+                    screenCount: 0,
+                    uniqueUsers: new Set(),
+                    areasCovered: [postData.county]
+                },
+                created: postData.timestamp,
+                likes: postData.likes || 0,
+                dislikes: postData.dislikes || 0,
+                isActive: true
+            };
+            
+            console.log(`📍 TRACKING: User post "${postId.substring(0, 8)}" in ${hierarchy} level "${postData.county}"`);
+        }
+        
+        /**
+         * Update post area tags based on engagement and reach
+         * Posts that grow get promoted to bigger area categories
+         */
+        function updatePostAreaTags(postId, engagementMetrics) {
+            // Find post across all users
+            for (const [userId, posts] of Object.entries(userOwnPostsTracker)) {
+                if (posts[postId]) {
+                    const trackedPost = posts[postId];
+                    const newPopulation = estimateAreaPopulation(trackedPost.areaTag) + engagementMetrics.screenCount * 10;
+                    const newHierarchy = getAreaHierarchyLevel(newPopulation, engagementMetrics);
+                    
+                    // If hierarchy changed, update it
+                    if (newHierarchy !== trackedPost.areaHierarchyLevel) {
+                        console.log(`🚀 POST PROMOTED: "${postId.substring(0, 8)}" ${trackedPost.areaHierarchyLevel} → ${newHierarchy}`);
+                        trackedPost.areaHierarchyLevel = newHierarchy;
+                        trackedPost.areaHistory.push(newHierarchy);
+                    }
+                    
+                    // Update metrics
+                    trackedPost.reach.screenCount = engagementMetrics.screenCount || 0;
+                    trackedPost.reach.uniqueUsers = engagementMetrics.uniqueUsers || new Set();
+                    trackedPost.likes = engagementMetrics.likes || 0;
+                    
+                    break;
+                }
+            }
+        }
+        
+        /**
+         * Get all active posts for a user with proper area tagging
+         * This ensures every post appears on the user's grid
+         */
+        function getUserActivePostsWithAreaTags(userId) {
+            if (!userOwnPostsTracker[userId]) return [];
+            
+            const activePosts = [];
+            
+            for (const [postId, postMetadata] of Object.entries(userOwnPostsTracker[userId])) {
+                if (postMetadata.isActive) {
+                    activePosts.push({
+                        id: postId,
+                        areaTag: postMetadata.areaTag,
+                        areaHierarchyLevel: postMetadata.areaHierarchyLevel,
+                        areaHistory: postMetadata.areaHistory,
+                        likes: postMetadata.likes,
+                        dislikes: postMetadata.dislikes,
+                        displayTags: generateDisplayAreaTags(postMetadata)
+                    });
+                }
+            }
+            
+            console.log(`📊 Retrieved ${activePosts.length} active posts for user ${userId.substring(0, 8)}`);
+            return activePosts;
+        }
+        
+        /**
+         * Generate display tags for a post based on its area hierarchy
+         * Shows progression: "Starbucks → Downtown → Seattle → Washington"
+         */
+        function generateDisplayAreaTags(postMetadata) {
+            const tags = [];
+            
+            // Start with original POI/location
+            tags.push({
+                level: 'ORIGINAL',
+                tag: postMetadata.originalAreaTag,
+                emoji: '📍',
+                scale: 1
+            });
+            
+            // Add hierarchy progression if post has grown
+            if (postMetadata.areaHistory.length > 1) {
+                postMetadata.areaHistory.slice(1).forEach((hierarchyLevel, idx) => {
+                    tags.push({
+                        level: hierarchyLevel,
+                        tag: `Growing to ${hierarchyLevel}`,
+                        emoji: AREA_HIERARCHY[hierarchyLevel]?.emoji || '📍',
+                        scale: AREA_HIERARCHY[hierarchyLevel]?.scale || 1
+                    });
+                });
+            }
+            
+            return tags;
+        }
         
         /**
          * CONTENT DISTRIBUTION ALGORITHM
@@ -12724,6 +12935,36 @@
                 }
             }
         });
+        
+        /**
+         * Generate enhanced zone tags for posts
+         * Shows hierarchy progression and area growth
+         */
+        function generateZoneTagHTML(post, zoneContext) {
+            // If post has area hierarchy, show the progression
+            if (post.areaHistory && post.areaHistory.length > 0) {
+                const tags = post.areaHistory.slice(-3); // Show last 3 area changes
+                const hierarchyEmojis = {
+                    'ORIGINAL': '📍',
+                    'POI': '☕',
+                    'NEIGHBORHOOD': '🏘️',
+                    'DISTRICT': '🏙️',
+                    'CITY': '🌆',
+                    'REGION': '🗺️',
+                    'STATE': '📌'
+                };
+                
+                const tagDisplay = tags.map(t => {
+                    const emoji = hierarchyEmojis[t] || '📍';
+                    return `${emoji} ${t}`;
+                }).join(' → ');
+                
+                return `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 32px; background: linear-gradient(to right, rgba(26,26,26,0.95), rgba(26,26,26,0.8)); display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 700; color: #4ade80; padding: 0 8px; box-sizing: border-box; font-family: 'Courier New', monospace; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${tagDisplay}</div>`;
+            }
+            
+            // Default zone tag display
+            return `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${zoneContext.display}</div>`;
+        }
 
         function renderGrid() {
             console.log('🔴 renderGrid() CALLED - START OF FUNCTION');
@@ -12821,6 +13062,32 @@
                     });
                 }
             }
+            
+            // 📍 ENSURE ALL USER'S ACTIVE POSTS ARE ON GRID
+            // This guarantees every post appears on the user's grid regardless of area
+            const userActivePosts = getUserActivePostsWithAreaTags(currentUserId);
+            userActivePosts.forEach(userPost => {
+                // Check if post already in allPosts
+                if (!allPosts.find(p => p.id === userPost.id)) {
+                    console.log(`📍 ADDING USER POST: "${userPost.id.substring(0,8)}" (${userPost.areaTag}) - was missing from grid`);
+                    // Add with preserved area tag and hierarchy
+                    allPosts.unshift({
+                        id: userPost.id,
+                        county: userPost.areaTag,
+                        areaHierarchyLevel: userPost.areaHierarchyLevel,
+                        areaHistory: userPost.areaHistory,
+                        isUserActivePost: true // Flag so we handle specially
+                    });
+                } else {
+                    // Update existing post with area hierarchy if missing
+                    const existingPost = allPosts.find(p => p.id === userPost.id);
+                    if (!existingPost.areaHierarchyLevel) {
+                        existingPost.areaHierarchyLevel = userPost.areaHierarchyLevel;
+                        existingPost.areaHistory = userPost.areaHistory;
+                    }
+                }
+            });
+            console.log(`📍 Ensured ${userActivePosts.length} user posts are on grid`);
             
             console.log(`🔴 renderGrid() reading posts from key: "${contentKey}"`);
             console.log(`🔴   currentUserId: ${currentUserId}`);
@@ -13103,9 +13370,9 @@
                             zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${badge.text} - Out of Area</div>`;
                             console.log(`    📸 MEDIA POST (OUT-OF-AREA) - Zone: ${badge.zone}, Badge: ${badge.text}`);
                         } else {
-                            // Dynamic zone tag based on engagement
-                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${zoneContext.display}</div>`;
-                            console.log(`    📸 MEDIA POST - Dynamic zone: ${zoneContext.display} (scale: ${zoneContext.scale})`);
+                            // Use enhanced zone tag with area hierarchy
+                            zoneTagHTML = generateZoneTagHTML(post, zoneContext);
+                            console.log(`    📸 MEDIA POST - Zone: ${post.county} (hierarchy: ${post.areaHierarchyLevel || 'N/A'})`);
                         }
                         
                         // Media container with padding to leave room for vote badge and zone tag
@@ -13129,9 +13396,9 @@
                             zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${badge.text} - Out of Area</div>`;
                             console.log(`    📝 TEXT POST (OUT-OF-AREA) - Zone: ${badge.zone}, Badge: ${badge.text}`);
                         } else {
-                            // Dynamic zone tag based on engagement
-                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${zoneContext.display}</div>`;
-                            console.log(`    📝 TEXT POST - Dynamic zone: ${zoneContext.display} (scale: ${zoneContext.scale})`);
+                            // Use enhanced zone tag with area hierarchy
+                            zoneTagHTML = generateZoneTagHTML(post, zoneContext);
+                            console.log(`    📝 TEXT POST - Zone: ${post.county} (hierarchy: ${post.areaHierarchyLevel || 'N/A'})`);
                         }
                         
                         box.innerHTML = `<div style="font-size: 21px; color: #fff; overflow: auto; line-height: 1.4; text-align: center; padding: 12px; word-wrap: break-word; padding-bottom: 70px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; height: 100%; max-height: 200px; background-color: #1a1a1a;">${post.content || ''}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>${zoneTagHTML}`;
@@ -13232,7 +13499,7 @@
                                     const badge = post.outOfAreaBadge;
                                     zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 11px; font-weight: 900; color: ${badge.color}; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${badge.text} - Out of Area</div>`;
                                 } else {
-                                    zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Courier New', monospace;">🌍 ${zoneContext.display}</div>`;
+                                    zoneTagHTML = generateZoneTagHTML(post, zoneContext);
                                 }
                                 box.innerHTML = `<div style="font-size: 21px; color: #fff; overflow: auto; line-height: 1.4; text-align: center; padding: 12px; word-wrap: break-word; padding-bottom: 70px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; height: 100%; max-height: 200px; background-color: #1a1a1a;">${post.content || ''}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>${zoneTagHTML}`;
                                 box.style.position = 'relative';
@@ -14503,6 +14770,11 @@
                 console.log('  ✅ savePostToFirebase completed successfully');
                 console.log(`  💾 Post NOW SAVED to: users/${networkIdForPost}/posts/${postId}`);
                 console.log('  🔍 Firebase listener should now trigger and show your post...');
+
+                // 📍 TRACK POST IN AREA HIERARCHY SYSTEM
+                // This ensures the post appears on user's grid and tracks its growth
+                trackUserPost(networkIdForPost, postId, postData);
+                console.log(`  📍 Post tracked in area hierarchy system (${postData.county})`);
 
                 // ✨ IMMEDIATELY ADD TO LOCAL CACHES
                 // Don't wait for Firebase listener - add post to gridContent + postCache NOW
