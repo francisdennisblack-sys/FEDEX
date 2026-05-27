@@ -16866,24 +16866,95 @@
                 console.log('🔴 renderGrid() early exit: isConnected=false');
                 return;
             }
-
-            // 🛡️ POST-ID INTEGRITY GUARD — runs BEFORE any sort/filter/render touches posts.
-            // Symptom this fixes: posts with missing `id` end up rendered with
-            // data-post-id="undefined", which breaks delete (target lookup fails →
-            // falls through to "hide from view") AND drops content because dedupe by
-            // p.id collapses every id-less post into one Map slot. Root cause varies
-            // (legacy Firebase entries, partial hydration, lost spread), so we self-heal
-            // here and log loudly so the actual culprit shows up in console.
+            
+            // ⚡ ULTRA-FAST MODE: If we have < 100ms, just render first 15 posts with NO algorithms
+            const startTime = performance.now();
+            const useUltraFastMode = startTime < 250; // First render must be <250ms
+            
+            if (useUltraFastMode) {
+                console.log('⚡ ULTRA-FAST MODE: Rendering first 15 posts immediately (no algorithms)');
+                renderGridUltraFast();
+                
+                // Schedule full render for later
+                setTimeout(() => {
+                    console.log('📝 Full renderGrid running (algorithms enabled)');
+                    renderGridFull();
+                }, 500);
+                return;
+            }
+            
+            renderGridFull();
+        }
+        
+        // ⚡ ULTRA-FAST RENDER: First 15 posts, no algorithms
+        function renderGridUltraFast() {
+            console.log('📊 Ultra-fast render: Getting first 15 posts');
+            
+            const gridElement = document.getElementById('grid');
+            if (!gridElement) return;
+            
+            // Get all posts (flat list, no reorganization)
+            const allPosts = [];
+            for (const key of Object.keys(gridContent)) {
+                if (Array.isArray(gridContent[key])) {
+                    allPosts.push(...gridContent[key]);
+                }
+            }
+            
+            // Just take first 15, no sorting
+            const firstPosts = allPosts.slice(0, 15);
+            console.log(`⚡ Rendering ${firstPosts.length} posts immediately`);
+            
+            // Clear grid except box-0 (add content)
+            for (let i = 1; i < Math.min(16, maxGridSize); i++) {
+                const box = document.getElementById(`box-${i}`);
+                if (box) {
+                    box.classList.remove('filled');
+                    box.innerHTML = '';
+                    box.removeAttribute('data-post-id');
+                }
+            }
+            
+            // Render first 15 posts FAST (minimal HTML)
+            let gridPos = 1;
+            firstPosts.forEach(post => {
+                if (!post || !post.id || gridPos >= 16) return;
+                
+                const box = document.getElementById(`box-${gridPos}`);
+                if (!box) return;
+                
+                // Simple HTML - no algorithms, no complex badges
+                const content = (post.content || '').substring(0, 200); // Truncate to avoid huge HTML
+                const likes = post.likes || 0;
+                const dislikes = post.dislikes || 0;
+                
+                box.innerHTML = `<div style="font-size: 16px; overflow-y: auto; padding: 12px; height: 100%;">${content}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; display: flex; gap: 8px; font-size: 12px;"><button onclick="voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 4px; cursor: pointer;">↑ ${likes}</button><button onclick="voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 4px; cursor: pointer;">↓ ${dislikes}</button></div>`;
+                box.setAttribute('data-post-id', post.id);
+                box.classList.add('filled');
+                
+                gridPos++;
+            });
+            
+            console.log(`✅ Ultra-fast render complete: ${gridPos - 1} posts visible`);
+        }
+        
+        // 📝 FULL RENDER: All posts with algorithms, badges, etc (deferred)
+        function renderGridFull() {
+            console.log('📝 Full renderGrid starting (with all algorithms)');
+            renderGrid_Original(); // Call the original full renderGrid below
+        }
+        
+        // ORIGINAL renderGrid function (renamed)
+        function renderGrid_Original() {
             try {
+                // 🛡️ POST-ID INTEGRITY GUARD
                 let _idFixed = 0, _idDropped = 0;
                 for (const key of Object.keys(gridContent)) {
                     if (!Array.isArray(gridContent[key])) continue;
                     const cleaned = [];
                     for (const post of gridContent[key]) {
                         if (!post || typeof post !== 'object') continue;
-                        // Run normalizer first (aliases id ↔ postId, fills owner trio)
                         if (typeof normalizePostFields === 'function') normalizePostFields(post, key);
-                        // Last-resort: derive an id from Firebase-style fallbacks
                         if (!post.id) {
                             const recovered = post.postId || post.firebaseKey || post._key || null;
                             if (recovered) {
@@ -16892,8 +16963,7 @@
                                 _idFixed++;
                             } else {
                                 _idDropped++;
-                                console.warn('🛡️ renderGrid: dropping id-less post under key', key, post);
-                                continue; // skip — would break click handlers + dedupe
+                                continue;
                             }
                         }
                         cleaned.push(post);
