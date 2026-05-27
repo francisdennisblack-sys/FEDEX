@@ -7905,6 +7905,27 @@
             console.log('='.repeat(70) + '\n');
         };
 
+        // ============================================================================
+        // 🔐 PERMANENT USER ID SYSTEM
+        // Creates or restores a permanent, persistent user ID
+        // This survives browser restarts and clears (stored in localStorage)
+        // ============================================================================
+        function getPermanentUserId() {
+            // Check localStorage first (persistent across sessions)
+            let permanentId = localStorage.getItem('permanentUserId');
+            
+            if (!permanentId) {
+                // Create new permanent ID (format: perm-{timestamp}-{random})
+                permanentId = `perm-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+                localStorage.setItem('permanentUserId', permanentId);
+                console.log(`✨ Created new PERMANENT userId: ${permanentId}`);
+            } else {
+                console.log(`✅ Restored PERMANENT userId: ${permanentId}`);
+            }
+            
+            return permanentId;
+        }
+
         // Set up anonymous authentication
         console.log('🔐 Setting up onAuthStateChanged listener...');
         
@@ -7921,6 +7942,9 @@
             console.log('✅ Step 1: Using cached userId from localStorage:', currentUserId);
         }
         
+        // STEP 1b: Get or create PERMANENT userId (survives everything)
+        const permanentUserId = getPermanentUserId();
+        
         onAuthStateChanged(auth, async (user) => {
             console.log('🔐 onAuthStateChanged fired');
             console.log('   user exists:', !!user);
@@ -7931,13 +7955,15 @@
                 console.log('🚀 BOOTSTRAP SEQUENCE: Auth → Grid → Firebase Posts');
                 console.log('='.repeat(70));
                 
-                // ✅ STEP 2: Lock userId (auth is the source of truth)
-                const newUserId = user.uid;
+                // ✅ STEP 2: Use PERMANENT userId (not Firebase UID which can change)
+                // This ensures the same user always has the same ID across sessions
+                const newUserId = permanentUserId;
                 currentUserId = newUserId;
                 localStorage.setItem('userId', currentUserId);
                 isConnected = true;
-                console.log(`\n✅ Step 2: userId LOCKED`);
-                console.log(`  newUserId from auth: ${newUserId}`);
+                console.log(`\n✅ Step 2: userId LOCKED to PERMANENT ID`);
+                console.log(`  Permanent ID: ${newUserId}`);
+                console.log(`  Firebase UID: ${user.uid} (backup, may change)`);
                 console.log(`  currentUserId now: ${currentUserId}`);
                 console.log(`  Saved to localStorage`);
                 
@@ -7962,11 +7988,14 @@
                     const userRef = ref(database, `users/${currentUserId}`);
                     set(userRef, {
                         uid: currentUserId,
+                        firebaseAuthUid: user.uid,
+                        permanentId: permanentUserId,
                         createdAt: new Date().getTime(),
                         lastSeen: new Date().getTime(),
                         isAnonymous: true
                     }, { merge: true });
                     console.log(`\n✅ Step 5: User profile created in Firebase at users/${currentUserId}`);
+                    console.log(`  Permanent ID mapped to Firebase UID for backup`);
                 } catch (err) {
                     console.error(`\n❌ Step 5 ERROR:`, err);
                 }
