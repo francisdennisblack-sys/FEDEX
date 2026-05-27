@@ -10412,9 +10412,9 @@
                 console.log('POST METADATA:');
                 console.log(`  postId: ${postId}`);
                 console.log(`  createdBy: ${postData.createdBy || 'MISSING!'}`);
-                console.log(`  userId: ${postData.userId}`);
-                console.log(`  networkId: ${postData.networkId}`);
-                console.log(`  county: ${postData.county}`);
+                console.log(`  authId: ${postData.authId}`);
+                console.log(`  gridId: ${postData.gridId}`);
+                console.log(`  zoneTag: ${postData.zoneTag}`);
                 console.log(`  content: "${(postData.content || '').substring(0, 50)}..."`);
                 console.log(`  timestamp: ${postData.timestamp}`);
                 console.log(`  Firebase path: posts/${postId}`);
@@ -12375,7 +12375,7 @@
                 targetPost = postCache[selectedPostId];
             }
 
-            const isOwnPost = !!targetPost && (targetPost.userId === currentUserId || targetPost.networkId === currentUserId || targetPost.createdBy === currentUserId);
+            const isOwnPost = !!targetPost && (targetPost.authId === currentUserId || targetPost.userId === currentUserId || targetPost.createdBy === currentUserId);
 
             if (isOwnPost) {
                 console.log('🗑️ deleteAndHidePost: deleting own post');
@@ -17913,8 +17913,8 @@
                     console.log(`🗑️ AUTO-DELETE: Post "${post.id.substring(0, 8)}..." is ${Math.round(postAge / (60*60*1000))}h old - removing from grid`);
                     
                     // Delete from Firebase too (async, don't block rendering)
-                    if (post.networkId) {
-                        const postRef = ref(database, `users/${post.networkId}/posts/${post.id}`);
+                    if (post.id) {
+                        const postRef = ref(database, `posts/${post.id}`);
                         remove(postRef).catch(err => console.error(`❌ Failed to delete expired post:`, err));
                     }
                     return false;
@@ -18425,7 +18425,7 @@
             window.ownPostBadgeUpgrades = {};
 
             if (currentUserId && sortedPosts.length > 0) {
-                const userPosts = sortedPosts.filter(post => post.networkId === currentUserId || post.userId === currentUserId);
+                const userPosts = sortedPosts.filter(post => post.authId === currentUserId || post.userId === currentUserId || post.createdBy === currentUserId);
                 const initialVisibleCount = Math.min(sortedPosts.length, 12); // First 12 boxes visible on mobile
 
                 if (userPosts.length > 0) {
@@ -20664,102 +20664,41 @@
                 console.log(`  📍 Zone: ${areaTag}`);
                 console.log('  🔍 Firebase listener should now trigger and load your post...');
 
-                // 🚀 DISTRIBUTE POST TO NEARBY USERS
-                // Posts should be visible to:
-                // 1. Users in the same area (county) who are NOT near POIs (unless posting user IS near a POI)
-                // 2. Users near the posting user's POI (if they are near a POI)
-                console.log('\n📡 POST DISTRIBUTION STARTING...');
+                // 🚀 POST IS NOW IN SHARED COLLECTION - ALL USERS SEE IT
+                // With shared posts collection, distribution is automatic
+                // All users will see this post via the Firebase listener
+                // (No need to copy to multiple user folders anymore)
+                
                 postData.isNew = true; // Add "new" badge
                 postData.createdAt = new Date().getTime();
                 postData.badge = 'NEW';
                 
-                // Determine distribution zone based on posting user's location
-                const postingUserPOI = findClosestPOIInZone(userLocation.lat, userLocation.lon);
-                const userIsNearPOI = postingUserPOI && postingUserPOI.poi;
-                
-                console.log(`  📍 Posting user analysis:`);
-                console.log(`     Area: ${areaTag}`);
-                console.log(`     Near POI: ${userIsNearPOI ? postingUserPOI.poi.name : 'No'}`);
-                
-                // Query all online users to distribute post
-                try {
-                    const onlineUsersRef = ref(database, 'onlineUsers');
-                    const onlineSnapshot = await get(onlineUsersRef);
-                    
-                    if (onlineSnapshot.exists()) {
-                        const onlineUsersData = onlineSnapshot.val();
-                        console.log(`  👥 Found ${Object.keys(onlineUsersData).length} online users to check for distribution`);
-                        
-                        let distributionCount = 0;
-                        
-                        for (const [userId, userData] of Object.entries(onlineUsersData)) {
-                            if (userId === networkIdForPost) continue; // Don't redistribute to self
-                            
-                            // Determine if this user should receive the post
-                            let shouldDistribute = false;
-                            let distributionReason = '';
-                            
-                            // Get user's area/POI info (from their last recorded location if available)
-                            const userAreaTag = userData.area || userData.county || 'Unknown';
-                            const userNearPOI = userData.poiName ? true : false;
-                            
-                            if (userIsNearPOI) {
-                                // Posting user IS near a POI - distribute to all users near THAT POI
-                                if (userData.poiName === postingUserPOI.poi.name) {
-                                    shouldDistribute = true;
-                                    distributionReason = `POI match: ${postingUserPOI.poi.name}`;
-                                }
-                            } else {
-                                // Posting user is NOT near POI - distribute to nearby users who also aren't near POIs
-                                if (!userNearPOI && userAreaTag === areaTag) {
-                                    shouldDistribute = true;
-                                    distributionReason = `Area match: ${areaTag} (no POI)`;
-                                }
-                            }
-                            
-                            // Save post to this user's distribution feed if they should receive it
-                            if (shouldDistribute) {
-                                const userPostsRef = ref(database, `users/${userId}/posts/${postId}`);
-                                await set(userPostsRef, {
-                                    ...postData,
-                                    distributedFrom: networkIdForPost,
-                                    distributedAt: new Date().getTime(),
-                                    reason: distributionReason
-                                });
-                                distributionCount++;
-                                console.log(`  ✅ Distributed to ${userId}: ${distributionReason}`);
-                            }
-                        }
-                        
-                        console.log(`📡 POST DISTRIBUTED: ${distributionCount} users will see this post`);
-                    } else {
-                        console.warn('  ⚠️ No online users found for distribution');
-                    }
-                } catch (distError) {
-                    console.error('⚠️ Distribution failed (non-blocking):', distError.message);
-                    // Don't throw - post still saved even if distribution fails
-                }
+                console.log(`📡 POST SAVED TO SHARED COLLECTION`);
 
+                console.log(`  ✅ All users will see this post automatically`);
+                console.log(`  📍 Zone: ${areaTag}`);
+                console.log(`  👤 Author authId: ${authUserId}`);
+                
                 // 📍 TRACK POST IN AREA HIERARCHY SYSTEM
                 // This ensures the post appears on user's grid and tracks its growth
-                trackUserPost(networkIdForPost, postId, postData);
-                console.log(`  📍 Post tracked in area hierarchy system (${postData.county})`);
+                trackUserPost(authUserId, postId, postData);
+                console.log(`  📍 Post tracked in area hierarchy system (${areaTag})`);
 
                 // ✨ IMMEDIATELY ADD TO LOCAL CACHES
                 // Don't wait for Firebase listener - add post to gridContent + postCache NOW
                 // This ensures instant feedback to user while Firebase updates propagate
                 console.log('  ⚡ Adding post to local caches for instant display...');
-                console.log('  🔐 POST OWNERSHIP CHECK BEFORE CACHE:');
-                console.log('     networkIdForPost:', networkIdForPost);
+                console.log('  🔐 POST OWNERSHIP CHECK:');
+                console.log('     authUserId:', authUserId);
                 console.log('     currentUserId:', currentUserId);
-                console.log('     Are they same?', networkIdForPost === currentUserId);
+                console.log('     Are they same?', authUserId === currentUserId);
                 
                 // Add to postCache (backup cache)
                 postCache[postId] = postData;
                 console.log(`  💾 Added to postCache: ${postId}`);
                 
-                // Add to gridContent under the correct key
-                const contentKey = networkIdForPost;
+                // Add to gridContent under the current user's key
+                const contentKey = currentUserId;
                 console.log(`  🔑 Using contentKey: "${contentKey}"`);
                 if (!gridContent[contentKey]) {
                     gridContent[contentKey] = [];
@@ -21997,11 +21936,12 @@
                         timestamp: Date.now(),
                         likes: 0,
                         dislikes: 0,
+                        authId: window.currentUserId,
                         userId: window.currentUserId,
-                        networkId: window.currentUserId
+                        createdBy: window.currentUserId
                     };
                     
-                    const path = `users/${window.currentUserId}/posts/${testPostId}`;
+                    const path = `posts/${testPostId}`;
                     console.log('  Saving to path:', path);
                     console.log('  Data:', testData);
                     
