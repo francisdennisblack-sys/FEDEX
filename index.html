@@ -8100,6 +8100,92 @@
                     console.log('='.repeat(70) + '\n');
                 };
                 
+                // 🔐 PERMANENT USER ID DEBUG - Check if system is working
+                window.checkPermanentAuth = function() {
+                    console.log('\n' + '='.repeat(70));
+                    console.log('🔐 PERMANENT AUTH DIAGNOSTIC');
+                    console.log('='.repeat(70));
+                    
+                    // Check localStorage
+                    const permanentId = localStorage.getItem('permanentUserId');
+                    const cachedUserId = localStorage.getItem('userId');
+                    
+                    console.log('📍 STORAGE STATE:');
+                    console.log(`  permanentUserId in localStorage: ${permanentId ? '✅ YES' : '❌ NO'}`);
+                    if (permanentId) console.log(`    Value: ${permanentId}`);
+                    console.log(`  userId in localStorage: ${cachedUserId ? '✅ YES' : '❌ NO'}`);
+                    if (cachedUserId) console.log(`    Value: ${cachedUserId}`);
+                    
+                    // Check current state
+                    console.log('\n👤 CURRENT STATE:');
+                    console.log(`  currentUserId: ${currentUserId || 'NULL'}`);
+                    console.log(`  Matches permanent?: ${currentUserId === permanentId ? '✅ YES' : '❌ NO'}`);
+                    
+                    // Check gridContent
+                    console.log('\n📊 GRID CONTENT:');
+                    const allKeys = Object.keys(gridContent);
+                    console.log(`  Total gridContent keys: ${allKeys.length}`);
+                    allKeys.forEach(key => {
+                        const count = (gridContent[key] || []).length;
+                        const isCurrentKey = key === currentUserId;
+                        console.log(`    "${key}": ${count} posts ${isCurrentKey ? '← CURRENT KEY' : ''}`);
+                    });
+                    
+                    // Check for posts with createdBy field
+                    console.log('\n🔎 POST ANALYSIS:');
+                    let totalPosts = 0;
+                    let postsWithCreatedBy = 0;
+                    let ownPosts = 0;
+                    let externalPosts = 0;
+                    
+                    Object.values(gridContent).forEach(posts => {
+                        if (Array.isArray(posts)) {
+                            totalPosts += posts.length;
+                            posts.forEach(p => {
+                                if (p.createdBy) postsWithCreatedBy++;
+                                if (p.createdBy === currentUserId) ownPosts++;
+                                else if (p.createdBy) externalPosts++;
+                            });
+                        }
+                    });
+                    
+                    console.log(`  Total posts in gridContent: ${totalPosts}`);
+                    console.log(`  Posts with createdBy field: ${postsWithCreatedBy}`);
+                    console.log(`  Own posts (createdBy === currentUserId): ${ownPosts}`);
+                    console.log(`  External posts: ${externalPosts}`);
+                    
+                    // Firebase auth info
+                    console.log('\n🔑 FIREBASE AUTH:');
+                    if (auth && auth.currentUser) {
+                        console.log(`  Firebase UID: ${auth.currentUser.uid}`);
+                        console.log(`  Matches current?: ${auth.currentUser.uid === currentUserId ? '✅ YES' : '❌ NO'}`);
+                        console.log(`  Anonymous: ${auth.currentUser.isAnonymous}`);
+                    } else {
+                        console.log(`  No Firebase user logged in`);
+                    }
+                    
+                    console.log('\n💡 DIAGNOSIS:');
+                    if (!permanentId) {
+                        console.log(`  ❌ ISSUE: permanentUserId not in localStorage`);
+                    } else if (currentUserId !== permanentId) {
+                        console.log(`  ❌ ISSUE: currentUserId (${currentUserId}) doesn't match permanentId (${permanentId})`);
+                    } else if (totalPosts === 0) {
+                        console.log(`  ⚠️  WARNING: No posts loaded yet - subscription may still be loading`);
+                    } else if (postsWithCreatedBy === 0) {
+                        console.log(`  ❌ ISSUE: Posts missing createdBy field - they were created before permanent ID system`);
+                        console.log(`  FIX: Delete these posts and create new ones with the permanent ID system`);
+                    } else if (ownPosts === 0) {
+                        console.log(`  ❌ ISSUE: No posts marked as created by you`);
+                        console.log(`  Possible causes:`);
+                        console.log(`    1. Posts have different createdBy value than currentUserId`);
+                        console.log(`    2. Self-post filter hiding them (check renderGrid 50% filter)`);
+                    } else {
+                        console.log(`  ✅ SYSTEM WORKING: Found ${ownPosts} of your posts`);
+                    }
+                    
+                    console.log('='.repeat(70) + '\n');
+                };
+                
             } else {
                 // User is signed out - sign in anonymously
                 console.log('🔐 Signing in anonymously...');
@@ -18438,8 +18524,8 @@
             
             // ========================================================================
             // SELF-POST VISIBILITY FILTERING
-            // - Regular self-posts: 50% chance to show (ML decides)
-            // - Boosted self-posts: 100% guaranteed to show
+            // - Regular self-posts: ALWAYS show (100% - user should see their content)
+            // - Boosted self-posts: ALWAYS show (100% guaranteed)
             // ========================================================================
             let filteredSortedPosts = [];
             sortedPosts.forEach(post => {
@@ -18451,19 +18537,12 @@
                 if (!isOwnPost) {
                     // Not a self-post - always show
                     filteredSortedPosts.push(post);
-                } else if (post.boostRequested || post.boostIntent?.requested) {
-                    // Own post that's boosted - ALWAYS show (100%)
-                    console.log(`🚀 SELF-POST BOOST: Including own post ${post.id.substring(0,8)} (boosted 100%)`);
-                    filteredSortedPosts.push(post);
                 } else {
-                    // Own post that's NOT boosted - 50% chance to show (ML controlled)
-                    const showOwnPost = Math.random() < 0.5;
-                    if (showOwnPost) {
-                        console.log(`✅ SELF-POST VISIBLE: Own post ${post.id.substring(0,8)} showing (50% chance)`);
-                        filteredSortedPosts.push(post);
-                    } else {
-                        console.log(`⏭️  SELF-POST HIDDEN: Own post ${post.id.substring(0,8)} hidden (50% chance)`);
-                    }
+                    // Own post - ALWAYS SHOW (100%)
+                    // User needs to see their own content at all times
+                    // The original 50% rule was causing posts to disappear randomly
+                    console.log(`✅ OWN POST: Including ${post.id.substring(0,8)} (ALWAYS 100%)`);
+                    filteredSortedPosts.push(post);
                 }
             });
             
