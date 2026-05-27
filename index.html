@@ -2544,7 +2544,7 @@
                         box-sizing: border-box;
                         transition: box-shadow 0.3s ease;
                         box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
-                    " type="text" onfocus="this.style.boxShadow='0 8px 20px rgba(102, 126, 234, 0.25)';" oninput="handleCustomZoneInput();" onblur="this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.1)'; const d=document.getElementById('autocompleteDropdown'); if(d) d.style.display='none';"/>
+                    " type="text" onfocus="this.style.boxShadow='0 8px 20px rgba(102, 126, 234, 0.25)'; handleCustomZoneInputFocus();" oninput="handleCustomZoneInput();" onblur="this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.1)'; const d=document.getElementById('autocompleteDropdown'); if(d) d.style.display='none';"/>
                     
                     <!-- Show Recommended Areas Button -->
                     <button id="showRecommendedAreasBtn" onclick="showRecommendedAreasDropdown()" style="
@@ -2572,14 +2572,38 @@
                     background-color: #1a1a1a;
                     border: 2px solid #667eea;
                     border-radius: 6px;
-                    max-height: 250px;
+                    max-height: 350px;
                     overflow-y: auto;
                     z-index: 1000;
                     display: none;
                     margin-top: 2px;
                     box-shadow: 0 8px 24px rgba(102, 126, 234, 0.2);
+                    scrollbar-width: thin;
+                    scrollbar-color: #667eea #1a1a1a;
                 ">
                 </div>
+                
+                <!-- Scrollbar styling for webkit browsers -->
+                <style>
+                    #autocompleteDropdown::-webkit-scrollbar {
+                        width: 8px;
+                    }
+                    
+                    #autocompleteDropdown::-webkit-scrollbar-track {
+                        background-color: #1a1a1a;
+                        border-radius: 4px;
+                    }
+                    
+                    #autocompleteDropdown::-webkit-scrollbar-thumb {
+                        background-color: #667eea;
+                        border-radius: 4px;
+                        border: 2px solid #1a1a1a;
+                    }
+                    
+                    #autocompleteDropdown::-webkit-scrollbar-thumb:hover {
+                        background-color: #8b9aff;
+                    }
+                </style>
             </div>
             
             <!-- Nearby Locations Suggestions (within 1-5 miles) -->
@@ -13126,6 +13150,109 @@
          * Handle custom zone input - show dropdown with matching suggestions
          * Called from inline oninput handler
          */
+        /**
+         * Handle focus on 'Specify area' field - show nearby locations dropdown if empty
+         */
+        function handleCustomZoneInputFocus() {
+            const customTagInput = document.getElementById('customZoneTag');
+            if (!customTagInput) return;
+
+            const val = customTagInput.value.trim();
+            
+            // If field is empty on focus, show nearby locations
+            if (val.length === 0) {
+                console.log('📍 Specify area field focused and empty - showing nearby locations');
+                showNearbyLocationsDropdown();
+            }
+        }
+
+        /**
+         * Show dropdown with nearby locations (LOCATIONS only, not POIs)
+         */
+        function showNearbyLocationsDropdown() {
+            const dropdown = document.getElementById('autocompleteDropdown');
+            if (!dropdown) return;
+
+            let html = '';
+            
+            // Header
+            html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600;">Nearby Locations</div>';
+            
+            // Show nearby locations from database
+            if (userLocation && globalLocationDatabase && globalLocationDatabase.length > 0) {
+                const userLat = userLocation.latitude || userLocation.lat;
+                const userLon = userLocation.longitude || userLocation.lon;
+                
+                if (userLat && userLon) {
+                    // Find nearby locations within 100km
+                    const nearbyLocations = globalLocationDatabase
+                        .filter(loc => {
+                            if (!loc.lat || !loc.lon) return false;
+                            const dist = calculateDistance(userLat, userLon, loc.lat, loc.lon);
+                            return dist < 100; // 100km = ~60 miles
+                        })
+                        .sort((a, b) => {
+                            const distA = calculateDistance(userLat, userLon, a.lat, a.lon);
+                            const distB = calculateDistance(userLat, userLon, b.lat, b.lon);
+                            return distA - distB;
+                        }); // Show ALL nearby locations through scrolling
+                    
+                    nearbyLocations.forEach(loc => {
+                        const dist = calculateDistance(userLat, userLon, loc.lat, loc.lon);
+                        const displayName = `${loc.name}, ${loc.state}`;
+                        html += `
+                            <div style="
+                                padding: 10px 12px;
+                                border-bottom: 1px solid #333;
+                                cursor: pointer;
+                                transition: background-color 0.1s;
+                                background-color: #1a1a1a;
+                                user-select: none;
+                                font-size: 12px;
+                                color: #bbb;
+                            " onmouseover="this.style.backgroundColor='#2a2a2a'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='#1a1a1a'; this.style.color='#bbb'" onclick="selectLocationFromSpecifyField('${displayName}', event)" title="Select: ${displayName}">
+                                <div style="font-weight: 500;">${displayName}</div>
+                                <div style="color: #777; margin-top: 2px; font-size: 10px;">${(dist * 0.621371).toFixed(1)}mi away</div>
+                            </div>
+                        `;
+                    });
+                    
+                    if (nearbyLocations.length > 0) {
+                        console.log(`📍 Showing ${nearbyLocations.length} nearby locations`);
+                    } else {
+                        html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">No nearby locations found</div>';
+                    }
+                } else {
+                    html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">Location data unavailable</div>';
+                }
+            } else {
+                html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">Loading locations...</div>';
+            }
+            
+            dropdown.innerHTML = html;
+            dropdown.style.display = 'block';
+        }
+
+        /**
+         * Select location from the specify area field dropdown
+         */
+        function selectLocationFromSpecifyField(locationName, event) {
+            if (event) event.stopPropagation();
+            
+            const customTagInput = document.getElementById('customZoneTag');
+            if (customTagInput) {
+                customTagInput.value = locationName;
+                customTagInput.focus();
+                console.log(`✅ Location selected: ${locationName}`);
+                
+                // Close dropdown after selection
+                const dropdown = document.getElementById('autocompleteDropdown');
+                if (dropdown) {
+                    dropdown.style.display = 'none';
+                }
+            }
+        }
+
         function handleCustomZoneInput() {
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
@@ -13136,8 +13263,8 @@
             }
             const val = customTagInput.value.trim();
             if (val.length === 0) {
-                const dropdown = document.getElementById('autocompleteDropdown');
-                if (dropdown) dropdown.style.display = 'none';
+                // If user cleared the field, show nearby locations again
+                showNearbyLocationsDropdown();
                 return;
             }
 
@@ -16667,6 +16794,7 @@
             }
             
             // SECTION 1.5: Nearby POIs from the 785K+ database (search-index + OSM + worldwide)
+            // ✨ NOW SCROLLABLE: Show ALL nearby POIs without limiting to 20
             if (globalPOIDatabase && globalPOIDatabase.length > 0 && userLocation) {
                 // Get POIs near user location (within 80km/50 miles for comprehensive coverage)
                 const nearbyPOIs = globalPOIDatabase
@@ -16685,8 +16813,7 @@
                         const distA = calculateDistance(userLocation.lat, userLocation.lon, a.lat, a.lon);
                         const distB = calculateDistance(userLocation.lat, userLocation.lon, b.lat, b.lon);
                         return distA - distB;
-                    })
-                    .slice(0, 20); // Top 20 nearest POIs (up from 15)
+                    }); // ✨ NO SLICE - Show ALL nearby POIs through scrolling!
                 
                 nearbyPOIs.forEach(poi => {
                     const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
@@ -16714,9 +16841,9 @@
             }
             
             // SECTION 2: All locations from database (searchable)
+            // ✨ NOW SCROLLABLE: Show ALL available locations (75K+) through scrolling
             if (globalLocationDatabase && globalLocationDatabase.length > 0) {
-                // Show ALL locations (75K+), batched for performance
-                // First show 100 locations alphabetically, indicate more available
+                // Show ALL locations through scrollable dropdown - no more arbitrary limits!
                 const allLocations = globalLocationDatabase
                     .map(loc => ({
                         name: loc.name,
@@ -16724,8 +16851,7 @@
                         display: `${loc.name}, ${loc.state}`,
                         data: loc
                     }))
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .slice(0, 100); // Show top 100 instead of top 20
+                    .sort((a, b) => a.name.localeCompare(b.name)); // ✨ NO SLICE - Show ALL locations via scrolling!
                 
                 allLocations.forEach(loc => {
                     html += `
@@ -16743,15 +16869,10 @@
                         </div>
                     `;
                 });
-                
-                if (globalLocationDatabase.length > 100) {
-                    html += `<div style="padding: 10px 12px; background-color: #0f1419; color: #666; font-size: 10px; text-align: center; border-top: 1px solid #2a2a2a;">
-                        + ${(globalLocationDatabase.length - 100).toLocaleString()} more locations available (type to search)
-                    </div>`;
-                }
             }
 
             // SECTION 3: Nearby POIs from 785K+ database (search-index + OSM + worldwide)
+            // ✨ NOW SCROLLABLE: Show ALL nearby attractions without limiting to 18
             try {
                 if (typeof globalPOIDatabase !== 'undefined' && globalPOIDatabase && globalPOIDatabase.length && typeof userLocation !== 'undefined' && userLocation) {
                     const userLat = userLocation.latitude || userLocation.lat;
@@ -16768,10 +16889,10 @@
                             if (mi < 40) nearby.push({ poi, mi }); // Extended range: 25→40 miles for more options
                         }
                         nearby.sort((a, b) => a.mi - b.mi);
-                        const top = nearby.slice(0, 18); // Increased from 12→18 POIs
-                        if (top.length > 0) {
-                            html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600; border-top: 1px solid #2a2a2a; margin-top: 8px;">Nearby Attractions</div>';
-                            top.forEach(({ poi, mi }) => {
+                        // ✨ NO SLICE - Show ALL nearby attractions through scrolling!
+                        if (nearby.length > 0) {
+                            html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600; border-top: 1px solid #2a2a2a; margin-top: 8px;">Nearby Attractions (Scroll for more)</div>';
+                            nearby.forEach(({ poi, mi }) => {
                                 const safeName = String(poi.name).replace(/'/g, "&#39;");
                                 const emoji = poi.emoji || (
                                     poi.category === 'Restaurant' ? '🍴' :
