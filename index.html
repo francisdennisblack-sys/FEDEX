@@ -8385,18 +8385,39 @@
                     console.error(`\n❌ Step 7 ERROR:`, err);
                 }
                 
-                // 🔄 SERVICE WORKER: Register for background sync
+                // 🔄 SERVICE WORKER: Register for background sync and offline support
                 if ('serviceWorker' in navigator) {
                     navigator.serviceWorker.register('/service-worker.js').then(reg => {
-                        console.log('✅ Service Worker registered:', reg.scope);
-                        // Attempt background sync
+                        console.log('✅ Service Worker registered - offline mode active');
+                        
+                        // Attempt background sync if available
                         if ('sync' in reg) {
-                            reg.sync.register('firebase-sync').catch(err => {
-                                console.warn('Background sync not available:', err);
+                            reg.sync.register('firebase-sync').then(() => {
+                                console.log('✅ Background sync registered - will sync even when offline');
+                            }).catch(err => {
+                                console.warn('Background sync not available (browser limitation):', err);
                             });
                         }
+                        
+                        // Listen for service worker updates
+                        reg.addEventListener('updatefound', () => {
+                            const newWorker = reg.installing;
+                            newWorker.addEventListener('statechange', () => {
+                                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                    console.log('✅ Service Worker update ready - will activate on next page load');
+                                }
+                            });
+                        });
                     }).catch(err => {
                         console.warn('Service Worker registration failed:', err);
+                    });
+                    
+                    // Listen for messages from service worker
+                    navigator.serviceWorker.addEventListener('message', (event) => {
+                        if (event.data.type === 'BACKGROUND_SYNC_TRIGGER') {
+                            console.log('📱 Service Worker triggered sync from background');
+                            subscribeToFirebasePostsWithReconnect();
+                        }
                     });
                 }
                 
@@ -11024,6 +11045,14 @@
                     console.log(`  📞 About to call callback with ${allPosts.length} posts`);
                     callback(allPosts);
                     console.log('  ✅ callback completed');
+                    
+                    // 💾 CACHE POSTS IN SERVICE WORKER FOR OFFLINE ACCESS
+                    if ('serviceWorker' in navigator && navigator.serviceWorker.controller && allPosts.length > 0) {
+                        navigator.serviceWorker.controller.postMessage({
+                            type: 'CACHE_POSTS',
+                            posts: allPosts.slice(0, 100) // Cache first 100 posts to avoid large messages
+                        });
+                    }
                 }, (error) => {
                     console.error('🚨🚨🚨 FIREBASE onValue ERROR 🚨🚨🚨');
                     console.error('  Error code:', error.code);
