@@ -790,8 +790,7 @@ app.post('/api/boost-prices', (req, res) => {
 
 app.post('/api/boost/create-intent', async (req, res) => {
     try {
-        const { tier = 'standard', userId = 'anon' } = req.body || {};
-        const t = BOOST_TIERS[tier] || BOOST_TIERS.standard;
+        const { priceCents = 499, userId = 'anon' } = req.body || {};
         const stripe = getStripeClient();
         if (!stripe) {
             return res.status(503).json({
@@ -799,15 +798,15 @@ app.post('/api/boost/create-intent', async (req, res) => {
             });
         }
         const intent = await stripe.paymentIntents.create({
-            amount: t.amountCents,
-            currency: t.currency,
+            amount: priceCents,
+            currency: 'usd',
             automatic_payment_methods: { enabled: true },
-            metadata: { kind: 'post_boost', tier, userId }
+            metadata: { kind: 'post_boost', priceCents, userId }
         });
         res.json({
             clientSecret: intent.client_secret,
             paymentIntentId: intent.id,
-            amountCents: t.amountCents,
+            amountCents: priceCents,
             currency: t.currency,
             label: t.label
         });
