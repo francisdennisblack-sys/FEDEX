@@ -4939,7 +4939,108 @@
         // ============================================
         async function loadPOIData() {
             try {
-                // Load expanded global POI database (96+ cities, 7,680+ POIs, 50+ categories)
+                console.log('📥 Loading comprehensive POI database...');
+                
+                // PRIORITY 1: Try to load the 500K POI search index (all states merged)
+                try {
+                    const searchIndexResponse = await fetch('pois/search-index.json');
+                    const searchIndexData = await searchIndexResponse.json();
+                    
+                    console.log(`✅ Loaded search index with ${searchIndexData.length} POIs`);
+                    
+                    // Build comprehensive POI database from search index
+                    globalPOIDatabase = searchIndexData.map(poi => ({
+                        name: poi.name,
+                        lat: poi.lat,
+                        lon: poi.lon,
+                        category: poi.category || poi.type || 'POI',
+                        type: poi.type || 'point_of_interest',
+                        state: poi.state || 'Unknown',
+                        subCategory: poi.subCategory || null,
+                        amenity: poi.amenity || null
+                    }));
+                    
+                    console.log(`🗺️ Built global POI database with ${globalPOIDatabase.length} points`);
+                    return; // Success - use comprehensive database
+                } catch (searchErr) {
+                    console.warn('⚠️ Search index load failed, trying state-by-state...', searchErr);
+                }
+                
+                // PRIORITY 2: Load POI manifest and load relevant state files
+                try {
+                    const manifestResponse = await fetch('pois/manifest.json');
+                    const manifest = await manifestResponse.json();
+                    
+                    console.log(`📋 Manifest loaded: ${manifest.totalStates} states, ${manifest.totalPois} total POIs`);
+                    
+                    // For now, load all states (can be optimized per-state later)
+                    const statePromises = [];
+                    
+                    for (const [stateName, stateInfo] of Object.entries(manifest.states)) {
+                        if (stateInfo.file) {
+                            statePromises.push(
+                                fetch(stateInfo.file)
+                                    .then(r => r.json())
+                                    .then(data => {
+                                        // Ensure all POIs have state info
+                                        return (data.pois || data).map(poi => ({
+                                            ...poi,
+                                            state: stateName
+                                        }));
+                                    })
+                                    .catch(err => {
+                                        console.warn(`⚠️ Failed to load ${stateName}: ${err.message}`);
+                                        return [];
+                                    })
+                            );
+                        }
+                    }
+                    
+                    // Load first 5 states quickly, defer rest
+                    const priorityStates = statePromises.slice(0, 5);
+                    const deferredStates = statePromises.slice(5);
+                    
+                    const priorityResults = await Promise.all(priorityStates);
+                    const allPOIs = priorityResults.flat();
+                    
+                    globalPOIDatabase = allPOIs.map(poi => ({
+                        name: poi.name,
+                        lat: poi.lat,
+                        lon: poi.lon,
+                        category: poi.category || poi.type || 'POI',
+                        type: poi.type || 'point_of_interest',
+                        state: poi.state || 'Unknown',
+                        subCategory: poi.subCategory || null,
+                        amenity: poi.amenity || null
+                    }));
+                    
+                    console.log(`✅ Loaded ${globalPOIDatabase.length} POIs from priority states`);
+                    
+                    // Load remaining states in background
+                    Promise.all(deferredStates)
+                        .then(results => {
+                            const additionalPOIs = results.flat().map(poi => ({
+                                name: poi.name,
+                                lat: poi.lat,
+                                lon: poi.lon,
+                                category: poi.category || poi.type || 'POI',
+                                type: poi.type || 'point_of_interest',
+                                state: poi.state || 'Unknown',
+                                subCategory: poi.subCategory || null,
+                                amenity: poi.amenity || null
+                            }));
+                            
+                            globalPOIDatabase = [...globalPOIDatabase, ...additionalPOIs];
+                            console.log(`✅ Background load complete: ${globalPOIDatabase.length} total POIs`);
+                        })
+                        .catch(err => console.warn('⚠️ Background POI load failed:', err));
+                    
+                    return; // Success
+                } catch (manifestErr) {
+                    console.warn('⚠️ Manifest load failed, trying expanded database...', manifestErr);
+                }
+                
+                // FALLBACK: Load original expanded POI database
                 const poiResponse = await fetch('poi_database_expanded.json');
                 const poiData = await poiResponse.json();
                 
@@ -16427,7 +16528,7 @@
             const dropdown = document.getElementById('mlAreaDropdown');
             if (!dropdown) return;
             
-            // Enhanced: Show ML recommendations PLUS all available locations
+            // Enhanced: Show ML recommendations PLUS all available locations AND POIs
             let html = '';
             
             // SECTION 1: ML Recommendations (if available)
@@ -16463,16 +16564,55 @@
                     `;
                 });
                 
-                html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600; border-top: 1px solid #2a2a2a; margin-top: 8px;">Or Browse All Locations</div>';
+                html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600; border-top: 1px solid #2a2a2a; margin-top: 8px;">POIs Near You</div>';
             } else {
-                html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600;">Available Locations</div>';
+                html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600;">Nearby POIs & Locations</div>';
+            }
+            
+            // SECTION 1.5: Nearby POIs from the 500K database
+            if (globalPOIDatabase && globalPOIDatabase.length > 0 && userLocation) {
+                // Get POIs near user location (within 50 miles)
+                const nearbyPOIs = globalPOIDatabase
+                    .filter(poi => {
+                        if (!poi.lat || !poi.lon) return false;
+                        const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                        return dist < 50; // 50 km = ~31 miles
+                    })
+                    .sort((a, b) => {
+                        const distA = calculateDistance(userLocation.lat, userLocation.lon, a.lat, a.lon);
+                        const distB = calculateDistance(userLocation.lat, userLocation.lon, b.lat, b.lon);
+                        return distA - distB;
+                    })
+                    .slice(0, 15); // Top 15 nearest POIs
+                
+                nearbyPOIs.forEach(poi => {
+                    const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                    html += `
+                        <div style="
+                            padding: 10px 12px;
+                            border-bottom: 1px solid #333;
+                            cursor: pointer;
+                            transition: background-color 0.1s;
+                            background-color: #1a1a1a;
+                            user-select: none;
+                            font-size: 11px;
+                        " onmouseover="this.style.backgroundColor='#2a2a2a'" onmouseout="this.style.backgroundColor='#1a1a1a'" onclick="selectMLArea('${poi.name}', event)" title="Click to select: ${poi.name}">
+                            <div style="font-weight: 500;">${poi.name}</div>
+                            <div style="color: #777; margin-top: 2px;">${(dist * 0.621371).toFixed(1)}mi • ${poi.category}</div>
+                        </div>
+                    `;
+                });
+                
+                if (nearbyPOIs.length > 0) {
+                    html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600; border-top: 1px solid #2a2a2a; margin-top: 8px;">Other Locations</div>';
+                }
             }
             
             // SECTION 2: All locations from database (searchable)
             if (globalLocationDatabase && globalLocationDatabase.length > 0) {
-                // Show top 20 locations alphabetically
-                const topLocations = globalLocationDatabase
-                    .slice(0, 50)
+                // Show ALL locations (75K+), batched for performance
+                // First show 100 locations alphabetically, indicate more available
+                const allLocations = globalLocationDatabase
                     .map(loc => ({
                         name: loc.name,
                         state: loc.state,
@@ -16480,9 +16620,9 @@
                         data: loc
                     }))
                     .sort((a, b) => a.name.localeCompare(b.name))
-                    .slice(0, 20);
+                    .slice(0, 100); // Show top 100 instead of top 20
                 
-                topLocations.forEach(loc => {
+                allLocations.forEach(loc => {
                     html += `
                         <div style="
                             padding: 10px 12px;
@@ -16499,9 +16639,9 @@
                     `;
                 });
                 
-                if (globalLocationDatabase.length > 20) {
+                if (globalLocationDatabase.length > 100) {
                     html += `<div style="padding: 10px 12px; background-color: #0f1419; color: #666; font-size: 10px; text-align: center; border-top: 1px solid #2a2a2a;">
-                        + ${(globalLocationDatabase.length - 20).toLocaleString()} more locations in search field
+                        + ${(globalLocationDatabase.length - 100).toLocaleString()} more locations available (type to search)
                     </div>`;
                 }
             }
