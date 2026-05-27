@@ -55,6 +55,10 @@ function dedupKey(name, lat, lon) {
     return `${String(name).toLowerCase().trim()}|${lat.toFixed(4)}|${lon.toFixed(4)}`;
 }
 
+// 6 decimal places ≈ 11 cm precision — way more than needed for POI ranking.
+// Existing shards have 13-14 digits per coord; truncating saves ~30% on shard size.
+function r6(x) { return typeof x === 'number' ? Math.round(x * 1e6) / 1e6 : x; }
+
 function mergeState(stateName) {
     const osmFile   = path.join(OSM_DIR, stateName.replace(/ /g, '_') + '.json');
     const shardFile = path.join(STATES_DIR, stateName.replace(/ /g, '_') + '.json');
@@ -78,11 +82,12 @@ function mergeState(stateName) {
     // Schools/colleges/universities
     for (const s of (osm.schools || [])) {
         const meta = SCHOOL_META[s.type] || SCHOOL_META.school;
-        const key = dedupKey(s.name, s.lat, s.lon);
+        const lat = r6(s.lat), lon = r6(s.lon);
+        const key = dedupKey(s.name, lat, lon);
         if (seen.has(key)) continue;
         seen.add(key);
         pois.push({
-            name: s.name, lat: s.lat, lon: s.lon,
+            name: s.name, lat, lon,
             category: meta.category, type: s.type, emoji: meta.emoji,
             scope: meta.scope, radiusMi: meta.radiusMi, weight: meta.weight,
             source: 'osm'
@@ -94,18 +99,25 @@ function mergeState(stateName) {
     const placeOut = []; // separate file
     for (const pl of (osm.places || [])) {
         const meta = PLACE_META[pl.kind] || PLACE_META.locality;
-        const key = dedupKey(pl.name, pl.lat, pl.lon);
+        const lat = r6(pl.lat), lon = r6(pl.lon);
+        const key = dedupKey(pl.name, lat, lon);
         if (!seen.has(key)) {
             seen.add(key);
             pois.push({
-                name: pl.name, lat: pl.lat, lon: pl.lon,
+                name: pl.name, lat, lon,
                 category: meta.category, type: meta.typeOut, emoji: meta.emoji,
                 scope: meta.scope, radiusMi: meta.radiusMi, weight: meta.weight,
                 source: 'osm'
             });
             addedPlaces++;
         }
-        placeOut.push({ name: pl.name, lat: pl.lat, lon: pl.lon, kind: meta.typeOut, state: stateName });
+        placeOut.push({ name: pl.name, lat, lon, kind: meta.typeOut, state: stateName });
+    }
+
+    // Truncate ALL coords (existing entries too) to 6dp on rewrite — shrinks shard ~30%
+    for (const p of pois) {
+        if (typeof p.lat === 'number') p.lat = r6(p.lat);
+        if (typeof p.lon === 'number') p.lon = r6(p.lon);
     }
 
     shard.pois = pois;
