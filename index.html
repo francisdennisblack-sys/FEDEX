@@ -5294,57 +5294,75 @@
                 console.log(`✅ US locations loaded & merged!`);
                 console.log(`   📍 Total locations now: ${globalLocationDatabase.length.toLocaleString()}`);
                 
-                // LOAD ULTRA COMPREHENSIVE GLOBAL DATABASES
-                console.log('\n🌍 Step 2b: Loading ULTRA COMPREHENSIVE GLOBAL databases...');
+                // LOAD MEGA + ULTRA COMPREHENSIVE GLOBAL DATABASES (1.5M+ LOCATIONS + 1.4M+ POIs)
+                console.log('\n🌍 Step 2b: Loading MEGA ULTRA databases (1.5M+ locations + 1.4M+ POIs)...');
                 try {
-                    // Load ULTRA master locations database (52K+ locations, all states, cities, neighborhoods)
-                    const ultraLocRes = await fetch('/ultra_master_locations_global.json');
-                    if (ultraLocRes.ok) {
-                        const ultraLocData = await ultraLocRes.json();
-                        let ultraLocCount = 0;
-                        if (ultraLocData.data && Array.isArray(ultraLocData.data)) {
-                            ultraLocData.data.forEach(loc => {
-                                if (loc.name && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
-                                    const key = `${loc.name.toLowerCase()}|${loc.lat.toFixed(4)}|${loc.lon.toFixed(4)}`;
-                                    const exists = globalLocationDatabase.some(existing => 
-                                        `${existing.name.toLowerCase()}|${existing.lat.toFixed(4)}|${existing.lon.toFixed(4)}` === key
-                                    );
-                                    if (!exists) {
-                                        globalLocationDatabase.push({
-                                            name: loc.name,
-                                            state: loc.state || loc.county || 'Unknown',
-                                            stateCode: loc.state,
-                                            lat: loc.lat,
-                                            lon: loc.lon,
-                                            type: loc.type || 'location',
-                                            county: loc.county,
-                                            city: loc.city,
-                                            region: loc.state,
-                                            source: 'ultra_global_locations'
+                    // Load MEGA master locations from chunks (1.5M+ locations)
+                    console.log(`   ⏳ Loading location chunks (1.5M+ locations across 7 files)...`);
+                    const megaManifestRes = await fetch('/mega_master_locations_manifest.json');
+                    if (megaManifestRes.ok) {
+                        const megaManifest = await megaManifestRes.json();
+                        let totalMegaLocCount = 0;
+                        let locChunksLoaded = 0;
+                        let locChunksFailed = 0;
+                        
+                        for (const fileInfo of megaManifest.files) {
+                            try {
+                                const chunkRes = await fetch(`/${fileInfo.filename}`);
+                                if (chunkRes.ok) {
+                                    const chunkData = await chunkRes.json();
+                                    if (chunkData.data && Array.isArray(chunkData.data)) {
+                                        chunkData.data.forEach(loc => {
+                                            if (loc.name && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
+                                                const key = `${loc.name.toLowerCase()}|${loc.lat.toFixed(4)}|${loc.lon.toFixed(4)}`;
+                                                const exists = globalLocationDatabase.some(existing => 
+                                                    `${existing.name.toLowerCase()}|${existing.lat.toFixed(4)}|${existing.lon.toFixed(4)}` === key
+                                                );
+                                                if (!exists) {
+                                                    globalLocationDatabase.push({
+                                                        name: loc.name,
+                                                        state: loc.state || 'Unknown',
+                                                        stateCode: loc.state,
+                                                        lat: loc.lat,
+                                                        lon: loc.lon,
+                                                        type: loc.type || 'location',
+                                                        county: loc.county,
+                                                        city: loc.city,
+                                                        neighborhood: loc.neighborhood,
+                                                        region: loc.state,
+                                                        source: 'mega_global_locations'
+                                                    });
+                                                    totalMegaLocCount++;
+                                                }
+                                            }
                                         });
-                                        ultraLocCount++;
                                     }
+                                    locChunksLoaded++;
+                                } else {
+                                    locChunksFailed++;
                                 }
-                            });
+                            } catch (e) {
+                                locChunksFailed++;
+                            }
                         }
-                        console.log(`   ✅ Added ${ultraLocCount.toLocaleString()} ULTRA locations (52K+ total coverage)`);
+                        console.log(`   ✅ Loaded ${locChunksLoaded}/${megaManifest.files.length} location chunks (${totalMegaLocCount.toLocaleString()} locations)`);
+                        if (locChunksFailed > 0) console.warn(`   ⚠️ ${locChunksFailed} location chunks failed (loading continues)`);
                     }
                     
-                    // Load ULTRA master POIs database from manifest + chunks
+                    // Load ULTRA POIs (1.4M+) from chunks
                     console.log(`   ⏳ Loading POI chunks (1.4M+ POIs across 15 files)...`);
                     const manifestRes = await fetch('/ultra_master_pois_manifest.json');
                     if (manifestRes.ok) {
                         const manifest = await manifestRes.json();
-                        let totalUltraPoiCount = 0;
+                        let totalPoiCount = 0;
+                        let chunksLoaded = 0;
+                        let chunksFailed = 0;
                         
-                        // Load each chunk sequentially
                         for (const fileInfo of manifest.files) {
                             try {
                                 const chunkRes = await fetch(`/${fileInfo.filename}`);
                                 if (chunkRes.ok) {
                                     const chunkData = await chunkRes.json();
-                                    let chunkPoiCount = 0;
-                                    
                                     if (chunkData.data && Array.isArray(chunkData.data)) {
                                         chunkData.data.forEach(poi => {
                                             if (poi.name && typeof poi.lat === 'number' && typeof poi.lon === 'number' && poi.category) {
@@ -5364,21 +5382,24 @@
                                                         rating: poi.rating || 4.0,
                                                         source: 'ultra_global_pois'
                                                     });
-                                                    chunkPoiCount++;
+                                                    totalPoiCount++;
                                                 }
                                             }
                                         });
                                     }
-                                    totalUltraPoiCount += chunkPoiCount;
+                                    chunksLoaded++;
+                                } else {
+                                    chunksFailed++;
                                 }
-                            } catch (chunkErr) {
-                                console.warn(`⚠️ Could not load ${fileInfo.filename}:`, chunkErr);
+                            } catch (e) {
+                                chunksFailed++;
                             }
                         }
-                        console.log(`   ✅ Added ${totalUltraPoiCount.toLocaleString()} ULTRA POIs (1.4M+ total coverage)`);
+                        console.log(`   ✅ Loaded ${chunksLoaded}/${manifest.files.length} POI chunks (${totalPoiCount.toLocaleString()} POIs)`);
+                        if (chunksFailed > 0) console.warn(`   ⚠️ ${chunksFailed} POI chunks failed (loading continues)`);
                     }
                 } catch (ultraError) {
-                    console.warn('⚠️ Could not load ultra global databases (optional):', ultraError);
+                    console.warn('⚠️ Could not load mega/ultra databases:', ultraError);
                 }
                 
                 // LOAD LEGACY MASTER DATABASES (older format, kept for compatibility)
