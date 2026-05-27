@@ -5294,8 +5294,95 @@
                 console.log(`✅ US locations loaded & merged!`);
                 console.log(`   📍 Total locations now: ${globalLocationDatabase.length.toLocaleString()}`);
                 
-                // LOAD MASTER COMPREHENSIVE DATABASES
-                console.log('\n🔄 Step 2b: Loading comprehensive master databases...');
+                // LOAD ULTRA COMPREHENSIVE GLOBAL DATABASES
+                console.log('\n🌍 Step 2b: Loading ULTRA COMPREHENSIVE GLOBAL databases...');
+                try {
+                    // Load ULTRA master locations database (52K+ locations, all states, cities, neighborhoods)
+                    const ultraLocRes = await fetch('/ultra_master_locations_global.json');
+                    if (ultraLocRes.ok) {
+                        const ultraLocData = await ultraLocRes.json();
+                        let ultraLocCount = 0;
+                        if (ultraLocData.data && Array.isArray(ultraLocData.data)) {
+                            ultraLocData.data.forEach(loc => {
+                                if (loc.name && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
+                                    const key = `${loc.name.toLowerCase()}|${loc.lat.toFixed(4)}|${loc.lon.toFixed(4)}`;
+                                    const exists = globalLocationDatabase.some(existing => 
+                                        `${existing.name.toLowerCase()}|${existing.lat.toFixed(4)}|${existing.lon.toFixed(4)}` === key
+                                    );
+                                    if (!exists) {
+                                        globalLocationDatabase.push({
+                                            name: loc.name,
+                                            state: loc.state || loc.county || 'Unknown',
+                                            stateCode: loc.state,
+                                            lat: loc.lat,
+                                            lon: loc.lon,
+                                            type: loc.type || 'location',
+                                            county: loc.county,
+                                            city: loc.city,
+                                            region: loc.state,
+                                            source: 'ultra_global_locations'
+                                        });
+                                        ultraLocCount++;
+                                    }
+                                }
+                            });
+                        }
+                        console.log(`   ✅ Added ${ultraLocCount.toLocaleString()} ULTRA locations (52K+ total coverage)`);
+                    }
+                    
+                    // Load ULTRA master POIs database from manifest + chunks
+                    console.log(`   ⏳ Loading POI chunks (1.4M+ POIs across 15 files)...`);
+                    const manifestRes = await fetch('/ultra_master_pois_manifest.json');
+                    if (manifestRes.ok) {
+                        const manifest = await manifestRes.json();
+                        let totalUltraPoiCount = 0;
+                        
+                        // Load each chunk sequentially
+                        for (const fileInfo of manifest.files) {
+                            try {
+                                const chunkRes = await fetch(`/${fileInfo.filename}`);
+                                if (chunkRes.ok) {
+                                    const chunkData = await chunkRes.json();
+                                    let chunkPoiCount = 0;
+                                    
+                                    if (chunkData.data && Array.isArray(chunkData.data)) {
+                                        chunkData.data.forEach(poi => {
+                                            if (poi.name && typeof poi.lat === 'number' && typeof poi.lon === 'number' && poi.category) {
+                                                const key = `${poi.name.toLowerCase()}|${poi.lat.toFixed(4)}|${poi.lon.toFixed(4)}`;
+                                                const exists = globalPOIDatabase.some(existing => 
+                                                    `${existing.name.toLowerCase()}|${existing.lat.toFixed(4)}|${existing.lon.toFixed(4)}` === key
+                                                );
+                                                if (!exists) {
+                                                    globalPOIDatabase.push({
+                                                        name: poi.name,
+                                                        lat: poi.lat,
+                                                        lon: poi.lon,
+                                                        category: poi.category,
+                                                        type: poi.type || poi.category,
+                                                        state: poi.state,
+                                                        location: poi.location,
+                                                        rating: poi.rating || 4.0,
+                                                        source: 'ultra_global_pois'
+                                                    });
+                                                    chunkPoiCount++;
+                                                }
+                                            }
+                                        });
+                                    }
+                                    totalUltraPoiCount += chunkPoiCount;
+                                }
+                            } catch (chunkErr) {
+                                console.warn(`⚠️ Could not load ${fileInfo.filename}:`, chunkErr);
+                            }
+                        }
+                        console.log(`   ✅ Added ${totalUltraPoiCount.toLocaleString()} ULTRA POIs (1.4M+ total coverage)`);
+                    }
+                } catch (ultraError) {
+                    console.warn('⚠️ Could not load ultra global databases (optional):', ultraError);
+                }
+                
+                // LOAD LEGACY MASTER DATABASES (older format, kept for compatibility)
+                console.log('\n🔄 Step 2c: Loading legacy master databases...');
                 try {
                     // Load master locations database (all states with real city names)
                     const masterLocRes = await fetch('/master_locations_database.json');
@@ -5328,7 +5415,7 @@
                                 });
                             }
                         });
-                        console.log(`   ✅ Added ${masterLocCount.toLocaleString()} new locations from master database`);
+                        if (masterLocCount > 0) console.log(`   ✅ Added ${masterLocCount.toLocaleString()} legacy locations`);
                     }
                     
                     // Load master POIs database (all categories and locations)
@@ -5361,10 +5448,10 @@
                                 }
                             });
                         }
-                        console.log(`   ✅ Added ${masterPoiCount.toLocaleString()} new POIs from master database`);
+                        if (masterPoiCount > 0) console.log(`   ✅ Added ${masterPoiCount.toLocaleString()} legacy POIs`);
                     }
                 } catch (masterError) {
-                    console.warn('⚠️ Could not load master databases (optional):', masterError);
+                    console.warn('⚠️ Could not load legacy master databases (optional):', masterError);
                 }
                 
                 console.log(`\n✨ DATABASE LOADING COMPLETE!`);
