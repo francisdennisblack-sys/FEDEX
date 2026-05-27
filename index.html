@@ -2418,6 +2418,8 @@
             box-shadow: 0 0 14px rgba(217, 119, 6, 0.45) !important;
         }
     </style>
+    <!-- 🚀 Stripe.js v3 — needed for inline Apple Pay / Google Pay one-tap on boost -->
+    <script src="https://js.stripe.com/v3/"></script>
 </head>
 
 <body>
@@ -2711,8 +2713,23 @@
                     send
                 </button>
             </div>
-            <div id="boostHint" style="display:none; margin-top:8px; padding:8px 10px; background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.35); border-radius:6px; color:#fbbf24; font-size:12px; font-weight:600; text-align:center;">
-                🚀 boost armed — your post will get a Boost badge, guaranteed reach, and rank lock for the boost window.
+            <div id="boostHint" style="display:none; margin-top:8px; padding:10px; background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.35); border-radius:8px; color:#fbbf24; font-size:12px; font-weight:600;">
+                <div id="boostHintText" style="text-align:center; margin-bottom:8px;">
+                    🚀 boost armed — <span id="boostPriceLabel">$2.99</span> for guaranteed reach + Boost badge.
+                </div>
+                <!-- Native one-tap pay button (Apple Pay on iOS Safari, Google Pay on Chrome/Android). Hidden until Stripe confirms support. -->
+                <div id="boostPayRequestMount" style="min-height:0;"></div>
+                <div id="boostPayStatus" style="display:none; text-align:center; margin-top:6px; color:#10b981; font-size:11px;"></div>
+                <!-- Compact fallback toggle -->
+                <div style="text-align:center; margin-top:6px;">
+                    <button type="button" id="boostOtherWaysBtn" onclick="toggleBoostOtherWays()" style="background:none; border:none; color:#94a3b8; font-size:11px; text-decoration:underline; cursor:pointer; padding:2px 4px;">other ways to pay</button>
+                </div>
+                <!-- Tiny inline card form, hidden until 'other ways' clicked -->
+                <div id="boostCardWrap" style="display:none; margin-top:8px;">
+                    <div id="boostCardMount" style="background:#0f172a; border:1px solid #334155; border-radius:6px; padding:10px;"></div>
+                    <button type="button" id="boostCardPayBtn" onclick="payBoostWithCard()" style="width:100%; margin-top:6px; padding:8px; background:#fbbf24; color:#111827; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay <span class="boost-price-inline">$2.99</span> with card</button>
+                    <div id="boostCardError" style="display:none; color:#ef4444; font-size:11px; margin-top:4px; text-align:center;"></div>
+                </div>
             </div>
         </div>
     </div>
@@ -18746,6 +18763,12 @@
                 console.log('Post submission already in progress, ignoring duplicate click');
                 return;
             }
+
+            // 🚀 BOOST GUARD: if user armed a boost but hasn't completed payment, stop here.
+            if (window.pendingBoost && window.pendingBoost.armed && !window.pendingBoost.paid) {
+                showErrorNotification && showErrorNotification('Finish boost payment', 'Tap Apple Pay / Google Pay (or “other ways to pay”) to complete your boost before sending.');
+                return;
+            }
             
             // Prevent posting while media is being processed
             if (isMediaProcessing) {
@@ -19024,12 +19047,12 @@
                     isUserPost: true,
                     // 🚀 BOOST INTENT — set when user toggled boost in composer.
                     // Backend will validate payment + assign boostTier, boostExpiresAt, etc.
-                    boostRequested: !!(window.pendingBoost && window.pendingBoost.armed),
-                    boostIntent: (window.pendingBoost && window.pendingBoost.armed) ? {
+                    boostRequested: !!(window.pendingBoost && window.pendingBoost.armed && window.pendingBoost.paid),
+                    boostIntent: (window.pendingBoost && window.pendingBoost.armed && window.pendingBoost.paid) ? {
                         armedAt: window.pendingBoost.armedAt || Date.now(),
                         client: 'composer-v1',
-                        // Tier/price/duration to be filled in by the boost backend on checkout.
-                        tier: window.pendingBoost.tier || 'standard'
+                        tier: window.pendingBoost.tier || 'standard',
+                        paymentIntentId: window.pendingBoost.paymentIntentId || null
                     } : null
                 };
 
@@ -19763,10 +19786,157 @@
         window.generateDisplayAreaTags = generateDisplayAreaTags;
         window.generateZoneTagHTML = generateZoneTagHTML;
 
-        // 🚀 BOOST COMPOSER — client-side toggle. Backend will validate payment + apply the
-        // boost. Until the boost backend ships, this only stamps boostRequested/boostIntent
-        // onto postData; the rest of the app stays unaffected (existing posts behave identically).
-        window.pendingBoost = window.pendingBoost || { armed: false, armedAt: 0, tier: 'standard' };
+        // ============================================================================
+        // 🚀 BOOST COMPOSER + STRIPE ONE-TAP PAY (inline, no popups)
+        // ----------------------------------------------------------------------------
+        // Idle  : amber outlined "boost" button next to send.
+        // Armed : Apple Pay / Google Pay button appears inline inside #boostHint.
+        //         If the device doesn't support a wallet, we silently fall back to a
+        //         tiny card form (also inline). "other ways to pay" link toggles it.
+        // On successful pay: pendingBoost.paid = true + paymentMethodId stamped.
+        //         uploadPost() then attaches boostIntent to postData; backend confirms
+        //         the boost server-side via /api/boost/confirm and assigns the badge.
+        // ============================================================================
+        window.STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || 'pk_test_REPLACE_ME';
+        window.BOOST_TIERS = window.BOOST_TIERS || {
+            standard: { amountCents: 299, label: '$2.99', durationHours: 24 }
+        };
+        window.pendingBoost = window.pendingBoost || {
+            armed: false, armedAt: 0, tier: 'standard',
+            paid: false, paymentMethodId: null, paymentIntentId: null, clientSecret: null
+        };
+        let _stripe = null;
+        let _stripePR = null;            // PaymentRequest instance (Apple/Google Pay)
+        let _stripePRButton = null;      // Mounted PRB Element
+        let _stripeCardElement = null;
+        function _getStripe() {
+            if (_stripe) return _stripe;
+            if (typeof Stripe !== 'function') { console.warn('⚠️ Stripe.js not loaded yet'); return null; }
+            try { _stripe = Stripe(window.STRIPE_PUBLISHABLE_KEY); } catch (e) { console.error('Stripe init failed', e); return null; }
+            return _stripe;
+        }
+        function _currentBoostTier() {
+            return window.BOOST_TIERS[window.pendingBoost.tier] || window.BOOST_TIERS.standard;
+        }
+        function _updateBoostPriceLabels() {
+            const tier = _currentBoostTier();
+            const lbl = document.getElementById('boostPriceLabel');
+            if (lbl) lbl.textContent = tier.label;
+            document.querySelectorAll('.boost-price-inline').forEach(el => { el.textContent = tier.label; });
+        }
+        async function _initBoostPaymentRequest() {
+            const stripe = _getStripe();
+            if (!stripe) return;
+            const tier = _currentBoostTier();
+            const mount = document.getElementById('boostPayRequestMount');
+            if (!mount) return;
+            mount.innerHTML = ''; // reset
+            // Create a fresh PaymentRequest each time the price might have changed
+            _stripePR = stripe.paymentRequest({
+                country: 'US',
+                currency: 'usd',
+                total: { label: 'Boost post', amount: tier.amountCents },
+                requestPayerName: false,
+                requestPayerEmail: false
+            });
+            const elements = stripe.elements();
+            _stripePRButton = elements.create('paymentRequestButton', {
+                paymentRequest: _stripePR,
+                style: { paymentRequestButton: { type: 'default', theme: 'dark', height: '40px' } }
+            });
+            // Only mount if the browser actually supports Apple Pay / Google Pay
+            const result = await _stripePR.canMakePayment();
+            if (result) {
+                _stripePRButton.mount('#boostPayRequestMount');
+            } else {
+                // No wallet — auto-expand the card fallback so the user still sees a way to pay.
+                const wrap = document.getElementById('boostCardWrap');
+                if (wrap) wrap.style.display = 'block';
+                _mountBoostCardElement();
+            }
+            _stripePR.on('paymentmethod', async (ev) => {
+                try {
+                    const resp = await fetch('/api/boost/create-intent', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tier: window.pendingBoost.tier, userId: window.currentUserId || 'anon' })
+                    });
+                    const data = await resp.json();
+                    if (!data.clientSecret) throw new Error(data.error || 'no client secret');
+                    const { error, paymentIntent } = await stripe.confirmCardPayment(
+                        data.clientSecret,
+                        { payment_method: ev.paymentMethod.id },
+                        { handleActions: false }
+                    );
+                    if (error) { ev.complete('fail'); _showBoostError(error.message); return; }
+                    ev.complete('success');
+                    window.pendingBoost.paid = true;
+                    window.pendingBoost.paymentMethodId = ev.paymentMethod.id;
+                    window.pendingBoost.paymentIntentId = paymentIntent.id;
+                    _showBoostPaid();
+                } catch (e) {
+                    ev.complete('fail');
+                    _showBoostError(e.message || 'payment failed');
+                }
+            });
+        }
+        function _mountBoostCardElement() {
+            const stripe = _getStripe();
+            if (!stripe || _stripeCardElement) return;
+            const elements = stripe.elements();
+            _stripeCardElement = elements.create('card', {
+                style: { base: { color: '#fff', fontSize: '14px', '::placeholder': { color: '#64748b' } } }
+            });
+            _stripeCardElement.mount('#boostCardMount');
+        }
+        function toggleBoostOtherWays() {
+            const wrap = document.getElementById('boostCardWrap');
+            if (!wrap) return;
+            const showing = wrap.style.display !== 'none';
+            wrap.style.display = showing ? 'none' : 'block';
+            if (!showing) _mountBoostCardElement();
+        }
+        async function payBoostWithCard() {
+            const stripe = _getStripe();
+            if (!stripe || !_stripeCardElement) return;
+            const errEl = document.getElementById('boostCardError');
+            if (errEl) errEl.style.display = 'none';
+            try {
+                const resp = await fetch('/api/boost/create-intent', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tier: window.pendingBoost.tier, userId: window.currentUserId || 'anon' })
+                });
+                const data = await resp.json();
+                if (!data.clientSecret) throw new Error(data.error || 'no client secret');
+                const { error, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, {
+                    payment_method: { card: _stripeCardElement }
+                });
+                if (error) { _showBoostError(error.message); return; }
+                window.pendingBoost.paid = true;
+                window.pendingBoost.paymentIntentId = paymentIntent.id;
+                _showBoostPaid();
+            } catch (e) {
+                _showBoostError(e.message || 'card payment failed');
+            }
+        }
+        function _showBoostPaid() {
+            const s = document.getElementById('boostPayStatus');
+            const t = document.getElementById('boostHintText');
+            const m = document.getElementById('boostPayRequestMount');
+            const w = document.getElementById('boostCardWrap');
+            const o = document.getElementById('boostOtherWaysBtn');
+            if (s) { s.textContent = '✅ boost paid — hit send to publish'; s.style.display = 'block'; }
+            if (t) t.textContent = '🚀 boost ready';
+            if (m) m.style.display = 'none';
+            if (w) w.style.display = 'none';
+            if (o) o.style.display = 'none';
+        }
+        function _showBoostError(msg) {
+            const errEl = document.getElementById('boostCardError');
+            if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; }
+            console.warn('🚀 boost payment error:', msg);
+        }
         function toggleBoostOnNewPost() {
             const btn   = document.getElementById('boostBtn');
             const label = document.getElementById('boostBtnLabel');
@@ -19782,15 +19952,22 @@
                 btn.style.boxShadow = '0 6px 20px rgba(251,191,36,0.55)';
                 if (label) label.textContent = 'boosted';
                 if (hint)  hint.style.display = 'block';
+                _updateBoostPriceLabels();
+                _initBoostPaymentRequest();
             } else {
                 resetBoostButton();
             }
         }
         function resetBoostButton() {
-            window.pendingBoost = { armed: false, armedAt: 0, tier: 'standard' };
+            window.pendingBoost = { armed: false, armedAt: 0, tier: 'standard', paid: false, paymentMethodId: null, paymentIntentId: null, clientSecret: null };
             const btn   = document.getElementById('boostBtn');
             const label = document.getElementById('boostBtnLabel');
             const hint  = document.getElementById('boostHint');
+            const status = document.getElementById('boostPayStatus');
+            const wrap = document.getElementById('boostCardWrap');
+            const other = document.getElementById('boostOtherWaysBtn');
+            const mount = document.getElementById('boostPayRequestMount');
+            const txt = document.getElementById('boostHintText');
             if (btn) {
                 btn.setAttribute('aria-pressed', 'false');
                 btn.style.background = 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)';
@@ -19800,9 +19977,21 @@
             }
             if (label) label.textContent = 'boost';
             if (hint)  hint.style.display = 'none';
+            if (status) { status.style.display = 'none'; status.textContent = ''; }
+            if (wrap) wrap.style.display = 'none';
+            if (other) other.style.display = '';
+            if (mount) { mount.innerHTML = ''; mount.style.display = ''; }
+            if (txt) txt.textContent = '🚀 boost armed — see price below.';
+            // Unmount Stripe elements so a fresh PaymentRequest is created on next arm.
+            try { if (_stripePRButton) _stripePRButton.unmount(); } catch(e){}
+            try { if (_stripeCardElement) { _stripeCardElement.unmount(); _stripeCardElement = null; } } catch(e){}
+            _stripePRButton = null;
+            _stripePR = null;
         }
         window.toggleBoostOnNewPost = toggleBoostOnNewPost;
-        window.resetBoostButton = resetBoostButton;
+        window.resetBoostButton    = resetBoostButton;
+        window.toggleBoostOtherWays = toggleBoostOtherWays;
+        window.payBoostWithCard     = payBoostWithCard;
         
         // Enable touch scrolling on the grid for mobile devices
         const grid = document.getElementById('grid');
