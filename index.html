@@ -17788,6 +17788,12 @@
                         console.error(`❌ Badge calculation error for post ${post.id}:`, badgeError);
                         // Continue rendering without badges if calculation fails
                     }
+                    
+                    // Check if post is NEW (created less than 5 minutes ago)
+                    if (post.isNew || (post.createdAt && (Date.now() - post.createdAt < 300000))) {
+                        box.classList.add('badge-new');
+                        console.log(`✨ Applied NEW badge to post ${post.id.substring(0, 8)}`);
+                    }
 
                     // Apply proximity badge (NEARBY, FEATURED, or COMMUNITY)
                     if (post.proximityClass) {
@@ -17894,6 +17900,11 @@
                             badges.forEach(b => {
                                 box.classList.add(`badge-${b}`);
                             });
+                            
+                            // Check if post is NEW (created less than 5 minutes ago)
+                            if (post.isNew || (post.createdAt && (Date.now() - post.createdAt < 300000))) {
+                                box.classList.add('badge-new');
+                            }
 
                             // Apply proximity badge (NEARBY, FEATURED, or COMMUNITY)
                             if (post.proximityClass) {
@@ -19527,6 +19538,82 @@
                 console.log('  ✅ savePostToFirebase completed successfully');
                 console.log(`  💾 Post NOW SAVED to: users/${networkIdForPost}/posts/${postId}`);
                 console.log('  🔍 Firebase listener should now trigger and show your post...');
+
+                // 🚀 DISTRIBUTE POST TO NEARBY USERS
+                // Posts should be visible to:
+                // 1. Users in the same area (county) who are NOT near POIs (unless posting user IS near a POI)
+                // 2. Users near the posting user's POI (if they are near a POI)
+                console.log('\n📡 POST DISTRIBUTION STARTING...');
+                postData.isNew = true; // Add "new" badge
+                postData.createdAt = new Date().getTime();
+                postData.badge = 'NEW';
+                
+                // Determine distribution zone based on posting user's location
+                const postingUserPOI = findClosestPOIInZone(userLocation.lat, userLocation.lon);
+                const userIsNearPOI = postingUserPOI && postingUserPOI.poi;
+                
+                console.log(`  📍 Posting user analysis:`);
+                console.log(`     Area: ${areaTag}`);
+                console.log(`     Near POI: ${userIsNearPOI ? postingUserPOI.poi.name : 'No'}`);
+                
+                // Query all online users to distribute post
+                try {
+                    const onlineUsersRef = ref(database, 'onlineUsers');
+                    const onlineSnapshot = await get(onlineUsersRef);
+                    
+                    if (onlineSnapshot.exists()) {
+                        const onlineUsersData = onlineSnapshot.val();
+                        console.log(`  👥 Found ${Object.keys(onlineUsersData).length} online users to check for distribution`);
+                        
+                        let distributionCount = 0;
+                        
+                        for (const [userId, userData] of Object.entries(onlineUsersData)) {
+                            if (userId === networkIdForPost) continue; // Don't redistribute to self
+                            
+                            // Determine if this user should receive the post
+                            let shouldDistribute = false;
+                            let distributionReason = '';
+                            
+                            // Get user's area/POI info (from their last recorded location if available)
+                            const userAreaTag = userData.area || userData.county || 'Unknown';
+                            const userNearPOI = userData.poiName ? true : false;
+                            
+                            if (userIsNearPOI) {
+                                // Posting user IS near a POI - distribute to all users near THAT POI
+                                if (userData.poiName === postingUserPOI.poi.name) {
+                                    shouldDistribute = true;
+                                    distributionReason = `POI match: ${postingUserPOI.poi.name}`;
+                                }
+                            } else {
+                                // Posting user is NOT near POI - distribute to nearby users who also aren't near POIs
+                                if (!userNearPOI && userAreaTag === areaTag) {
+                                    shouldDistribute = true;
+                                    distributionReason = `Area match: ${areaTag} (no POI)`;
+                                }
+                            }
+                            
+                            // Save post to this user's distribution feed if they should receive it
+                            if (shouldDistribute) {
+                                const userPostsRef = ref(database, `users/${userId}/posts/${postId}`);
+                                await set(userPostsRef, {
+                                    ...postData,
+                                    distributedFrom: networkIdForPost,
+                                    distributedAt: new Date().getTime(),
+                                    reason: distributionReason
+                                });
+                                distributionCount++;
+                                console.log(`  ✅ Distributed to ${userId}: ${distributionReason}`);
+                            }
+                        }
+                        
+                        console.log(`📡 POST DISTRIBUTED: ${distributionCount} users will see this post`);
+                    } else {
+                        console.warn('  ⚠️ No online users found for distribution');
+                    }
+                } catch (distError) {
+                    console.error('⚠️ Distribution failed (non-blocking):', distError.message);
+                    // Don't throw - post still saved even if distribution fails
+                }
 
                 // 📍 TRACK POST IN AREA HIERARCHY SYSTEM
                 // This ensures the post appears on user's grid and tracks its growth
