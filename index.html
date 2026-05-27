@@ -20644,25 +20644,57 @@
                 console.log('  currentUserId:', currentUserId);
                 console.log('  postId:', postId);
                 
-                // REFACTORED: Save to shared posts collection, not per-user
-                // This allows ALL users to see all posts from anywhere
-                const networkIdForPost = currentUserId || 'shared-network-1';
-                postData.networkId = networkIdForPost;
-                postData.userId = postData.userId || networkIdForPost;
-                postData.createdBy = currentUserId;  // Track who created it
-                postData.ownerUid = postData.ownerUid || networkIdForPost;
+                // CRITICAL: Use permanent auth ID (NOT old WiFi networkId)
+                // The permanent ID system (perm-{timestamp}-{random}) ensures posts 
+                // are correctly attributed to the user across sessions and zones
+                const authUserId = currentUserId;  // This is the permanent ID (perm-...)
+                
+                if (!authUserId || authUserId === 'shared-network-1') {
+                    console.warn('⚠️  WARNING: authUserId is fallback value - auth may not be fully initialized');
+                }
+                
+                // Save post with PERMANENT AUTH ID (not old networkId)
+                postData.authId = authUserId;        // Primary identifier (permanent auth)
+                postData.userId = authUserId;        // User identifier
+                postData.createdBy = authUserId;     // Creator identifier
+                postData.networkId = authUserId;     // Compatibility (legacy field, but now maps to auth)
+                postData.ownerUid = authUserId;      // Owner identifier
                 postData.id = postId;
                 postData.postId = postId;
                 postData.ownerAt = postData.ownerAt || new Date().getTime();
-                console.log('  ✅ Using networkId for post:', networkIdForPost);
-                console.log('  📝 Full path will be: posts/${postId} (SHARED - all users see this)');
-                console.log('  📋 About to call savePostToFirebase with:', { postId, postDataKeys: Object.keys(postData) });
+                
+                // ZONE/AREA MAPPING: Save the zone/area info for Apple Maps display
+                // This ensures posts appear at the correct location on maps
+                if (areaTag) {
+                    postData.zoneTag = areaTag;      // Primary zone/area tag
+                    postData.area = areaTag;         // Area identifier
+                    postData.region = areaTag;       // Region
+                }
+                
+                if (userLocation) {
+                    postData.latitude = userLocation.lat;
+                    postData.longitude = userLocation.lon;
+                    postData.mapCoordinates = { lat: userLocation.lat, lon: userLocation.lon };
+                }
+                
+                console.log('✅ POST IDENTIFIERS SET:');
+                console.log('  authId (primary):', authUserId);
+                console.log('  userId:', postData.userId);
+                console.log('  createdBy:', postData.createdBy);
+                console.log('  networkId (legacy compat):', postData.networkId);
+                console.log('  zoneTag:', postData.zoneTag);
+                console.log('  coordinates:', `${postData.latitude}, ${postData.longitude}`);
+                console.log('');
+                console.log('📝 Full path will be: posts/${postId} (SHARED - all users see this)');
+                console.log('📋 About to save post with:', { postId, authUserId, zoneTag: areaTag });
                 
                 // Save to SHARED posts collection (not per-user)
                 await savePostToFirebaseShared(postId, postData);
-                console.log('  ✅ savePostToFirebase completed successfully');
-                console.log(`  💾 Post NOW SAVED to: posts/${postId} (visible to ALL users)`);
-                console.log('  🔍 Firebase listener should now trigger and show your post to everyone...');
+                console.log('  ✅ savePostToFirebaseShared completed successfully');
+                console.log(`  💾 Post NOW SAVED to: posts/${postId}`);
+                console.log(`  👤 Owner: ${authUserId}`);
+                console.log(`  📍 Zone: ${areaTag}`);
+                console.log('  🔍 Firebase listener should now trigger and load your post...');
 
                 // 🚀 DISTRIBUTE POST TO NEARBY USERS
                 // Posts should be visible to:
