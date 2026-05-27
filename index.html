@@ -10223,6 +10223,32 @@
             }
         }
         
+        // SHARED POST COLLECTION - NEW ARCHITECTURE
+        async function savePostToFirebaseShared(postId, postData) {
+            try {
+                const database = getDatabase();
+                if (!database) {
+                    throw new Error('Firebase database not initialized');
+                }
+
+                // Save to shared posts collection (not per-user)
+                const postRef = ref(database, `posts/${postId}`);
+                await set(postRef, postData);
+
+                console.log(`✅ Post saved to shared collection:`, {
+                    postId: postId,
+                    path: `posts/${postId}`,
+                    hasCreator: !!postData.createdBy,
+                    isBoosted: postData.boostIntent?.requested
+                });
+
+                return { success: true, path: `posts/${postId}` };
+            } catch (error) {
+                console.error('❌ Error saving post to shared collection:', error);
+                throw error;
+            }
+        }
+        
         // FIREBASE DIAGNOSTIC FUNCTION
         window.testFirebaseConnection = async function() {
             console.log('\n🔍 FIREBASE DIAGNOSTIC TEST\n');
@@ -10365,20 +10391,16 @@
 
         function subscribeToFirebasePosts(networkId, callback) {
             try {
-                // Use the networkId parameter (currentUserId) for consistency
-                // networkId comes from subscribeToFirebasePostsWithReconnect(currentUserId)
-                const actualNetworkId = networkId || currentUserId || currentUserId;
+                // Load from SHARED posts collection (not per-user)
+                // networkId parameter is ignored for shared collection
                 
-                console.log('\n🔴🔴🔴 subscribeToFirebasePosts CALLED 🔴🔴🔴');
-                console.log('  networkId param:', networkId);
-                console.log('  actualNetworkId:', actualNetworkId);
-                console.log('  currentUserId:', currentUserId);
+                console.log('\n🔴🔴🔴 subscribeToFirebasePosts CALLED (SHARED COLLECTION) 🔴🔴🔴');
                 console.log('  currentUserId:', currentUserId);
                 console.log('  database:', database);
                 
-                const postsRef = ref(database, `users/${actualNetworkId}/posts`);
+                const postsRef = ref(database, `posts`);
                 console.log('  postsRef created:', postsRef);
-                console.log('  postsRef path:', `users/${actualNetworkId}/posts`);
+                console.log('  postsRef path: posts (SHARED COLLECTION)');
                 
                 // FIRST: Try a one-time GET to verify data exists
                 console.log('  🔍 Attempting one-time GET to check if data exists...');
@@ -10386,21 +10408,19 @@
                     console.log('  ✅ GET SNAPSHOT RECEIVED');
                     console.log('    snapshot.exists():', snapshot.exists());
                     if (snapshot.exists()) {
-                        console.log('    Data in Firebase:', snapshot.val());
+                        console.log('    Posts in Firebase:', Object.keys(snapshot.val()).length, 'posts');
                     } else {
-                        console.log('    ⚠️ Path is empty in Firebase');
+                        console.log('    ⚠️ Posts collection is empty in Firebase');
                     }
                 }).catch((error) => {
                     console.error('  ❌ GET ERROR:', error);
                     console.error('    Error code:', error.code);
                     console.error('    Error message:', error.message);
-                    console.error('    Is PERMISSION_DENIED?', error.code === 'PERMISSION_DENIED');
-                    console.error('    Path attempted:', `users/${actualNetworkId}/posts`);
                 });
                 
                 // NOW set up onValue listener
                 let callCount = 0;
-                console.log('  🎧 Setting up onValue listener...');
+                console.log('  🎧 Setting up onValue listener on shared posts...');
                 const unsubscribe = onValue(postsRef, (snapshot) => {
                     callCount++;
                     console.log(`\n🔥🔥🔥 FIREBASE onValue LISTENER FIRED (call #${callCount}) 🔥🔥🔥`);
@@ -10413,22 +10433,17 @@
                     if (snapshot.exists()) {
                         const postsObj = snapshot.val();
                         console.log('  ✅ snapshot.val() returned object');
-                        console.log('  posts data:', postsObj);
-                        console.log('  posts count:', Object.keys(postsObj).length);
+                        console.log('  total posts count:', Object.keys(postsObj).length);
                         
                         // Convert posts object to array
                         Object.keys(postsObj).forEach(postId => {
-                            console.log(`    Processing post ID: ${postId}`);
-                            
                             // CRITICAL: De-duplicate - only keep first instance of each post ID
                             if (seenPostIds.has(postId)) {
-                                console.log(`    ⚠️ DUPLICATE: ${postId} already seen - SKIPPING`);
                                 return; // Skip this duplicate
                             }
                             
                             seenPostIds.add(postId);
                             const post = postsObj[postId];
-                            console.log(`    ✅ Added post:`, post);
                             allPosts.push({
                                 id: postId,
                                 ...post
@@ -10437,7 +10452,7 @@
                         
                         console.log(`  📊 Total posts after processing: ${allPosts.length}`);
                     } else {
-                        console.log('  ⚠️ snapshot.exists() returned FALSE - No data at this path');
+                        console.log('  ⚠️ Posts collection is empty');
                     }
                     
                     console.log(`  📞 About to call callback with ${allPosts.length} posts`);
@@ -10448,14 +10463,9 @@
                     console.error('  Error code:', error.code);
                     console.error('  Error message:', error.message);
                     console.error('  Full error:', error);
-                    console.error('🔍 DIAGNOSTIC INFO:');
-                    console.error('  Is PERMISSION_DENIED?', error.code === 'PERMISSION_DENIED');
-                    console.error('  Path attempted:', `users/${actualNetworkId}/posts`);
-                    console.error('  currentUserId:', currentUserId);
-                    console.error('  currentUserId:', currentUserId);
                 });
                 
-                console.log('✅ Firebase onValue listener setup complete');
+                console.log('✅ Firebase onValue listener setup complete on shared collection');
                 console.log('  unsubscribe function exists:', !!unsubscribe);
                 
                 return unsubscribe;
@@ -10469,20 +10479,14 @@
 
         async function deletePostFromFirebase(networkId, postId) {
             try {
-                const ownerUserId = networkId || (auth && auth.currentUser && auth.currentUser.uid) || currentUserId || localStorage.getItem('userId');
-                if (!ownerUserId) {
-                    throw new Error('No authenticated user ID available for deletion');
-                }
-
-                console.log('🗑️ DELETING FROM FIREBASE:');
-                console.log('  networkId:', networkId);
-                console.log('  ownerUserId:', ownerUserId);
+                // Delete from SHARED posts collection (not per-user)
+                console.log('🗑️ DELETING FROM SHARED COLLECTION:');
                 console.log('  postId:', postId);
-                console.log('  Firebase path: users/' + ownerUserId + '/posts/' + postId);
+                console.log('  Firebase path: posts/' + postId);
                 
-                const postRef = ref(database, `users/${ownerUserId}/posts/${postId}`);
+                const postRef = ref(database, `posts/${postId}`);
                 await remove(postRef);
-                console.log('✅ Post successfully deleted from Firebase:', postId);
+                console.log('✅ Post successfully deleted from shared collection:', postId);
             } catch (error) {
                 console.error('❌ Error deleting post from Firebase:', error);
                 throw error;
@@ -10580,32 +10584,13 @@
             const MAX_RETRIES = 3;
             const RETRY_DELAY = 1000 * Math.pow(2, retryCount); // Exponential backoff
             
-            // CRITICAL: Find the actual post owner if not provided
-            let ownerUserId = postOwner;
-            if (!ownerUserId) {
-                // Search for the post in gridContent to find its owner
-                for (let key in gridContent) {
-                    const foundPost = gridContent[key].find(p => p.id === postId);
-                    if (foundPost && (foundPost.networkId || foundPost.userId)) {
-                        ownerUserId = foundPost.networkId || foundPost.userId;
-                        break;
-                    }
-                }
-                // Fallback: check postCache
-                if (!ownerUserId && postCache[postId]) {
-                    ownerUserId = postCache[postId].networkId || postCache[postId].userId;
-                }
-            }
-            
-            if (!ownerUserId) {
-                console.error(`❌ Cannot update post votes - post owner not found for ${postId}`);
-                return;
-            }
+            // For shared collection, we don't need to find owner - all posts in /posts/{postId}
             
             try {
-                const postRef = ref(database, `users/${ownerUserId}/posts/${postId}`);
+                // Update in SHARED posts collection (not per-user)
+                const postRef = ref(database, `posts/${postId}`);
                 await update(postRef, updates);
-                console.log(`✅ Votes updated successfully for post ${postId} owned by ${ownerUserId.substring(0,8)}`);
+                console.log(`✅ Votes updated successfully for post ${postId} in shared collection`);
             } catch (error) {
                 console.error(`❌ Error updating votes (attempt ${retryCount + 1}):`, error);
                 
@@ -10613,13 +10598,13 @@
                 if (retryCount < MAX_RETRIES && (error.code === 'NETWORK_ERROR' || error.code === 'PERMISSION_DENIED' || !navigator.onLine)) {
                     console.log(`🔄 Retrying vote update in ${RETRY_DELAY}ms...`);
                     setTimeout(() => {
-                        updatePostVotesFirebase(userId, postId, updates, retryCount + 1, ownerUserId);
+                        updatePostVotesFirebase(userId, postId, updates, retryCount + 1, postOwner);
                     }, RETRY_DELAY);
                 } else if (retryCount >= MAX_RETRIES) {
                     console.error(`❌ Failed to update votes after ${MAX_RETRIES} attempts`);
                     // Queue for later sync
                     const queuedUpdates = JSON.parse(localStorage.getItem('queuedVoteUpdates') || '{}');
-                    queuedUpdates[postId] = { userId: ownerUserId, updates, timestamp: Date.now() };
+                    queuedUpdates[postId] = { userId, updates, timestamp: Date.now() };
                     localStorage.setItem('queuedVoteUpdates', JSON.stringify(queuedUpdates));
                     console.log('💾 Vote update queued for later sync');
                 }
@@ -12231,7 +12216,7 @@
                 targetPost = postCache[selectedPostId];
             }
 
-            const isOwnPost = !!targetPost && (targetPost.userId === currentUserId || targetPost.networkId === currentUserId);
+            const isOwnPost = !!targetPost && (targetPost.userId === currentUserId || targetPost.networkId === currentUserId || targetPost.createdBy === currentUserId);
 
             if (isOwnPost) {
                 console.log('🗑️ deleteAndHidePost: deleting own post');
@@ -12435,7 +12420,7 @@
             const deleteOwnPostBtn = document.getElementById('deleteOwnPostBtn');
             const hideOtherPostBtn = document.getElementById('hideOtherPostBtn');
             
-            if (targetPost.userId === currentUserId || targetPost.networkId === currentUserId) {
+            if (targetPost.userId === currentUserId || targetPost.networkId === currentUserId || targetPost.createdBy === currentUserId) {
                 // User is the post owner - show Delete button
                 deleteSection.style.display = 'block';
                 deleteOwnPostBtn.style.display = 'block';
@@ -18422,6 +18407,40 @@
                 console.log(`   - Post ${p.id.substring(0, 8)}...: ${p.likes || 0}L / ${p.dislikes || 0}D`);
             });
             
+            // ========================================================================
+            // SELF-POST VISIBILITY FILTERING
+            // - Regular self-posts: 50% chance to show (ML decides)
+            // - Boosted self-posts: 100% guaranteed to show
+            // ========================================================================
+            let filteredSortedPosts = [];
+            sortedPosts.forEach(post => {
+                // Check if this is a self-post (creator ID matches current user)
+                const isOwnPost = (post.createdBy === currentUserId) || 
+                                 (post.networkId === currentUserId) || 
+                                 (post.userId === currentUserId);
+                
+                if (!isOwnPost) {
+                    // Not a self-post - always show
+                    filteredSortedPosts.push(post);
+                } else if (post.boostRequested || post.boostIntent?.requested) {
+                    // Own post that's boosted - ALWAYS show (100%)
+                    console.log(`🚀 SELF-POST BOOST: Including own post ${post.id.substring(0,8)} (boosted 100%)`);
+                    filteredSortedPosts.push(post);
+                } else {
+                    // Own post that's NOT boosted - 50% chance to show (ML controlled)
+                    const showOwnPost = Math.random() < 0.5;
+                    if (showOwnPost) {
+                        console.log(`✅ SELF-POST VISIBLE: Own post ${post.id.substring(0,8)} showing (50% chance)`);
+                        filteredSortedPosts.push(post);
+                    } else {
+                        console.log(`⏭️  SELF-POST HIDDEN: Own post ${post.id.substring(0,8)} hidden (50% chance)`);
+                    }
+                }
+            });
+            
+            console.log(`📊 Self-post filtering: ${sortedPosts.length} → ${filteredSortedPosts.length} posts`);
+            sortedPosts = filteredSortedPosts;
+            
             // CRITICAL: First reset ALL boxes to empty state (up to maxGridSize)
             for (let i = 1; i < maxGridSize; i++) {
                 const box = document.getElementById(`box-${i}`);
@@ -20438,26 +20457,27 @@
                 console.log('🔥 ABOUT TO SAVE POST TO FIREBASE');
                 console.log('🔥 ABOUT TO SAVE POST TO FIREBASE');
                 console.log('  currentUserId:', currentUserId);
-                console.log('  currentUserId:', currentUserId);
                 console.log('  postId:', postId);
                 
-                // Use currentUserId as the network ID (all posts in same WiFi network)
-                // Fall back to shared-network-1 if needed
+                // REFACTORED: Save to shared posts collection, not per-user
+                // This allows ALL users to see all posts from anywhere
                 const networkIdForPost = currentUserId || 'shared-network-1';
                 postData.networkId = networkIdForPost;
                 postData.userId = postData.userId || networkIdForPost;
+                postData.createdBy = currentUserId;  // Track who created it
                 postData.ownerUid = postData.ownerUid || networkIdForPost;
                 postData.id = postId;
                 postData.postId = postId;
                 postData.ownerAt = postData.ownerAt || new Date().getTime();
                 console.log('  ✅ Using networkId for post:', networkIdForPost);
-                console.log('  📝 Full path will be:', `users/${networkIdForPost}/posts/${postId}`);
-                console.log('  📋 About to call savePostToFirebase with:', { networkIdForPost, postId, postDataKeys: Object.keys(postData) });
+                console.log('  📝 Full path will be: posts/${postId} (SHARED - all users see this)');
+                console.log('  📋 About to call savePostToFirebase with:', { postId, postDataKeys: Object.keys(postData) });
                 
-                await savePostToFirebase(networkIdForPost, postId, postData);
+                // Save to SHARED posts collection (not per-user)
+                await savePostToFirebaseShared(postId, postData);
                 console.log('  ✅ savePostToFirebase completed successfully');
-                console.log(`  💾 Post NOW SAVED to: users/${networkIdForPost}/posts/${postId}`);
-                console.log('  🔍 Firebase listener should now trigger and show your post...');
+                console.log(`  💾 Post NOW SAVED to: posts/${postId} (visible to ALL users)`);
+                console.log('  🔍 Firebase listener should now trigger and show your post to everyone...');
 
                 // 🚀 DISTRIBUTE POST TO NEARBY USERS
                 // Posts should be visible to:
