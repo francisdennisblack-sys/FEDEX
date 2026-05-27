@@ -8219,11 +8219,12 @@
                     console.log(`\n✅ POST FOUND in gridContent["${foundIn}"]`);
                     console.log('\n📊 POST DATA:');
                     console.log(`  id: ${foundPost.id}`);
+                    console.log(`  authId: ${foundPost.authId}`);
                     console.log(`  createdBy: ${foundPost.createdBy}`);
                     console.log(`  userId: ${foundPost.userId}`);
-                    console.log(`  networkId: ${foundPost.networkId}`);
+                    console.log(`  gridId: ${foundPost.gridId}`);
                     console.log(`  content: "${(foundPost.content || '').substring(0, 50)}..."`);
-                    console.log(`  county: ${foundPost.county}`);
+                    console.log(`  zoneTag: ${foundPost.zoneTag}`);
                     console.log(`  timestamp: ${foundPost.timestamp}`);
                     console.log(`  likes: ${foundPost.likes || 0}`);
                     console.log(`  dislikes: ${foundPost.dislikes || 0}`);
@@ -8411,9 +8412,9 @@
                     // Also remove from Firebase if they're time-expired
                     const expiredPosts = allAvailablePosts.filter(p => !ML_POST_RETENTION.shouldKeepPost(p));
                     for (const post of expiredPosts) {
-                        if (post.networkId && post.id) {
+                        if (post.authId && post.id) {
                             try {
-                                const postRef = ref(database, `users/${post.networkId}/posts/${post.id}`);
+                                const postRef = ref(database, `posts/${post.id}`);
                                 await remove(postRef);
                                 console.log(`🗑️ Removed expired post from Firebase: ${post.id.substring(0, 8)}`);
                             } catch (err) {
@@ -10542,7 +10543,7 @@
         }
 
         // Video Moderation - checks video for nudity and violence
-        async function moderateVideo(videoUrl, postId, networkId) {
+        async function moderateVideo(videoUrl, postId) {
             try {
                 // Moderation is disabled on client-side - videos are always approved
                 console.log('✅ Video approved (moderation disabled)');
@@ -10554,7 +10555,7 @@
         }
 
         // Photo Moderation - checks images for nudity, violence, racy content
-        async function moderatePhoto(imageUrl, postId, networkId) {
+        async function moderatePhoto(imageUrl, postId) {
             try {
                 // Moderation is disabled on client-side - photos are always approved
                 console.log('✅ Photo approved (moderation disabled)');
@@ -10813,15 +10814,16 @@
         // ============================================
         const postTrackingSystem = {
             // Track a post creation for user
-            async trackPostCreation(userId, postId, postData, networkId) {
+            async trackPostCreation(userId, postId, postData) {
                 try {
-                    // Record in user's post history
+                    // Record in user's post history (for their dashboard/profile)
                     const userPostRef = ref(database, `user-posts/${userId}/${postId}`);
                     await set(userPostRef, {
                         postId,
-                        networkId,
+                        authId: postData.authId,
+                        gridId: postData.gridId,
                         content: postData.content || '',
-                        county: postData.county,
+                        zoneTag: postData.zoneTag,
                         timestamp: postData.timestamp,
                         mediaType: postData.mediaType,
                         photoURL: postData.photoURL || null,
@@ -10836,15 +10838,10 @@
                 }
             },
             
-            // Get all posts by user
-            async getUserPosts(userId, networkId = null) {
+            // Get all posts by user (from their history)
+            async getUserPosts(userId) {
                 try {
-                    let postsRef;
-                    if (networkId) {
-                        postsRef = ref(database, `user-posts/${userId}/${networkId}`);
-                    } else {
-                        postsRef = ref(database, `user-posts/${userId}`);
-                    }
+                    const postsRef = ref(database, `user-posts/${userId}`);
                     
                     const snapshot = await get(postsRef);
                     if (snapshot.exists()) {
@@ -10862,9 +10859,9 @@
             },
             
             // Get post engagement metrics
-            async getPostMetrics(networkId, postId) {
+            async getPostMetrics(postId) {
                 try {
-                    const postRef = ref(database, `users/${networkId}/posts/${postId}`);
+                    const postRef = ref(database, `posts/${postId}`);
                     const snapshot = await get(postRef);
                     
                     if (snapshot.exists()) {
@@ -10886,9 +10883,9 @@
             },
             
             // Track post view
-            async trackPostView(networkId, postId) {
+            async trackPostView(postId) {
                 try {
-                    const postRef = ref(database, `users/${networkId}/posts/${postId}`);
+                    const postRef = ref(database, `posts/${postId}`);
                     const snapshot = await get(postRef);
                     
                     if (snapshot.exists()) {
@@ -10904,11 +10901,11 @@
             },
             
             // Delete post
-            async deletePost(userId, networkId, postId) {
+            async deletePost(userId, postId) {
                 try {
-                    // Remove from network posts
-                    const networkPostRef = ref(database, `users/${networkId}/posts/${postId}`);
-                    await remove(networkPostRef);
+                    // Remove from shared posts
+                    const postRef = ref(database, `posts/${postId}`);
+                    await remove(postRef);
                     
                     // Remove from user's post history
                     const userPostRef = ref(database, `user-posts/${userId}/${postId}`);
@@ -10922,22 +10919,27 @@
                 }
             },
             
-            // Get posts from multiple users
-            async getNetworkPosts(networkId, limit = 100) {
+            // Get posts from user's grid (filter shared posts by gridId)
+            async getGridPosts(gridId, limit = 100) {
                 try {
-                    const networkRef = ref(database, `users/${networkId}/posts`);
-                    const snapshot = await get(networkRef);
+                    const postsRef = ref(database, `posts`);
+                    const snapshot = await get(postsRef);
                     
                     if (snapshot.exists()) {
-                        const posts = Object.values(snapshot.val());
-                        // Sort by timestamp, newest first
-                        posts.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                        const postsObj = snapshot.val();
+                        const allPosts = Object.values(postsObj);
                         
-                        return posts.slice(0, limit);
+                        // Filter by gridId
+                        const gridPosts = allPosts
+                            .filter(p => p.gridId === gridId)
+                            .slice(0, limit);
+                        
+                        console.log(`✅ Retrieved ${gridPosts.length} posts for grid: ${gridId}`);
+                        return gridPosts;
                     }
                     return [];
                 } catch (error) {
-                    console.error('❌ Error getting network posts:', error);
+                    console.error('❌ Error retrieving grid posts:', error);
                     return [];
                 }
             },
@@ -11253,7 +11255,7 @@
                     if (post) {
                         const banEndTime = durationSeconds ? new Date().getTime() + (durationSeconds * 1000) : null;
                         bansToApply.push({
-                            networkId: currentUserId,
+                            authId: post.authId,
                             postId: postId,
                             posterDeviceId: post.posterDeviceId || 'unknown',
                             banDuration: durationSeconds,
@@ -11508,68 +11510,31 @@
             console.log('⚡ FORCE DELETE ALL - INITIATED');
             
             try {
-                console.log('🔥 Starting complete database wipe...');
-                
-                // Get ALL networks first
-                const networksRef = ref(database, `networks`);
-                const networksSnapshot = await get(networksRef);
+                console.log('🔥 Starting complete database wipe (shared collection)...');
                 
                 let totalPostsDeleted = 0;
-                let totalPhotosDeleted = 0;
                 
-                if (networksSnapshot.exists()) {
-                    const networks = networksSnapshot.val();
-                    const networkIds = Object.keys(networks);
+                // DELETE ALL POSTS FROM SHARED COLLECTION
+                const postsRef = ref(database, `posts`);
+                const postsSnapshot = await get(postsRef);
+                
+                if (postsSnapshot.exists()) {
+                    const posts = postsSnapshot.val();
+                    const postIds = Object.keys(posts);
                     
-                    console.log(`🗂️ Found ${networkIds.length} networks to process`);
+                    console.log(`📝 ${postIds.length} posts to delete from shared collection`);
                     
-                    // Process each network
-                    for (const networkId of networkIds) {
-                        console.log(`📍 Processing network: ${networkId}`);
-                        
-                        // 1. DELETE ALL POSTS IN THIS NETWORK
-                        const postsRef = ref(database, `users/${networkId}/posts`);
-                        const postsSnapshot = await get(postsRef);
-                        
-                        if (postsSnapshot.exists()) {
-                            const posts = postsSnapshot.val();
-                            const postIds = Object.keys(posts);
-                            
-                            console.log(`  📝 ${postIds.length} posts to delete`);
-                            
-                            const deletionPromises = postIds.map(postId => 
-                                remove(ref(database, `users/${networkId}/posts/${postId}`))
-                                    .catch(() => {})
-                            );
-                            
-                            await Promise.all(deletionPromises);
-                            totalPostsDeleted += postIds.length;
-                        }
-                        
-                        // 2. DELETE ALL PHOTOS IN THIS NETWORK
-                        const photosRef = ref(database, `users/${networkId}/photos`);
-                        const photosSnapshot = await get(photosRef);
-                        
-                        if (photosSnapshot.exists()) {
-                            const photos = photosSnapshot.val();
-                            const photoIds = Object.keys(photos);
-                            
-                            console.log(`  📷 ${photoIds.length} photos to delete`);
-                            
-                            const photoDeletePromises = photoIds.map(photoId => 
-                                remove(ref(database, `users/${networkId}/photos/${photoId}`))
-                                    .catch(() => {})
-                            );
-                            
-                            await Promise.all(photoDeletePromises);
-                            totalPhotosDeleted += photoIds.length;
-                        }
-                    }
+                    const deletionPromises = postIds.map(postId => 
+                        remove(ref(database, `posts/${postId}`))
+                            .catch(() => {})
+                    );
                     
-                    // 3. DELETE ALL NETWORK DATA
-                    console.log(`🗑️ Deleting all network directories...`);
-                    await remove(networksRef).catch(() => {});
+                    await Promise.all(deletionPromises);
+                    totalPostsDeleted += postIds.length;
                 }
+                
+                // DELETE ALL PHOTOS (stored under posts)
+                // Photos are automatically deleted when their posts are deleted
                 
                 // 4. CLEAR ALL USER VOTES
                 console.log(`🗳️ Clearing all user votes...`);
@@ -11580,17 +11545,15 @@
                 await remove(ref(database, `onlineUsers`)).catch(() => {});
                 
                 // 6. VERIFY DELETION
-                const verifyNetworks = await get(networksRef);
-                const remaining = verifyNetworks.exists() ? Object.keys(verifyNetworks.val()).length : 0;
-                
-                const totalDeleted = totalPostsDeleted + totalPhotosDeleted;
+                const verifyPosts = await get(postsRef);
+                const remaining = verifyPosts.exists() ? Object.keys(verifyPosts.val()).length : 0;
                 
                 console.log(`%c🎉 COMPLETE DATABASE WIPE SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 16px;');
                 
                 if (remaining === 0) {
-                    alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${totalPostsDeleted}\n• Photos: ${totalPhotosDeleted}\n• Votes: cleared\n• Users: cleared\n\n✓ Firebase completely wiped`);
+                    alert(`✅ FORCE DELETE COMPLETE!\n\n📊 Summary:\n• Posts: ${totalPostsDeleted}\n• Votes: cleared\n• Users: cleared\n\n✓ Firebase completely wiped`);
                 } else {
-                    alert(`⚠️ Partial deletion:\n• Deleted: ${totalDeleted} items\n• Networks remaining: ${remaining}`);
+                    alert(`⚠️ Partial deletion:\n• Deleted: ${totalPostsDeleted} items\n• Posts remaining: ${remaining}`);
                 }
                 
                 // Clear local caches
@@ -12262,7 +12225,7 @@
                 
                 set(reportsRef, {
                     postId: selectedPostId,
-                    networkId: currentUserId,
+                    authId: currentUserId,
                     reason: reason,
                     reportedAt: new Date().getTime(),
                     reportedBy: currentUserId, // Device ID of reporter
@@ -20510,9 +20473,11 @@
                 
                 const postData = {
                     id: postId,
-                    networkId: currentUserId,
+                    authId: currentUserId,
                     userId: currentUserId,
+                    createdBy: currentUserId,
                     ownerUid: currentUserId,
+                    gridId: currentGridId,
                     content: postText,
                     photoURL: photoURL,
                     mediaType: selectedMediaType,
@@ -20812,7 +20777,7 @@
                 
                 // 📝 TRACK POST CREATION IN FIREBASE SYSTEM
                 if (window.postTrackingSystem) {
-                    await window.postTrackingSystem.trackPostCreation(currentUserId, postId, postData, networkIdForPost);
+                    await window.postTrackingSystem.trackPostCreation(currentUserId, postId, postData);
                     console.log(`📍 Post tracked in Firebase system for retrieval and analytics`);
                 }
 
@@ -21887,15 +21852,18 @@
             try {
                 const testPostId = `test-${Date.now()}`;
                 const testData = {
+                    id: testPostId,
+                    postId: testPostId,
+                    authId: currentUserId,
+                    userId: currentUserId,
+                    createdBy: currentUserId,
                     content: 'This is a test post ' + new Date().toLocaleTimeString(),
                     timestamp: Date.now(),
                     likes: 0,
-                    dislikes: 0,
-                    userId: currentUserId,
-                    networkId: currentUserId
+                    dislikes: 0
                 };
                 
-                const path = `users/${currentUserId}/posts/${testPostId}`;
+                const path = `posts/${testPostId}`;
                 console.log('  Saving to:', path);
                 console.log('  Data:', testData);
                 
