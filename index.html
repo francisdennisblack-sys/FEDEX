@@ -673,25 +673,15 @@
             transition: background-color 0.8s ease, border-color 0.8s ease, color 0.8s ease;
         }
 
-        /* 🌍 wificontent.com brand logo — left-anchored earth emoji.
-           Pulses gently while OTHER users are online (count > 1 means you + someone else),
-           so the lone visible emoji on screen doubles as a liveness indicator and
-           replaces the old status dot entirely. */
-        .brand-logo {
-            font-size: 44px;
-            line-height: 1;
+        /* 🌍 wificontent.com brand logo — Canvas 3D rotating globe */
+        #brandGlobeCanvas {
+            cursor: default;
             user-select: none;
             pointer-events: none;
-            filter: drop-shadow(0 2px 8px rgba(0,0,0,0.4));
-            display: inline-block;
-            transform-origin: center;
+            filter: drop-shadow(0 2px 12px rgba(74, 222, 128, 0.5));
         }
-        body.light-mode .brand-logo {
-            filter: drop-shadow(0 2px 6px rgba(0,0,0,0.15));
-        }
-        @keyframes brandSpin {
-            0%       { transform: rotate(0deg);   }
-            100%     { transform: rotate(360deg); }
+        #brandGlobeCanvas.online {
+            animation: brandGlow 1.2s ease-in-out infinite, brandPulse 1.2s ease-in-out infinite;
         }
         @keyframes brandPulse {
             0%, 100% { transform: scale(1);    }
@@ -700,12 +690,6 @@
         @keyframes brandGlow {
             0%, 100% { filter: drop-shadow(0 2px 12px rgba(74, 222, 128, 0.5)); }
             50%      { filter: drop-shadow(0 2px 18px rgba(74, 222, 128, 0.85)); }
-        }
-        .brand-logo.online {
-            animation: brandSpin 1.2s linear infinite, brandPulse 1.2s ease-in-out infinite, brandGlow 1.2s ease-in-out infinite;
-        }
-        body.light-mode .brand-logo.online {
-            animation: brandSpin 1.2s linear infinite, brandPulse 1.2s ease-in-out infinite, brandGlow 1.2s ease-in-out infinite;
         }
 
         /* Mobile header optimization */
@@ -2460,7 +2444,7 @@
 
 <body>
     <div class="header">
-        <span class="brand-logo" role="img" aria-label="wificontent.com" title="wificontent.com" id="brandLogoEmoji">🌍</span>
+        <canvas id="brandGlobeCanvas" width="44" height="44" style="display: inline-block; vertical-align: middle;" title="wificontent.com"></canvas>
         <div style="display: flex; align-items: center; gap: 12px;">
             <div id="onlineUserCount" style="font-size: 12px; color: #888; margin-left: 4px;">0 online</div>
         </div>
@@ -10934,6 +10918,108 @@
             });
         }
 
+        // ============================================================================
+        // 🌍 CANVAS 3D GLOBE ENGINE — rotating earth with green glow + pulse
+        // ============================================================================
+        window.brandGlobeEngine = (function() {
+            const canvas = document.getElementById('brandGlobeCanvas');
+            if (!canvas) return { start: () => {}, stop: () => {} };
+            
+            const ctx = canvas.getContext('2d');
+            const radius = 20; // Sphere radius in px (canvas is 44×44)
+            let rotation = 0;
+            let animFrameId = null;
+            let isRunning = false;
+            
+            // Simple continent coloring — green for land, dark for water
+            function drawGlobe() {
+                const w = canvas.width;
+                const h = canvas.height;
+                const cx = w / 2;
+                const cy = h / 2;
+                
+                // Clear
+                ctx.clearRect(0, 0, w, h);
+                
+                // Ocean (dark blue-black)
+                ctx.fillStyle = '#0a1628';
+                ctx.beginPath();
+                ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Land masses (simple dots/patches representing continents)
+                ctx.fillStyle = '#22c55e'; // Green for land
+                const continents = [
+                    { lat: 45, lon: -100, size: 3 },  // North America
+                    { lat: -20, lon: -60, size: 2.5 }, // South America
+                    { lat: 50, lon: 10, size: 3.5 },   // Europe/Africa
+                    { lat: 20, lon: 75, size: 4 },     // India
+                    { lat: 35, lon: 105, size: 3.5 },  // China
+                    { lat: -25, lon: 133, size: 3 }    // Australia
+                ];
+                
+                for (const cont of continents) {
+                    // 3D projection: latitude + rotated longitude
+                    const lat = cont.lat * Math.PI / 180;
+                    const lon = (cont.lon + rotation) * Math.PI / 180;
+                    
+                    // Simple spherical to 2D: only draw if facing camera
+                    const cosLat = Math.cos(lat);
+                    const z = Math.cos(lon) * cosLat;
+                    if (z > 0) {
+                        const x = cx + radius * Math.sin(lon) * cosLat;
+                        const y = cy + radius * Math.sin(lat);
+                        ctx.beginPath();
+                        ctx.arc(x, y, cont.size, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+                
+                // Subtle grid lines (latitude/longitude)
+                ctx.strokeStyle = 'rgba(34, 197, 94, 0.2)';
+                ctx.lineWidth = 0.5;
+                for (let lat = -60; lat <= 60; lat += 30) {
+                    const latRad = lat * Math.PI / 180;
+                    ctx.beginPath();
+                    for (let lon = 0; lon <= 360; lon += 10) {
+                        const lonRad = (lon + rotation) * Math.PI / 180;
+                        const cosLat = Math.cos(latRad);
+                        const z = Math.cos(lonRad) * cosLat;
+                        if (z > 0) {
+                            const x = cx + radius * Math.sin(lonRad) * cosLat;
+                            const y = cy + radius * Math.sin(latRad);
+                            if (lon === 0) ctx.moveTo(x, y);
+                            else ctx.lineTo(x, y);
+                        }
+                    }
+                    ctx.stroke();
+                }
+            }
+            
+            function animate() {
+                if (!isRunning) return;
+                rotation += 1.5; // 1.5° per frame ≈ 1 full rotation per ~240 frames (~4s at 60fps)
+                if (rotation >= 360) rotation -= 360;
+                drawGlobe();
+                animFrameId = requestAnimationFrame(animate);
+            }
+            
+            return {
+                start: () => {
+                    if (!isRunning) {
+                        isRunning = true;
+                        animate();
+                    }
+                },
+                stop: () => {
+                    isRunning = false;
+                    if (animFrameId) cancelAnimationFrame(animFrameId);
+                    rotation = 0;
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                }
+            };
+        })();
+
         function subscribeToOnlineUserCount() {
             try {
                 const onlineUsersRef = ref(database, 'onlineUsers');
@@ -10970,26 +11056,15 @@
                         countElement.textContent = count + ' online';
                         console.log(`👥 ONLINE COUNT UPDATE: ${count}/${totalUsers} active (${activeUsers.slice(0,3).join(', ')}${totalUsers > 3 ? '...' : ''})`);
                     }
-                    // 🌍 Brand-logo liveness pulse — replaces the removed status dot.
-                    // Pulse when there are OTHER users online (you alone shouldn't pulse).
-                    // Emoji variants rotate every 0.4s: 🌍 → 🌎 → 🌏
+                    // 🌍 Canvas globe engine — start rotation when others are online.
                     try {
-                        const logoEl = document.querySelector('.brand-logo');
-                        const logoEmoji = document.getElementById('brandLogoEmoji');
+                        const canvas = document.getElementById('brandGlobeCanvas');
                         const isOnline = count > 1;
-                        if (logoEl) logoEl.classList.toggle('online', isOnline);
-                        // Start emoji swap loop when online, clear when offline
-                        if (isOnline && !window._earthSwapInterval) {
-                            const emojis = ['🌍', '🌎', '🌏'];
-                            let idx = 0;
-                            window._earthSwapInterval = setInterval(() => {
-                                if (logoEmoji) logoEmoji.textContent = emojis[idx % 3];
-                                idx++;
-                            }, 400); // Change every 0.4s (1/3 of 1.2s cycle)
-                        } else if (!isOnline && window._earthSwapInterval) {
-                            clearInterval(window._earthSwapInterval);
-                            window._earthSwapInterval = null;
-                            if (logoEmoji) logoEmoji.textContent = '🌍';
+                        if (canvas) canvas.classList.toggle('online', isOnline);
+                        if (isOnline) {
+                            window.brandGlobeEngine.start();
+                        } else {
+                            window.brandGlobeEngine.stop();
                         }
                     } catch (_) {}
                 });
