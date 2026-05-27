@@ -7731,6 +7731,17 @@
             post.likes = newLikes;
             post.dislikes = newDislikes;
             
+            // 🚀 BOOST PERFORMANCE TRACKING: Track engagement if post is boosted
+            if (post.boostRequested && post.boostIntent) {
+                try {
+                    window.boostPerformanceSystem.trackEngagement(post.id, newLikes);
+                    const engagement = window.boostPerformanceSystem.getEngagementScore(post.id);
+                    console.log(`🚀 BOOST ENGAGEMENT: Post ${post.id.substring(0,8)} now has ${newLikes} likes (${engagement.toFixed(1)}% engagement)`);
+                } catch (e) {
+                    console.warn('⚠️ Failed to track boost engagement:', e);
+                }
+            }
+            
             // CRITICAL: Preserve all post properties when updating references
             // Update the same post in all gridContent keys (by reference) but ensure content is NOT lost
             if (postCache[postId]) {
@@ -18038,9 +18049,92 @@
                 }
             }
 
-            // Rank with nearby bias + rotating rebadge boost
+            // 🚀 BOOST SYSTEM: Identify and score all boosted posts
+            // Boosted posts appear at the top of grid with special badges
+            const boostTime = Date.now();
+            const boostScores = new Map();
+            
+            sortedPosts.forEach(post => {
+                // Check if post has boost data
+                if (!post.boostIntent || !post.boostRequested || !post.boostIntent.tier) {
+                    boostScores.set(post.id, { tier: null, score: 0, isBoosted: false });
+                    return;
+                }
+                
+                // Check if boost is still active (has not expired)
+                const boostPaidAt = post.boostIntent.armedAt || post.boostPaidAt || post.timestamp || boostTime;
+                const boostTier = post.boostIntent.tier || 'standard';
+                
+                // Boost duration by tier: standard=24h, premium=72h, elite=7d
+                const boostDurations = { standard: 24*60*60*1000, premium: 72*60*60*1000, elite: 7*24*60*60*1000 };
+                const duration = boostDurations[boostTier] || boostDurations.standard;
+                const boostExpiresAt = post.boostExpiresAt || (boostPaidAt + duration);
+                const isBoostActive = boostTime < boostExpiresAt;
+                
+                // 🏆 BADGE PERSISTENCE: Check if post already has a permanent badge
+                // Crowned and Podium badges stay forever even after boost expires
+                const hasPermaBadge = post.boostBadge === 'crowned' || post.boostBadge === 'podium';
+                
+                // Update boost status if expired
+                if (!isBoostActive) {
+                    post.boostStatus = 'expired';
+                    
+                    // If post has permanent badge, keep it but don't boost
+                    if (hasPermaBadge) {
+                        console.log(`🏆 PERMA-BADGE: Post ${post.id.substring(0,8)} boost expired but ${post.boostBadge} badge persists`);
+                        boostScores.set(post.id, { tier: boostTier, score: 0, isBoosted: false, expired: true, permaBadge: post.boostBadge });
+                    } else {
+                        console.log(`⏰ BOOST EXPIRED: Post ${post.id.substring(0,8)} no longer boosted`);
+                        boostScores.set(post.id, { tier: boostTier, score: 0, isBoosted: false, expired: true });
+                    }
+                    return;
+                }
+                
+                // Boost is still active - calculate scoring
+                // Boost scoring: higher tier = higher priority
+                const tierScores = { standard: 500, premium: 750, elite: 1000 };
+                const boostScore = tierScores[boostTier] || tierScores.standard;
+                
+                // Track remaining time until boost expires (for display)
+                const timeRemainingMs = boostExpiresAt - boostTime;
+                const timeRemainingHours = Math.ceil(timeRemainingMs / (60*60*1000));
+                
+                // Track boost and determine badge
+                let badgeType = 'spotlight';  // Default: paid but not in top
+                
+                // Later we'll update badge if post reaches top positions
+                // For now, mark that we should render with boost styling
+                boostScores.set(post.id, { 
+                    tier: boostTier, 
+                    score: boostScore, 
+                    isBoosted: true,
+                    expiresAt: boostExpiresAt,
+                    timeRemainingHours: timeRemainingHours,
+                    badgeType: badgeType
+                });
+                
+                console.log(`🚀 BOOST: Post ${post.id.substring(0,8)} tier=${boostTier} expires in ${timeRemainingHours}h`);
+            });
+
+            // Rank with boost priority + nearby bias + rotating rebadge boost
             sortedPosts = sortedPosts
                 .map((post, index) => {
+                    // 🚀 BOOST PRIORITY: Get boost score first
+                    const boostInfo = boostScores.get(post.id) || { tier: null, score: 0, isBoosted: false };
+                    
+                    // If post is boosted and active, it gets massive priority
+                    if (boostInfo.isBoosted && boostInfo.score > 0) {
+                        // Set default boost badge (will be upgraded based on position)
+                        post.boostBadge = post.boostBadge || 'spotlight';
+                        return {
+                            post,
+                            score: boostInfo.score + 10000,  // Boosted posts get huge base score
+                            index,
+                            boostInfo
+                        };
+                    }
+                    
+                    // Regular scoring for non-boosted posts
                     const likes = post.likes || 0;
                     const dislikes = post.dislikes || 0;
                     const tier = String(post.engagementTier || '').toLowerCase();
@@ -18071,11 +18165,46 @@
                     return {
                         post,
                         score,
-                        index
+                        index,
+                        boostInfo
                     };
                 })
-                .sort((a, b) => b.score - a.score || a.index - b.index)
-                .map(item => item.post);
+                .sort((a, b) => {
+                    // Sort by boost score first, then regular score
+                    if (b.score !== a.score) return b.score - a.score;
+                    return a.index - b.index;
+                })
+                .map((item, newPosition) => {
+                    const post = item.post;
+                    const boostInfo = item.boostInfo;
+                    
+                    // 🏆 BADGE PROGRESSION: Track if post reaches top positions
+                    if (boostInfo && boostInfo.isBoosted) {
+                        // Track position for badge upgrades
+                        if (newPosition === 0) {
+                            // Crowned: peaked at #1
+                            boostInfo.badgeType = 'crowned';
+                            post.boostBadge = 'crowned';
+                            if (!post.boostPeakPosition || post.boostPeakPosition > 0) {
+                                post.boostPeakPosition = 0;
+                                post.boostPeakReachedAt = boostTime;
+                                console.log(`🏆 CROWNED: Post ${post.id.substring(0,8)} reached #1 position!`);
+                            }
+                        } else if (newPosition <= 2) {
+                            // Podium: peaked in top 3
+                            boostInfo.badgeType = 'podium';
+                            post.boostBadge = 'podium';
+                            if (!post.boostPeakPosition || post.boostPeakPosition > newPosition) {
+                                post.boostPeakPosition = newPosition;
+                                console.log(`🥈 PODIUM: Post ${post.id.substring(0,8)} reached position ${newPosition+1}!`);
+                            }
+                        } else {
+                            post.boostBadge = 'spotlight';
+                        }
+                    }
+                    
+                    return post;
+                });
 
             // ========================================================================
             // BADGE DIVERSITY BALANCE
@@ -18116,6 +18245,41 @@
             // Keep latest feed snapshot available for timed rotators/refresher systems
             window.latestSortedPosts = [...sortedPosts];
             window.latestUserAreaTag = userAreaTag;
+            
+            // ========================================================================
+            // 🚀 MANDATORY BOOST: Ensure boosted posts appear for their creator
+            // This is CRITICAL: Creators MUST see their boosted posts in prime positions
+            // ========================================================================
+            const userBoostedPosts = sortedPosts.filter(post => 
+                post.boostRequested && 
+                post.boostIntent && 
+                post.boostStatus !== 'expired' &&
+                (post.networkId === currentUserId || post.userId === currentUserId)
+            );
+            
+            if (userBoostedPosts.length > 0) {
+                console.log(`🚀 MANDATORY BOOST: Found ${userBoostedPosts.length} active boosted posts by creator`);
+                
+                // For each boosted post by this user, ensure it appears in top 5
+                userBoostedPosts.forEach((boostedPost, index) => {
+                    // Find current position
+                    const currentPos = sortedPosts.findIndex(p => p.id === boostedPost.id);
+                    
+                    // Target position: 0-4 depending on boost tier + engagement
+                    const boostTier = boostedPost.boostIntent?.tier || 'standard';
+                    const tierPriority = { standard: 3, premium: 2, elite: 0 };
+                    const targetPos = Math.min(tierPriority[boostTier] || 3, 4);
+                    
+                    // If not already in top 5, move it there
+                    if (currentPos > 4) {
+                        sortedPosts.splice(currentPos, 1);  // Remove from current position
+                        sortedPosts.splice(targetPos, 0, boostedPost);  // Insert at target
+                        console.log(`🚀 MANDATORY: Moved boost post to position ${targetPos + 1} (from ${currentPos + 1})`);
+                    } else if (currentPos > -1) {
+                        console.log(`🚀 GUARANTEED: Boost post already in top 5 at position ${currentPos + 1}`);
+                    }
+                });
+            }
             
             // ========================================================================
             // MACHINE LEARNING: OWNER RECIRCULATION + BADGE UPGRADE SURFACING
@@ -18332,6 +18496,20 @@
                     const likes = post.likes || 0;
                     const dislikes = post.dislikes || 0;
                     
+                    // 🚀 BOOST TIMER: Generate boost remaining time display
+                    let boostTimerHTML = '';
+                    if (post.boostExpiresAt && post.boostStatus !== 'expired') {
+                        const now = Date.now();
+                        const timeRemaining = post.boostExpiresAt - now;
+                        if (timeRemaining > 0) {
+                            const hours = Math.floor(timeRemaining / (60*60*1000));
+                            const minutes = Math.floor((timeRemaining % (60*60*1000)) / (60*1000));
+                            const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+                            const boostTier = post.boostIntent?.tier || 'standard';
+                            boostTimerHTML = `<div style="position: absolute; top: 8px; right: 8px; background: rgba(251,191,36,0.2); border: 1px solid #fbbf24; border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: 600; color: #fbbf24; font-family: monospace;">🚀 ${timeStr}</div>`;
+                        }
+                    }
+                    
                     // Check for Firebase Storage URL (photoURL) or legacy base64 (imageData)
                     if (post.photoURL || post.imageData) {
                         const imageSource = post.photoURL || post.imageData;
@@ -18368,7 +18546,7 @@
                         }
                         
                         // Media container with padding to leave room for vote badge and zone tag
-                        box.innerHTML = `<div style="width: 100%; height: calc(100% - 50px); background-color: #000; display: flex; align-items: center; justify-content: center; overflow: hidden;">${mediaHTML}</div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; top: 0;">${voteBadge}${zoneTagHTML}</div>`;
+                        box.innerHTML = `<div style="width: 100%; height: calc(100% - 50px); background-color: #000; display: flex; align-items: center; justify-content: center; overflow: hidden;">${mediaHTML}</div><div style="position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; top: 0;">${boostTimerHTML}${voteBadge}${zoneTagHTML}</div>`;
                         box.style.position = 'relative';
                     } else {
                         // Text-only posts - show text centered with prominent vote badge styled like modal
@@ -18393,7 +18571,7 @@
                             console.log(`    📝 TEXT POST - Zone: ${post.county} (hierarchy: ${post.areaHierarchyLevel || 'N/A'})`);
                         }
                         
-                        box.innerHTML = `<div style="font-size: 18px; color: #fff; overflow-y: auto; line-height: 1.5; text-align: center; padding: 16px; word-wrap: break-word; padding-bottom: 60px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; height: 100%; background-color: #1a1a1a;">${post.content || ''}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>${zoneTagHTML}`;
+                        box.innerHTML = `<div style="font-size: 18px; color: #fff; overflow-y: auto; line-height: 1.5; text-align: center; padding: 16px; word-wrap: break-word; padding-bottom: 60px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; height: 100%; background-color: #1a1a1a;">${post.content || ''}</div><div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>${boostTimerHTML}${zoneTagHTML}`;
                         box.style.position = 'relative';
                     }
                     box.classList.add('filled');
@@ -18404,6 +18582,12 @@
                     const zoneTag = document.getElementById(`zone-${gridPosition}`);
                     if (zoneTag) {
                         zoneTag.style.display = 'none';
+                    }
+                    
+                    // 🚀 APPLY BOOST BADGE: Priority over all other badges
+                    if (post.boostBadge) {
+                        box.classList.add(`badge-${post.boostBadge}`);
+                        console.log(`🚀 Applied BOOST badge: badge-${post.boostBadge} to post ${post.id.substring(0, 8)}`);
                     }
                     
                     // Apply badge class - if MIXED badge and has a primary badge, apply both
@@ -18441,6 +18625,17 @@
                             }
                         } catch (e) {
                             console.warn('⚠️ Failed to track own post shown:', e);
+                        }
+                    }
+                    
+                    // 🚀 BOOST PERFORMANCE TRACKING: Track impression if post is boosted
+                    if (post.boostRequested && post.boostIntent) {
+                        try {
+                            const zone = post.county || post.neighborhood || userAreaTag || 'unknown';
+                            const tier = post.boostIntent.tier || 'standard';
+                            window.boostPerformanceSystem.trackImpression(post.id, zone, tier);
+                        } catch (e) {
+                            console.warn('⚠️ Failed to track boost impression:', e);
                         }
                     }
                     
@@ -20140,6 +20335,89 @@
                         paymentIntentId: window.pendingBoost.paymentIntentId || null
                     } : null
                 };
+                
+                // 🚀 BOOST TRACKING: If boost requested, calculate expiration times
+                if (postData.boostRequested && postData.boostIntent) {
+                    const boostDurations = { standard: 24*60*60*1000, premium: 72*60*60*1000, elite: 7*24*60*60*1000 };
+                    const boostTier = postData.boostIntent.tier || 'standard';
+                    const boostDuration = boostDurations[boostTier] || boostDurations.standard;
+                    const boostPaidAt = postData.boostIntent.armedAt;
+                    const boostExpiresAt = boostPaidAt + boostDuration;
+                    
+                    // Track boost metadata for expiration and badge progression
+                    postData.boostPaidAt = boostPaidAt;
+                    postData.boostExpiresAt = boostExpiresAt;
+                    postData.boostStatus = 'active';  // Will be updated to 'expired' after duration
+                    postData.boostDurationHours = boostDuration / (60*60*1000);
+                    postData.boostPeakPosition = null;  // Will track highest position reached
+                    postData.boostPeakReachedAt = null;  // Will track when peaked
+                    
+                    console.log(`🚀 BOOST TRACKING: Tier=${boostTier}, Duration=${postData.boostDurationHours}h, Expires=${new Date(boostExpiresAt).toLocaleTimeString()}`);
+                    
+                    // 🚀 BOOST DISTRIBUTION: Determine how many zones this post will appear in
+                    // This drives the value of the boost - more zones = more impressions = more engagement
+                    const zoneDistribution = {
+                        standard: { minZones: 3, maxZones: 5, label: '3-5 zones' },
+                        premium: { minZones: 6, maxZones: 8, label: '6-8 zones' },
+                        elite: { minZones: 10, maxZones: 15, label: '10-15 zones' }
+                    };
+                    
+                    const distribution = zoneDistribution[boostTier] || zoneDistribution.standard;
+                    const zonesCount = Math.floor(Math.random() * (distribution.maxZones - distribution.minZones + 1)) + distribution.minZones;
+                    
+                    // Strategy: Distribute to high-value zones
+                    // Priority: POI audiences > neighborhood zones > city zones
+                    const boostZones = [];
+                    
+                    // 1. Find nearby POI zones (highest engagement)
+                    if (userLocation && globalPOIDatabase && globalPOIDatabase.length > 0) {
+                        // Find top 3 closest POIs
+                        const nearbyPOIs = [];
+                        for (let i = 0; i < globalPOIDatabase.length && nearbyPOIs.length < 3; i++) {
+                            const poi = globalPOIDatabase[i];
+                            const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                            if (dist < 50) {  // Within 50km
+                                nearbyPOIs.push({ ...poi, distance: dist });
+                            }
+                        }
+                        nearbyPOIs.forEach(poi => boostZones.push(`${poi.name} (POI)`));
+                    }
+                    
+                    // 2. Add neighborhood zones from area database
+                    if (globalLocationDatabase && globalLocationDatabase.length > 0) {
+                        const neighborhoodZones = globalLocationDatabase
+                            .filter(loc => loc.neighborhood && loc.city === areaTag)
+                            .slice(0, Math.min(5, Math.ceil(zonesCount * 0.4)))
+                            .map(loc => `${loc.neighborhood} (neighborhood)`);
+                        boostZones.push(...neighborhoodZones);
+                    }
+                    
+                    // 3. Add city zones
+                    const cityZones = [];
+                    const nearbyZones = new Set();
+                    if (globalLocationDatabase && globalLocationDatabase.length > 0) {
+                        for (let i = 0; i < Math.min(zonesCount - boostZones.length, globalLocationDatabase.length); i++) {
+                            const loc = globalLocationDatabase[Math.floor(Math.random() * globalLocationDatabase.length)];
+                            if (loc.city && !nearbyZones.has(loc.city)) {
+                                nearbyZones.add(loc.city);
+                                cityZones.push(`${loc.city} (city)`);
+                            }
+                        }
+                    }
+                    boostZones.push(...cityZones);
+                    
+                    // Trim to zone count
+                    const finalZones = boostZones.slice(0, zonesCount);
+                    
+                    postData.boostDistribution = {
+                        zonesCount: finalZones.length,
+                        zones: finalZones,
+                        strategy: distribution.label,
+                        createdAt: Date.now()
+                    };
+                    
+                    console.log(`🚀 DISTRIBUTION: Post will reach ${finalZones.length} zones (${distribution.label}): ${finalZones.slice(0, 3).join(', ')}${finalZones.length > 3 ? '...' : ''}`);
+                }
 
                 console.log('📊 Post data prepared:', postData);
                 console.log(`   County field will be: "${postData.county}"`);
@@ -20899,9 +21177,286 @@
         //         the boost server-side via /api/boost/confirm and assigns the badge.
         // ============================================================================
         window.STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || 'pk_test_REPLACE_ME';
-        window.BOOST_TIERS = window.BOOST_TIERS || {
-            standard: { amountCents: 299, label: '$2.99', durationHours: 24 }
+        
+        // 🚀 DYNAMIC BOOST TIERS (prices update based on performance)
+        // This is generated dynamically from the pricing engine
+        window.BOOST_TIERS = window.BOOST_TIERS || {};
+        
+        // Function to refresh boost tiers from pricing engine
+        function _refreshBoostTiers() {
+            window.BOOST_TIERS = {
+                standard: { 
+                    amountCents: window.boostPricingEngine?.getPrice('standard') || 299, 
+                    label: window.boostPricingEngine?.getPriceString('standard') || '$2.99', 
+                    durationHours: 24 
+                },
+                premium: { 
+                    amountCents: window.boostPricingEngine?.getPrice('premium') || 799, 
+                    label: window.boostPricingEngine?.getPriceString('premium') || '$7.99', 
+                    durationHours: 72 
+                },
+                elite: { 
+                    amountCents: window.boostPricingEngine?.getPrice('elite') || 1999, 
+                    label: window.boostPricingEngine?.getPriceString('elite') || '$19.99', 
+                    durationHours: 168 
+                }
+            };
+        }
+        
+        // Initialize default tiers
+        _refreshBoostTiers();
+        
+        // 🚀 BOOST PERFORMANCE TRACKING SYSTEM
+        // Tracks metrics for all boosted posts to drive ML pricing
+        window.boostPerformanceSystem = {
+            metrics: {},  // { postId: { likes, impressions, zones, engagement% } }
+            
+            // Track when a boosted post is rendered (impression)
+            trackImpression(postId, zone, tier) {
+                if (!postId) return;
+                if (!this.metrics[postId]) {
+                    this.metrics[postId] = {
+                        postId,
+                        tier,
+                        likes: 0,
+                        impressions: 0,
+                        zones: new Set(),
+                        firstSeenAt: Date.now(),
+                        zonePerformance: {}  // { 'zone-name': { impressions, likes } }
+                    };
+                }
+                this.metrics[postId].impressions++;
+                this.metrics[postId].zones.add(zone);
+                
+                // Track zone-specific performance
+                if (!this.metrics[postId].zonePerformance[zone]) {
+                    this.metrics[postId].zonePerformance[zone] = { impressions: 0, likes: 0 };
+                }
+                this.metrics[postId].zonePerformance[zone].impressions++;
+            },
+            
+            // Track engagement (likes) for boosted post
+            trackEngagement(postId, newLikes) {
+                if (!this.metrics[postId]) return;
+                this.metrics[postId].likes = newLikes;
+            },
+            
+            // Get engagement score: (likes / impressions) * 100
+            getEngagementScore(postId) {
+                if (!this.metrics[postId] || this.metrics[postId].impressions === 0) return 0;
+                return (this.metrics[postId].likes / this.metrics[postId].impressions) * 100;
+            },
+            
+            // Get average performance across all boost tier
+            getAveragePerformance(tier) {
+                const tierPosts = Object.values(this.metrics).filter(m => m.tier === tier);
+                if (tierPosts.length === 0) return { engagement: 50, totalImpressions: 0, totalLikes: 0 };
+                
+                const totalLikes = tierPosts.reduce((sum, m) => sum + m.likes, 0);
+                const totalImpressions = tierPosts.reduce((sum, m) => sum + m.impressions, 0);
+                const avgEngagement = totalImpressions > 0 ? (totalLikes / totalImpressions) * 100 : 50;
+                
+                return {
+                    engagement: avgEngagement,
+                    totalImpressions,
+                    totalLikes,
+                    postCount: tierPosts.length
+                };
+            },
+            
+            // Get best performing zones
+            getBestZones(limit = 5) {
+                const zonePerf = {};
+                Object.values(this.metrics).forEach(post => {
+                    Object.entries(post.zonePerformance).forEach(([zone, perf]) => {
+                        if (!zonePerf[zone]) {
+                            zonePerf[zone] = { impressions: 0, likes: 0 };
+                        }
+                        zonePerf[zone].impressions += perf.impressions;
+                        zonePerf[zone].likes += perf.likes;
+                    });
+                });
+                
+                return Object.entries(zonePerf)
+                    .map(([zone, perf]) => ({
+                        zone,
+                        engagement: perf.impressions > 0 ? (perf.likes / perf.impressions) * 100 : 0,
+                        impressions: perf.impressions,
+                        likes: perf.likes
+                    }))
+                    .sort((a, b) => b.engagement - a.engagement)
+                    .slice(0, limit);
+            }
         };
+        
+        // 🚀 ML DYNAMIC PRICING ENGINE
+        // Automatically adjusts boost prices based on performance metrics
+        // Prices persist in localStorage and can be updated from server
+        window.boostPricingEngine = {
+            // Base prices (can be overridden from server)
+            basePrices: {
+                standard: 299,    // $2.99 in cents
+                premium: 799,     // $7.99
+                elite: 1999       // $19.99
+            },
+            
+            // Price multipliers based on performance
+            priceMultipliers: {
+                standard: 1.0,
+                premium: 1.0,
+                elite: 1.0
+            },
+            
+            // Price update history
+            priceHistory: [],
+            lastPriceUpdateAt: null,
+            
+            // Initialize pricing from localStorage
+            init() {
+                const stored = localStorage.getItem('boostPrices');
+                if (stored) {
+                    try {
+                        const data = JSON.parse(stored);
+                        this.basePrices = { ...this.basePrices, ...data.basePrices };
+                        this.priceMultipliers = { ...this.priceMultipliers, ...data.priceMultipliers };
+                        this.priceHistory = data.priceHistory || [];
+                        this.lastPriceUpdateAt = data.lastPriceUpdateAt;
+                        console.log(`💰 Loaded boost prices from localStorage`);
+                    } catch (e) {
+                        console.warn('Failed to load boost prices:', e);
+                    }
+                }
+                
+                // Try to fetch from server
+                this.fetchPricesFromServer();
+                
+                // Auto-update prices every hour based on performance
+                setInterval(() => this.updatePricesBasedOnPerformance(), 60*60*1000);
+            },
+            
+            // Fetch prices from server (can be updated without redeploying)
+            fetchPricesFromServer() {
+                fetch('/api/boost-prices', { method: 'GET' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.basePrices) {
+                            this.basePrices = { ...this.basePrices, ...data.basePrices };
+                            this.priceMultipliers = { ...this.priceMultipliers, ...data.priceMultipliers };
+                            this.lastPriceUpdateAt = Date.now();
+                            this.savePrices();
+                            console.log(`💰 Updated boost prices from server:`, data.basePrices);
+                        }
+                    })
+                    .catch(e => console.warn('Failed to fetch boost prices from server:', e));
+            },
+            
+            // Get current price for tier
+            getPrice(tier) {
+                const basePrice = this.basePrices[tier] || this.basePrices.standard;
+                const multiplier = this.priceMultipliers[tier] || 1.0;
+                return Math.round(basePrice * multiplier);
+            },
+            
+            // Get formatted price string ($X.XX)
+            getPriceString(tier) {
+                const cents = this.getPrice(tier);
+                return '$' + (cents / 100).toFixed(2);
+            },
+            
+            // Update prices based on performance metrics
+            updatePricesBasedOnPerformance() {
+                const now = Date.now();
+                const lastUpdate = this.lastPriceUpdateAt || 0;
+                
+                // Only update once per hour
+                if (now - lastUpdate < 60*60*1000) return;
+                
+                console.log(`💰 ML PRICING: Calculating price adjustments based on performance...`);
+                
+                Object.keys(this.basePrices).forEach(tier => {
+                    const performance = window.boostPerformanceSystem.getAveragePerformance(tier);
+                    const engagement = performance.engagement || 50;
+                    
+                    // Pricing rules:
+                    // - High engagement (>50%): increase price 10%
+                    // - Low engagement (<30%): decrease price 10%
+                    // - Medium (30-50%): no change
+                    
+                    let newMultiplier = this.priceMultipliers[tier];
+                    
+                    if (engagement > 50) {
+                        newMultiplier *= 1.10;  // +10%
+                        console.log(`📈 ${tier.toUpperCase()}: High engagement (${engagement.toFixed(1)}%) - raising price`);
+                    } else if (engagement < 30) {
+                        newMultiplier *= 0.90;  // -10%
+                        console.log(`📉 ${tier.toUpperCase()}: Low engagement (${engagement.toFixed(1)}%) - lowering price`);
+                    } else {
+                        console.log(`➡️ ${tier.toUpperCase()}: Stable engagement (${engagement.toFixed(1)}%) - keeping price`);
+                    }
+                    
+                    // Cap multiplier between 0.5x and 2.0x (prices don't go too crazy)
+                    newMultiplier = Math.max(0.5, Math.min(2.0, newMultiplier));
+                    this.priceMultipliers[tier] = newMultiplier;
+                });
+                
+                this.lastPriceUpdateAt = now;
+                this.savePrices();
+                this.logPriceUpdate();
+            },
+            
+            // Save prices to localStorage
+            savePrices() {
+                localStorage.setItem('boostPrices', JSON.stringify({
+                    basePrices: this.basePrices,
+                    priceMultipliers: this.priceMultipliers,
+                    priceHistory: this.priceHistory,
+                    lastPriceUpdateAt: this.lastPriceUpdateAt
+                }));
+            },
+            
+            // Log price update for analytics
+            logPriceUpdate() {
+                const record = {
+                    timestamp: Date.now(),
+                    prices: {
+                        standard: this.getPriceString('standard'),
+                        premium: this.getPriceString('premium'),
+                        elite: this.getPriceString('elite')
+                    },
+                    multipliers: { ...this.priceMultipliers },
+                    performance: {
+                        standard: window.boostPerformanceSystem.getAveragePerformance('standard'),
+                        premium: window.boostPerformanceSystem.getAveragePerformance('premium'),
+                        elite: window.boostPerformanceSystem.getAveragePerformance('elite')
+                    }
+                };
+                
+                this.priceHistory.push(record);
+                // Keep only last 100 price updates
+                if (this.priceHistory.length > 100) {
+                    this.priceHistory.shift();
+                }
+                
+                console.log(`💰 PRICE UPDATE RECORDED:`, record);
+            },
+            
+            // Manual price update (admin)
+            setPrices(newPrices) {
+                this.basePrices = { ...this.basePrices, ...newPrices };
+                this.lastPriceUpdateAt = Date.now();
+                this.savePrices();
+                this.logPriceUpdate();
+                console.log(`💰 ADMIN: Prices updated to:`, newPrices);
+            }
+        };
+        
+        // Initialize pricing engine
+        setTimeout(() => {
+            window.boostPricingEngine.init();
+            _refreshBoostTiers();  // Update tiers with loaded prices
+            _updateBoostPriceLabels();  // Update UI labels
+        }, 1000);
+        
         window.pendingBoost = window.pendingBoost || {
             armed: false, armedAt: 0, tier: 'standard',
             paid: false, paymentMethodId: null, paymentIntentId: null, clientSecret: null
