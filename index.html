@@ -12125,8 +12125,21 @@
                     const state = (location.state || '').toLowerCase();
                     const stateCode = (location.stateCode || '').toLowerCase();
                     
+                    // Exact match (top priority — typed full name)
+                    if (locName === q) {
+                        const key = `${location.name}, ${location.state}`;
+                        locationMatches[key] = {
+                            display: key,
+                            type: 'location',
+                            value: location.name,
+                            priority: 0,
+                            data: location,
+                            state: location.state
+                        };
+                        prefixMatches++;
+                    }
                     // Prefix match (highest priority - most relevant)
-                    if (locName.startsWith(q)) {
+                    else if (locName.startsWith(q)) {
                         const key = `${location.name}, ${location.state}`;
                         locationMatches[key] = { 
                             display: key, 
@@ -12235,15 +12248,22 @@
                     return null;
                 })();
                 const matchesQuery = (nameLower, typeCode) => {
+                    // 🎯 Polished priority ladder: exact > prefix > tokens > type/category > contains
+                    if (nameLower === q) return 'exact';
+                    if (nameLower.startsWith(q)) return 'prefix';
+                    // Multi-token: all tokens must appear (more specific than plain contains)
+                    if (qTokens.length >= 2 && qTokens.every(t => nameLower.includes(t))) return 'tokens';
                     // Type-code shortcut: e.g. typing "high school" returns ALL high schools
                     if (typeCodeFilter && typeCode && typeCodeFilter.has(typeCode)) return 'type';
-                    if (nameLower.startsWith(q)) return 'prefix';
                     if (nameLower.includes(q)) return 'contains';
-                    // Multi-token: all tokens must appear somewhere in the name
-                    if (qTokens.length >= 2 && qTokens.every(t => nameLower.includes(t))) return 'tokens';
                     return null;
                 };
-                const matchPriority = m => m === 'prefix' ? 1 : (m === 'contains' ? 2 : (m === 'tokens' ? 2 : 3));
+                const matchPriority = m =>
+                    m === 'exact'    ? 0 :
+                    m === 'prefix'   ? 1 :
+                    m === 'tokens'   ? 2 :
+                    m === 'type'     ? 3 :
+                    m === 'contains' ? 4 : 5;
 
                 // 🌍 GLOBAL INDEX SCAN — covers ALL 500k POIs (other states) once index is fetched.
                 // Rows are [name, lat, lon, stateIdx, typeCode]. Stays before local scans so cross-state matches surface.
@@ -12263,6 +12283,9 @@
                         const m = matchesQuery(nameLower, typeCode);
                         if (!m) continue;
                         const lat = row[1], lon = row[2], stIdx = row[3];
+                        // v3 schema: [name, lat, lon, stateIdx, typeCode, tier, radiusMi, weight]
+                        const tier = (typeof row[5] === 'number') ? row[5] : null;
+                        const weight = (typeof row[7] === 'number') ? row[7] : 1.0;
                         const stateName = (stIdx >= 0 && stIdx < stateCodes.length) ? stateCodes[stIdx] : null;
                         const emoji = ({h:'🏫',c:'🎓',u:'🎓',r:'🍽️',k:'☕',s:'🛍️'})[typeCode] || '📍';
                         // Dedupe by lowercase name — keep nearest (if location known) or first
@@ -12275,7 +12298,9 @@
                         if (existing) {
                             if (haveLoc && distMi !== null && (existing.distMi === null || distMi < existing.distMi)) {
                                 existing.distMi = distMi;
-                                existing.data = { name, lat, lon, emoji, state: stateName, isGlobalIndex: true };
+                                existing.data = { name, lat, lon, emoji, state: stateName, tier, weight, isGlobalIndex: true };
+                                if (tier !== null) existing.tier = tier;
+                                if (weight) existing.weight = weight;
                             }
                             continue;
                         }
@@ -12285,10 +12310,12 @@
                             type: 'poi',
                             value: name,
                             priority: matchPriority(m),
+                            tier,            // neighborhoods (tier ≥10) surface above venues (tier ≤8)
+                            weight,          // higher-weight POIs (universities, malls) outrank cafes
                             distMi,
-                            data: { name, lat, lon, emoji, state: stateName, isGlobalIndex: true }
+                            data: { name, lat, lon, emoji, state: stateName, tier, weight, isGlobalIndex: true }
                         };
-                        if (m === 'prefix') poiPrefix++; else poiContains++;
+                        if (m === 'prefix' || m === 'exact') poiPrefix++; else poiContains++;
                     }
                 }
 
@@ -12338,19 +12365,31 @@
                             type: 'poi',
                             value: poi.name,
                             priority: matchPriority(m),
+                            tier:   (typeof poi.tier   === 'number') ? poi.tier   : null,
+                            weight: (typeof poi.weight === 'number') ? poi.weight : 1.0,
                             distMi,
                             data: poi
                         };
-                        if (m === 'prefix') poiPrefix++; else poiContains++;
+                        if (m === 'prefix' || m === 'exact') poiPrefix++; else poiContains++;
                     }
                 }
 
                 const sortedPois = Object.values(poiMatches).sort((a, b) => {
+                    // 1) Match quality: exact > prefix > tokens > type > contains
                     if (a.priority !== b.priority) return a.priority - b.priority;
-                    // Distance-rank when available
+                    // 2) 🏘️ Neighborhood-first: higher tier (10+ = neighborhoods/cities) ranks above venues (≤8).
+                    //    Only kicks in when priorities are equal so a prefix-match cafe still beats a contains-match city.
+                    const ta = (typeof a.tier === 'number') ? a.tier : 0;
+                    const tb = (typeof b.tier === 'number') ? b.tier : 0;
+                    if (ta !== tb) return tb - ta;
+                    // 3) Heavier POIs (universities, malls) beat lighter ones at same tier
+                    const wa = a.weight || 1.0, wb = b.weight || 1.0;
+                    if (wa !== wb) return wb - wa;
+                    // 4) Distance when both known
                     if (a.distMi !== null && b.distMi !== null) return a.distMi - b.distMi;
                     if (a.distMi !== null) return -1;
                     if (b.distMi !== null) return 1;
+                    // 5) Alpha tiebreaker
                     return String(a.value).localeCompare(String(b.value));
                 });
 
