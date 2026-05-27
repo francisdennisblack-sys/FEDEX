@@ -1,65 +1,88 @@
 #!/usr/bin/env node
 /**
- * build_global_poi_index.js
+ * build_global_poi_index.js  (v3)
  *
- * Build ONE compact search index for all 500k POIs so any user can search
- * for any POI in the country (even outside their state) with a single fetch.
+ * Builds one compact search index from the per-state shards in pois/states/*.json
  *
- * Output: pois/search-index.json
- *   { stateCodes: [...], typeCodes: {h,c,u,r,k,s,o}, rows: [[name, lat, lon, stateIdx, typeCode], ...] }
+ * Each row is a positional array — keeps the file small:
+ *   [name, lat, lon, stateIdx, typeCode, tier, radiusMi, weight]
  *
- * Uses positional arrays + integer state indices to minimize size.
- * Expected: ~22 MB raw, ~5-7 MB gzipped over the wire.
+ * stateCodes[i] gives the state name for stateIdx=i.
+ * typeCodes is the legend for one-char type codes.
+ *
+ * Tier/radius/weight let the client run the same scope-aware boost on cross-state hits
+ * without lazy-loading the shard first.
  */
+
 const fs = require('fs');
 const path = require('path');
 
 const ROOT = __dirname;
-const SRC = path.join(ROOT, 'poi_database_worldwide.json');
+const STATES_DIR = path.join(ROOT, 'pois', 'states');
 const OUT = path.join(ROOT, 'pois', 'search-index.json');
 
-if (!fs.existsSync(SRC)) { console.error('Missing source'); process.exit(1); }
+if (!fs.existsSync(STATES_DIR)) { console.error('Missing pois/states/'); process.exit(1); }
 
-const TYPE_CODES = { high_school:'h', college:'c', university:'u', restaurant:'r', cafe:'k', shopping:'s' };
+const TYPE_CODES = {
+    // education
+    high_school: 'h', middle_school: 'm', elementary_school: 'e', school: 'l',
+    college: 'c', university: 'u',
+    // food
+    restaurant: 'r', cafe: 'k', fast_food: 'f', bar: 'b', pub: 'b',
+    // shop
+    shopping: 's', mall: 'M', supermarket: 'g', convenience: 'v', pharmacy: 'p',
+    // places
+    neighborhood: 'N', neighbourhood: 'N', suburb: 'B', hamlet: 'H',
+    village: 'V', town: 'T', city: 'Y', locality: 'L',
+    // services
+    hospital: '+', fuel: 'G', gas_station: 'G', atm: 'A', post_office: 'P',
+    // leisure
+    park: 'q', gym: 'y', fitness_centre: 'y', library: 'i', museum: 'x',
+    cinema: 'X', theatre: 'X', hotel: 'I', stadium: 'd', airport: 'P', theme_park: 'd',
+};
 
-console.log('📖 Reading source…');
-const world = JSON.parse(fs.readFileSync(SRC, 'utf8'));
+const files = fs.readdirSync(STATES_DIR).filter(f => f.endsWith('.json') && !f.includes('.index'));
+files.sort();
 
 const stateCodes = [];
-const stateIdx = {};
+const stateIdx = new Map();
 const rows = [];
 
-const entries = Object.entries(world.states || {}).sort((a,b)=>a[0].localeCompare(b[0]));
-for (const [stateName, stateObj] of entries) {
-    const i = stateCodes.length;
-    stateCodes.push(stateName);
-    stateIdx[stateName] = i;
-    for (const p of (stateObj.pois || [])) {
+let totalRead = 0;
+for (const f of files) {
+    const data = JSON.parse(fs.readFileSync(path.join(STATES_DIR, f), 'utf8'));
+    const stateName = data.state || f.replace('.json', '').replace(/_/g, ' ');
+    if (!stateIdx.has(stateName)) { stateIdx.set(stateName, stateCodes.length); stateCodes.push(stateName); }
+    const sIdx = stateIdx.get(stateName);
+    for (const p of (data.pois || [])) {
+        if (!p || !p.name || typeof p.lat !== 'number' || typeof p.lon !== 'number') continue;
+        const tc = TYPE_CODES[p.type] || 'o';
         rows.push([
             p.name,
-            +(p.lat).toFixed(4),
-            +(p.lon).toFixed(4),
-            i,
-            TYPE_CODES[p.type] || 'o',
+            +p.lat.toFixed(5),
+            +p.lon.toFixed(5),
+            sIdx,
+            tc,
+            p.tier || 0,
+            +(p.radiusMi || 0).toFixed(2),
+            +(p.weight || 0).toFixed(2),
         ]);
-    }
-}
-
-// also fold in worldwide city POIs (different bucket — state stays null index = -1)
-for (const [cityName, city] of Object.entries(world.cities || {})) {
-    for (const p of (city.pois || [])) {
-        rows.push([ p.name, +(p.lat||0).toFixed(4), +(p.lon||0).toFixed(4), -1, TYPE_CODES[p.type] || 'o' ]);
+        totalRead++;
     }
 }
 
 const payload = {
+    version: 3,
     generatedAt: new Date().toISOString(),
     stateCodes,
     typeCodes: TYPE_CODES,
+    rowSchema: ['name', 'lat', 'lon', 'stateIdx', 'typeCode', 'tier', 'radiusMi', 'weight'],
     totalRows: rows.length,
     rows,
 };
 fs.writeFileSync(OUT, JSON.stringify(payload));
-const sizeMB = fs.statSync(OUT).size / 1024 / 1024;
-console.log(`✅ ${OUT}  rows=${rows.length.toLocaleString()}  size=${sizeMB.toFixed(1)} MB`);
-console.log('   (Vercel will gzip this on the wire; expected wire size ~5-7 MB.)');
+const sizeMB = (fs.statSync(OUT).size / 1024 / 1024).toFixed(1);
+console.log(`✅ ${OUT}`);
+console.log(`   rows: ${rows.length.toLocaleString()} (${totalRead.toLocaleString()} read)`);
+console.log(`   states: ${stateCodes.length}`);
+console.log(`   size: ${sizeMB} MB raw  (~${(sizeMB * 0.18).toFixed(1)} MB gzipped over the wire)`);

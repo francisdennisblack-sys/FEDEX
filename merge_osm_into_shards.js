@@ -61,11 +61,15 @@ function r6(x) { return typeof x === 'number' ? Math.round(x * 1e6) / 1e6 : x; }
 
 function mergeState(stateName) {
     const osmFile   = path.join(OSM_DIR, stateName.replace(/ /g, '_') + '.json');
+    const extraFile = path.join(OSM_DIR, 'extra_' + stateName.replace(/ /g, '_') + '.json');
     const shardFile = path.join(STATES_DIR, stateName.replace(/ /g, '_') + '.json');
-    if (!fs.existsSync(osmFile))   { console.log(`⏭️  ${stateName}: no OSM data, skip`); return null; }
+    const haveBase = fs.existsSync(osmFile);
+    const haveExtra = fs.existsSync(extraFile);
+    if (!haveBase && !haveExtra) { console.log(`⏭️  ${stateName}: no OSM data, skip`); return null; }
     if (!fs.existsSync(shardFile)) { console.log(`⏭️  ${stateName}: no shard, skip`);    return null; }
 
-    const osm   = JSON.parse(fs.readFileSync(osmFile, 'utf8'));
+    const osm   = haveBase ? JSON.parse(fs.readFileSync(osmFile, 'utf8')) : { places: [], schools: [] };
+    const extra = haveExtra ? JSON.parse(fs.readFileSync(extraFile, 'utf8')) : { pois: [] };
     const shard = JSON.parse(fs.readFileSync(shardFile, 'utf8'));
     const pois  = shard.pois || [];
 
@@ -77,7 +81,7 @@ function mergeState(stateName) {
         }
     }
 
-    let addedSchools = 0, addedPlaces = 0;
+    let addedSchools = 0, addedPlaces = 0, addedExtra = 0;
 
     // Schools/colleges/universities
     for (const s of (osm.schools || [])) {
@@ -120,14 +124,40 @@ function mergeState(stateName) {
         if (typeof p.lon === 'number') p.lon = r6(p.lon);
     }
 
+    // Extra POIs (food/shop/services/transit/leisure/tourism) from fetch_extra_pois.js.
+    // Tier/radius/weight get assigned by rescope_pois.js after the merge.
+    const EXTRA_EMOJI = {
+        restaurant:'🍽️', cafe:'☕', fast_food:'🍔', bar:'🍺', pub:'🍺',
+        bank:'🏦', atm:'🏧', pharmacy:'💊', gas_station:'⛽', hospital:'🏥', clinic:'🏥',
+        post_office:'📮', fire_station:'🚒', police:'👮', community_centre:'🏛️', place_of_worship:'⛪',
+        supermarket:'🛒', mall:'🛍️', shopping:'🛍️', convenience:'🏪',
+        park:'🌳', playground:'🎠', stadium:'🏟️', gym:'💪',
+        hotel:'🏨', museum:'🏛️', theatre:'🎭', cinema:'🎬', library:'📚',
+        transit_station:'🚉', airport:'✈️', theme_park:'🎢'
+    };
+    for (const e of (extra.pois || [])) {
+        const lat = r6(e.lat), lon = r6(e.lon);
+        if (typeof lat !== 'number' || typeof lon !== 'number') continue;
+        const key = dedupKey(e.name, lat, lon);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pois.push({
+            name: e.name, lat, lon,
+            category: e.category, type: e.type,
+            emoji: EXTRA_EMOJI[e.type] || '📍',
+            source: 'osm-extra'
+        });
+        addedExtra++;
+    }
+
     shard.pois = pois;
     shard.poiCount = pois.length;
     shard.osmMerged = true;
     shard.osmMergedAt = new Date().toISOString();
     fs.writeFileSync(shardFile, JSON.stringify(shard));
 
-    console.log(`✅ ${stateName}: +${addedSchools} schools, +${addedPlaces} places  (total now ${pois.length.toLocaleString()})`);
-    return { state: stateName, addedSchools, addedPlaces, total: pois.length, places: placeOut };
+    console.log(`✅ ${stateName}: +${addedSchools} schools, +${addedPlaces} places, +${addedExtra} extra  (total now ${pois.length.toLocaleString()})`);
+    return { state: stateName, addedSchools, addedPlaces, addedExtra, total: pois.length, places: placeOut };
 }
 
 function rebuildManifest() {
