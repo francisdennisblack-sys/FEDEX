@@ -7170,6 +7170,44 @@
         const voteDebounceMap = {}; // Track {postId_voteType: timestamp}
         const VOTE_DEBOUNCE_TIME = 500; // milliseconds - prevent same vote within 500ms
         
+        // Debounce render calls - batch vote updates into single render (100ms window)
+        let renderScheduled = false;
+        function scheduleRender() {
+            if (!renderScheduled) {
+                renderScheduled = true;
+                setTimeout(() => {
+                    renderGrid();
+                    renderScheduled = false;
+                }, 100);
+            }
+        }
+        
+        // Update vote display directly in DOM without full re-render
+        // This prevents posts from moving positions on the grid
+        function updateVoteDisplayInDOM(postId, newLikes, newDislikes) {
+            const postBoxes = document.querySelectorAll(`[data-post-id="${postId}"]`);
+            postBoxes.forEach(box => {
+                // Update likes display
+                const likeBtn = box.querySelector('.like-btn');
+                if (likeBtn) {
+                    const likeCount = likeBtn.querySelector('.vote-count');
+                    if (likeCount) {
+                        likeCount.textContent = newLikes > 0 ? newLikes : '';
+                    }
+                }
+                
+                // Update dislikes display
+                const dislikeBtn = box.querySelector('.dislike-btn');
+                if (dislikeBtn) {
+                    const dislikeCount = dislikeBtn.querySelector('.vote-count');
+                    if (dislikeCount) {
+                        dislikeCount.textContent = newDislikes > 0 ? newDislikes : '';
+                    }
+                }
+            });
+            console.log(`✅ Updated vote display in DOM for post ${postId.substring(0, 8)}: ${newLikes} likes, ${newDislikes} dislikes`);
+        }
+        
         function voteOnPost(postId, voteType) {
             if (!isConnected) {
                 alert('Please connect to WiFi first');
@@ -7288,23 +7326,33 @@
                 console.log(`🧠 Tracked ${voteType} for ML tag rewriting at distance from post origin`);
             }
             
-            // CRITICAL: Update ALL references to this post in gridContent to keep them in sync
+            // CRITICAL: Only update vote counts without mutating other properties
             console.log(`   Updating post votes: ${newLikes} likes, ${newDislikes} dislikes`);
             post.likes = newLikes;
             post.dislikes = newDislikes;
             
-            // Update the same post in all gridContent keys (by reference)
+            // CRITICAL: Preserve all post properties when updating references
+            // Update the same post in all gridContent keys (by reference) but ensure content is NOT lost
             if (postCache[postId]) {
                 postCache[postId].likes = newLikes;
                 postCache[postId].dislikes = newDislikes;
+                // Ensure content is preserved
+                if (!postCache[postId].content && post.content) {
+                    postCache[postId].content = post.content;
+                }
             }
             
             // Update in all gridContent arrays to maintain consistency
+            // CRITICAL: Only update votes, never delete or clear other properties
             for (let key in gridContent) {
                 const postInKey = gridContent[key].find(p => p.id === postId);
                 if (postInKey) {
                     postInKey.likes = newLikes;
                     postInKey.dislikes = newDislikes;
+                    // SAFETY: Never clear content
+                    if (!postInKey.content && post.content) {
+                        postInKey.content = post.content;
+                    }
                 }
             }
             
@@ -7313,7 +7361,16 @@
             console.log(`   Content: "${(post.content || '').substring(0, 50)}"...`);
             console.log(`   Likes: ${post.likes} | Dislikes: ${post.dislikes}`);
             
-            renderGrid();
+            // 🎯 CRITICAL FIX: Update vote display in DOM WITHOUT full re-render
+            // This prevents the post from moving positions on the grid
+            updateVoteDisplayInDOM(postId, newLikes, newDislikes);
+            
+            // Schedule a FULL re-render for 3 seconds later (after voting interaction is done)
+            // This allows the algorithm to reorganize posts, but only after user has finished voting
+            setTimeout(() => {
+                console.log(`🔄 Scheduling full grid re-render (3s after vote)`);
+                renderGrid();
+            }, 3000);
             
             // CRITICAL: Check if we need to load more posts after rendering
             // If visible posts fall below threshold, load more to keep grid full
@@ -7521,6 +7578,21 @@
                     console.log(`\n✅ Step 7: User votes loading from Firebase`);
                 } catch (err) {
                     console.error(`\n❌ Step 7 ERROR:`, err);
+                }
+                
+                // 🔄 SERVICE WORKER: Register for background sync
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.register('/service-worker.js').then(reg => {
+                        console.log('✅ Service Worker registered:', reg.scope);
+                        // Attempt background sync
+                        if ('sync' in reg) {
+                            reg.sync.register('firebase-sync').catch(err => {
+                                console.warn('Background sync not available:', err);
+                            });
+                        }
+                    }).catch(err => {
+                        console.warn('Service Worker registration failed:', err);
+                    });
                 }
                 
                 // ✅ STEP 8: Load worldwide locations (async, non-blocking)
@@ -11244,11 +11316,34 @@
             updateUserActivity();
             subscribeToOnlineUserCount();
             
-            // Add periodic heartbeat every 30 seconds to keep user in online list
-            setInterval(() => {
-                console.log('💓 Heartbeat: Refreshing online status');
-                updateUserActivity();
-            }, 30 * 1000);
+            // 🎯 SMART BACKGROUND PERSISTENCE: Aggressive heartbeat when tab is hidden
+            let heartbeatInterval = null;
+            let backgroundHeartbeatActive = false;
+            
+            function setHeartbeatInterval(ms) {
+                if (heartbeatInterval) clearInterval(heartbeatInterval);
+                heartbeatInterval = setInterval(() => {
+                    const mode = document.hidden ? 'background' : 'foreground';
+                    console.log(`💓 Heartbeat [${mode}]: Refreshing online status`);
+                    updateUserActivity();
+                }, ms);
+            }
+            
+            // Start with normal heartbeat (60s when tab visible)
+            setHeartbeatInterval(60 * 1000);
+            
+            // Listen for visibility changes - aggressive when hidden (5s), normal when visible (60s)
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) {
+                    console.log('🌙 Tab hidden: SWITCHING TO AGGRESSIVE HEARTBEAT (5s)');
+                    backgroundHeartbeatActive = true;
+                    setHeartbeatInterval(5 * 1000); // 5s when backgrounded
+                } else {
+                    console.log('🌞 Tab visible: SWITCHING TO NORMAL HEARTBEAT (60s)');
+                    backgroundHeartbeatActive = false;
+                    setHeartbeatInterval(60 * 1000); // 60s when visible
+                }
+            });
             
             // Update activity on user interaction
             document.addEventListener('mousemove', updateUserActivity, { passive: true });
@@ -17129,7 +17224,19 @@
                 gridContent[currentUserId] = preservedUserContent.map(oldPost => {
                     // Find the same post in allPosts (which may have updated vote counts)
                     const updatedPost = allPosts.find(p => p.id === oldPost.id);
-                    return updatedPost || oldPost;
+                    
+                    // CRITICAL SAFETY: Never lose content during merge
+                    if (updatedPost) {
+                        // Preserve content from oldPost if updatedPost is missing it
+                        if (!updatedPost.content && oldPost.content) {
+                            updatedPost.content = oldPost.content;
+                        }
+                        return updatedPost;
+                    } else {
+                        // If post not found in allPosts, keep original
+                        console.warn(`⚠️ Post ${oldPost.id} not found in allPosts, keeping original`);
+                        return oldPost;
+                    }
                 });
             }
             
@@ -17587,6 +17694,13 @@
                 
                 const box = document.getElementById(`box-${gridPosition}`);
                 if (box) {
+                    // CRITICAL SAFETY CHECK: Recover post content if missing
+                    // This can happen if post was reorganized without preserving all properties
+                    if (!post.content && postCache[post.id]) {
+                        console.warn(`⚠️ RECOVERING CONTENT: Post ${post.id.substring(0,8)} missing content, restoring from cache`);
+                        post.content = postCache[post.id].content;
+                    }
+                    
                     // Get vote counts
                     const likes = post.likes || 0;
                     const dislikes = post.dislikes || 0;
@@ -19623,46 +19737,15 @@
             body.scrollTop = 0;
         }
         
-        // Lock dimensions immediately and on every size change
+        // Lock dimensions on load, trust CSS for responsive rendering
         lockDimensions();
         
-        // CRITICAL: Detect and block the 250px height reduction - ULTRA AGGRESSIVE
-        const containerHeightLock = setInterval(() => {
-            const container = document.querySelector('.container');
-            const grid = document.getElementById('grid');
-            
-            if (container) {
-                const expectedHeight = window.innerHeight - 80; // 80px header
-                const actualHeight = container.clientHeight;
-                const delta = expectedHeight - actualHeight;
-                
-                if (Math.abs(delta) > 5) { // If more than 5px difference
-                    console.error(`🚨 CONTAINER HEIGHT MISMATCH: Expected ${expectedHeight}px, got ${actualHeight}px (delta: ${delta}px)`);
-                    // Force container back to correct height
-                    container.style.height = expectedHeight + 'px';
-                    container.style.minHeight = expectedHeight + 'px';
-                    container.style.maxHeight = expectedHeight + 'px';
-                }
-            }
-            
-            // ALSO lock grid to prevent it from shrinking
-            if (grid) {
-                const gridHeight = grid.clientHeight;
-                if (!window._baselineGridHeight) {
-                    window._baselineGridHeight = gridHeight;
-                    console.log('📏 BASELINE GRID HEIGHT SET:', gridHeight);
-                } else if (gridHeight < window._baselineGridHeight - 5) {
-                    // Grid is trying to shrink!
-                    console.error(`🚨 GRID SHRINKING DETECTED! Was ${window._baselineGridHeight}px, now ${gridHeight}px (Δ ${gridHeight - window._baselineGridHeight}px)`);
-                    grid.style.minHeight = window._baselineGridHeight + 'px';
-                    grid.style.height = window._baselineGridHeight + 'px';
-                } else if (gridHeight > window._baselineGridHeight + 5) {
-                    // Grid is growing - might be new content, update baseline
-                    console.log(`📈 GRID GROWING: ${gridHeight}px (was ${window._baselineGridHeight}px, +${gridHeight - window._baselineGridHeight}px) - updating baseline`);
-                    window._baselineGridHeight = gridHeight;
-                }
-            }
-        }, 25); // Even more aggressive - 25ms instead of 50ms
+        // Handle orientation change gracefully
+        window.addEventListener('orientationchange', () => {
+            setTimeout(lockDimensions, 500);
+        });
+        
+        console.log('✅ Layout locked. CSS handles responsive rendering.');
         
         // Track initial dimensions for comparison
         let lastInnerWidth = window.innerWidth;
@@ -20496,6 +20579,24 @@
                     console.error('   Error message:', error.message);
                 }
             };
+            
+            // 🔄 BACKGROUND SYNC MESSAGE HANDLER
+            // Listen for background sync messages from Service Worker
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.addEventListener('message', (event) => {
+                    console.log('📨 Message from Service Worker:', event.data);
+                    
+                    if (event.data.type === 'BACKGROUND_SYNC') {
+                        console.log('🔄 Handling background sync...');
+                        // Re-subscribe to posts if connection was restored
+                        if (currentUserId && isConnected) {
+                            subscribeToPostsForUser(currentUserId);
+                            updateUserActivity();
+                            console.log('✅ Background sync complete');
+                        }
+                    }
+                });
+            }
             
             console.log('✅ Global debug functions ready');
             console.log('   Try: window.createTestPost()');
