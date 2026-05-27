@@ -725,6 +725,69 @@ function getStripeClient() {
 app.get('/api/boost/tiers', (req, res) => {
     res.json({ tiers: BOOST_TIERS });
 });
+
+// 🚀 DYNAMIC PRICING ENDPOINT — Returns current boost prices
+// Can be updated on server without redeploying
+app.get('/api/boost-prices', (req, res) => {
+    // Try to load dynamic prices from file (created by admin)
+    const pricesFile = path.join(__dirname, 'boost-prices.json');
+    let basePrices = null;
+    let priceMultipliers = null;
+    
+    try {
+        if (fs.existsSync(pricesFile)) {
+            const data = fs.readFileSync(pricesFile, 'utf8');
+            const parsed = JSON.parse(data);
+            basePrices = parsed.basePrices;
+            priceMultipliers = parsed.priceMultipliers;
+            console.log('📊 Loaded dynamic boost prices from file');
+        }
+    } catch (e) {
+        console.warn('⚠️ Could not load dynamic prices:', e.message);
+    }
+    
+    // Return dynamic prices if available, otherwise return defaults
+    res.json({
+        basePrices: basePrices || {
+            standard: 299,
+            premium: 799,
+            elite: 1999
+        },
+        priceMultipliers: priceMultipliers || {
+            standard: 1.0,
+            premium: 1.0,
+            elite: 1.0
+        },
+        lastUpdated: Date.now()
+    });
+});
+
+// 🚀 ADMIN: Update boost prices
+// POST /api/boost-prices with { basePrices: {...}, priceMultipliers: {...} }
+app.post('/api/boost-prices', (req, res) => {
+    const { basePrices, priceMultipliers } = req.body;
+    
+    if (!basePrices || !priceMultipliers) {
+        return res.status(400).json({ error: 'Missing basePrices or priceMultipliers' });
+    }
+    
+    const pricesFile = path.join(__dirname, 'boost-prices.json');
+    
+    try {
+        fs.writeFileSync(pricesFile, JSON.stringify({
+            basePrices,
+            priceMultipliers,
+            lastUpdated: Date.now()
+        }, null, 2));
+        
+        console.log('💰 Updated boost prices:', basePrices);
+        res.json({ success: true, basePrices, priceMultipliers });
+    } catch (e) {
+        console.error('Error saving prices:', e);
+        res.status(500).json({ error: 'Failed to save prices' });
+    }
+});
+
 app.post('/api/boost/create-intent', async (req, res) => {
     try {
         const { tier = 'standard', userId = 'anon' } = req.body || {};
