@@ -2408,7 +2408,12 @@
             content: none !important;
         }
 
-        /* 🚀 BOOST badge — emoji-free, just a glowing amber edge so the brand earth stays the lone emoji. */
+        /* 🚀 BOOST badge — emoji-free, just a glowing amber edge so the brand earth stays the lone emoji.
+           Three permanent end-state variants stamp the buyer's RESULT (peak rank achieved):
+           - boost-crowned  : peaked at #1 — gold edge + stronger glow (kept forever)
+           - boost-podium   : peaked top-3 — amber edge
+           - boost-spotlight: never reached top-3 but the buyer paid — warm edge, still recognised
+           These propagate into areaBadges so §7b keeps surfacing the post organically. */
         .grid-box.badge-boost {
             border-right: 5px solid #fbbf24 !important;
             box-shadow: 0 0 16px rgba(251, 191, 36, 0.55), inset 0 0 0 1px rgba(251,191,36,0.35) !important;
@@ -2416,6 +2421,18 @@
         body.light-mode .grid-box.badge-boost {
             border-right: 5px solid #d97706 !important;
             box-shadow: 0 0 14px rgba(217, 119, 6, 0.45) !important;
+        }
+        .grid-box.badge-boost-crowned {
+            border-right: 6px solid #ffd700 !important;
+            box-shadow: 0 0 22px rgba(255, 215, 0, 0.7), inset 0 0 0 1px rgba(255,215,0,0.45) !important;
+        }
+        .grid-box.badge-boost-podium {
+            border-right: 5px solid #fbbf24 !important;
+            box-shadow: 0 0 18px rgba(251, 191, 36, 0.6), inset 0 0 0 1px rgba(251,191,36,0.4) !important;
+        }
+        .grid-box.badge-boost-spotlight {
+            border-right: 4px solid #f59e0b !important;
+            box-shadow: 0 0 12px rgba(245, 158, 11, 0.45) !important;
         }
     </style>
     <!-- 🚀 Stripe.js v3 — needed for inline Apple Pay / Google Pay one-tap on boost -->
@@ -14071,6 +14088,194 @@
         window.updateMLScores = updateMLScores;
 
         // ============================================================================
+        // 🚀 BOOST ENGINE — paid "guaranteed visibility window" with per-post balance
+        // ============================================================================
+        // Philosophy: a boost is a CONTRACT, not a megaphone. Each boosted post gets a
+        // dynamically-sized target (likes to chase + window to chase them in) computed
+        // from the POI's density and the post's content type. The rank-lock then
+        // adaptively pushes harder when the post is BEHIND pace, and eases off when it
+        // is AHEAD — so the boost spends its budget where it's actually needed.
+        //
+        // Promise to the buyer: (a) better badge, (b) good position, (c) good duration.
+        // Promise to the audience: boosted posts don't dominate forever — they earn or
+        // expire, and either way the badge they end with reflects what they achieved.
+        // ============================================================================
+        window.boostEngine = (function () {
+            // ---- TIER CONFIG (extend as new SKUs are added; $2.99 is the v1 standard) ----
+            const TIERS = {
+                standard: {
+                    priceCents: 299,
+                    baseDurationMs: 60 * 60 * 1000,   // 1 hour at density=1
+                    baseTargetLikes: 10,              // 10 likes at density=1
+                    baseRankBonus: 70,                // dominates organic signals
+                    rankFloor: 150                    // never let it drop out of top contention
+                }
+            };
+
+            // Density factor from POI scope (matches §8 capacity throttle so the boost
+            // budget scales with how many eyeballs realistically pass through the area).
+            function densityFactor(post) {
+                try {
+                    const poi = window._poiNameIndex && post && post.county
+                        ? window._poiNameIndex.get(String(post.county).toLowerCase())
+                        : null;
+                    if (!poi) return 1.0;
+                    const scope = poi.scope;
+                    if (scope === 'xlarge') return 4.0;
+                    if (scope === 'large')  return 2.2;
+                    if (scope === 'medium') return 1.2;
+                    if (scope === 'small')  return 0.6;
+                    return poi.weight || 1.0;
+                } catch (_) { return 1.0; }
+            }
+
+            // Content-richness multiplier: media posts attract likes faster, so they need
+            // FEWER like-targets but get the SAME duration (the buyer paid for time, not
+            // for an artificially padded target). Text-only posts in sparse areas get a
+            // longer effective window because their expected like-rate is lower.
+            function contentFactor(post) {
+                const hasMedia = !!(post && (post.photoURL || post.imageData));
+                const hasText  = !!(post && post.content && String(post.content).trim().length > 0);
+                if (hasMedia && hasText) return 1.15; // mixed = best engagement
+                if (hasMedia)            return 1.00;
+                if (hasText)             return 0.85;
+                return 0.75;
+            }
+
+            // ---- ACTIVATE on first sight ----
+            // Called from generateUnifiedPostRank the first time a paid-but-unactivated
+            // post is scored. Computes the per-post contract and stamps it onto the post.
+            function activateIfReady(post) {
+                if (!post || !post.boostRequested) return null;
+                if (post.boost && post.boost.activatedAt) return post.boost; // already live or expired
+                const tierKey = (post.boostIntent && post.boostIntent.tier) || 'standard';
+                const tier = TIERS[tierKey] || TIERS.standard;
+                const dens = densityFactor(post);
+                const content = contentFactor(post);
+                const now = Date.now();
+                // Duration grows logarithmically with density so a stadium boost lasts
+                // ~2.6h while a cafe boost stays at ~1h — keeps small areas from being
+                // dominated by a single paid post for too long.
+                const durationMs   = Math.round(tier.baseDurationMs * (1 + Math.log2(Math.max(1, dens))));
+                const targetLikes  = Math.max(3, Math.round(tier.baseTargetLikes * dens * content));
+                post.boost = {
+                    tier: tierKey,
+                    activatedAt: now,
+                    expiresAt:   now + durationMs,
+                    durationMs,
+                    targetLikes,
+                    startLikes:  post.likes || 0,
+                    peakRank:    null,           // best (lowest #) rank achieved
+                    status:      'active',
+                    finalBadge:  null,
+                    paymentIntentId: post.boostIntent && post.boostIntent.paymentIntentId
+                };
+                try { console.log(`🚀 Boost activated for post ${String(post.id).slice(0,8)} — ${(durationMs/60000)|0}min, target ${targetLikes} likes (density ${dens.toFixed(2)}×content ${content.toFixed(2)})`); } catch(_){}
+                return post.boost;
+            }
+
+            // ---- STATUS snapshot used by ranker + badge calc ----
+            function status(post) {
+                const b = post && post.boost;
+                if (!b) return { active: false, expired: false };
+                const now = Date.now();
+                if (b.status === 'expired') return { active: false, expired: true, boost: b };
+                if (now >= b.expiresAt)     return { active: false, expired: true, boost: b, justExpired: true };
+                const remaining = Math.max(0, Math.min(1, (b.expiresAt - now) / b.durationMs));
+                const earned    = Math.max(0, (post.likes || 0) - (b.startLikes || 0));
+                const progress  = Math.min(2, earned / Math.max(1, b.targetLikes));
+                return { active: true, expired: false, boost: b, remaining, progress, earned };
+            }
+
+            // ---- RANK BONUS — the actual "good position for a good amount of time" ----
+            // timeWeight decays linearly (1 → 0.4) so the boost smoothly hands the floor
+            // back to organic posts as it nears expiry.
+            // paceKicker pushes HARDER if likes are behind schedule (we owe the buyer reach).
+            // ahead-of-pace softening shrinks the bonus when the post is already winning
+            // organically, so the boost budget isn't wasted on a runaway hit.
+            function rankBonus(post) {
+                const s = status(post);
+                if (!s.active) return 0;
+                const tier = TIERS[s.boost.tier] || TIERS.standard;
+                const expectedProgress = 1 - s.remaining;          // linear pacing
+                const paceDeficit = Math.max(0, expectedProgress - s.progress);
+                let timeWeight = 0.4 + 0.6 * s.remaining;          // 1.0 → 0.4
+                if (s.progress > expectedProgress + 0.3) timeWeight *= 0.6; // crushing it — ease off
+                const paceKicker = paceDeficit * 30;               // up to +30 when way behind
+                return tier.baseRankBonus * timeWeight + paceKicker;
+            }
+
+            // ---- EXPIRE — stamp the FINAL badge the post earned, propagate to areaLedger ----
+            // The final badge is the buyer's permanent receipt: it reflects the peak rank
+            // they hit during the window. Even a flop earns "boost-spotlight" because they
+            // paid — but a winner earns "boost-crowned" and that propagates into the §7b
+            // area-badge engine, so the post keeps surfacing organically afterward.
+            function expire(post) {
+                const b = post && post.boost;
+                if (!b || b.status === 'expired') return null;
+                b.status = 'expired';
+                b.endedAt = Date.now();
+                const peak = b.peakRank;
+                let finalBadge;
+                if (peak === 1)           finalBadge = 'boost-crowned';
+                else if (peak && peak<=3) finalBadge = 'boost-podium';
+                else                      finalBadge = 'boost-spotlight';
+                b.finalBadge = finalBadge;
+                // Stamp into per-area badge ledger so §7b keeps surfacing it organically.
+                try {
+                    const area = post.areaTag || post.county;
+                    if (area) {
+                        if (!post.areaBadges) post.areaBadges = {};
+                        const prev = post.areaBadges[area] || { badges: [], firstEarnedAt: b.activatedAt, peakRank: peak };
+                        const merged = Array.from(new Set([...(prev.badges||[]), finalBadge, 'boost']));
+                        post.areaBadges[area] = {
+                            ...prev,
+                            badges: merged,
+                            lastUpdatedAt: Date.now(),
+                            peakLikes: Math.max(prev.peakLikes || 0, post.likes || 0),
+                            peakRank: peak || prev.peakRank || null
+                        };
+                        post.badgedAreaCount = Object.keys(post.areaBadges).length;
+                    }
+                } catch (_) {}
+                try { console.log(`🏁 Boost expired for post ${String(post.id).slice(0,8)} → ${finalBadge} (peak rank ${peak || 'n/a'}, earned ${(post.likes||0)-(b.startLikes||0)} likes)`); } catch(_){}
+                return finalBadge;
+            }
+
+            // Record peak rank each render so the final badge is accurate.
+            function notePosition(post, gridPosition) {
+                const b = post && post.boost;
+                if (!b || b.status !== 'active' || !gridPosition) return;
+                if (b.peakRank == null || gridPosition < b.peakRank) b.peakRank = gridPosition;
+            }
+
+            // Periodic sweep — catches expiries even when a post is offscreen.
+            // Runs every 60s; cheap because it only touches posts with .boost set.
+            function sweep() {
+                try {
+                    const buckets = (typeof gridContent === 'object' && gridContent) ? Object.values(gridContent) : [];
+                    let expired = 0;
+                    for (const list of buckets) {
+                        if (!Array.isArray(list)) continue;
+                        for (const p of list) {
+                            if (p && p.boost && p.boost.status === 'active' && Date.now() >= p.boost.expiresAt) {
+                                expire(p);
+                                expired++;
+                            }
+                        }
+                    }
+                    if (expired) console.log(`🏁 Boost sweep: expired ${expired} post(s)`);
+                } catch (e) { /* never break loop */ }
+            }
+            try { setInterval(sweep, 60 * 1000); } catch (_) {}
+
+            return {
+                TIERS, activateIfReady, status, rankBonus, expire, notePosition, sweep,
+                densityFactor, contentFactor
+            };
+        })();
+
+        // ============================================================================
         // UNIFIED CONTENT RANKING SYSTEM - Blend all post ranking systems
         // ============================================================================
         // Combines: Area Hierarchy, Badge System, POI Detection, ML Recommendations, Zone Tags
@@ -14201,6 +14406,25 @@
             if (post.county === currentArea) {
                 score += 5;
             }
+
+            // ========== 7c. 🚀 BOOST RANK-LOCK (0-100 points + hard floor) ==========
+            // Paid contract: guaranteed top-tier visibility for the boost window. The
+            // engine adaptively pushes harder when behind pace, eases off when ahead,
+            // and decays gracefully toward expiry. Hard floor ensures a boosted post
+            // never falls out of contention while live — that's what the buyer paid for.
+            try {
+                if (post.boostRequested) {
+                    window.boostEngine.activateIfReady(post);
+                    const bonus = window.boostEngine.rankBonus(post);
+                    if (bonus > 0) {
+                        score += bonus;
+                        const floor = (window.boostEngine.TIERS[
+                            (post.boost && post.boost.tier) || 'standard'
+                        ] || window.boostEngine.TIERS.standard).rankFloor;
+                        if (score < floor) score = floor;
+                    }
+                }
+            } catch (e) { /* never break ranking */ }
 
             // ========== 7b. 🏅 AREA-BADGE BOOST (0-55 points) — AGGRESSIVE area-tag flip signal ==========
             // The CORE area-tag mechanic: a post tagged for "NYC" earns badges in NYC. When other
@@ -17268,7 +17492,7 @@
                     box.className = 'grid-box';
                     box.classList.remove('filled');
                     box.removeAttribute('data-post-id');
-                    box.classList.remove('badge-new', 'badge-hot', 'badge-rising', 'badge-trending', 'badge-controversial', 'badge-verified', 'badge-disliked', 'badge-balanced', 'badge-media-content', 'badge-spotlight', 'badge-crowned', 'badge-runner-up', 'badge-podium', 'badge-liked');
+                    box.classList.remove('badge-new', 'badge-hot', 'badge-rising', 'badge-trending', 'badge-controversial', 'badge-verified', 'badge-disliked', 'badge-balanced', 'badge-media-content', 'badge-spotlight', 'badge-crowned', 'badge-runner-up', 'badge-podium', 'badge-liked', 'badge-boost', 'badge-boost-crowned', 'badge-boost-podium', 'badge-boost-spotlight');
                 }
                 if (zoneTag) {
                     zoneTag.textContent = 'No zone';
@@ -17968,6 +18192,28 @@
             if (post.id === spotlightPostId) {
                 applicableBadges.push('spotlight');
             }
+
+            // 🚀 BOOST badges — live status during the paid window, permanent tier after.
+            // While active: 'boost' lights up the amber edge AND we track peak rank so
+            // the final badge reflects what the buyer actually achieved. On expiry the
+            // engine stamps boost-crowned / boost-podium / boost-spotlight into
+            // areaBadges so §7b keeps surfacing the post organically afterward.
+            try {
+                if (post.boost) {
+                    const bs = window.boostEngine.status(post);
+                    if (bs.active) {
+                        applicableBadges.push('boost');
+                        window.boostEngine.notePosition(post, gridPosition);
+                    } else if (bs.justExpired) {
+                        const fb = window.boostEngine.expire(post);
+                        if (fb) applicableBadges.push(fb);
+                        applicableBadges.push('boost');
+                    } else if (bs.expired && post.boost.finalBadge) {
+                        applicableBadges.push(post.boost.finalBadge);
+                        applicableBadges.push('boost');
+                    }
+                }
+            } catch (e) { /* never break badge calc */ }
             
             // Build final badges array with ordering rules for grid positions 1-2000
             // Order: PODIUM → GOOD BADGES → LIKE BADGES → RISING BADGES → DISLIKED BADGES
