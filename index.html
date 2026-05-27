@@ -7402,6 +7402,41 @@
         // Make voteOnPost globally accessible for onclick handlers
         window.voteOnPost = voteOnPost;
 
+        // ============================================================================
+        // 🧪 DEBUG HELPERS — Available immediately (before auth completes)
+        // ============================================================================
+        window.debugBootstrap = function() {
+            console.log('\n' + '='.repeat(70));
+            console.log('🔍 BOOTSTRAP DEBUG INFO');
+            console.log('='.repeat(70));
+            console.log('currentUserId:', currentUserId);
+            console.log('isConnected:', isConnected);
+            console.log('isPhase0Complete:', isPhase0Complete);
+            console.log('currentZoneTag:', currentZoneTag);
+            console.log('gridContent keys:', Object.keys(gridContent));
+            
+            // Count posts at each key
+            for (const key of Object.keys(gridContent)) {
+                const count = (gridContent[key] || []).length;
+                console.log(`  gridContent["${key}"]: ${count} posts`);
+                if (count > 0) {
+                    gridContent[key].slice(0, 2).forEach((p, i) => {
+                        console.log(`    [${i}] "${(p.content || '').substring(0, 40)}..."`);
+                    });
+                }
+            }
+            
+            // Check localStorage
+            const cachedId = localStorage.getItem('userId');
+            console.log('\nlocalStorage.userId:', cachedId);
+            
+            // Check Firebase path
+            console.log('\nFirebase path being read from:');
+            console.log(`  users/${currentUserId || cachedId || 'UNKNOWN'}/posts`);
+            
+            console.log('='.repeat(70) + '\n');
+        };
+
         // Set up anonymous authentication
         console.log('🔐 Setting up onAuthStateChanged listener...');
         
@@ -7420,6 +7455,8 @@
         
         onAuthStateChanged(auth, async (user) => {
             console.log('🔐 onAuthStateChanged fired');
+            console.log('   user exists:', !!user);
+            console.log('   user.uid:', user?.uid);
             
             if (user) {
                 console.log('\n' + '='.repeat(70));
@@ -7427,71 +7464,95 @@
                 console.log('='.repeat(70));
                 
                 // ✅ STEP 2: Lock userId (auth is the source of truth)
-                currentUserId = user.uid;
+                const newUserId = user.uid;
+                currentUserId = newUserId;
                 localStorage.setItem('userId', currentUserId);
                 isConnected = true;
-                console.log(`\nStep 2: userId locked (auth verified)`);
-                console.log(`  UID: ${currentUserId}`);
+                console.log(`\n✅ Step 2: userId LOCKED`);
+                console.log(`  newUserId from auth: ${newUserId}`);
+                console.log(`  currentUserId now: ${currentUserId}`);
+                console.log(`  Saved to localStorage`);
                 
                 // ✅ STEP 3: Create gridContent structure with userId key
                 if (!gridContent[currentUserId]) {
                     gridContent[currentUserId] = [];
-                    console.log(`Step 3: gridContent[${currentUserId}] created (ready to receive posts)`);
+                    console.log(`\n✅ Step 3: Created gridContent[${currentUserId}]`);
                 } else {
-                    console.log(`Step 3: gridContent[${currentUserId}] already exists (${gridContent[currentUserId].length} posts)`);
+                    console.log(`\n⚠️ Step 3: gridContent[${currentUserId}] already has ${gridContent[currentUserId].length} posts`);
                 }
                 
                 // ✅ STEP 4: Initialize grid UI
-                initializeGrid();
-                console.log(`Step 4: grid UI initialized`);
+                try {
+                    initializeGrid();
+                    console.log(`\n✅ Step 4: Grid UI initialized`);
+                } catch (err) {
+                    console.error(`\n❌ Step 4 ERROR:`, err);
+                }
                 
                 // ✅ STEP 5: Setup Firebase persistence
-                const userRef = ref(database, `users/${currentUserId}`);
-                set(userRef, {
-                    uid: currentUserId,
-                    createdAt: new Date().getTime(),
-                    lastSeen: new Date().getTime(),
-                    isAnonymous: true
-                }, { merge: true });
-                console.log(`Step 5: user profile created in Firebase`);
+                try {
+                    const userRef = ref(database, `users/${currentUserId}`);
+                    set(userRef, {
+                        uid: currentUserId,
+                        createdAt: new Date().getTime(),
+                        lastSeen: new Date().getTime(),
+                        isAnonymous: true
+                    }, { merge: true });
+                    console.log(`\n✅ Step 5: User profile created in Firebase at users/${currentUserId}`);
+                } catch (err) {
+                    console.error(`\n❌ Step 5 ERROR:`, err);
+                }
                 
                 // ✅ STEP 6: Initialize area names database
-                if (window.areaNameDatabase) {
-                    window.areaNameDatabase.initialize();
-                    console.log(`Step 6: area names database initialized`);
+                try {
+                    if (window.areaNameDatabase) {
+                        window.areaNameDatabase.initialize();
+                        console.log(`\n✅ Step 6: Area names database initialized`);
+                    } else {
+                        console.log(`\n⚠️ Step 6: areaNameDatabase not found`);
+                    }
+                } catch (err) {
+                    console.error(`\n❌ Step 6 ERROR:`, err);
                 }
                 
                 // ✅ STEP 7: Load votes from Firebase
-                loadUserVotesFromFirebase(currentUserId);
-                console.log(`Step 7: user votes loaded from Firebase`);
+                try {
+                    loadUserVotesFromFirebase(currentUserId);
+                    console.log(`\n✅ Step 7: User votes loading from Firebase`);
+                } catch (err) {
+                    console.error(`\n❌ Step 7 ERROR:`, err);
+                }
                 
                 // ✅ STEP 8: Load worldwide locations (async, non-blocking)
-                console.log(`Step 8: loading location database...`);
+                console.log(`\n✅ Step 8: Loading location database (non-blocking)...`);
                 loadWorldwideLocationsAndPOIs().then(success => {
                     if (success) {
-                        console.log(`  ✅ Search system ready (${globalLocationDatabase.length.toLocaleString()} locations)`);
+                        console.log(`  ✅ Search ready (${globalLocationDatabase.length.toLocaleString()} locations)`);
                     } else {
-                        console.warn(`  ⚠️ Some databases failed, search limited`);
+                        console.warn(`  ⚠️ Some databases failed`);
                     }
                 }).catch(err => {
-                    console.error(`  ❌ Location database error:`, err);
+                    console.error(`  ❌ Location error:`, err);
                 });
                 
                 // ✅ STEP 9: Run Phase 0 (geolocation + zone detection)
-                console.log(`Step 9: starting Phase 0 (location detection)...`);
+                console.log(`\n✅ Step 9: Starting Phase 0 (location detection)...`);
                 initializePhase0().then(() => {
-                    console.log(`  ✅ Phase 0 complete - user zone: ${currentZoneTag}`);
+                    console.log(`  ✅ Phase 0 COMPLETE`);
+                    console.log(`  Zone detected: ${currentZoneTag}`);
                     
-                    // 🎯 ONLY NOW: Subscribe to Firebase posts (phase 0 complete, userId locked, gridContent ready)
-                    console.log(`Step 10: subscribing to Firebase posts for userId: ${currentUserId}`);
+                    // 🎯 ONLY NOW: Subscribe to Firebase posts
+                    console.log(`\n✅ Step 10: Subscribing to Firebase posts`);
+                    console.log(`  userId: ${currentUserId}`);
+                    console.log(`  Firebase path: users/${currentUserId}/posts`);
                     subscribeToFirebasePostsWithReconnect(currentUserId);
                     
-                    console.log('='.repeat(70));
-                    console.log('✅ BOOTSTRAP COMPLETE - Ready for posts');
+                    console.log('\n' + '='.repeat(70));
+                    console.log('✅ BOOTSTRAP COMPLETE - Waiting for posts...');
                     console.log('='.repeat(70) + '\n');
                 }).catch(err => {
-                    console.error('❌ Phase 0 failed:', err);
-                    // Subscribe anyway with fallback
+                    console.error('❌ Phase 0 FAILED:', err);
+                    console.log('⚠️ Subscribing anyway with fallback...');
                     subscribeToFirebasePostsWithReconnect(currentUserId);
                 });
                 
