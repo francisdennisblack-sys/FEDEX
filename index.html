@@ -14756,14 +14756,18 @@
         // expire, and either way the badge they end with reflects what they achieved.
         // ============================================================================
         window.boostEngine = (function () {
-            // ---- TIER CONFIG (extend as new SKUs are added; $2.99 is the v1 standard) ----
+            // ---- SINGLE BOOST CONFIG ----
+            // One simple boost option: send to multiple zones, guarantee top-5 on creator's grid
+            // Value controlled by: zone distribution + position + engagement metrics
+            // Price controlled by: window.boostPricingEngine (adjustable without redeployment)
             const TIERS = {
-                standard: {
-                    priceCents: 299,
-                    baseDurationMs: 60 * 60 * 1000,   // 1 hour at density=1
-                    baseTargetLikes: 10,              // 10 likes at density=1
-                    baseRankBonus: 70,                // dominates organic signals
-                    rankFloor: 150                    // never let it drop out of top contention
+                boost: {
+                    priceCents: 499,  // $4.99 (controlled by boostPricingEngine.getPrice())
+                    baseDurationMs: 24 * 60 * 60 * 1000,   // 24 hours fixed
+                    baseTargetLikes: 15,                    // typical target for single boost
+                    baseRankBonus: 100,                     // strong position boost
+                    rankFloor: 200,                         // keep in top positions
+                    zoneCount: 8                            // send to ~8 zones by default
                 }
             };
 
@@ -14803,16 +14807,14 @@
             function activateIfReady(post) {
                 if (!post || !post.boostRequested) return null;
                 if (post.boost && post.boost.activatedAt) return post.boost; // already live or expired
-                const tierKey = (post.boostIntent && post.boostIntent.tier) || 'standard';
-                const tier = TIERS[tierKey] || TIERS.standard;
+                const tierKey = 'boost';  // Single boost option
+                const tier = TIERS[tierKey];
                 const dens = densityFactor(post);
                 const content = contentFactor(post);
                 const now = Date.now();
-                // Duration grows logarithmically with density so a stadium boost lasts
-                // ~2.6h while a cafe boost stays at ~1h — keeps small areas from being
-                // dominated by a single paid post for too long.
-                const durationMs   = Math.round(tier.baseDurationMs * (1 + Math.log2(Math.max(1, dens))));
-                const targetLikes  = Math.max(3, Math.round(tier.baseTargetLikes * dens * content));
+                // Duration is fixed at 24 hours for all boost posts
+                const durationMs   = 24 * 60 * 60 * 1000;
+                const targetLikes  = Math.max(3, Math.round(tier.baseTargetLikes * densityFactor(post) * contentFactor(post)));
                 post.boost = {
                     tier: tierKey,
                     activatedAt: now,
@@ -14851,7 +14853,7 @@
             function rankBonus(post) {
                 const s = status(post);
                 if (!s.active) return 0;
-                const tier = TIERS[s.boost.tier] || TIERS.standard;
+                const tier = TIERS.boost;  // Single boost tier
                 const expectedProgress = 1 - s.remaining;          // linear pacing
                 const paceDeficit = Math.max(0, expectedProgress - s.progress);
                 let timeWeight = 0.4 + 0.6 * s.remaining;          // 1.0 → 0.4
@@ -15073,9 +15075,7 @@
                     const bonus = window.boostEngine.rankBonus(post);
                     if (bonus > 0) {
                         score += bonus;
-                        const floor = (window.boostEngine.TIERS[
-                            (post.boost && post.boost.tier) || 'standard'
-                        ] || window.boostEngine.TIERS.standard).rankFloor;
+                        const floor = window.boostEngine.TIERS.boost.rankFloor;
                         if (score < floor) score = floor;
                     }
                 }
@@ -18056,19 +18056,17 @@
             
             sortedPosts.forEach(post => {
                 // Check if post has boost data
-                if (!post.boostIntent || !post.boostRequested || !post.boostIntent.tier) {
+                if (!post.boostIntent || !post.boostRequested) {
                     boostScores.set(post.id, { tier: null, score: 0, isBoosted: false });
                     return;
                 }
                 
                 // Check if boost is still active (has not expired)
                 const boostPaidAt = post.boostIntent.armedAt || post.boostPaidAt || post.timestamp || boostTime;
-                const boostTier = post.boostIntent.tier || 'standard';
                 
-                // Boost duration by tier: standard=24h, premium=72h, elite=7d
-                const boostDurations = { standard: 24*60*60*1000, premium: 72*60*60*1000, elite: 7*24*60*60*1000 };
-                const duration = boostDurations[boostTier] || boostDurations.standard;
-                const boostExpiresAt = post.boostExpiresAt || (boostPaidAt + duration);
+                // Single boost: 24 hour fixed duration
+                const boostDuration = 24*60*60*1000;  // 24 hours
+                const boostExpiresAt = post.boostExpiresAt || (boostPaidAt + boostDuration);
                 const isBoostActive = boostTime < boostExpiresAt;
                 
                 // 🏆 BADGE PERSISTENCE: Check if post already has a permanent badge
@@ -18082,18 +18080,17 @@
                     // If post has permanent badge, keep it but don't boost
                     if (hasPermaBadge) {
                         console.log(`🏆 PERMA-BADGE: Post ${post.id.substring(0,8)} boost expired but ${post.boostBadge} badge persists`);
-                        boostScores.set(post.id, { tier: boostTier, score: 0, isBoosted: false, expired: true, permaBadge: post.boostBadge });
+                        boostScores.set(post.id, { tier: 'boost', score: 0, isBoosted: false, expired: true, permaBadge: post.boostBadge });
                     } else {
                         console.log(`⏰ BOOST EXPIRED: Post ${post.id.substring(0,8)} no longer boosted`);
-                        boostScores.set(post.id, { tier: boostTier, score: 0, isBoosted: false, expired: true });
+                        boostScores.set(post.id, { tier: 'boost', score: 0, isBoosted: false, expired: true });
                     }
                     return;
                 }
                 
                 // Boost is still active - calculate scoring
-                // Boost scoring: higher tier = higher priority
-                const tierScores = { standard: 500, premium: 750, elite: 1000 };
-                const boostScore = tierScores[boostTier] || tierScores.standard;
+                // Single boost price: check boostPricingEngine
+                const boostScore = 10000;  // Fixed high score for boosted posts
                 
                 // Track remaining time until boost expires (for display)
                 const timeRemainingMs = boostExpiresAt - boostTime;
@@ -18105,7 +18102,7 @@
                 // Later we'll update badge if post reaches top positions
                 // For now, mark that we should render with boost styling
                 boostScores.set(post.id, { 
-                    tier: boostTier, 
+                    tier: 'boost', 
                     score: boostScore, 
                     isBoosted: true,
                     expiresAt: boostExpiresAt,
@@ -18113,7 +18110,7 @@
                     badgeType: badgeType
                 });
                 
-                console.log(`🚀 BOOST: Post ${post.id.substring(0,8)} tier=${boostTier} expires in ${timeRemainingHours}h`);
+                console.log(`🚀 BOOST: Post ${post.id.substring(0,8)} boost expires in ${timeRemainingHours}h`);
             });
 
             // Rank with boost priority + nearby bias + rotating rebadge boost
@@ -18265,10 +18262,8 @@
                     // Find current position
                     const currentPos = sortedPosts.findIndex(p => p.id === boostedPost.id);
                     
-                    // Target position: 0-4 depending on boost tier + engagement
-                    const boostTier = boostedPost.boostIntent?.tier || 'standard';
-                    const tierPriority = { standard: 3, premium: 2, elite: 0 };
-                    const targetPos = Math.min(tierPriority[boostTier] || 3, 4);
+                    // Target position: 0-4 for single boost tier
+                    const targetPos = Math.min(index, 4);  // Multiple boosts get positions 0-4
                     
                     // If not already in top 5, move it there
                     if (currentPos > 4) {
@@ -18505,7 +18500,6 @@
                             const hours = Math.floor(timeRemaining / (60*60*1000));
                             const minutes = Math.floor((timeRemaining % (60*60*1000)) / (60*1000));
                             const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-                            const boostTier = post.boostIntent?.tier || 'standard';
                             boostTimerHTML = `<div style="position: absolute; top: 8px; right: 8px; background: rgba(251,191,36,0.2); border: 1px solid #fbbf24; border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: 600; color: #fbbf24; font-family: monospace;">🚀 ${timeStr}</div>`;
                         }
                     }
@@ -18632,8 +18626,7 @@
                     if (post.boostRequested && post.boostIntent) {
                         try {
                             const zone = post.county || post.neighborhood || userAreaTag || 'unknown';
-                            const tier = post.boostIntent.tier || 'standard';
-                            window.boostPerformanceSystem.trackImpression(post.id, zone, tier);
+                            window.boostPerformanceSystem.trackImpression(post.id, zone);
                         } catch (e) {
                             console.warn('⚠️ Failed to track boost impression:', e);
                         }
@@ -20326,21 +20319,19 @@
                     dislikes: 0,
                     isUserPost: true,
                     // 🚀 BOOST INTENT — set when user toggled boost in composer.
-                    // Backend will validate payment + assign boostTier, boostExpiresAt, etc.
+                    // Backend will validate payment + assign boost parameters
                     boostRequested: !!(window.pendingBoost && window.pendingBoost.armed && window.pendingBoost.paid),
                     boostIntent: (window.pendingBoost && window.pendingBoost.armed && window.pendingBoost.paid) ? {
                         armedAt: window.pendingBoost.armedAt || Date.now(),
                         client: 'composer-v1',
-                        tier: window.pendingBoost.tier || 'standard',
+                        priceCents: window.boostPricingEngine.getPrice(),
                         paymentIntentId: window.pendingBoost.paymentIntentId || null
                     } : null
                 };
                 
                 // 🚀 BOOST TRACKING: If boost requested, calculate expiration times
                 if (postData.boostRequested && postData.boostIntent) {
-                    const boostDurations = { standard: 24*60*60*1000, premium: 72*60*60*1000, elite: 7*24*60*60*1000 };
-                    const boostTier = postData.boostIntent.tier || 'standard';
-                    const boostDuration = boostDurations[boostTier] || boostDurations.standard;
+                    const boostDuration = 24*60*60*1000;  // Fixed 24 hour duration
                     const boostPaidAt = postData.boostIntent.armedAt;
                     const boostExpiresAt = boostPaidAt + boostDuration;
                     
@@ -20352,18 +20343,14 @@
                     postData.boostPeakPosition = null;  // Will track highest position reached
                     postData.boostPeakReachedAt = null;  // Will track when peaked
                     
-                    console.log(`🚀 BOOST TRACKING: Tier=${boostTier}, Duration=${postData.boostDurationHours}h, Expires=${new Date(boostExpiresAt).toLocaleTimeString()}`);
+                    console.log(`🚀 BOOST TRACKING: Duration=${postData.boostDurationHours}h, Expires=${new Date(boostExpiresAt).toLocaleTimeString()}`);
                     
-                    // 🚀 BOOST DISTRIBUTION: Determine how many zones this post will appear in
+                    // 🚀 BOOST DISTRIBUTION: Send to 6-10 zones by default
                     // This drives the value of the boost - more zones = more impressions = more engagement
-                    const zoneDistribution = {
-                        standard: { minZones: 3, maxZones: 5, label: '3-5 zones' },
-                        premium: { minZones: 6, maxZones: 8, label: '6-8 zones' },
-                        elite: { minZones: 10, maxZones: 15, label: '10-15 zones' }
-                    };
-                    
-                    const distribution = zoneDistribution[boostTier] || zoneDistribution.standard;
-                    const zonesCount = Math.floor(Math.random() * (distribution.maxZones - distribution.minZones + 1)) + distribution.minZones;
+                    // Single boost tier sends to ~8 zones on average (6-10 range)
+                    const minZones = 6;
+                    const maxZones = 10;
+                    const zonesCount = Math.floor(Math.random() * (maxZones - minZones + 1)) + minZones;
                     
                     // Strategy: Distribute to high-value zones
                     // Priority: POI audiences > neighborhood zones > city zones
@@ -20412,7 +20399,7 @@
                     postData.boostDistribution = {
                         zonesCount: finalZones.length,
                         zones: finalZones,
-                        strategy: distribution.label,
+                        strategy: `${minZones}-${maxZones} zones`,
                         createdAt: Date.now()
                     };
                     
@@ -21178,27 +21165,24 @@
         // ============================================================================
         window.STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || 'pk_test_REPLACE_ME';
         
-        // 🚀 DYNAMIC BOOST TIERS (prices update based on performance)
-        // This is generated dynamically from the pricing engine
+        // 🚀 SINGLE BOOST PRICE (no tiers - one simple option)
+        // Control value through: distribution (zones), positioning, and volume management
+        window.BOOST_PRICE_CENTS = 499;  // $4.99 - change this to adjust boost price
+        window.BOOST_DURATION_HOURS = 24;  // 24 hour boost
+        
+        // 🚀 DYNAMIC BOOST TIERS (single boost option with dynamic pricing)
         window.BOOST_TIERS = window.BOOST_TIERS || {};
         
         // Function to refresh boost tiers from pricing engine
         function _refreshBoostTiers() {
+            const price = window.boostPricingEngine?.getPrice('boost') || window.BOOST_PRICE_CENTS;
+            const priceStr = window.boostPricingEngine?.getPriceString('boost') || ('$' + (window.BOOST_PRICE_CENTS / 100).toFixed(2));
+            
             window.BOOST_TIERS = {
-                standard: { 
-                    amountCents: window.boostPricingEngine?.getPrice('standard') || 299, 
-                    label: window.boostPricingEngine?.getPriceString('standard') || '$2.99', 
-                    durationHours: 24 
-                },
-                premium: { 
-                    amountCents: window.boostPricingEngine?.getPrice('premium') || 799, 
-                    label: window.boostPricingEngine?.getPriceString('premium') || '$7.99', 
-                    durationHours: 72 
-                },
-                elite: { 
-                    amountCents: window.boostPricingEngine?.getPrice('elite') || 1999, 
-                    label: window.boostPricingEngine?.getPriceString('elite') || '$19.99', 
-                    durationHours: 168 
+                boost: { 
+                    amountCents: price, 
+                    label: priceStr, 
+                    durationHours: window.BOOST_DURATION_HOURS 
                 }
             };
         }
@@ -21290,22 +21274,15 @@
         };
         
         // 🚀 ML DYNAMIC PRICING ENGINE
-        // Automatically adjusts boost prices based on performance metrics
-        // Prices persist in localStorage and can be updated from server
+        // Automatically adjusts single boost price based on performance metrics
+        // Control value through: zones covered, position priority, volume
         window.boostPricingEngine = {
-            // Base prices (can be overridden from server)
-            basePrices: {
-                standard: 299,    // $2.99 in cents
-                premium: 799,     // $7.99
-                elite: 1999       // $19.99
-            },
+            // Single boost price (in cents)
+            basePrice: 499,  // $4.99
+            currentPrice: 499,
             
-            // Price multipliers based on performance
-            priceMultipliers: {
-                standard: 1.0,
-                premium: 1.0,
-                elite: 1.0
-            },
+            // Price multiplier based on performance (demand/value)
+            priceMultiplier: 1.0,
             
             // Price update history
             priceHistory: [],
@@ -21313,102 +21290,109 @@
             
             // Initialize pricing from localStorage
             init() {
-                const stored = localStorage.getItem('boostPrices');
+                const stored = localStorage.getItem('boostPrice');
                 if (stored) {
                     try {
                         const data = JSON.parse(stored);
-                        this.basePrices = { ...this.basePrices, ...data.basePrices };
-                        this.priceMultipliers = { ...this.priceMultipliers, ...data.priceMultipliers };
+                        this.basePrice = data.basePrice;
+                        this.currentPrice = data.currentPrice;
+                        this.priceMultiplier = data.priceMultiplier;
                         this.priceHistory = data.priceHistory || [];
                         this.lastPriceUpdateAt = data.lastPriceUpdateAt;
-                        console.log(`💰 Loaded boost prices from localStorage`);
+                        console.log(`💰 Loaded boost price from localStorage: ${this.getPriceString()}`);
                     } catch (e) {
-                        console.warn('Failed to load boost prices:', e);
+                        console.warn('Failed to load boost price:', e);
                     }
                 }
                 
                 // Try to fetch from server
-                this.fetchPricesFromServer();
+                this.fetchPriceFromServer();
                 
-                // Auto-update prices every hour based on performance
-                setInterval(() => this.updatePricesBasedOnPerformance(), 60*60*1000);
+                // Auto-update price every hour based on performance
+                setInterval(() => this.updatePriceBasedOnPerformance(), 60*60*1000);
             },
             
-            // Fetch prices from server (can be updated without redeploying)
-            fetchPricesFromServer() {
-                fetch('/api/boost-prices', { method: 'GET' })
+            // Fetch price from server (can be updated without redeploying)
+            fetchPriceFromServer() {
+                fetch('/api/boost-price', { method: 'GET' })
                     .then(res => res.json())
                     .then(data => {
-                        if (data.basePrices) {
-                            this.basePrices = { ...this.basePrices, ...data.basePrices };
-                            this.priceMultipliers = { ...this.priceMultipliers, ...data.priceMultipliers };
+                        if (data.basePrice || data.currentPrice) {
+                            this.basePrice = data.basePrice || this.basePrice;
+                            this.currentPrice = data.currentPrice || this.basePrice;
+                            this.priceMultiplier = data.priceMultiplier || 1.0;
                             this.lastPriceUpdateAt = Date.now();
-                            this.savePrices();
-                            console.log(`💰 Updated boost prices from server:`, data.basePrices);
+                            this.savePrice();
+                            console.log(`💰 Updated boost price from server: ${this.getPriceString()}`);
                         }
                     })
-                    .catch(e => console.warn('Failed to fetch boost prices from server:', e));
+                    .catch(e => console.warn('Failed to fetch boost price from server:', e));
             },
             
-            // Get current price for tier
-            getPrice(tier) {
-                const basePrice = this.basePrices[tier] || this.basePrices.standard;
-                const multiplier = this.priceMultipliers[tier] || 1.0;
-                return Math.round(basePrice * multiplier);
+            // Get current price in cents
+            getPrice() {
+                return Math.round(this.basePrice * this.priceMultiplier);
             },
             
             // Get formatted price string ($X.XX)
-            getPriceString(tier) {
-                const cents = this.getPrice(tier);
+            getPriceString() {
+                const cents = this.getPrice();
                 return '$' + (cents / 100).toFixed(2);
             },
             
-            // Update prices based on performance metrics
-            updatePricesBasedOnPerformance() {
+            // Update price based on boost performance metrics
+            updatePriceBasedOnPerformance() {
                 const now = Date.now();
                 const lastUpdate = this.lastPriceUpdateAt || 0;
                 
                 // Only update once per hour
                 if (now - lastUpdate < 60*60*1000) return;
                 
-                console.log(`💰 ML PRICING: Calculating price adjustments based on performance...`);
+                console.log(`💰 BOOST PRICING: Calculating price adjustment...`);
                 
-                Object.keys(this.basePrices).forEach(tier => {
-                    const performance = window.boostPerformanceSystem.getAveragePerformance(tier);
-                    const engagement = performance.engagement || 50;
-                    
-                    // Pricing rules:
-                    // - High engagement (>50%): increase price 10%
-                    // - Low engagement (<30%): decrease price 10%
-                    // - Medium (30-50%): no change
-                    
-                    let newMultiplier = this.priceMultipliers[tier];
-                    
-                    if (engagement > 50) {
-                        newMultiplier *= 1.10;  // +10%
-                        console.log(`📈 ${tier.toUpperCase()}: High engagement (${engagement.toFixed(1)}%) - raising price`);
-                    } else if (engagement < 30) {
-                        newMultiplier *= 0.90;  // -10%
-                        console.log(`📉 ${tier.toUpperCase()}: Low engagement (${engagement.toFixed(1)}%) - lowering price`);
-                    } else {
-                        console.log(`➡️ ${tier.toUpperCase()}: Stable engagement (${engagement.toFixed(1)}%) - keeping price`);
-                    }
-                    
-                    // Cap multiplier between 0.5x and 2.0x (prices don't go too crazy)
-                    newMultiplier = Math.max(0.5, Math.min(2.0, newMultiplier));
-                    this.priceMultipliers[tier] = newMultiplier;
-                });
+                const boostMetrics = window.boostPerformanceSystem.getAveragePerformance('boost');
+                const boostCount = boostMetrics.postCount || 0;
+                const engagement = boostMetrics.engagement || 50;
+                
+                // Pricing strategy:
+                // 1. High engagement (>60%): decrease price 5% (posts performing well, demand is high)
+                // 2. Low engagement (<40%): increase price 5% (posts not performing, reduce volume)
+                // 3. Too many boosts (>20): increase price 10% (too many = devalue)
+                // 4. Few boosts (<5): decrease price 5% (encourage adoption)
+                
+                let newMultiplier = this.priceMultiplier;
+                
+                if (boostCount > 20) {
+                    newMultiplier *= 1.10;  // +10% - too many boost posts
+                    console.log(`📈 TOO MANY BOOSTS: ${boostCount} active boosts - raising price`);
+                } else if (boostCount < 5) {
+                    newMultiplier *= 0.95;  // -5% - few boosts, encourage adoption
+                    console.log(`📉 FEW BOOSTS: Only ${boostCount} active boosts - lowering price`);
+                } else if (engagement > 60) {
+                    newMultiplier *= 0.95;  // -5% - high engagement, posts working well
+                    console.log(`✨ HIGH ENGAGEMENT: ${engagement.toFixed(1)}% - lowering price`);
+                } else if (engagement < 40) {
+                    newMultiplier *= 1.05;  // +5% - low engagement, raise price
+                    console.log(`⚠️ LOW ENGAGEMENT: ${engagement.toFixed(1)}% - raising price`);
+                } else {
+                    console.log(`➡️ BALANCED: ${boostCount} boosts, ${engagement.toFixed(1)}% engagement - keeping price`);
+                }
+                
+                // Cap multiplier between 0.5x and 2.0x
+                newMultiplier = Math.max(0.5, Math.min(2.0, newMultiplier));
+                this.priceMultiplier = newMultiplier;
                 
                 this.lastPriceUpdateAt = now;
-                this.savePrices();
+                this.savePrice();
                 this.logPriceUpdate();
             },
             
-            // Save prices to localStorage
-            savePrices() {
-                localStorage.setItem('boostPrices', JSON.stringify({
-                    basePrices: this.basePrices,
-                    priceMultipliers: this.priceMultipliers,
+            // Save price to localStorage
+            savePrice() {
+                localStorage.setItem('boostPrice', JSON.stringify({
+                    basePrice: this.basePrice,
+                    currentPrice: this.getPrice(),
+                    priceMultiplier: this.priceMultiplier,
                     priceHistory: this.priceHistory,
                     lastPriceUpdateAt: this.lastPriceUpdateAt
                 }));
@@ -21418,17 +21402,9 @@
             logPriceUpdate() {
                 const record = {
                     timestamp: Date.now(),
-                    prices: {
-                        standard: this.getPriceString('standard'),
-                        premium: this.getPriceString('premium'),
-                        elite: this.getPriceString('elite')
-                    },
-                    multipliers: { ...this.priceMultipliers },
-                    performance: {
-                        standard: window.boostPerformanceSystem.getAveragePerformance('standard'),
-                        premium: window.boostPerformanceSystem.getAveragePerformance('premium'),
-                        elite: window.boostPerformanceSystem.getAveragePerformance('elite')
-                    }
+                    price: this.getPriceString(),
+                    multiplier: this.priceMultiplier,
+                    metrics: window.boostPerformanceSystem.getAveragePerformance('boost')
                 };
                 
                 this.priceHistory.push(record);
@@ -21441,24 +21417,24 @@
             },
             
             // Manual price update (admin)
-            setPrices(newPrices) {
-                this.basePrices = { ...this.basePrices, ...newPrices };
+            setPrice(newPriceCents) {
+                this.basePrice = newPriceCents;
+                this.priceMultiplier = 1.0;
                 this.lastPriceUpdateAt = Date.now();
-                this.savePrices();
+                this.savePrice();
                 this.logPriceUpdate();
-                console.log(`💰 ADMIN: Prices updated to:`, newPrices);
+                console.log(`💰 ADMIN: Boost price updated to ${this.getPriceString()}`);
             }
         };
         
         // Initialize pricing engine
         setTimeout(() => {
             window.boostPricingEngine.init();
-            _refreshBoostTiers();  // Update tiers with loaded prices
             _updateBoostPriceLabels();  // Update UI labels
         }, 1000);
         
         window.pendingBoost = window.pendingBoost || {
-            armed: false, armedAt: 0, tier: 'standard',
+            armed: false, armedAt: 0,
             paid: false, paymentMethodId: null, paymentIntentId: null, clientSecret: null
         };
         let _stripe = null;
@@ -21471,19 +21447,19 @@
             try { _stripe = Stripe(window.STRIPE_PUBLISHABLE_KEY); } catch (e) { console.error('Stripe init failed', e); return null; }
             return _stripe;
         }
-        function _currentBoostTier() {
-            return window.BOOST_TIERS[window.pendingBoost.tier] || window.BOOST_TIERS.standard;
+        function _currentBoostPrice() {
+            return window.boostPricingEngine.getPrice();  // Returns cents
         }
         function _updateBoostPriceLabels() {
-            const tier = _currentBoostTier();
+            const priceStr = window.boostPricingEngine.getPriceString();
             const lbl = document.getElementById('boostPriceLabel');
-            if (lbl) lbl.textContent = tier.label;
-            document.querySelectorAll('.boost-price-inline').forEach(el => { el.textContent = tier.label; });
+            if (lbl) lbl.textContent = priceStr;
+            document.querySelectorAll('.boost-price-inline').forEach(el => { el.textContent = priceStr; });
         }
         async function _initBoostPaymentRequest() {
             const stripe = _getStripe();
             if (!stripe) return;
-            const tier = _currentBoostTier();
+            const priceCents = _currentBoostPrice();
             const mount = document.getElementById('boostPayRequestMount');
             if (!mount) return;
             mount.innerHTML = ''; // reset
@@ -21491,7 +21467,7 @@
             _stripePR = stripe.paymentRequest({
                 country: 'US',
                 currency: 'usd',
-                total: { label: 'Boost post', amount: tier.amountCents },
+                total: { label: 'Boost post', amount: priceCents },
                 requestPayerName: false,
                 requestPayerEmail: false
             });
@@ -21515,7 +21491,7 @@
                     const resp = await fetch('/api/boost/create-intent', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ tier: window.pendingBoost.tier, userId: window.currentUserId || 'anon' })
+                        body: JSON.stringify({ priceCents: priceCents, userId: window.currentUserId || 'anon' })
                     });
                     const data = await resp.json();
                     if (!data.clientSecret) throw new Error(data.error || 'no client secret');
@@ -21558,10 +21534,11 @@
             const errEl = document.getElementById('boostCardError');
             if (errEl) errEl.style.display = 'none';
             try {
+                const priceCents = _currentBoostPrice();
                 const resp = await fetch('/api/boost/create-intent', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tier: window.pendingBoost.tier, userId: window.currentUserId || 'anon' })
+                    body: JSON.stringify({ priceCents: priceCents, userId: window.currentUserId || 'anon' })
                 });
                 const data = await resp.json();
                 if (!data.clientSecret) throw new Error(data.error || 'no client secret');
