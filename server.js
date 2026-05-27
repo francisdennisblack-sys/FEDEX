@@ -694,6 +694,79 @@ app.get('/api/reverse-geocode', (req, res) => {
     }
 });
 
+// ============================================================================
+// 🚀 BOOST PAYMENT ENDPOINTS (Stripe)
+// ----------------------------------------------------------------------------
+// /api/boost/tiers        → returns price catalog (client uses for label/PR amount)
+// /api/boost/create-intent→ creates a PaymentIntent; returns clientSecret
+//                           Apple Pay / Google Pay confirm with this clientSecret
+//                           inline — no redirects, no popups.
+// /api/boost/confirm      → (optional) server-side audit: post.id + paymentIntentId
+//                           so backend can flip post.boost.active=true on its side.
+// Requires env: STRIPE_SECRET_KEY  (sk_test_... for dev, sk_live_... in prod)
+// ============================================================================
+const BOOST_TIERS = {
+    standard: { amountCents: 299, currency: 'usd', label: '$2.99', durationHours: 24 }
+};
+let _stripeClient = null;
+function getStripeClient() {
+    if (_stripeClient) return _stripeClient;
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (!key) return null;
+    try {
+        const Stripe = require('stripe');
+        _stripeClient = Stripe(key);
+        return _stripeClient;
+    } catch (e) {
+        console.warn('[boost] stripe SDK not installed yet — run `npm i stripe` once. err:', e.message);
+        return null;
+    }
+}
+app.get('/api/boost/tiers', (req, res) => {
+    res.json({ tiers: BOOST_TIERS });
+});
+app.post('/api/boost/create-intent', async (req, res) => {
+    try {
+        const { tier = 'standard', userId = 'anon' } = req.body || {};
+        const t = BOOST_TIERS[tier] || BOOST_TIERS.standard;
+        const stripe = getStripeClient();
+        if (!stripe) {
+            return res.status(503).json({
+                error: 'Stripe not configured. Set STRIPE_SECRET_KEY env var and `npm i stripe`.'
+            });
+        }
+        const intent = await stripe.paymentIntents.create({
+            amount: t.amountCents,
+            currency: t.currency,
+            automatic_payment_methods: { enabled: true },
+            metadata: { kind: 'post_boost', tier, userId }
+        });
+        res.json({
+            clientSecret: intent.client_secret,
+            paymentIntentId: intent.id,
+            amountCents: t.amountCents,
+            currency: t.currency,
+            label: t.label
+        });
+    } catch (e) {
+        console.error('[boost] create-intent failed', e);
+        res.status(500).json({ error: e.message || 'create-intent failed' });
+    }
+});
+app.post('/api/boost/confirm', async (req, res) => {
+    try {
+        const { paymentIntentId, postId } = req.body || {};
+        const stripe = getStripeClient();
+        if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
+        const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+        const ok = intent && intent.status === 'succeeded' && intent.metadata && intent.metadata.kind === 'post_boost';
+        res.json({ ok, status: intent && intent.status, postId, tier: intent && intent.metadata && intent.metadata.tier });
+    } catch (e) {
+        console.error('[boost] confirm failed', e);
+        res.status(500).json({ error: e.message || 'confirm failed' });
+    }
+});
+
 // Serve index.html for any non-API routes (SPA fallback)
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
