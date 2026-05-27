@@ -7405,80 +7405,47 @@
         // Set up anonymous authentication
         console.log('🔐 Setting up onAuthStateChanged listener...');
         
-        // CHECK FOR CACHED USER ID FIRST - allows posts to load immediately on refresh
+        // ============================================================================
+        // 🚀 BOOTSTRAP SEQUENCE: Auth → Grid → Posts (in correct order)
+        // ============================================================================
+        // Handles hard refresh correctly by locking userId before grid setup
+        // ============================================================================
+        
+        // STEP 1: Check for cached userId (handles hard refresh instantly)
         const cachedUserId = localStorage.getItem('userId');
         if (cachedUserId) {
             currentUserId = cachedUserId;
-            console.log('✅ Using cached userId from localStorage:', currentUserId);
+            console.log('✅ Step 1: Using cached userId from localStorage:', currentUserId);
         }
         
-        onAuthStateChanged(auth, (user) => {
+        onAuthStateChanged(auth, async (user) => {
             console.log('🔐 onAuthStateChanged fired');
-            console.log('  user:', user);
+            
             if (user) {
-                // User is signed in (anonymously)
-                currentUserId = user.uid;
-                localStorage.setItem('userId', currentUserId); // PERSIST for next page load
-                isConnected = true;
-                console.log('✅ User authenticated anonymously');
-                console.log('  UID:', currentUserId);
-                console.log('✅ User ID persisted to localStorage');
+                console.log('\n' + '='.repeat(70));
+                console.log('🚀 BOOTSTRAP SEQUENCE: Auth → Grid → Firebase Posts');
+                console.log('='.repeat(70));
                 
-                // Initialize area names database for auto-detection
-                if (window.areaNameDatabase) {
-                    window.areaNameDatabase.initialize();
-                    console.log('✅ Area names database initialized');
+                // ✅ STEP 2: Lock userId (auth is the source of truth)
+                currentUserId = user.uid;
+                localStorage.setItem('userId', currentUserId);
+                isConnected = true;
+                console.log(`\nStep 2: userId locked (auth verified)`);
+                console.log(`  UID: ${currentUserId}`);
+                
+                // ✅ STEP 3: Create gridContent structure with userId key
+                if (!gridContent[currentUserId]) {
+                    gridContent[currentUserId] = [];
+                    console.log(`Step 3: gridContent[${currentUserId}] created (ready to receive posts)`);
+                } else {
+                    console.log(`Step 3: gridContent[${currentUserId}] already exists (${gridContent[currentUserId].length} posts)`);
                 }
                 
-                // Reverted: Using currentUserId directly for post storage
-                console.log('✅ currentUserId is now SET - READY for Firebase operations');
-                
-                // Load user's previous votes from Firebase
-                loadUserVotesFromFirebase(currentUserId);
-                
-                // Load worldwide locations and POIs for search/dropdown (1M+ locations)
-                console.log('🌐 Loading worldwide location database for search...');
-                loadWorldwideLocationsAndPOIs().then(success => {
-                    if (success) {
-                        console.log(`✅ Search system ready with ${globalLocationDatabase.length.toLocaleString()} locations`);
-                    } else {
-                        console.warn('⚠️ Some location databases failed to load, search may be limited');
-                    }
-                }).catch(err => {
-                    console.error('❌ Failed to load location databases:', err);
-                });
-                
-                // Initialize grid and Firebase subscription
+                // ✅ STEP 4: Initialize grid UI
                 initializeGrid();
+                console.log(`Step 4: grid UI initialized`);
                 
-                // WAIT FOR PHASE 0 TO COMPLETE before subscribing to Firebase
-                // This ensures currentZoneTag is set before posts are filtered
-                const waitForPhase0 = setInterval(() => {
-                    if (isPhase0Complete) {
-                        clearInterval(waitForPhase0);
-                        console.log('🔄 Phase 0 complete - NOW subscribing to Firebase with userId:', currentUserId);
-                        subscribeToFirebasePostsWithReconnect(currentUserId);
-                    }
-                }, 100); // Check every 100ms
-                
-                // Clean up old posts on startup
-                cleanupOldPosts();
-                updatePostCountDisplay();
-                
-                // Set up periodic cleanup (every 10 seconds for instant 36h deletion)
-                setInterval(cleanupOldPosts, 10 * 1000);
-                
-                // Update post count display frequently
-                setInterval(updatePostCountDisplay, 5 * 1000);
-                
-                // Set up REAL-TIME grid checking (every 500ms = 5Hz) - detect when user moves to different POI
-                // Increased frequency for more responsive POI/grid detection
-                setInterval(checkGridUpdate, 500);
-                
-                // Display POI grid status in real-time
-                setInterval(displayPOIGridStatus, 500);
-                
-                // Create user profile in database
+                // ✅ STEP 5: Setup Firebase persistence
                 const userRef = ref(database, `users/${currentUserId}`);
                 set(userRef, {
                     uid: currentUserId,
@@ -7486,6 +7453,55 @@
                     lastSeen: new Date().getTime(),
                     isAnonymous: true
                 }, { merge: true });
+                console.log(`Step 5: user profile created in Firebase`);
+                
+                // ✅ STEP 6: Initialize area names database
+                if (window.areaNameDatabase) {
+                    window.areaNameDatabase.initialize();
+                    console.log(`Step 6: area names database initialized`);
+                }
+                
+                // ✅ STEP 7: Load votes from Firebase
+                loadUserVotesFromFirebase(currentUserId);
+                console.log(`Step 7: user votes loaded from Firebase`);
+                
+                // ✅ STEP 8: Load worldwide locations (async, non-blocking)
+                console.log(`Step 8: loading location database...`);
+                loadWorldwideLocationsAndPOIs().then(success => {
+                    if (success) {
+                        console.log(`  ✅ Search system ready (${globalLocationDatabase.length.toLocaleString()} locations)`);
+                    } else {
+                        console.warn(`  ⚠️ Some databases failed, search limited`);
+                    }
+                }).catch(err => {
+                    console.error(`  ❌ Location database error:`, err);
+                });
+                
+                // ✅ STEP 9: Run Phase 0 (geolocation + zone detection)
+                console.log(`Step 9: starting Phase 0 (location detection)...`);
+                initializePhase0().then(() => {
+                    console.log(`  ✅ Phase 0 complete - user zone: ${currentZoneTag}`);
+                    
+                    // 🎯 ONLY NOW: Subscribe to Firebase posts (phase 0 complete, userId locked, gridContent ready)
+                    console.log(`Step 10: subscribing to Firebase posts for userId: ${currentUserId}`);
+                    subscribeToFirebasePostsWithReconnect(currentUserId);
+                    
+                    console.log('='.repeat(70));
+                    console.log('✅ BOOTSTRAP COMPLETE - Ready for posts');
+                    console.log('='.repeat(70) + '\n');
+                }).catch(err => {
+                    console.error('❌ Phase 0 failed:', err);
+                    // Subscribe anyway with fallback
+                    subscribeToFirebasePostsWithReconnect(currentUserId);
+                });
+                
+                // ✅ BACKGROUND TASKS: Post cleanup & maintenance (all non-blocking)
+                cleanupOldPosts();
+                updatePostCountDisplay();
+                setInterval(cleanupOldPosts, 10 * 1000);
+                setInterval(updatePostCountDisplay, 5 * 1000);
+                setInterval(checkGridUpdate, 500);
+                setInterval(displayPOIGridStatus, 500);
                 
                 // Initialize online user tracking
                 initializeOnlineTracking();
@@ -7494,6 +7510,22 @@
                 if (spotlightInterval) clearInterval(spotlightInterval);
                 rotateSpotlight(); // Show first spotlight immediately
                 spotlightInterval = setInterval(rotateSpotlight, 15 * 1000); // Rotate every 15 seconds
+                
+                // 🧪 TEST HELPER: Verify bootstrap worked
+                window.verifyBootstrap = function() {
+                    console.log('\n' + '='.repeat(70));
+                    console.log('🔍 BOOTSTRAP VERIFICATION');
+                    console.log('='.repeat(70));
+                    console.log('currentUserId:', currentUserId);
+                    console.log('gridContent keys:', Object.keys(gridContent));
+                    console.log('gridContent[currentUserId] posts:', (gridContent[currentUserId] || []).length);
+                    if (gridContent[currentUserId]) {
+                        gridContent[currentUserId].slice(0, 3).forEach((p, i) => {
+                            console.log(`  [${i}] ${p.id ? p.id.substring(0, 12) : 'no-id'}: "${(p.content || '').substring(0, 30)}..."`);
+                        });
+                    }
+                    console.log('='.repeat(70) + '\n');
+                };
                 
             } else {
                 // User is signed out - sign in anonymously
