@@ -3754,21 +3754,20 @@
             } else {
                 console.log('✅ Already connected, forcing Firebase refresh...');
                 if (currentUserId) {
-                    subscribeToFirebasePostsWithReconnect(currentUserId);
+                    subscribeToFirebasePostsWithReconnect();
                 }
             }
         };
         
         // Emergency debug: manually get from Firebase
         window.directFirebaseQuery = async function() {
-            console.log('🔍🔍🔍 DIRECT FIREBASE QUERY 🔍🔍🔍');
+            console.log('🔍🔍🔍 DIRECT FIREBASE QUERY (SHARED POSTS) 🔍🔍🔍');
             try {
-                const networkId = currentUserId || 'shared-network-1';
-                console.log('  Querying network:', networkId);
+                console.log('  Querying shared posts collection');
                 console.log('  database:', database);
                 console.log('  ref function:', ref);
                 
-                const postsRef = ref(database, `users/${networkId}/posts`);
+                const postsRef = ref(database, `posts`);
                 console.log('  postsRef created:', postsRef);
                 
                 console.log('  Calling get()...');
@@ -7524,10 +7523,11 @@
         let isPhase0Complete = false; // Flag to track when location/zone is ready — MUST be before initializePhase0()
         // Reverted: Using currentUserId directly for post storage
 
-        // Unified ownership check for both legacy and current post formats
+        // Unified ownership check - ALWAYS use authId (primary identifier)
+        // gridId determines which zone's grid shows this post
         function isOwnedByCurrentUser(post) {
             if (!post || !currentUserId) return false;
-            return post.userId === currentUserId || post.networkId === currentUserId || post.ownerUid === currentUserId;
+            return post.authId === currentUserId || post.userId === currentUserId || post.createdBy === currentUserId || post.ownerUid === currentUserId;
         }
 
         /**
@@ -7543,20 +7543,23 @@
         /**
          * Normalize a post object hydrated from Firebase so ownership fields are ALWAYS present.
          * - id / postId aliasing
-         * - userId, ownerUid, networkId all resolve to the post's true owner
+         * - authId is primary owner identifier
+         * - userId, ownerUid, createdBy all resolve to the post's true creator
+         * - gridId tracks which zone's grid should display this post
          * - Prevents "refresh removes other users' posts" by guaranteeing every post has the keys ML+ownership checks rely on.
          */
-        function normalizePostFields(post, fallbackNetworkId) {
+        function normalizePostFields(post, fallbackAuthId) {
             if (!post || typeof post !== 'object') return post;
             // id / postId alias
             if (!post.id && post.postId) post.id = post.postId;
             if (!post.postId && post.id) post.postId = post.id;
-            // ownership trio — fall back to networkId, then fallback
-            const owner = post.userId || post.ownerUid || post.networkId || fallbackNetworkId || null;
+            // authId is PRIMARY owner identifier - fall back to other fields if needed
+            const owner = post.authId || post.userId || post.createdBy || post.ownerUid || fallbackAuthId || null;
             if (owner) {
+                if (!post.authId)    post.authId    = owner;
                 if (!post.userId)    post.userId    = owner;
+                if (!post.createdBy) post.createdBy = owner;
                 if (!post.ownerUid)  post.ownerUid  = owner;
-                if (!post.networkId) post.networkId = owner;
             }
             return post;
         }
@@ -8056,8 +8059,8 @@
                     // 🎯 ONLY NOW: Subscribe to Firebase posts
                     console.log(`\n✅ Step 10: Subscribing to Firebase posts`);
                     console.log(`  userId: ${currentUserId}`);
-                    console.log(`  Firebase path: users/${currentUserId}/posts`);
-                    subscribeToFirebasePostsWithReconnect(currentUserId);
+                    console.log(`  Firebase path: posts (SHARED COLLECTION)`);
+                    subscribeToFirebasePostsWithReconnect();
                     
                     console.log('\n' + '='.repeat(70));
                     console.log('✅ BOOTSTRAP COMPLETE - Waiting for posts...');
@@ -8065,7 +8068,7 @@
                 }).catch(err => {
                     console.error('❌ Phase 0 FAILED:', err);
                     console.log('⚠️ Subscribing anyway with fallback...');
-                    subscribeToFirebasePostsWithReconnect(currentUserId);
+                    subscribeToFirebasePostsWithReconnect();
                 });
                 
                 // ✅ BACKGROUND TASKS: Post cleanup & maintenance (all non-blocking)
@@ -8256,7 +8259,7 @@
             if (!currentUserId) return;
             console.log('🔄 Foreground sync: refreshing feed/cache state');
             try {
-                subscribeToFirebasePostsWithReconnect(currentUserId);
+                subscribeToFirebasePostsWithReconnect();
             } catch (e) {
                 console.warn('⚠️ Foreground resubscribe warning:', e);
             }
@@ -10332,11 +10335,12 @@
         }
         
         // Firebase Database Functions
-        async function savePostToFirebase(networkId, postId, postData) {
+        async function savePostToFirebase(postId, postData) {
             try {
                 console.log('🔥 SAVING POST TO FIREBASE');
-                console.log('  networkId:', networkId);
                 console.log('  postId:', postId);
+                console.log('  authId:', postData.authId);
+                console.log('  gridId:', postData.gridId);
                 console.log('  postData:', postData);
                 console.log('  database object:', database);
                 
@@ -10344,8 +10348,8 @@
                     throw new Error('Database not initialized!');
                 }
                 
-                const postRef = ref(database, `users/${networkId}/posts/${postId}`);
-                console.log('  📍 Reference path created:', `users/${networkId}/posts/${postId}`);
+                const postRef = ref(database, `posts/${postId}`);
+                console.log('  📍 Reference path created:', `posts/${postId}`);
                 console.log('  postRef object:', postRef);
                 
                 console.log('  ⏳ Calling set() to save to Firebase...');
@@ -10509,11 +10513,10 @@
             }
         };
 
-        async function uploadPhotoToFirebase(networkId, postId, file) {
+        async function uploadPhotoToFirebase(postId, file) {
             try {
-                const photoPath = `users/${networkId}/photos/${postId}`;
+                const photoPath = `posts/${postId}/photo`;
                 console.log('🔥 STARTING PHOTO UPLOAD TO STORAGE');
-                console.log('  Network ID:', networkId);
                 console.log('  Post ID:', postId);
                 console.log('  Storage path:', photoPath);
                 console.log('  File details:', { name: file.name, size: file.size, type: file.type });
@@ -10562,9 +10565,9 @@
             }
         }
 
-        async function getPostsFromFirebase(networkId) {
+        async function getPostsFromFirebase() {
             try {
-                const postsRef = ref(database, `users/${networkId}/posts`);
+                const postsRef = ref(database, `posts`);
                 const snapshot = await get(postsRef);
                 
                 if (snapshot.exists()) {
@@ -10581,13 +10584,14 @@
             }
         }
 
-        function subscribeToFirebasePosts(networkId, callback) {
+        function subscribeToFirebasePosts(callback) {
             try {
-                // Load from SHARED posts collection (not per-user)
-                // networkId parameter is ignored for shared collection
+                // Load from SHARED posts collection (all users see all posts)
+                // gridId in post data determines which zone's grid shows it
                 
                 console.log('\n🔴🔴🔴 subscribeToFirebasePosts CALLED (SHARED COLLECTION) 🔴🔴🔴');
                 console.log('  currentUserId:', currentUserId);
+                console.log('  currentGridId:', currentGridId);
                 console.log('  database:', database);
                 
                 const postsRef = ref(database, `posts`);
@@ -10669,9 +10673,9 @@
             }
         }
 
-        async function deletePostFromFirebase(networkId, postId) {
+        async function deletePostFromFirebase(postId) {
             try {
-                // Delete from SHARED posts collection (not per-user)
+                // Delete from SHARED posts collection (authId ownership check happens in UI)
                 console.log('🗑️ DELETING FROM SHARED COLLECTION:');
                 console.log('  postId:', postId);
                 console.log('  Firebase path: posts/' + postId);
@@ -12313,7 +12317,7 @@
             
             // Delete immediately without confirmation
             // Delete from Firebase permanently (removes for everyone)
-            deletePostFromFirebase(currentUserId, selectedPostId).then(() => {
+            deletePostFromFirebase(selectedPostId).then(() => {
                 console.log('✅ Post permanently deleted from Firebase');
                 
                 // Track deletion in localStorage for record keeping
@@ -12612,7 +12616,7 @@
             const deleteOwnPostBtn = document.getElementById('deleteOwnPostBtn');
             const hideOtherPostBtn = document.getElementById('hideOtherPostBtn');
             
-            if (targetPost.userId === currentUserId || targetPost.networkId === currentUserId || targetPost.createdBy === currentUserId) {
+            if (targetPost.authId === currentUserId || targetPost.userId === currentUserId || targetPost.createdBy === currentUserId) {
                 // User is the post owner - show Delete button
                 deleteSection.style.display = 'block';
                 deleteOwnPostBtn.style.display = 'block';
@@ -14034,10 +14038,10 @@
             }
             
             // Subscribe to real-time updates from Firebase
-            // CRITICAL FIX: Use currentUserId for consistency with where posts are SAVED
+            // CRITICAL FIX: Subscribe to shared posts collection
             if (isConnected && currentUserId) {
-                console.log('Subscribing to Firebase posts for network:', currentUserId);
-                subscribeToFirebasePostsWithReconnect(currentUserId);
+                console.log('Subscribing to Firebase posts (shared collection)');
+                subscribeToFirebasePostsWithReconnect();
                 
                 // CRITICAL MOBILE FIX: If Firebase hasn't delivered posts within 500ms,
                 // force render the grid anyway so user sees the "Add content" button
@@ -14059,28 +14063,27 @@
             refreshInterval = setInterval(() => {
                 if (isConnected && currentUserId && !firebaseUnsubscribe) {
                     console.log('🫀 Heartbeat: Checking Firebase listener...');
-                    subscribeToFirebasePostsWithReconnect(currentUserId);
+                    subscribeToFirebasePostsWithReconnect();
                 }
             }, 5000);
         }
 
-        function subscribeToFirebasePostsWithReconnect(networkId) {
+        function subscribeToFirebasePostsWithReconnect() {
             try {
                 console.log('\n🔗🔗🔗 subscribeToFirebasePostsWithReconnect CALLED 🔗🔗🔗');
-                console.log('  networkId param:', networkId);
                 console.log('  currentUserId:', currentUserId);
-                console.log('  currentUserId:', currentUserId);
+                console.log('  currentGridId:', currentGridId);
                 
-                // Use currentUserId as the primary network ID for reading posts
-                // This matches where posts are SAVED (line 12314: networkIdForPost = currentUserId)
-                const actualNetworkId = currentUserId || networkId || 'shared-network-1';
-                console.log('  ✅ Final networkId to subscribe to:', actualNetworkId);
-                console.log('  🔍 FIREBASE PATH: users/' + actualNetworkId + '/posts');
+                // Subscribe to SHARED posts collection (all users see all posts)
+                // gridId and authId determine filtering/routing in renderGrid
+                console.log('  ✅ Subscribing to shared posts collection');
+                console.log('  🔍 FIREBASE PATH: posts (SHARED COLLECTION)');
                 
-                firebaseUnsubscribe = subscribeToFirebasePosts(actualNetworkId, (posts) => {
+                firebaseUnsubscribe = subscribeToFirebasePosts((posts) => {
                     console.log('\n✅✅✅ CALLBACK RECEIVED FROM FIREBASE ✅✅✅');
                     console.log('  Posts count:', posts.length);
-                    console.log('  👤 Posts retrieved for user:', actualNetworkId);
+                    console.log('  👤 Current user:', currentUserId);
+                    console.log('  📍 Current grid:', currentGridId);
                     console.log('  ⏰ Current time:', new Date().toLocaleTimeString());
                     console.log('  🖥️  Viewport:', window.innerWidth + 'x' + window.innerHeight);
                     
@@ -14088,24 +14091,24 @@
                         console.log('  📋 First post preview:', {
                             id: posts[0].id ? posts[0].id.substring(0, 8) + '...' : 'N/A',
                             content: posts[0].content ? posts[0].content.substring(0, 30) + '...' : 'N/A',
-                            county: posts[0].county,
-                            networkId: posts[0].networkId,
+                            authId: posts[0].authId ? posts[0].authId.substring(0, 8) + '...' : 'N/A',
+                            gridId: posts[0].gridId,
                             timestamp: posts[0].timestamp ? new Date(posts[0].timestamp).toLocaleTimeString() : 'N/A'
                         });
                     }
                     
                     // CRITICAL: De-duplicate posts by ID + normalize ownership fields on every hydrated post
-                    // This guarantees post.userId/ownerUid/networkId are present so refresh never drops ownership.
+                    // authId is primary owner identifier
                     const seenIds = new Set();
                     const uniquePosts = [];
                     posts.forEach(post => {
-                        normalizePostFields(post, actualNetworkId);
+                        normalizePostFields(post, currentUserId);
                         if (!post.id) return; // skip malformed entries
                         if (!seenIds.has(post.id)) {
                             seenIds.add(post.id);
                             uniquePosts.push(post);
                         } else {
-                            console.log(`  ⚠️ De-duplicated post: ${post.id.substring(0, 8)}... (zone: ${post.county})`);
+                            console.log(`  ⚠️ De-duplicated post: ${post.id.substring(0, 8)}...`);
                         }
                     });
                     
@@ -14120,12 +14123,11 @@
                         console.log('✅ Firebase loaded in time - timeout cleared');
                     }
                     
-                    console.log('  🔄 Updating gridContent for subscribed network:', actualNetworkId);
-                    // Always hydrate under the actual subscribed network ID for stability.
-                    const contentKey = actualNetworkId || 'shared-network-1';
+                    console.log('  🔄 Updating gridContent with shared posts');
+                    // Store shared posts under currentUserId for consistency
+                    const contentKey = currentUserId || 'shared-posts';
                     console.log('  🔑 CONTENT KEY DECISION:');
                     console.log('     currentUserId value:', currentUserId);
-                    console.log('     currentUserId type:', typeof currentUserId);
                     console.log('     Using key:', contentKey);
                     console.log('     Posts count:', uniquePosts.length);
                     console.log('     ✅ Posts will be stored at: gridContent["' + contentKey + '"]');
@@ -14160,7 +14162,7 @@
             } catch (error) {
                 console.error('Firebase listener error:', error);
                 // CRITICAL: Still show grid even on error so user isn't stuck
-                const fallbackKey = currentUserId || networkId || 'shared-network-1';
+                const fallbackKey = currentUserId || 'shared-posts';
                 if (!gridContent[fallbackKey]) {
                     gridContent[fallbackKey] = [];
                 }
@@ -15166,7 +15168,7 @@
             
             // ========== 5. USER OWNERSHIP BOOST (0-10 points) ==========
             // User's own posts should always be highly visible
-            const isUserPost = post.userId === userId || post.networkId === userId;
+            const isUserPost = post.authId === userId || post.userId === userId || post.createdBy === userId;
             score += isUserPost ? 10 : 0;
 
             // ========== 5b. POI-NEAR BOOST (0-26 points) — scope-aware bidirectional routing ==========
@@ -15351,7 +15353,7 @@
             }));
             
             // Separate by category while maintaining unified ranking
-            const userPosts = rankedPosts.filter(p => p.userId === currentUserId || p.networkId === currentUserId);
+            const userPosts = rankedPosts.filter(p => p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId);
             const localPosts = rankedPosts.filter(p => p.county === getCurrentUserArea() && !userPosts.find(u => u.id === p.id));
             const remoteRecommended = rankedPosts.filter(p => p.county !== getCurrentUserArea() && p.unifiedRank > 70 && !userPosts.find(u => u.id === p.id));
             const otherPosts = rankedPosts.filter(p => !userPosts.find(u => u.id === p.id) && !localPosts.find(l => l.id === p.id) && !remoteRecommended.find(r => r.id === p.id));
@@ -18428,7 +18430,7 @@
                 post.boostRequested && 
                 post.boostIntent && 
                 post.boostStatus !== 'expired' &&
-                (post.networkId === currentUserId || post.userId === currentUserId)
+                (post.authId === currentUserId || post.userId === currentUserId || post.createdBy === currentUserId)
             );
             
             if (userBoostedPosts.length > 0) {
@@ -18511,7 +18513,7 @@
                     }
 
                     // ── FALLBACK: if STILL no own post in first 12, promote one ────
-                    const hasUserPostVisible = sortedPosts.slice(0, initialVisibleCount).some(p => p.networkId === currentUserId || p.userId === currentUserId);
+                    const hasUserPostVisible = sortedPosts.slice(0, initialVisibleCount).some(p => p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId);
                     if (!hasUserPostVisible) {
                         const topUserPost = recircPool[0];
                         sortedPosts = sortedPosts.filter(p => p.id !== topUserPost.id);
@@ -18520,7 +18522,7 @@
                     }
                 }
 
-                console.log(`✅ ML CHECK: User has ${userPosts.length} posts, ${sortedPosts.slice(0, initialVisibleCount).filter(p => p.networkId === currentUserId || p.userId === currentUserId).length} visible in first 12 boxes`);
+                console.log(`✅ ML CHECK: User has ${userPosts.length} posts, ${sortedPosts.slice(0, initialVisibleCount).filter(p => p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId).length} visible in first 12 boxes`);
             }
 
             // ========================================================================
@@ -18607,8 +18609,9 @@
             let filteredSortedPosts = [];
             sortedPosts.forEach(post => {
                 // Check if this is a self-post (creator ID matches current user)
-                const isOwnPost = (post.createdBy === currentUserId) || 
-                                 (post.networkId === currentUserId) || 
+                // authId is PRIMARY ownership identifier
+                const isOwnPost = (post.authId === currentUserId) || 
+                                 (post.createdBy === currentUserId) || 
                                  (post.userId === currentUserId);
                 
                 if (!isOwnPost) {
@@ -20413,7 +20416,7 @@
                 if (imageFile) {
                     console.log('Uploading photo to Firebase Storage...');
                     try {
-                        photoURL = await uploadPhotoToFirebase(currentUserId, postId, imageFile);
+                        photoURL = await uploadPhotoToFirebase(postId, imageFile);
                         console.log('Photo upload complete. URL:', photoURL);
                     } catch (photoError) {
                         console.error('Photo upload FAILED:', photoError);
@@ -20657,8 +20660,8 @@
                 postData.authId = authUserId;        // Primary identifier (permanent auth)
                 postData.userId = authUserId;        // User identifier
                 postData.createdBy = authUserId;     // Creator identifier
-                postData.networkId = authUserId;     // Compatibility (legacy field, but now maps to auth)
                 postData.ownerUid = authUserId;      // Owner identifier
+                postData.gridId = currentGridId;     // Zone/grid tracking (where user currently is)
                 postData.id = postId;
                 postData.postId = postId;
                 postData.ownerAt = postData.ownerAt || new Date().getTime();
@@ -20681,7 +20684,7 @@
                 console.log('  authId (primary):', authUserId);
                 console.log('  userId:', postData.userId);
                 console.log('  createdBy:', postData.createdBy);
-                console.log('  networkId (legacy compat):', postData.networkId);
+                console.log('  gridId (zone tracking):', postData.gridId);
                 console.log('  zoneTag:', postData.zoneTag);
                 console.log('  coordinates:', `${postData.latitude}, ${postData.longitude}`);
                 console.log('');
@@ -20875,7 +20878,7 @@
             // 📡 LAZY LOAD: Posts from Firebase (non-blocking)
             setTimeout(() => {
                 console.log('⚡ LAZY LOAD: Loading posts from Firebase...');
-                subscribeToFirebasePostsWithReconnect('shared-network-1');
+                subscribeToFirebasePostsWithReconnect();
             }, 200); // Defer to allow geolocation to start
             
             // 🌐 LAZY LOAD: WiFi connection check

@@ -12,16 +12,15 @@ const database = getDatabase(app);
 const storage = getStorage(app);
 
 /**
- * Create or update a post in Firebase
- * @param {string} networkId - WiFi network ID
+ * Create or update a post in Firebase (shared collection)
  * @param {string} postId - Unique post ID
- * @param {object} postData - Post data (content, timestamp, etc)
+ * @param {object} postData - Post data (content, timestamp, authId, etc)
  */
-export async function savePost(networkId, postId, postData) {
+export async function savePost(postId, postData) {
     try {
-        const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
+        const postRef = ref(database, `posts/${postId}`);
         await set(postRef, postData);
-        console.log(`Post saved: ${postId}`);
+        console.log(`Post saved to shared collection: ${postId}`);
         return { success: true, postId };
     } catch (error) {
         console.error('Error saving post:', error);
@@ -30,13 +29,12 @@ export async function savePost(networkId, postId, postData) {
 }
 
 /**
- * Get all posts for a network
- * @param {string} networkId - WiFi network ID
+ * Get all posts from shared collection
  * @returns {Promise<array>} Array of posts
  */
-export async function getPosts(networkId) {
+export async function getPosts() {
     try {
-        const postsRef = ref(database, `networks/${networkId}/posts`);
+        const postsRef = ref(database, `posts`);
         const snapshot = await get(postsRef);
         
         if (snapshot.exists()) {
@@ -55,14 +53,13 @@ export async function getPosts(networkId) {
 }
 
 /**
- * Subscribe to real-time updates for posts in a network
- * @param {string} networkId - WiFi network ID
+ * Subscribe to real-time updates for shared posts collection
  * @param {function} callback - Function to call when posts change
  * @returns {function} Unsubscribe function
  */
-export function subscribeToPostsRealTime(networkId, callback) {
+export function subscribeToPostsRealTime(callback) {
     try {
-        const postsRef = ref(database, `networks/${networkId}/posts`);
+        const postsRef = ref(database, `posts`);
         
         const unsubscribe = onValue(postsRef, (snapshot) => {
             if (snapshot.exists()) {
@@ -88,15 +85,14 @@ export function subscribeToPostsRealTime(networkId, callback) {
 
 /**
  * Upload a photo to Firebase Storage
- * @param {string} networkId - WiFi network ID
  * @param {string} postId - Post ID
  * @param {File} file - Image file to upload
  * @returns {Promise<string>} Download URL of uploaded file
  */
-export async function uploadPhoto(networkId, postId, file) {
+export async function uploadPhoto(postId, file) {
     try {
-        // Create a path: networks/{networkId}/photos/{postId}
-        const photoPath = `networks/${networkId}/photos/${postId}`;
+        // Create a path: posts/{postId}/photo
+        const photoPath = `posts/${postId}/photo`;
         const photoRef = storageRef(storage, photoPath);
         
         // Upload the file
@@ -113,13 +109,12 @@ export async function uploadPhoto(networkId, postId, file) {
 }
 
 /**
- * Delete a post from Firebase
- * @param {string} networkId - WiFi network ID
+ * Delete a post from shared collection
  * @param {string} postId - Post ID to delete
  */
-export async function deletePost(networkId, postId) {
+export async function deletePost(postId) {
     try {
-        const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
+        const postRef = ref(database, `posts/${postId}`);
         await remove(postRef);
         console.log(`Post deleted: ${postId}`);
         return { success: true };
@@ -131,12 +126,11 @@ export async function deletePost(networkId, postId) {
 
 /**
  * Delete a photo from Firebase Storage
- * @param {string} networkId - WiFi network ID
  * @param {string} postId - Post ID
  */
-export async function deletePhoto(networkId, postId) {
+export async function deletePhoto(postId) {
     try {
-        const photoPath = `networks/${networkId}/photos/${postId}`;
+        const photoPath = `posts/${postId}/photo`;
         const photoRef = storageRef(storage, photoPath);
         await deleteObject(photoRef);
         console.log(`Photo deleted: ${photoPath}`);
@@ -147,14 +141,13 @@ export async function deletePhoto(networkId, postId) {
 }
 
 /**
- * Update post votes (likes/dislikes)
- * @param {string} networkId - WiFi network ID
+ * Update post votes (likes/dislikes) in shared collection
  * @param {string} postId - Post ID
  * @param {object} updates - Fields to update (likes, dislikes)
  */
-export async function updatePostVotes(networkId, postId, updates) {
+export async function updatePostVotes(postId, updates) {
     try {
-        const postRef = ref(database, `networks/${networkId}/posts/${postId}`);
+        const postRef = ref(database, `posts/${postId}`);
         await update(postRef, updates);
         console.log(`Post votes updated: ${postId}`);
         return { success: true };
