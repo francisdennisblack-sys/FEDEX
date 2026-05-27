@@ -6790,34 +6790,27 @@
                 console.timeEnd('Geolocation');
                 console.log(`✅ Location acquired: ${userLocation.lat.toFixed(4)}°N, ${userLocation.lon.toFixed(4)}°E`);
                 
-                // STEP 2: Load POI database with timeout
+                // STEP 2: Load POI database IN BACKGROUND (non-blocking with aggressive timeout)
                 console.log('\n📥 STEP 2: Loading POI database (219 cities, 38K+ POIs)...');
                 console.time('POI Database Load');
                 
+                // Race: either load completes or timeout fires after 1.5s (aggressive)
                 const poiLoadTimeout = new Promise((resolve) => {
                     setTimeout(() => {
-                        console.warn('⏰ POI load timeout - continuing with fallback neighborhood detection');
+                        console.warn('⏰ POI load timeout (1.5s) - continuing with neighborhood fallback');
                         resolve();
-                    }, 3000);
+                    }, 1500);
                 });
                 
-                // CRITICAL: Wait for loadPOIData to complete (not just race it)
-                // loadPOIData is async and includes loading the location database
-                try {
-                    await loadPOIData();
-                    console.log('✅ POI Data loaded successfully');
-                } catch (dbError) {
-                    console.warn('⚠️ POI Data load error:', dbError);
-                }
+                // Start loading but don't wait more than 1.5s
+                const loadPromise = loadPOIData().catch(err => {
+                    console.warn('⚠️ POI Data load error:', err);
+                });
+                
+                await Promise.race([loadPromise, poiLoadTimeout]);
                 
                 console.timeEnd('POI Database Load');
-                console.log(`✅ Database ready: ${poiDatabase.length} POIs loaded, ${globalLocationDatabase.length} locations indexed`);
-                
-                // VERIFY: Check if globalLocationDatabase is populated
-                if (!globalLocationDatabase || globalLocationDatabase.length === 0) {
-                    console.warn('⚠️ WARNING: globalLocationDatabase still empty after load!');
-                    console.log('   Will attempt zone detection anyway...');
-                }
+                console.log(`✅ Database ready: ${poiDatabase.length} POIs, ${globalLocationDatabase.length} locations`);
                 
                 // STEP 3: Detect hyper-local zone
                 console.log('\n🔍 STEP 3: Smart zone detection...');
@@ -17713,9 +17706,10 @@
                                        (typeof imageSource === 'string' && (imageSource.includes('.mp4') || imageSource.includes('.webm') || imageSource.includes('.mov')));
                         
                         // Posts with photos/videos: show media with vote badge at bottom
+                        // Use loading="lazy" for images and defer video loads
                         let mediaHTML = isVideo 
-                            ? `<video src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;" autoplay muted loop playsinline></video>`
-                            : `<img src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
+                            ? `<video data-src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;" muted loop playsinline></video>`
+                            : `<img data-src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;" loading="lazy">`;
                         
                         const voteBadge = `<div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 12px;"><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↑ ${likes}</button><button onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer;">↓ ${dislikes}</button></div>`;
                         
@@ -17819,6 +17813,33 @@
                     gridPosition++; // Only increment when post is actually rendered
                 }
             });
+            
+            // 🖼️ LAZY LOAD MEDIA: Defer image/video loading using Intersection Observer
+            // Only load media when post becomes visible in viewport
+            if ('IntersectionObserver' in window) {
+                const imageObserver = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            const media = entry.target;
+                            if (media.tagName === 'IMG' && media.dataset.src) {
+                                media.src = media.dataset.src;
+                                media.removeAttribute('data-src');
+                                imageObserver.unobserve(media);
+                            } else if (media.tagName === 'VIDEO' && media.dataset.src) {
+                                media.src = media.dataset.src;
+                                media.removeAttribute('data-src');
+                                media.autoplay = true;
+                                imageObserver.unobserve(media);
+                            }
+                        }
+                    });
+                }, { rootMargin: '50px' }); // Start loading 50px before entering viewport
+                
+                // Observe all lazy-loaded images and videos
+                document.querySelectorAll('img[data-src], video[data-src]').forEach(media => {
+                    imageObserver.observe(media);
+                });
+            }
             
             // ✅ RENDERING COMPLETE LOG
             const filledBoxes = document.querySelectorAll('.grid-box.filled').length;
@@ -19697,90 +19718,46 @@
         // Auto-initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
             console.log('=== 🚀 DOMContentLoaded FIRED ===');
-            console.log('📊 Initial State:', {
-                windowInnerWidth: window.innerWidth,
-                windowInnerHeight: window.innerHeight,
-                documentClientWidth: document.documentElement.clientWidth,
-                documentClientHeight: document.documentElement.clientHeight,
-                scrollX: window.scrollX,
-                scrollY: window.scrollY,
-                devicePixelRatio: window.devicePixelRatio
-            });
             
-            // MOBILE DEBUG: Log grid element dimensions
-            setTimeout(() => {
-                const grid = document.getElementById('grid');
-                const container = document.querySelector('.container');
-                const gridBox = document.querySelector('.grid-box');
-                
-                if (grid) {
-                    const gridStyle = window.getComputedStyle(grid);
-                    console.log('📐 MOBILE GRID SIZING:', {
-                        gridWidth: grid.offsetWidth,
-                        gridHeight: grid.offsetHeight,
-                        gridColumns: gridStyle.gridTemplateColumns,
-                        gridGap: gridStyle.gap,
-                        display: gridStyle.display
-                    });
-                }
-                
-                if (gridBox) {
-                    const boxStyle = window.getComputedStyle(gridBox);
-                    console.log('📦 GRID BOX SIZING:', {
-                        boxWidth: gridBox.offsetWidth,
-                        boxHeight: gridBox.offsetHeight,
-                        minHeight: boxStyle.minHeight,
-                        aspectRatio: boxStyle.aspectRatio,
-                        padding: boxStyle.padding
-                    });
-                }
-                
-                if (container) {
-                    const containerStyle = window.getComputedStyle(container);
-                    console.log('🎯 CONTAINER SIZING:', {
-                        containerWidth: container.offsetWidth,
-                        containerHeight: container.offsetHeight,
-                        containerDisplay: containerStyle.display,
-                        containerFlex: containerStyle.flex
-                    });
-                }
-                
-                // Check if it's mobile
-                const isMobile = window.innerWidth <= 599;
-                console.log(`📱 DEVICE TYPE: ${isMobile ? 'MOBILE (≤599px)' : 'TABLET/DESKTOP (>599px)'}`);
-            }, 100);
-            
-            // CRITICAL: Disable any automatic zoom adjustments by the browser
-            // This prevents the "wrong size -> corrects -> zooms in" glitch on mobile
-            const viewport = document.querySelector('meta[name="viewport"]');
-            console.log('📍 Viewport meta tag:', viewport?.getAttribute('content'));
-            if (viewport) {
-                const newContent = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no';
-                viewport.setAttribute('content', newContent);
-                console.log('✅ Viewport set to:', newContent);
-            }
-            
-            // Prevent any scroll offset that could trigger zoom
-            console.log('🔒 Resetting scroll position...');
-            window.scrollTo(0, 0);
-            document.documentElement.scrollLeft = 0;
-            document.documentElement.scrollTop = 0;
-            console.log('📊 After scroll reset:', { scrollX: window.scrollX, scrollY: window.scrollY });
-            
+            // ⚡ CRITICAL PATH: Show content IMMEDIATELY (before anything else)
+            // Initialize theme, show grid skeleton
             initializeTheme();
-            console.log('🚀 FEDEX v1.0.3 - Page loaded, initializing WiFi grid...');
-            console.log('BUILD INFO: Mobile optimizations, LIKED badge smart display, video autoplay support');
             initializeGrid();
             
-            // 🚀 INSTANT POSTS: Load posts from Firebase immediately, don't wait for auth/geolocation
-            console.log('⚡ LOADING POSTS IMMEDIATELY (before geolocation)...');
-            subscribeToFirebasePostsWithReconnect('shared-network-1'); // Default network for all users
+            console.log('✅ UI initialized - showing skeleton immediately');
+            console.log('🚀 FEDEX v1.0.3 - Loading content in background...');
             
-            checkWiFiOnLoad();
+            // 📍 LAZY LOAD: Heavy operations happen AFTER content is visible
+            // This provides instant visual feedback to user
+            setTimeout(() => {
+                console.log('⚡ LAZY LOAD: Phase 0 (geolocation + POI detection)');
+                initializePhase0().catch(err => {
+                    console.error('Phase 0 failed (non-critical):', err);
+                });
+            }, 100); // Defer slightly to let UI paint
             
-            // Pinch-zoom and double-tap zoom enabled for mobile users
+            // 📡 LAZY LOAD: Posts from Firebase (non-blocking)
+            setTimeout(() => {
+                console.log('⚡ LAZY LOAD: Loading posts from Firebase...');
+                subscribeToFirebasePostsWithReconnect('shared-network-1');
+            }, 200); // Defer to allow geolocation to start
             
-            // Close zone dropdown when clicking outside
+            // 🌐 LAZY LOAD: WiFi connection check
+            setTimeout(() => {
+                console.log('⚡ LAZY LOAD: Checking WiFi connection...');
+                checkWiFiOnLoad();
+            }, 300);
+            
+            // 📊 LAZY LOAD: Debug logging
+            setTimeout(() => {
+                console.log('📊 Initial State:', {
+                    windowInnerWidth: window.innerWidth,
+                    windowInnerHeight: window.innerHeight,
+                    devicePixelRatio: window.devicePixelRatio
+                });
+            }, 1000);
+            
+            // Close zone dropdown when clicking outside (non-blocking)
             document.addEventListener('click', (e) => {
                 const zoneInfo = document.getElementById('zoneInfo');
                 const zoneDropdown = document.getElementById('zoneDropdown');
@@ -19789,13 +19766,13 @@
                 }
             });
             
-            console.log('=== 🎉 DOMContentLoaded COMPLETE ===');
+            console.log('=== 🎉 DOMContentLoaded COMPLETE (UI ready, loading in background) ===');
         });
         // Also try to connect immediately in case DOMContentLoaded already fired
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', checkWiFiOnLoad);
         } else {
-            setTimeout(checkWiFiOnLoad, 100);
+            setTimeout(checkWiFiOnLoad, 300);
         }
         
         // =================== DEBUG: ZOOM & RESIZE MONITORING ===================
