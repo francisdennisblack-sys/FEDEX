@@ -4329,6 +4329,7 @@
         let currentGridRadius = 0;
         let currentContentScope = 'CITY';
         let currentGeographicLocation = ''; // City/Region name for context
+        let currentGridId = null; // Zone/grid ID for post tracking (derived from currentZoneTag)
         let geolocationRequested = false; // Flag to prevent multiple geolocation requests
 
         // ============================================
@@ -6890,9 +6891,17 @@
                         console.log(`   ✅ USING LOCATION: ${closestLocationData.location.name} is closest match`);
                         currentZoneTag = `${closestLocationData.location.name}`;
                         currentAreaName = closestLocationData.location.name;
+                        currentGridId = closestLocationData.location.name; // Set zone ID for posts
                         currentGridRadius = getLocationRadius(closestLocationData.location.type);
                         currentContentScope = closestLocationData.location.type;
                         currentGeographicLocation = closestLocationData.location.name;
+                        
+                        // 📊 UPDATE DIAGNOSTIC DASHBOARD
+                        if (diagnosticState) {
+                            diagnosticState.gridIdAssigned = true;
+                            diagnosticState.gridIdValue = currentGridId;
+                        }
+                        
                         console.log(`\n✅ ZONE SELECTED: ${currentZoneTag}`);
                         console.log(`   Type: ${closestLocationData.location.type} (Closest Location)`);
                         console.log(`   State: ${closestLocationData.location.state}`);
@@ -6903,9 +6912,17 @@
                         console.log(`   ✅ USING LOCATION (even though ${distanceToLocKm.toFixed(1)} km away): ${closestLocationData.location.name} is best available`);
                         currentZoneTag = `${closestLocationData.location.name}`;
                         currentAreaName = closestLocationData.location.name;
+                        currentGridId = closestLocationData.location.name; // Set zone ID for posts
                         currentGridRadius = getLocationRadius(closestLocationData.location.type);
                         currentContentScope = closestLocationData.location.type;
                         currentGeographicLocation = closestLocationData.location.name;
+                        
+                        // 📊 UPDATE DIAGNOSTIC DASHBOARD
+                        if (diagnosticState) {
+                            diagnosticState.gridIdAssigned = true;
+                            diagnosticState.gridIdValue = currentGridId;
+                        }
+                        
                         console.log(`\n✅ ZONE SELECTED: ${currentZoneTag}`);
                         console.log(`   Type: ${closestLocationData.location.type} (Closest Location - distant)`);
                         console.log(`   State: ${closestLocationData.location.state}`);
@@ -6918,8 +6935,15 @@
                 // STEP 2: No location found - use raw coordinates as fallback
                 console.log('\n🔍 Step 2: No location found - using raw coordinates fallback...');
                 currentZoneTag = `📍 ${userLocation.lat.toFixed(3)}, ${userLocation.lon.toFixed(3)}`;
+                currentGridId = `COORDS_${userLocation.lat.toFixed(3)}_${userLocation.lon.toFixed(3)}`; // Set zone ID
                 currentGridRadius = 0.02;
                 currentContentScope = 'LOCAL';
+                
+                // 📊 UPDATE DIAGNOSTIC DASHBOARD
+                if (diagnosticState) {
+                    diagnosticState.gridIdAssigned = true;
+                    diagnosticState.gridIdValue = currentGridId;
+                }
                 
                 console.log(`\n✅ ZONE SELECTED: ${currentZoneTag}`);
                 console.log(`   Type: Coordinates (Fallback)`);
@@ -7255,6 +7279,12 @@
                 console.log('║  (Users can override with "Move post to" field)            ║');
                 console.log('╚════════════════════════════════════════════════════════════╝\n');
                 
+                // 📊 START LOCATION TRACKING FOR DIAGNOSTICS
+                if (typeof startLocationTracking === 'function') {
+                    startLocationTracking();
+                    console.log('📡 Location tracking started for diagnostic dashboard');
+                }
+                
                 // INSTANT: Initialize area selector with real location
                 console.log('⚡ Initializing area selector with real-time location...');
                 autoDetectClosestArea(userLocation);
@@ -7522,6 +7552,146 @@
         let currentUserId = null; // Will store Firebase UID
         let isPhase0Complete = false; // Flag to track when location/zone is ready — MUST be before initializePhase0()
         // Reverted: Using currentUserId directly for post storage
+
+        // ============================================================
+        // 📊 UNIFIED DIAGNOSTIC DASHBOARD
+        // Single source of truth for all debugging info
+        // ============================================================
+        let diagnosticState = {
+            totalPostsLive: 0,
+            authIdSaved: false,
+            authIdValue: null,
+            gridIdAssigned: false,
+            gridIdValue: null,
+            postIdAssigned: false,
+            postIdValue: null,
+            idsSurvivedRefresh: false,
+            locationTrackingActive: false,
+            lastLocationUpdate: null,
+            lastLocation: { lat: 0, lon: 0 },
+            userHasMoved: false,
+            locationHistory: [],
+            totalDistanceMoved: 0
+        };
+
+        function updateDiagnosticDashboard() {
+            // Compile all status information
+            const posts = diagnosticState.totalPostsLive;
+            const authOk = diagnosticState.authIdSaved;
+            const gridOk = diagnosticState.gridIdAssigned;
+            const postOk = diagnosticState.postIdAssigned;
+            const refreshOk = diagnosticState.idsSurvivedRefresh;
+            const locActive = diagnosticState.locationTrackingActive;
+            
+            // Build color-coded status indicators
+            const authStatus = authOk ? `✓ ${diagnosticState.authIdValue?.substring(0, 16)}...` : '✗ MISSING';
+            const gridStatus = gridOk ? `✓ ${diagnosticState.gridIdValue}` : '✗ NOT ASSIGNED';
+            const postStatus = postOk ? `✓ CREATED` : '✗ NOT CREATED';
+            const refreshStatus = refreshOk ? '✓ PERSISTENT' : '⏳ PENDING TEST';
+            const locStatus = locActive ? 
+                (diagnosticState.userHasMoved ? 
+                    `✓ TRACKING (${diagnosticState.totalDistanceMoved.toFixed(0)}m moved)` : 
+                    `✓ ACTIVE (stationary)`) : 
+                '✗ INACTIVE';
+
+            // Color styling
+            const green = 'color: #10b981; font-weight: bold; font-size: 13px;';
+            const red = 'color: #ef4444; font-weight: bold; font-size: 13px;';
+            const yellow = 'color: #f59e0b; font-weight: bold; font-size: 13px;';
+            const blue = 'color: #3b82f6; font-weight: bold; font-size: 13px;';
+            const header = 'color: #6366f1; font-weight: bold; font-size: 14px;';
+
+            // Display comprehensive dashboard
+            console.clear();
+            console.log('%c╔═══════════════════════════════════════════════════════════╗', header);
+            console.log('%c║                  UNIFIED DIAGNOSTIC DASHBOARD              ║', header);
+            console.log('%c╚═══════════════════════════════════════════════════════════╝', header);
+            console.log('');
+            
+            console.log('%c📊 SYSTEM STATUS', blue);
+            console.log(`   Posts Live: %c${posts} posts%c in shared collection`, green, 'color: #666; font-size: 12px;');
+            
+            console.log('');
+            console.log('%c🔐 AUTHENTICATION', blue);
+            console.log(`   Auth ID: %c${authStatus}%c`, authOk ? green : red, 'color: #666; font-size: 12px;');
+            
+            console.log('');
+            console.log('%c📍 ZONE TRACKING', blue);
+            console.log(`   Grid ID: %c${gridStatus}%c`, gridOk ? green : red, 'color: #666; font-size: 12px;');
+            
+            console.log('');
+            console.log('%c📝 POST MANAGEMENT', blue);
+            console.log(`   Post ID: %c${postStatus}%c`, postOk ? green : red, 'color: #666; font-size: 12px;');
+            
+            console.log('');
+            console.log('%c🔄 PERSISTENCE', blue);
+            console.log(`   Survived Refresh: %c${refreshStatus}%c`, refreshOk ? green : yellow, 'color: #666; font-size: 12px;');
+            
+            console.log('');
+            console.log('%c📡 LOCATION SERVICES', blue);
+            console.log(`   Tracking: %c${locStatus}%c`, locActive ? green : red, 'color: #666; font-size: 12px;');
+            if (diagnosticState.lastLocationUpdate) {
+                const timeAgo = Math.round((Date.now() - diagnosticState.lastLocationUpdate) / 1000);
+                console.log(`   Last Update: %c${diagnosticState.lastLocation.lat.toFixed(4)}, ${diagnosticState.lastLocation.lon.toFixed(4)} (${timeAgo}s ago)%c`, 
+                    'color: #666; font-size: 12px;', 'color: #999;');
+            }
+            
+            console.log('');
+            console.log('%c╔═══════════════════════════════════════════════════════════╗', header);
+            console.log('%c║ Call window.showDashboard() to refresh this info anytime  ║', header);
+            console.log('%c╚═══════════════════════════════════════════════════════════╝', header);
+        }
+
+        // Location tracking interval (1s updates)
+        let lastTrackedLocation = { lat: 0, lon: 0 };
+        let locationTrackingInterval = null;
+
+        function startLocationTracking() {
+            if (locationTrackingInterval) return;
+            
+            diagnosticState.locationTrackingActive = true;
+            
+            locationTrackingInterval = setInterval(() => {
+                // Check if we have a valid location
+                if (userLocation && userLocation.lat && userLocation.lon) {
+                    const distanceMoved = calculateDistance(
+                        lastTrackedLocation.lat, lastTrackedLocation.lon,
+                        userLocation.lat, userLocation.lon
+                    );
+                    
+                    if (distanceMoved > 0) {
+                        diagnosticState.totalDistanceMoved += distanceMoved;
+                        if (distanceMoved > 0.01) { // > 10m
+                            diagnosticState.userHasMoved = true;
+                            diagnosticState.locationHistory.push({
+                                lat: userLocation.lat,
+                                lon: userLocation.lon,
+                                timestamp: Date.now()
+                            });
+                        }
+                        lastTrackedLocation = { lat: userLocation.lat, lon: userLocation.lon };
+                    }
+                    
+                    // Update diagnostic state
+                    diagnosticState.lastLocation = { lat: userLocation.lat, lon: userLocation.lon };
+                    diagnosticState.lastLocationUpdate = Date.now();
+                }
+            }, 1000);
+        }
+
+        function stopLocationTracking() {
+            if (locationTrackingInterval) {
+                clearInterval(locationTrackingInterval);
+                locationTrackingInterval = null;
+                diagnosticState.locationTrackingActive = false;
+            }
+        }
+
+        // Make dashboard globally accessible
+        window.showDashboard = updateDiagnosticDashboard;
+        window.startLocationTracking = startLocationTracking;
+        window.stopLocationTracking = stopLocationTracking;
+        window.diagnosticState = diagnosticState;
 
         // Unified ownership check - ALWAYS use authId (primary identifier)
         // gridId determines which zone's grid shows this post
@@ -7948,6 +8118,9 @@
         // STEP 1b: Get or create PERMANENT userId (survives everything)
         const permanentUserId = getPermanentUserId();
         
+        // STEP 1c: Check if IDs survived refresh (for diagnostics)
+        const previousSessionAuthId = localStorage.getItem('lastSessionAuthId');
+        
         onAuthStateChanged(auth, async (user) => {
             console.log('🔐 onAuthStateChanged fired');
             console.log('   user exists:', !!user);
@@ -7969,6 +8142,25 @@
                 console.log(`  Firebase UID: ${user.uid} (backup, may change)`);
                 console.log(`  currentUserId now: ${currentUserId}`);
                 console.log(`  Saved to localStorage`);
+                
+                // 📊 CHECK IF IDS SURVIVED REFRESH
+                if (previousSessionAuthId && previousSessionAuthId === newUserId) {
+                    if (diagnosticState) {
+                        diagnosticState.idsSurvivedRefresh = true;
+                        console.log('✅ IDs survived refresh - PERSISTENT ACROSS SESSIONS');
+                    }
+                } else if (previousSessionAuthId) {
+                    console.log('⚠️ IDs changed on refresh (different session or new install)');
+                }
+                
+                // Store current session auth ID for next refresh check
+                localStorage.setItem('lastSessionAuthId', newUserId);
+                
+                // 📊 UPDATE DIAGNOSTIC DASHBOARD
+                if (diagnosticState) {
+                    diagnosticState.authIdSaved = true;
+                    diagnosticState.authIdValue = newUserId;
+                }
                 
                 // ✅ STEP 3: Create gridContent structure with userId key
                 if (!gridContent[currentUserId]) {
@@ -8065,6 +8257,13 @@
                     console.log('\n' + '='.repeat(70));
                     console.log('✅ BOOTSTRAP COMPLETE - Waiting for posts...');
                     console.log('='.repeat(70) + '\n');
+                    
+                    // 📊 SHOW UNIFIED DIAGNOSTIC DASHBOARD
+                    setTimeout(() => {
+                        if (typeof updateDiagnosticDashboard === 'function') {
+                            updateDiagnosticDashboard();
+                        }
+                    }, 500);
                 }).catch(err => {
                     console.error('❌ Phase 0 FAILED:', err);
                     console.log('⚠️ Subscribing anyway with fallback...');
@@ -14003,7 +14202,6 @@
             // Subscribe to real-time updates from Firebase
             // CRITICAL FIX: Subscribe to shared posts collection
             if (isConnected && currentUserId) {
-                console.log('Subscribing to Firebase posts (shared collection)');
                 subscribeToFirebasePostsWithReconnect();
                 
                 // CRITICAL MOBILE FIX: If Firebase hasn't delivered posts within 500ms,
@@ -14025,7 +14223,6 @@
             // This ensures the app always feels constantly up to date with votes and new posts
             refreshInterval = setInterval(() => {
                 if (isConnected && currentUserId && !firebaseUnsubscribe) {
-                    console.log('🫀 Heartbeat: Checking Firebase listener...');
                     subscribeToFirebasePostsWithReconnect();
                 }
             }, 5000);
@@ -14043,21 +14240,9 @@
                 console.log('  🔍 FIREBASE PATH: posts (SHARED COLLECTION)');
                 
                 firebaseUnsubscribe = subscribeToFirebasePosts((posts) => {
-                    console.log('\n✅✅✅ CALLBACK RECEIVED FROM FIREBASE ✅✅✅');
-                    console.log('  Posts count:', posts.length);
-                    console.log('  👤 Current user:', currentUserId);
-                    console.log('  📍 Current grid:', currentGridId);
-                    console.log('  ⏰ Current time:', new Date().toLocaleTimeString());
-                    console.log('  🖥️  Viewport:', window.innerWidth + 'x' + window.innerHeight);
-                    
-                    if (posts.length > 0) {
-                        console.log('  📋 First post preview:', {
-                            id: posts[0].id ? posts[0].id.substring(0, 8) + '...' : 'N/A',
-                            content: posts[0].content ? posts[0].content.substring(0, 30) + '...' : 'N/A',
-                            authId: posts[0].authId ? posts[0].authId.substring(0, 8) + '...' : 'N/A',
-                            gridId: posts[0].gridId,
-                            timestamp: posts[0].timestamp ? new Date(posts[0].timestamp).toLocaleTimeString() : 'N/A'
-                        });
+                    // UPDATE DIAGNOSTIC DASHBOARD WITH LIVE POST COUNT
+                    if (diagnosticState) {
+                        diagnosticState.totalPostsLive = posts.length;
                     }
                     
                     // CRITICAL: De-duplicate posts by ID + normalize ownership fields on every hydrated post
@@ -14070,45 +14255,25 @@
                         if (!seenIds.has(post.id)) {
                             seenIds.add(post.id);
                             uniquePosts.push(post);
-                        } else {
-                            console.log(`  ⚠️ De-duplicated post: ${post.id.substring(0, 8)}...`);
                         }
                     });
-                    
-                    if (uniquePosts.length < posts.length) {
-                        console.log(`🧹 Removed ${posts.length - uniquePosts.length} duplicate posts`);
-                    }
                     
                     // Clear the mobile slow-load timeout since data arrived
                     if (window.firebaseLoadTimeoutId) {
                         clearTimeout(window.firebaseLoadTimeoutId);
                         window.firebaseLoadTimeoutId = null;
-                        console.log('✅ Firebase loaded in time - timeout cleared');
                     }
                     
-                    console.log('  🔄 Updating gridContent with shared posts');
                     // Store shared posts under currentUserId for consistency
                     const contentKey = currentUserId || 'shared-posts';
-                    console.log('  🔑 CONTENT KEY DECISION:');
-                    console.log('     currentUserId value:', currentUserId);
-                    console.log('     Using key:', contentKey);
-                    console.log('     Posts count:', uniquePosts.length);
-                    console.log('     ✅ Posts will be stored at: gridContent["' + contentKey + '"]');
-                    
                     gridContent[contentKey] = uniquePosts;
-                    console.log('  ✅ gridContent updated at key "' + contentKey + '". New state:', {
-                        storedAt: contentKey,
-                        postsCount: uniquePosts.length,
-                        allKeys: Object.keys(gridContent),
-                        allKeysWithCounts: Object.keys(gridContent).map(k => `"${k}": ${(gridContent[k] || []).length}`)
-                    });
                     
                     // 💾 BACKUP CACHE: Also store all posts in postCache by ID for modal lookups
                     // This ensures posts are always findable even if gridContent is cleared
                     uniquePosts.forEach(post => {
                         postCache[post.id] = post;
                     });
-                    console.log(`  💾 postCache updated: ${Object.keys(postCache).length} posts cached`);
+                    
                     
                     // ⚡ UPDATE CACHE: Save fresh posts for instant load on next page refresh
                     if (window.postCacheSystem) {
@@ -14116,12 +14281,9 @@
                         window.postCacheSystem.pruneOldCache();
                     }
                     
-                    console.log('  📞 About to call renderGrid()');
                     renderGrid();
-                    console.log('  ✅ renderGrid() complete');
                 });
                 
-                console.log('  ✅ subscribeToFirebasePosts returned, subscription active');
             } catch (error) {
                 console.error('Firebase listener error:', error);
                 // CRITICAL: Still show grid even on error so user isn't stuck
@@ -14130,7 +14292,6 @@
                     gridContent[fallbackKey] = [];
                 }
                 renderGrid();
-                console.log('✅ Grid rendered despite Firebase error - will retry');
                 // Will try again on next heartbeat
             }
         }
@@ -20328,6 +20489,12 @@
             // 🆔 UNIQUE POST ID: prefixed with owner UID so one post = one id and owner is traceable
             const postId = generateUniquePostId(currentUserId);
             
+            // 📊 UPDATE DIAGNOSTIC DASHBOARD
+            if (diagnosticState) {
+                diagnosticState.postIdAssigned = true;
+                diagnosticState.postIdValue = postId;
+            }
+            
             try {
                 // Safety guard: reserved Add Content square can never be used for post placement
                 if (!boxIndex || boxIndex <= 0) {
@@ -20606,12 +20773,6 @@
                 
                 console.log('✅ Pre-save validation passed — proceeding with post save');
                 
-                // Save post to Firebase Realtime Database ONLY
-                console.log('🔥 ABOUT TO SAVE POST TO FIREBASE');
-                console.log('🔥 ABOUT TO SAVE POST TO FIREBASE');
-                console.log('  currentUserId:', currentUserId);
-                console.log('  postId:', postId);
-                
                 // CRITICAL: Use permanent auth ID (NOT old WiFi networkId)
                 // The permanent ID system (perm-{timestamp}-{random}) ensures posts 
                 // are correctly attributed to the user across sessions and zones
@@ -20645,24 +20806,11 @@
                     postData.mapCoordinates = { lat: userLocation.lat, lon: userLocation.lon };
                 }
                 
-                console.log('✅ POST IDENTIFIERS SET:');
-                console.log('  authId (primary):', authUserId);
-                console.log('  userId:', postData.userId);
-                console.log('  createdBy:', postData.createdBy);
-                console.log('  gridId (zone tracking):', postData.gridId);
-                console.log('  zoneTag:', postData.zoneTag);
-                console.log('  coordinates:', `${postData.latitude}, ${postData.longitude}`);
-                console.log('');
-                console.log('📝 Full path will be: posts/${postId} (SHARED - all users see this)');
-                console.log('📋 About to save post with:', { postId, authUserId, zoneTag: areaTag });
+                console.log(`📝 Saving post: ${postId.substring(0, 12)}... to ${areaTag || 'Local Zone'} by ${authUserId.substring(0, 12)}...`);
                 
                 // Save to SHARED posts collection (not per-user)
                 await savePostToFirebaseShared(postId, postData);
-                console.log('  ✅ savePostToFirebaseShared completed successfully');
-                console.log(`  💾 Post NOW SAVED to: posts/${postId}`);
-                console.log(`  👤 Owner: ${authUserId}`);
-                console.log(`  📍 Zone: ${areaTag}`);
-                console.log('  🔍 Firebase listener should now trigger and load your post...');
+                console.log(`✅ Post saved to shared collection - all users will see it`);
 
                 // 🚀 POST IS NOW IN SHARED COLLECTION - ALL USERS SEE IT
                 // With shared posts collection, distribution is automatic
@@ -20673,25 +20821,13 @@
                 postData.createdAt = new Date().getTime();
                 postData.badge = 'NEW';
                 
-                console.log(`📡 POST SAVED TO SHARED COLLECTION`);
-
-                console.log(`  ✅ All users will see this post automatically`);
-                console.log(`  📍 Zone: ${areaTag}`);
-                console.log(`  👤 Author authId: ${authUserId}`);
-                
                 // 📍 TRACK POST IN AREA HIERARCHY SYSTEM
                 // This ensures the post appears on user's grid and tracks its growth
                 trackUserPost(authUserId, postId, postData);
-                console.log(`  📍 Post tracked in area hierarchy system (${areaTag})`);
 
                 // ✨ IMMEDIATELY ADD TO LOCAL CACHES
                 // Don't wait for Firebase listener - add post to gridContent + postCache NOW
                 // This ensures instant feedback to user while Firebase updates propagate
-                console.log('  ⚡ Adding post to local caches for instant display...');
-                console.log('  🔐 POST OWNERSHIP CHECK:');
-                console.log('     authUserId:', authUserId);
-                console.log('     currentUserId:', currentUserId);
-                console.log('     Are they same?', authUserId === currentUserId);
                 
                 // Add to postCache (backup cache)
                 postCache[postId] = postData;
