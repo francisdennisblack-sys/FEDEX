@@ -14080,7 +14080,63 @@
             if (post.county === currentArea) {
                 score += 5;
             }
-            
+
+            // ========== 7b. 🏅 AREA-BADGE BOOST (0-55 points) — AGGRESSIVE area-tag flip signal ==========
+            // The CORE area-tag mechanic: a post tagged for "NYC" earns badges in NYC. When other
+            // NYC viewers see it, those badges prove it's been validated by THIS audience — so ML
+            // surfaces it aggressively. Badges in OTHER areas count less (the post still hasn't
+            // earned its place HERE). Multi-area champions get a global momentum bonus.
+            try {
+                if (post.areaBadges && typeof post.areaBadges === 'object') {
+                    const viewerArea = currentArea;                       // viewer's current area tag
+                    const postChosenArea = post.areaTag || post.county;   // sender's chosen tag
+                    const BADGE_WEIGHTS = {
+                        crowned: 15, 'runner-up': 11, podium: 9,          // top-3 in an area = serious proof
+                        trending: 10, hot: 9, rising: 6, featured: 8,
+                        spotlight: 5, verified: 6, liked: 3, new: 2,
+                        controversial: 2, redemption: 4, balanced: 1
+                    };
+
+                    let areaBadgeScore = 0;
+                    const HOUR = 60 * 60 * 1000;
+                    const now = Date.now();
+
+                    // (a) Badges earned in the VIEWER'S area — heaviest weight
+                    if (viewerArea && post.areaBadges[viewerArea]) {
+                        const entry = post.areaBadges[viewerArea];
+                        let sub = 0;
+                        for (const b of (entry.badges || [])) sub += (BADGE_WEIGHTS[b] || 0);
+                        // Recency surge: badge updated in last hour → ×1.6
+                        const fresh = entry.lastUpdatedAt && (now - entry.lastUpdatedAt) < HOUR;
+                        if (fresh) sub *= 1.6;
+                        // Peak-rank kicker: if it ever hit #1-3 here, +6
+                        if (entry.peakRank && entry.peakRank <= 3) sub += 6;
+                        areaBadgeScore += sub;
+                    }
+
+                    // (b) Badges earned in the post's CHOSEN tag area (if different from viewer)
+                    //     — moderate weight; the post has proven itself where it was aimed.
+                    if (postChosenArea && postChosenArea !== viewerArea && post.areaBadges[postChosenArea]) {
+                        const entry = post.areaBadges[postChosenArea];
+                        let sub = 0;
+                        for (const b of (entry.badges || [])) sub += (BADGE_WEIGHTS[b] || 0) * 0.5;
+                        areaBadgeScore += sub;
+                    }
+
+                    // (c) Multi-area champion bonus — proves cross-region momentum.
+                    //     2 areas: +5, 3: +9, 4: +13, 5+: +18
+                    const bac = post.badgedAreaCount || Object.keys(post.areaBadges).length || 0;
+                    if (bac >= 5)      areaBadgeScore += 18;
+                    else if (bac === 4) areaBadgeScore += 13;
+                    else if (bac === 3) areaBadgeScore += 9;
+                    else if (bac === 2) areaBadgeScore += 5;
+
+                    // Cap at 55 to keep the rank in a sane envelope, but this CAN dominate
+                    // the score (intentional — badges are the "earned visibility" signal).
+                    score += Math.min(55, areaBadgeScore);
+                }
+            } catch (e) { /* never break ranking */ }
+
             // ========== 8. SCOPE-AWARE CAPACITY THROTTLE ==========
             // Dense POIs (universities, malls) can carry more content; small POIs (cafes)
             // should not flood the feed. Cap derived from matched POI's scope/weight.
@@ -14101,8 +14157,9 @@
                 score *= Math.max(0.6, 1 - 0.3 * Math.min(1, overflow));
             }
             
-            // Normalize to 0-100 range
-            return Math.min(100, Math.max(0, score));
+            // Normalize to 0-200 range (expanded ceiling so the aggressive area-badge boost
+            // in #7b can meaningfully reorder posts instead of being clipped by the cap).
+            return Math.min(200, Math.max(0, score));
         }
         
         /**
@@ -17766,9 +17823,43 @@
             
             // Add remaining badges (controversial, balanced, media-content)
             badges.push(...applicableBadges.filter(b => !podiumBadges.concat(goodBadges, likeBadges, risingBadges, dislikedBadges).includes(b)));
-            
+
+            // 🏅 PER-AREA BADGE LEDGER — tracks WHERE each badge was earned.
+            // This is the "area-tag flipping" tracker: a post's chosen tag never auto-rewrites,
+            // but its badges are stamped per-area so the ML can boost it heavily when shown to
+            // viewers in areas where it has already proven itself.
+            try {
+                const area = post.areaTag || post.county || post.originalAreaTag;
+                if (area && badges.length) {
+                    if (!post.areaBadges || typeof post.areaBadges !== 'object') post.areaBadges = {};
+                    const prev = post.areaBadges[area] || {
+                        badges: [], firstEarnedAt: now, lastUpdatedAt: now, peakLikes: 0, peakRank: null
+                    };
+                    // Union new + previous badges (never lose history — that IS the flip record)
+                    const merged = Array.from(new Set([...(prev.badges || []), ...badges]));
+                    post.areaBadges[area] = {
+                        badges: merged,
+                        firstEarnedAt: prev.firstEarnedAt || now,
+                        lastUpdatedAt: now,
+                        peakLikes: Math.max(prev.peakLikes || 0, likes),
+                        peakRank: (prev.peakRank == null) ? gridPosition
+                                  : (gridPosition && gridPosition < prev.peakRank) ? gridPosition : prev.peakRank
+                    };
+                    // Multi-area champion counter (used by ML boost #2b)
+                    post.badgedAreaCount = Object.keys(post.areaBadges).length;
+                    post.lastBadgeAt = now;
+                }
+            } catch (e) { /* never break badge calc */ }
+
             return badges;
         }
+
+        // 🏅 Helper: badges this post earned in a specific viewer area (for ML + UI chips)
+        function getPostBadgesForArea(post, areaTag) {
+            if (!post || !post.areaBadges || !areaTag) return null;
+            return post.areaBadges[areaTag] || null;
+        }
+        window.getPostBadgesForArea = getPostBadgesForArea;
 
         function calculateBadge(post, allPosts) {
             const now = new Date().getTime();
