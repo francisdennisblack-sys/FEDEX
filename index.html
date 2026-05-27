@@ -7693,6 +7693,104 @@
         window.stopLocationTracking = stopLocationTracking;
         window.diagnosticState = diagnosticState;
 
+        // 🟢 SYSTEM HEALTH MONITOR - Visual feedback for production debugging
+        // ============================================================
+        const systemHealth = {
+            logoAnimating: false,
+            isHealthy: true,
+            lastCheck: Date.now(),
+            bottleneck: null,
+            startTime: Date.now()
+        };
+
+        function updateSystemHealth() {
+            const now = Date.now();
+            const isHealthy = isConnected && currentUserId && (now - diagnosticState.lastLocationUpdate < 5000 || !locationTrackingInterval);
+            
+            systemHealth.isHealthy = isHealthy;
+            systemHealth.lastCheck = now;
+            
+            // Animate logo if system is healthy
+            const canvas = document.getElementById('brandGlobeCanvas');
+            if (canvas) {
+                if (isHealthy) {
+                    canvas.classList.add('online');
+                    systemHealth.logoAnimating = true;
+                } else {
+                    canvas.classList.remove('online');
+                    systemHealth.logoAnimating = false;
+                }
+            }
+            
+            return isHealthy;
+        }
+
+        // Update system health every 2 seconds
+        setInterval(updateSystemHealth, 2000);
+
+        // Enhanced console logging with performance tracking
+        function logSystemStatus(label, value, duration = 0) {
+            const uptime = ((Date.now() - systemHealth.startTime) / 1000).toFixed(1);
+            const durationMs = duration > 0 ? ` [${duration}ms]` : '';
+            const health = systemHealth.isHealthy ? '🟢' : '🟡';
+            
+            console.log(`${health} [${uptime}s] ${label}: ${value}${durationMs}`);
+        }
+
+        // Make health monitor globally accessible
+        window.systemHealth = systemHealth;
+        window.updateSystemHealth = updateSystemHealth;
+        window.logSystemStatus = logSystemStatus;
+
+        // 🚀 STARTUP PERFORMANCE MONITOR - Track initialization timing
+        // ============================================================
+        const startupMetrics = {
+            pageLoadStart: Date.now(),
+            bootstrapStart: null,
+            bootstrapEnd: null,
+            firebaseConnected: null,
+            firstPostsLoaded: null,
+            totalStartupTime: 0,
+            milestones: []
+        };
+
+        function recordMilestone(name, timestamp) {
+            const elapsed = timestamp - startupMetrics.pageLoadStart;
+            startupMetrics.milestones.push({ name, elapsed });
+            return elapsed;
+        }
+
+        function showStartupSummary() {
+            const now = Date.now();
+            startupMetrics.bootstrapEnd = now;
+            startupMetrics.totalStartupTime = now - startupMetrics.pageLoadStart;
+
+            console.log('\n' + '═'.repeat(70));
+            console.log('🚀 STARTUP PERFORMANCE SUMMARY');
+            console.log('═'.repeat(70));
+            console.log(`📱 Total startup time: ${startupMetrics.totalStartupTime}ms`);
+            console.log('\n📊 Milestones:');
+            
+            startupMetrics.milestones.forEach((m, i) => {
+                const elapsed = m.elapsed;
+                const color = elapsed < 500 ? '🟢' : elapsed < 1000 ? '🟡' : '🔴';
+                console.log(`  ${color} [${elapsed}ms] ${m.name}`);
+            });
+
+            console.log('\n📈 System Status:');
+            console.log(`  ✅ Auth ID: ${currentUserId ? '✓ Persisted' : '✗ Not set'}`);
+            console.log(`  ✅ Location: ${diagnosticState.lastLocation ? `${diagnosticState.lastLocation.lat.toFixed(4)}, ${diagnosticState.lastLocation.lon.toFixed(4)}` : '⏳ Detecting...'}`);
+            console.log(`  ✅ Grid ID: ${currentGridId || 'Detecting...'}`);
+            console.log(`  ✅ Posts live: ${diagnosticState.totalPostsLive || 0}`);
+            console.log(`  ✅ System health: ${systemHealth.isHealthy ? '🟢 HEALTHY' : '🔴 CHECKING'}`);
+            console.log('═'.repeat(70) + '\n');
+        }
+
+        // Make startup metrics globally accessible
+        window.startupMetrics = startupMetrics;
+        window.showStartupSummary = showStartupSummary;
+        window.recordMilestone = recordMilestone;
+
         // Unified ownership check - ALWAYS use authId (primary identifier)
         // gridId determines which zone's grid shows this post
         function isOwnedByCurrentUser(post) {
@@ -8091,16 +8189,22 @@
                 // Create new permanent ID (format: perm-{timestamp}-{random})
                 permanentId = `perm-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
                 localStorage.setItem('permanentUserId', permanentId);
-                console.log(`✨ Created new PERMANENT userId: ${permanentId}`);
+                console.log(`\n✨ NEW AUTH SESSION CREATED`);
+                console.log(`   Permanent ID: ${permanentId}`);
+                console.log(`   Time: ${new Date().toLocaleString()}`);
+                console.log(`   This ID will persist across browser restarts\n`);
             } else {
-                console.log(`✅ Restored PERMANENT userId: ${permanentId}`);
+                console.log(`\n✅ AUTH RESTORED FROM CACHE`);
+                console.log(`   Permanent ID: ${permanentId}`);
+                console.log(`   Time: ${new Date().toLocaleString()}`);
+                console.log(`   User has persisted across refreshes!\n`);
             }
             
             return permanentId;
         }
 
         // Set up anonymous authentication
-        console.log('🔐 Setting up onAuthStateChanged listener...');
+        console.log('🔐 Initializing Firebase Authentication...');
         
         // ============================================================================
         // 🚀 BOOTSTRAP SEQUENCE: Auth → Grid → Posts (in correct order)
@@ -8130,6 +8234,10 @@
                 console.log('\n' + '='.repeat(70));
                 console.log('🚀 BOOTSTRAP SEQUENCE: Auth → Grid → Firebase Posts');
                 console.log('='.repeat(70));
+                
+                // Record bootstrap start
+                startupMetrics.bootstrapStart = Date.now();
+                recordMilestone('Auth initialized', startupMetrics.bootstrapStart);
                 
                 // ✅ STEP 2: Use PERMANENT userId (not Firebase UID which can change)
                 // This ensures the same user always has the same ID across sessions
@@ -8173,6 +8281,7 @@
                 // ✅ STEP 4: Initialize grid UI
                 try {
                     initializeGrid();
+                    recordMilestone('Grid UI initialized', Date.now());
                     console.log(`\n✅ Step 4: Grid UI initialized`);
                 } catch (err) {
                     console.error(`\n❌ Step 4 ERROR:`, err);
@@ -8189,6 +8298,7 @@
                         lastSeen: new Date().getTime(),
                         isAnonymous: true
                     }, { merge: true });
+                    recordMilestone('Firebase persistence ready', Date.now());
                     console.log(`\n✅ Step 5: User profile created in Firebase at users/${currentUserId}`);
                     console.log(`  Permanent ID mapped to Firebase UID for backup`);
                 } catch (err) {
@@ -8245,6 +8355,7 @@
                 // ✅ STEP 9: Run Phase 0 (geolocation + zone detection)
                 console.log(`\n✅ Step 9: Starting Phase 0 (location detection)...`);
                 initializePhase0().then(() => {
+                    recordMilestone('Phase 0 location complete', Date.now());
                     console.log(`  ✅ Phase 0 COMPLETE`);
                     console.log(`  Zone detected: ${currentZoneTag}`);
                     
@@ -8252,14 +8363,18 @@
                     console.log(`\n✅ Step 10: Subscribing to Firebase posts`);
                     console.log(`  userId: ${currentUserId}`);
                     console.log(`  Firebase path: posts (SHARED COLLECTION)`);
+                    recordMilestone('Firebase subscription started', Date.now());
                     subscribeToFirebasePostsWithReconnect();
                     
                     console.log('\n' + '='.repeat(70));
                     console.log('✅ BOOTSTRAP COMPLETE - Waiting for posts...');
                     console.log('='.repeat(70) + '\n');
                     
-                    // 📊 SHOW UNIFIED DIAGNOSTIC DASHBOARD
+                    // 📊 SHOW STARTUP PERFORMANCE SUMMARY
                     setTimeout(() => {
+                        if (typeof showStartupSummary === 'function') {
+                            showStartupSummary();
+                        }
                         if (typeof updateDiagnosticDashboard === 'function') {
                             updateDiagnosticDashboard();
                         }
@@ -14243,6 +14358,12 @@
                     // UPDATE DIAGNOSTIC DASHBOARD WITH LIVE POST COUNT
                     if (diagnosticState) {
                         diagnosticState.totalPostsLive = posts.length;
+                    }
+                    
+                    // Record first posts arrival for startup metrics
+                    if (!startupMetrics.firstPostsLoaded && posts.length > 0) {
+                        startupMetrics.firstPostsLoaded = Date.now();
+                        recordMilestone(`First posts loaded (${posts.length} posts)`, startupMetrics.firstPostsLoaded);
                     }
                     
                     // CRITICAL: De-duplicate posts by ID + normalize ownership fields on every hydrated post
