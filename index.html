@@ -16446,7 +16446,47 @@
                 console.log('🔴 renderGrid() early exit: isConnected=false');
                 return;
             }
-            
+
+            // 🛡️ POST-ID INTEGRITY GUARD — runs BEFORE any sort/filter/render touches posts.
+            // Symptom this fixes: posts with missing `id` end up rendered with
+            // data-post-id="undefined", which breaks delete (target lookup fails →
+            // falls through to "hide from view") AND drops content because dedupe by
+            // p.id collapses every id-less post into one Map slot. Root cause varies
+            // (legacy Firebase entries, partial hydration, lost spread), so we self-heal
+            // here and log loudly so the actual culprit shows up in console.
+            try {
+                let _idFixed = 0, _idDropped = 0;
+                for (const key of Object.keys(gridContent)) {
+                    if (!Array.isArray(gridContent[key])) continue;
+                    const cleaned = [];
+                    for (const post of gridContent[key]) {
+                        if (!post || typeof post !== 'object') continue;
+                        // Run normalizer first (aliases id ↔ postId, fills owner trio)
+                        if (typeof normalizePostFields === 'function') normalizePostFields(post, key);
+                        // Last-resort: derive an id from Firebase-style fallbacks
+                        if (!post.id) {
+                            const recovered = post.postId || post.firebaseKey || post._key || null;
+                            if (recovered) {
+                                post.id = recovered;
+                                post.postId = recovered;
+                                _idFixed++;
+                            } else {
+                                _idDropped++;
+                                console.warn('🛡️ renderGrid: dropping id-less post under key', key, post);
+                                continue; // skip — would break click handlers + dedupe
+                            }
+                        }
+                        cleaned.push(post);
+                    }
+                    gridContent[key] = cleaned;
+                }
+                if (_idFixed || _idDropped) {
+                    console.warn(`🛡️ POST-ID GUARD: recovered ${_idFixed} ids, dropped ${_idDropped} broken posts`);
+                }
+            } catch (e) {
+                console.error('🛡️ POST-ID GUARD failed (continuing render):', e);
+            }
+
             const startTime = performance.now();
             
             const grid = document.getElementById('grid');
@@ -17283,6 +17323,7 @@
                         box.style.position = 'relative';
                     }
                     box.classList.add('filled');
+                    if (!post.id) { console.warn('⚠️ renderGrid: skipping main-path post with no id', post); return; }
                     box.setAttribute('data-post-id', post.id);
                     
                     // Hide the old zone tag element (now integrated inside post)
@@ -17391,6 +17432,7 @@
                                 box.style.position = 'relative';
                             }
                             box.classList.add('filled');
+                            if (!post.id) { console.warn('⚠️ renderGrid: skipping lazy-path post with no id', post); return; }
                             box.setAttribute('data-post-id', post.id);
                             const zoneTag = document.getElementById(`zone-${lazyGridPosition}`);
                             if (zoneTag) {
