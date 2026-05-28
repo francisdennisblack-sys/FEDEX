@@ -21722,6 +21722,66 @@
                 }
             }
             setInterval(pollLocalServerPosts, 5000);
+
+            // ======= DEBUG: Smoke test helper (call from browser console) =======
+            window.runSmokeTest = function runSmokeTest(opts = {}) {
+                console.log('🔬 Running smoke test: injecting mock location, POIs and posts');
+                try {
+                    // Mock location (San Francisco by default)
+                    const lat = opts.lat || 37.7749;
+                    const lon = opts.lon || -122.4194;
+                    userLocation = { lat: lat, lon: lon, accuracy: 10 };
+                    currentGeographicLocation = opts.city || 'San Francisco';
+
+                    // Load or override small POI set for deterministic results
+                    globalPOIDatabase = [
+                        { name: 'Cafe Test', lat: lat + 0.0003, lon: lon + 0.0001, category: 'Cafe' },
+                        { name: 'Park Test', lat: lat - 0.0004, lon: lon - 0.0002, category: 'Park' }
+                    ];
+
+                    // Ensure city density map lookup influences radius
+                    currentGridRadius = (window.cityDensityMap && window.cityDensityMap[currentGeographicLocation] && window.cityDensityMap[currentGeographicLocation].gridRadius) || getLocationRadius('city');
+
+                    // Create mock posts in postCache and shared-posts
+                    postCache = postCache || {};
+                    gridContent = gridContent || {};
+                    gridContent['shared-posts'] = [];
+
+                    const now = Date.now();
+                    for (let i = 1; i <= 120; i++) {
+                        const id = `smoke-${i}`;
+                        const p = {
+                            id: id,
+                            content: `Smoke test post #${i}`,
+                            likes: Math.floor(Math.random() * 20),
+                            dislikes: Math.floor(Math.random() * 5),
+                            timestamp: now - i * 60000,
+                            authId: i % 5 === 0 ? 'perm-test-user' : `anon-${i % 10}`,
+                            county: currentGeographicLocation,
+                            areaTag: currentGeographicLocation
+                        };
+                        postCache[id] = p;
+                        // Mix some into shared-posts and some into other keys
+                        if (i % 3 === 0) gridContent['shared-posts'].push(p);
+                        else {
+                            const key = i % 4 === 0 ? 'external-feed' : 'nearby-others';
+                            gridContent[key] = gridContent[key] || [];
+                            gridContent[key].push(p);
+                        }
+                    }
+
+                    // Ensure currentUserId is set (signed-in user)
+                    currentUserId = currentUserId || 'perm-test-user';
+
+                    console.log(`🔢 Injected ${Object.keys(postCache).length} mock posts, POIs: ${globalPOIDatabase.length}`);
+
+                    // Call renderGrid to exercise backfill and preservation logic
+                    renderGrid();
+                    console.log('✅ Smoke test completed — check the grid and console logs for details');
+                } catch (err) {
+                    console.error('❌ Smoke test failed:', err);
+                }
+            };
             
             // 🌐 LAZY LOAD: POI connection check
             setTimeout(() => {
