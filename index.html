@@ -7889,6 +7889,32 @@
                 if (!post.createdBy) post.createdBy = owner;
                 if (!post.ownerUid)  post.ownerUid  = owner;
             }
+            // Normalize geolocation fields: ensure `post.lat` and `post.lon` exist
+            // Some posts store coordinates as `latitude`/`longitude`, `mapCoordinates`, or `geolocation`.
+            try {
+                if ((post.lat === undefined || post.lat === null) && post.latitude !== undefined) {
+                    post.lat = Number(post.latitude);
+                }
+                if ((post.lon === undefined || post.lon === null) && post.longitude !== undefined) {
+                    post.lon = Number(post.longitude);
+                }
+
+                if ((post.lat === undefined || post.lat === null) && post.geolocation && post.geolocation.lat !== undefined) {
+                    post.lat = Number(post.geolocation.lat);
+                }
+                if ((post.lon === undefined || post.lon === null) && post.geolocation && post.geolocation.lon !== undefined) {
+                    post.lon = Number(post.geolocation.lon);
+                }
+
+                if ((post.lat === undefined || post.lat === null) && post.mapCoordinates && post.mapCoordinates.lat !== undefined) {
+                    post.lat = Number(post.mapCoordinates.lat);
+                }
+                if ((post.lon === undefined || post.lon === null) && post.mapCoordinates && post.mapCoordinates.lon !== undefined) {
+                    post.lon = Number(post.mapCoordinates.lon);
+                }
+            } catch (e) {
+                // Defensive: leave post as-is if mapping fails
+            }
             return post;
         }
         window.normalizePostFields = normalizePostFields;
@@ -14440,6 +14466,18 @@
                 console.log('  🔍 FIREBASE PATH: posts (SHARED COLLECTION)');
                 
                 firebaseUnsubscribe = subscribeToFirebasePosts((posts) => {
+                    console.log('\n📬 Firebase snapshot received for shared posts');
+                    console.log('  snapshot length:', posts.length);
+                    try {
+                        // Show a concise list of incoming post IDs for quick inspection
+                        const incomingIds = posts.map(p => p && p.id ? p.id : '(no-id)');
+                        console.log('  incoming post IDs (first 50):', incomingIds.slice(0, 50));
+                    } catch (e) {
+                        console.warn('  Unable to enumerate incoming post IDs', e);
+                    }
+
+                    // Live diagnostic: count posts that appear to be missing owner fields
+                    let missingOwnerCount = 0;
                     // UPDATE DIAGNOSTIC DASHBOARD WITH LIVE POST COUNT
                     if (diagnosticState) {
                         diagnosticState.totalPostsLive = posts.length;
@@ -14452,17 +14490,41 @@
                     }
                     
                     // CRITICAL: De-duplicate posts by ID + normalize ownership fields on every hydrated post
-                    // authId is primary owner identifier
+                    // authId is primary owner identifier. DO NOT use the viewing user's id as a
+                    // fallback owner (that would make other users' posts appear to belong to the viewer).
                     const seenIds = new Set();
                     const uniquePosts = [];
-                    posts.forEach(post => {
-                        normalizePostFields(post, currentUserId);
-                        if (!post.id) return; // skip malformed entries
+                    posts.forEach((post, idx) => {
+                        if (!post) return;
+                        const beforeOwner = { authId: post.authId, userId: post.userId, createdBy: post.createdBy };
+                        try {
+                            normalizePostFields(post);
+                        } catch (e) {
+                            console.error('  Error normalizing post at index', idx, 'id=', post.id, e);
+                        }
+
+                        const afterOwner = { authId: post.authId, userId: post.userId, createdBy: post.createdBy };
+                        if (!afterOwner.authId && !afterOwner.userId) missingOwnerCount++;
+
+                        // Log owner change only when it is surprising (owner set to viewer or removed)
+                        if ((beforeOwner.authId || beforeOwner.userId) !== (afterOwner.authId || afterOwner.userId)) {
+                            console.log(`  [normalize] post id=${post.id} owners before=`, beforeOwner, 'after=', afterOwner);
+                        }
+
+                        if (!post.id) {
+                            console.warn('  Skipping malformed post (no id) at idx', idx, post);
+                            return;
+                        }
+
                         if (!seenIds.has(post.id)) {
                             seenIds.add(post.id);
                             uniquePosts.push(post);
+                        } else {
+                            console.log('  Duplicate post filtered:', post.id);
                         }
                     });
+
+                    console.log('  uniquePosts length after dedupe:', uniquePosts.length, 'missingOwnerCount:', missingOwnerCount);
                     
                     // Clear the mobile slow-load timeout since data arrived
                     if (window.firebaseLoadTimeoutId) {
@@ -14470,15 +14532,27 @@
                         window.firebaseLoadTimeoutId = null;
                     }
                     
-                    // Store shared posts under currentUserId for consistency
-                    const contentKey = currentUserId || 'shared-posts';
+                    // Store shared posts under a global key (shared-posts) so they are not
+                    // attributed to the viewing user. Grid ownership checks still use
+                    // post.authId / post.userId to determine true creator.
+                    const contentKey = 'shared-posts';
                     gridContent[contentKey] = uniquePosts;
+                    console.log(`  ✅ gridContent['${contentKey}'] updated with ${uniquePosts.length} posts`);
                     
                     // 💾 BACKUP CACHE: Also store all posts in postCache by ID for modal lookups
                     // This ensures posts are always findable even if gridContent is cleared
                     uniquePosts.forEach(post => {
                         postCache[post.id] = post;
                     });
+
+                    // Extra verification: if the current user's own recently-created post exists,
+                    // log a short assertion so we can see if creator attribution matches.
+                    try {
+                        const recentOwn = uniquePosts.filter(p => p && (p.authId === permanentUserId || p.userId === permanentUserId));
+                        if (recentOwn.length > 0) console.log('  Found posts authored by this device (`permanentUserId`):', recentOwn.map(p => p.id));
+                    } catch (e) {
+                        // ignore
+                    }
                     
                     
                     // ⚡ UPDATE CACHE: Save fresh posts for instant load on next page refresh
