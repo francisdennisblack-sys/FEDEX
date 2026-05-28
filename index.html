@@ -2978,14 +2978,34 @@
                         const permanentUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
                         const database = getDatabase();
                         if (database) {
-                            // Write profile under the authenticated Firebase UID so DB rules allow it
-                            await set(ref(database, `users/${firebaseUid}/profile`), { username: window.__pendingUsername || phoneNumber, phone: phoneNumber, createdAt: Date.now(), linkedPermanentUid: permanentUid });
-                            // init stats under firebase uid
-                            await set(ref(database, `users/${firebaseUid}/stats`), { postsCount: 0, totalLikes: 0 });
-                            // store a mapping from our local permanent id to firebase uid so server-side migration/linking can be done later
                             try {
-                                await set(ref(database, `users_by_permanent/${permanentUid}`), { firebaseUid: firebaseUid, linkedAt: Date.now() });
-                            } catch (e) { console.warn('Failed writing permanent->firebase mapping', e); }
+                                // Only create profile/stats if they don't already exist — prevents duplicate accounts
+                                const profileSnap = await get(ref(database, `users/${firebaseUid}/profile`));
+                                const statsSnap = await get(ref(database, `users/${firebaseUid}/stats`));
+                                const existingProfile = profileSnap && profileSnap.val ? profileSnap.val() : null;
+                                const existingStats = statsSnap && statsSnap.val ? statsSnap.val() : null;
+
+                                if (!existingProfile) {
+                                    await set(ref(database, `users/${firebaseUid}/profile`), { username: window.__pendingUsername || phoneNumber, phone: phoneNumber, createdAt: Date.now(), linkedPermanentUid: permanentUid });
+                                } else {
+                                    // If profile exists but missing linkedPermanentUid, add it
+                                    if (!existingProfile.linkedPermanentUid && permanentUid) {
+                                        try { await update(ref(database, `users/${firebaseUid}/profile`), { linkedPermanentUid: permanentUid }); } catch(e){}
+                                    }
+                                }
+
+                                if (!existingStats) {
+                                    await set(ref(database, `users/${firebaseUid}/stats`), { postsCount: 0, totalLikes: 0 });
+                                }
+
+                                // store a mapping from our local permanent id to firebase uid so server-side migration/linking can be done later
+                                try {
+                                    const mapSnap = await get(ref(database, `users_by_permanent/${permanentUid}`));
+                                    if (!(mapSnap && mapSnap.val && mapSnap.val().firebaseUid)) {
+                                        await set(ref(database, `users_by_permanent/${permanentUid}`), { firebaseUid: firebaseUid, linkedAt: Date.now() });
+                                    }
+                                } catch (e) { console.warn('Failed writing permanent->firebase mapping', e); }
+                            } catch (e) { console.warn('confirmPhoneCode DB handling failed', e); }
                         }
                         // Use Firebase UID as the canonical current user for subsequent DB writes (matches DB rules)
                         window.currentUserId = firebaseUid;
