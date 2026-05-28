@@ -2744,33 +2744,40 @@
             // Client-friendly sign-in helper: try popup, fall back to redirect
             (function(){
                 async function _signInWithGoogle() {
+                    // IMPORTANT: For popups to succeed the signInWithPopup call must
+                    // occur as a direct result of a user gesture (click). Awaiting
+                    // async persistence calls before calling popup can break that
+                    // gesture in some browsers/extensions. Therefore we kick off
+                    // persistence asynchronously and immediately attempt popup.
                     try {
-                        if (window.setPersistence && window.browserLocalPersistence && window.auth) {
-                            try { await setPersistence(window.auth, browserLocalPersistence); } catch(e) { console.warn('setPersistence failed', e); }
-                        }
                         const provider = (typeof GoogleAuthProvider === 'function') ? new GoogleAuthProvider() : null;
                         if (!provider) { alert('Auth provider not ready yet — try again in a moment'); return; }
 
-                        // Prefer redirect (more robust across browsers and extensions)
-                        console.log('🔐 Starting Google sign-in via redirect (preferred)');
-                        if (typeof signInWithRedirect === 'function') {
-                            try {
-                                await signInWithRedirect(window.auth, provider);
-                                return;
-                            } catch (errRedirect) {
-                                console.warn('Redirect sign-in failed, attempting popup as fallback:', errRedirect);
-                            }
+                        // Try popup first (best UX). Do not await setPersistence to preserve user gesture.
+                        if (window.setPersistence && window.browserLocalPersistence && window.auth) {
+                            setPersistence(window.auth, browserLocalPersistence).catch(e => console.warn('setPersistence failed', e));
                         }
 
-                        // Popup fallback
                         if (typeof signInWithPopup === 'function') {
                             try {
                                 const result = await signInWithPopup(window.auth, provider);
-                                console.log('✅ Signed in via popup (fallback):', result.user && result.user.uid);
+                                console.log('✅ Signed in via popup:', result.user && result.user.uid);
                                 return result;
                             } catch (errPopup) {
-                                console.error('Popup fallback also failed:', errPopup);
-                                alert('Sign-in failed: ' + (errPopup && errPopup.message));
+                                console.warn('Popup sign-in failed or was blocked, falling back to redirect:', errPopup);
+                                // If popup failed (blocked), try redirect next
+                            }
+                        }
+
+                        // Fallback to redirect (more robust when popups blocked)
+                        if (typeof signInWithRedirect === 'function') {
+                            try {
+                                console.log('🔐 Falling back to redirect sign-in');
+                                await signInWithRedirect(window.auth, provider);
+                                return;
+                            } catch (errRedirect) {
+                                console.error('Redirect sign-in failed:', errRedirect);
+                                alert('Sign-in failed: ' + (errRedirect && errRedirect.message));
                             }
                         } else {
                             alert('Sign-in not available in this browser. Try another browser or enable popups.');
