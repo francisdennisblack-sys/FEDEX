@@ -3114,7 +3114,7 @@
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
         import { getDatabase, ref, set, get, update, remove, onValue } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
         import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
-        import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
+        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
 
         const firebaseConfig = {
             apiKey: "AIzaSyD5A_MF7gRvqnHd_DD3lReYpEkRph6msX4",
@@ -8489,6 +8489,8 @@
                     console.log(`  Firebase path: posts (SHARED COLLECTION)`);
                     recordMilestone('Firebase subscription started', Date.now());
                     subscribeToFirebasePostsWithReconnect();
+                    // Attempt to flush any queued posts now that auth/db are ready
+                    try { flushQueuedPosts().catch(e => console.warn('Queued flush error:', e)); } catch(e) { console.warn('flushQueuedPosts not available yet', e); }
                     
                     console.log('\n' + '='.repeat(70));
                     console.log('✅ BOOTSTRAP COMPLETE - Waiting for posts...');
@@ -8505,6 +8507,7 @@
                     console.error('❌ Phase 0 FAILED:', err);
                     console.log('⚠️ Subscribing anyway with fallback...');
                     subscribeToFirebasePostsWithReconnect();
+                    try { flushQueuedPosts().catch(e => console.warn('Queued flush error:', e)); } catch(e) { console.warn('flushQueuedPosts not available yet', e); }
                 });
                 
                 // ✅ BACKGROUND TASKS: Keep minimal - only essential updates
@@ -8525,13 +8528,15 @@
                 // trackPostLifecycle removed in cleanup build (diagnostics trimmed)
                 
             } else {
-                // User is signed out - sign in anonymously
-                console.log('🔐 Signing in anonymously...');
-                signInAnonymously(auth).then(() => {
-                    console.log('✅ Anonymous sign-in successful');
-                }).catch((error) => {
+                // User is signed out - sign in anonymously with persistent session
+                console.log('🔐 Signing in anonymously with persistent session...');
+                try {
+                    await setPersistence(auth, browserLocalPersistence);
+                    await signInAnonymously(auth);
+                    console.log('✅ Anonymous sign-in with local persistence successful');
+                } catch (error) {
                     console.error('❌ Anonymous sign-in failed:', error);
-                });
+                }
             }
         });
 
@@ -10731,6 +10736,42 @@
                     req.onerror = (e) => { reject(e.target.error || new Error('IDB delete error')); db.close(); };
                 } catch (err) { reject(err); }
             });
+        }
+
+        // Flush queued posts from IndexedDB to Firebase when auth/db ready
+        async function flushQueuedPosts() {
+            try {
+                const queued = await getAllQueuedPosts();
+                if (!queued || !queued.length) return console.log('No queued posts to flush');
+                console.log(`Flushing ${queued.length} queued posts to Firebase`);
+                for (const item of queued) {
+                    try {
+                        const enqueueId = item.enqueueId;
+                        const pId = item.postId || (item.postData && item.postData.id) || null;
+                        const pData = item.postData || {};
+
+                        // Ensure authId/userId are set before sending
+                        pData.authId = currentUserId || pData.authId || (window.permanentUserId || null);
+                        pData.userId = pData.authId;
+
+                        if (!pId) {
+                            console.warn('Queued item missing postId, skipping:', item);
+                            continue;
+                        }
+
+                        console.log('Attempting flush for queued post:', pId);
+                        await savePostToFirebaseShared(pId, pData);
+                        // On success, remove from queue
+                        await removeQueuedPost(enqueueId);
+                        console.log('Flushed and removed queued post:', pId);
+                    } catch (err) {
+                        console.warn('Failed flushing queued post (will retry later):', err);
+                        // don't remove; will retry later
+                    }
+                }
+            } catch (e) {
+                console.error('flushQueuedPosts error:', e);
+            }
         }
 
         // SHARED POST COLLECTION - NEW ARCHITECTURE
