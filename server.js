@@ -943,6 +943,59 @@ app.post('/api/sell/confirm', async (req, res) => {
     }
 });
 
+// ============================================================================
+// COMBINED CHECKOUT ENDPOINT
+// Creates a single PaymentIntent for multiple items (e.g. boost + sell)
+// POST /api/checkout/create-intent { items: [{ kind: 'boost'|'sell', priceCents }], userId }
+// Returns: { clientSecret, paymentIntentId, amountCents, currency, label }
+app.post('/api/checkout/create-intent', async (req, res) => {
+    try {
+        const { items, totalCents, userId = 'anon' } = req.body || {};
+        let amount = 0;
+        const metadataItems = [];
+
+        if (Array.isArray(items) && items.length) {
+            for (const it of items) {
+                const pc = parseInt((it && it.priceCents) || 0, 10) || 0;
+                amount += pc;
+                metadataItems.push({ kind: (it && it.kind) || 'item', priceCents: pc });
+            }
+        } else if (totalCents) {
+            amount = parseInt(totalCents, 10) || 0;
+            metadataItems.push({ kind: 'total', priceCents: amount });
+        } else {
+            // Fallback: combine default boost (standard) + sell
+            const boostDefault = (BOOST_TIERS && BOOST_TIERS.standard && BOOST_TIERS.standard.amountCents) ? BOOST_TIERS.standard.amountCents : 299;
+            amount = boostDefault + (SELL_PRICE && SELL_PRICE.amountCents ? SELL_PRICE.amountCents : 200);
+            metadataItems.push({ kind: 'boost', priceCents: boostDefault });
+            metadataItems.push({ kind: 'sell', priceCents: (SELL_PRICE && SELL_PRICE.amountCents) ? SELL_PRICE.amountCents : 200 });
+        }
+
+        const stripe = getStripeClient();
+        if (!stripe) {
+            return res.status(503).json({ error: 'Stripe not configured. Set STRIPE_SECRET_KEY env var and `npm i stripe`.' });
+        }
+
+        const intent = await stripe.paymentIntents.create({
+            amount: amount,
+            currency: 'usd',
+            automatic_payment_methods: { enabled: true },
+            metadata: { kind: 'combined_checkout', items: JSON.stringify(metadataItems), userId }
+        });
+
+        res.json({
+            clientSecret: intent.client_secret,
+            paymentIntentId: intent.id,
+            amountCents: amount,
+            currency: intent.currency || 'usd',
+            label: 'Combined purchase'
+        });
+    } catch (e) {
+        console.error('[checkout] create-intent failed', e);
+        res.status(500).json({ error: e.message || 'create-intent failed' });
+    }
+});
+
 // Serve index.html for any non-API routes (SPA fallback)
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
