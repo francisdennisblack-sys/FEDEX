@@ -53,66 +53,63 @@ self.addEventListener('activate', (event) => {
   if (VERBOSE_SW) console.log('[Service Worker] Now controlling all clients');
 });
 
-// 🌐 FETCH: Serve from cache, update from network
+// 🌐 FETCH: Network-first for navigations/index to ensure Visit shows latest deployment,
+// and cache-first for other static assets for offline support.
 self.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET') {
-    return;
-  }
+  if (event.request.method !== 'GET') return;
 
-  // Firebase endpoints: network first, cache fallback
-  if (event.request.url.includes('firebase') || 
-      event.request.url.includes('firestore') ||
-      event.request.url.includes('storage.googleapis')) {
-    
+  const requestUrl = new URL(event.request.url);
+
+  // Firebase endpoints: network first, cache fallback (keep previous behavior)
+  if (event.request.url.includes('firebase') || event.request.url.includes('firestore') || event.request.url.includes('storage.googleapis')) {
     event.respondWith(
       fetch(event.request)
         .then((response) => {
-          // Cache Firebase responses for offline
           if (response.ok && event.request.url.includes('/posts')) {
             const responseToCache = response.clone();
-            caches.open(POSTS_CACHE).then((cache) => {
-              cache.put(event.request, responseToCache);
-            });
+            caches.open(POSTS_CACHE).then((cache) => cache.put(event.request, responseToCache));
           }
           return response;
         })
-        .catch(() => {
-          // If Firebase fails, try cache
-          return caches.match(event.request);
-        })
+        .catch(() => caches.match(event.request))
     );
     return;
   }
 
-  // Static assets: cache first, network fallback
+  // Treat navigation requests (page loads) and requests for index.html as network-first so
+  // the browser visits the live deployment rather than an old cached index.html.
+  const isNavigation = event.request.mode === 'navigate' || requestUrl.pathname === '/' || requestUrl.pathname.endsWith('/index.html');
+
+  if (isNavigation) {
+    event.respondWith(
+      fetch(event.request)
+        .then((networkResponse) => {
+          // Update cache with fresh index.html/network response for offline fallback
+          if (networkResponse && networkResponse.ok) {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', clone));
+          }
+          return networkResponse;
+        })
+        .catch(() => caches.match('/index.html').then((cached) => cached || new Response('Service Unavailable', { status: 503 })))
+    );
+    return;
+  }
+
+  // Static assets: cache-first, network fallback (unchanged)
   event.respondWith(
     caches.match(event.request)
       .then((response) => {
-            if (response) {
-          return response;
-        }
-        
+        if (response) return response;
         return fetch(event.request)
-          .then((response) => {
-            if (response.ok) {
-              const responseToCache = response.clone();
-              caches.open(CACHE_NAME).then((cache) => {
-                cache.put(event.request, responseToCache);
-              });
+          .then((networkResponse) => {
+            if (networkResponse && networkResponse.ok) {
+              const responseToCache = networkResponse.clone();
+              caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseToCache));
             }
-            return response;
-          });
-      })
-      .catch(() => {
-                // Offline fallback: prefer cached index.html (SPA) so app still loads
-        return caches.match('/index.html').then((cached) => {
-          if (cached) return cached;
-          // Fallback to plain text when nothing cached
-          return new Response('Content not available offline', {
-            status: 503,
-            statusText: 'Service Unavailable'
-          });
-        })
+            return networkResponse;
+          })
+          .catch(() => caches.match('/index.html').then((cached) => cached || new Response('Service Unavailable', { status: 503 })));
       })
   );
 });
