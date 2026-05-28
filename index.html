@@ -10677,6 +10677,62 @@
             }
         }
         
+        // IndexedDB queue helpers for offline enqueueing
+        function openQueueDB() {
+            return new Promise((resolve, reject) => {
+                try {
+                    const req = indexedDB.open('fedex-queue', 1);
+                    req.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains('posts')) {
+                            db.createObjectStore('posts', { keyPath: 'enqueueId', autoIncrement: true });
+                        }
+                    };
+                    req.onsuccess = (e) => resolve(e.target.result);
+                    req.onerror = (e) => reject(e.target.error || new Error('IDB open error'));
+                } catch (err) { reject(err); }
+            });
+        }
+
+        async function enqueuePostToIDB(item) {
+            const db = await openQueueDB();
+            return new Promise((resolve, reject) => {
+                try {
+                    const tx = db.transaction('posts', 'readwrite');
+                    const store = tx.objectStore('posts');
+                    const req = store.add(Object.assign({}, item, { enqueueAt: Date.now() }));
+                    req.onsuccess = (e) => { resolve(e.target.result); db.close(); };
+                    req.onerror = (e) => { reject(e.target.error || new Error('IDB add error')); db.close(); };
+                } catch (err) { reject(err); }
+            });
+        }
+
+        async function getAllQueuedPosts() {
+            const db = await openQueueDB();
+            return new Promise((resolve, reject) => {
+                try {
+                    const tx = db.transaction('posts', 'readonly');
+                    const store = tx.objectStore('posts');
+                    const req = store.getAll();
+                    req.onsuccess = (e) => { resolve(e.target.result || []); db.close(); };
+                    req.onerror = (e) => { reject(e.target.error || new Error('IDB getAll error')); db.close(); };
+                } catch (err) { reject(err); }
+            });
+        }
+
+        async function removeQueuedPost(enqueueId) {
+            const db = await openQueueDB();
+            return new Promise((resolve, reject) => {
+                try {
+                    const tx = db.transaction('posts', 'readwrite');
+                    const store = tx.objectStore('posts');
+                    const req = store.delete(enqueueId);
+                    req.onsuccess = (e) => { resolve(true); db.close(); };
+                    req.onerror = (e) => { reject(e.target.error || new Error('IDB delete error')); db.close(); };
+                } catch (err) { reject(err); }
+            });
+        }
+
         // SHARED POST COLLECTION - NEW ARCHITECTURE
         async function savePostToFirebaseShared(postId, postData) {
             try {
@@ -10748,46 +10804,21 @@
                 console.error('ERROR CODE:', error.code);
                 console.error('ERROR:', error);
                 console.error('❌'.repeat(35) + '\n');
-                // Try local server fallback to persist post when Firebase is blocked (permissions/network)
+                // Save failed — enqueue to IndexedDB for reliable retry instead of writing to local dev server.
                 try {
-                    console.warn('Attempting local server fallback: POST /api/posts');
-                    const fallbackBody = {
-                        postId: postId,
-                        zoneId: postData.zoneTag || postData.county || null,
-                        lat: postData.latitude || (postData.geolocation && postData.geolocation.lat) || null,
-                        lon: postData.longitude || (postData.geolocation && postData.geolocation.lon) || null,
-                        content: postData.content || '',
-                        imageData: postData.photoURL || null,
-                        timestamp: postData.timestamp || Date.now(),
-                        clientId: postData.clientId || null,
-                        // Auth & ownership fields so fallback posts remain attributable
-                        authId: postData.authId || postData.userId || null,
-                        userId: postData.userId || postData.authId || null,
-                        createdBy: postData.createdBy || postData.authId || postData.userId || null,
-                        zoneTag: postData.zoneTag || postData.county || null,
-                        latitude: postData.latitude || (postData.geolocation && postData.geolocation.lat) || null,
-                        longitude: postData.longitude || (postData.geolocation && postData.geolocation.lon) || null
-                    };
-
-                    const resp = await fetch('/api/posts', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(fallbackBody)
-                    });
-
-                    if (resp.ok) {
-                        const json = await resp.json();
-                        console.log('✅ Local server fallback saved post:', json.post ? json.post.id : '(unknown id)');
-                        return { success: true, path: `local:/posts/${json.post ? json.post.id : 'unknown'}` };
+                    console.warn('Saving to Firebase failed; enqueueing post for retry in IndexedDB');
+                    if (typeof enqueuePostToIDB === 'function') {
+                        await enqueuePostToIDB({ postId, postData, error: String(error), queuedAt: Date.now() });
+                        console.log('✅ Enqueued post for later retry:', postId);
+                        return { success: false, queued: true };
                     } else {
-                        const text = await resp.text();
-                        console.error('Local fallback failed, status:', resp.status, 'body:', text);
+                        console.error('IndexedDB enqueue helper not available; cannot persist post for retry');
                     }
-                } catch (fbFallbackErr) {
-                    console.error('Local fallback also failed:', fbFallbackErr);
+                } catch (eidbErr) {
+                    console.error('Failed to enqueue post to IDB:', eidbErr);
                 }
 
-                // Re-throw original Firebase error if fallback didn't succeed
+                // Re-throw original Firebase error as a last resort
                 throw error;
             }
         }
@@ -20696,13 +20727,33 @@
                     console.log('  🔑 Assigned clientId for idempotency:', postData.clientId);
                 }
 
-                // 🚨 CRITICAL VALIDATION: Ensure currentUserId is set
-                if (!currentUserId || currentUserId === 'null' || currentUserId === null) {
-                    console.error('🚨 CRITICAL ERROR: currentUserId is null/empty!');
-                    console.error('   This will cause post to not be visible!');
-                    console.error('   Force setting to "shared-network-1" as fallback');
-                    currentUserId = 'shared-network-1';
-                    window.currentUserId = 'shared-network-1';
+                // 🚨 CRITICAL VALIDATION: Ensure Firebase `database` + `auth` and `currentUserId` are ready
+                if (typeof database === 'undefined' || typeof auth === 'undefined' || !currentUserId || currentUserId === 'null') {
+                    console.error('🚨 CRITICAL ERROR: Firebase auth or database not ready, or currentUserId missing');
+                    console.error('   Enqueuing post locally for reliable retry and showing pending UI');
+
+                    // Mark post as pending and add to local caches for immediate feedback
+                    postData._pending = true;
+                    postData._queuedAt = Date.now();
+                    postCache[postId] = postData;
+                    const contentKey = currentUserId || 'pending-local';
+                    if (!gridContent[contentKey]) gridContent[contentKey] = [];
+                    gridContent[contentKey].push(postData);
+
+                    try {
+                        if (typeof enqueuePostToIDB === 'function') {
+                            await enqueuePostToIDB({ postId, postData, queuedAt: Date.now() });
+                            console.log('✅ Post enqueued for sync when Firebase is available:', postId);
+                        } else {
+                            console.warn('IndexedDB enqueue helper missing; post not persisted for retry');
+                        }
+                    } catch (e) {
+                        console.error('Failed to enqueue post for retry:', e);
+                    }
+
+                    // Update UI immediately and stop save flow
+                    if (typeof renderGrid === 'function') renderGrid();
+                    return; // Exit save flow — post will be synced later
                 }
                 
                 // 🔐 PRE-SAVE VALIDATION: Verify tracking system is ready
