@@ -2838,6 +2838,74 @@
                     });
                 }
 
+                // Update account UI in header/profile area
+                async function updateAccountUI() {
+                    try {
+                        const accountArea = document.getElementById('accountArea');
+                        const signInBtn = document.getElementById('signInBtn');
+                        if (!accountArea || !signInBtn) return;
+                        // default: hide accountStats and signOut if present
+                        let accountStats = document.getElementById('accountStats');
+                        let signOutBtn = document.getElementById('signOutBtn');
+                        if (!window.currentUserId) {
+                            // not signed in: show Profile button, hide sign-out
+                            signInBtn.textContent = 'Profile';
+                            if (signOutBtn) signOutBtn.style.display = 'none';
+                            if (accountStats) accountStats.style.display = 'none';
+                            return;
+                        }
+                        // signed in: fetch profile/stats
+                        const database = getDatabase();
+                        let profile = {};
+                        let stats = { postsCount: 0, totalLikes: 0 };
+                        if (database) {
+                            try {
+                                const snap = await get(ref(database, `users/${window.currentUserId}`));
+                                const data = snap && snap.val ? snap.val() : {};
+                                profile = (data && data.profile) || {};
+                                stats = (data && data.stats) || stats;
+                            } catch (e) { console.warn('updateAccountUI fetch failed', e); }
+                        }
+                        const posts = stats.postsCount || 0;
+                        const totalLikes = stats.totalLikes || 0;
+                        const avgLikes = posts ? (totalLikes / posts).toFixed(1) : '0';
+
+                        // update profile button label
+                        signInBtn.textContent = profile.username || (window.currentUserId && window.currentUserId.slice ? window.currentUserId.slice(0,8) : 'Me');
+
+                        // account stats element
+                        if (!accountStats) {
+                            accountStats = document.createElement('div');
+                            accountStats.id = 'accountStats';
+                            accountStats.style.fontSize = '12px';
+                            accountStats.style.color = '#ccc';
+                            accountStats.style.textAlign = 'right';
+                            accountStats.style.lineHeight = '1.1';
+                            accountArea.insertBefore(accountStats, signInBtn);
+                        }
+                        accountStats.style.display = 'block';
+                        accountStats.innerHTML = `Posts: ${posts}<br>Avg likes: ${avgLikes}`;
+
+                        // sign-out button
+                        if (!signOutBtn) {
+                            signOutBtn = document.createElement('button');
+                            signOutBtn.id = 'signOutBtn';
+                            signOutBtn.textContent = 'Sign out';
+                            signOutBtn.style.padding = '8px 10px';
+                            signOutBtn.style.borderRadius = '8px';
+                            signOutBtn.style.border = 'none';
+                            signOutBtn.style.background = '#ef4444';
+                            signOutBtn.style.color = '#fff';
+                            signOutBtn.style.cursor = 'pointer';
+                            signOutBtn.style.marginLeft = '8px';
+                            signOutBtn.addEventListener('click', (e) => { e.preventDefault(); doSignOut(); });
+                            accountArea.appendChild(signOutBtn);
+                        } else {
+                            signOutBtn.style.display = 'inline-block';
+                        }
+                    } catch (err) { console.warn('updateAccountUI error', err); }
+                }
+
                 async function showProfileModal() {
                     ensureProfileModal();
                     const modal = document.getElementById('profileModal');
@@ -2846,6 +2914,8 @@
                     const msg = document.getElementById('profileMsg');
                     profileView.innerHTML = '';
                     msg.textContent = '';
+                    // Ensure account UI is current
+                    try { updateAccountUI(); } catch(e){}
                     if (window.currentUserId) {
                         // show profile view
                         profileForm.style.display = 'none';
@@ -2856,10 +2926,20 @@
                             const data = snap && snap.val ? snap.val() : {};
                             const profile = (data && data.profile) || {};
                             const stats = (data && data.stats) || { postsCount: 0, totalLikes: 0 };
+                            const posts = stats.postsCount || 0;
+                            const totalLikes = stats.totalLikes || 0;
+                            const avgLikes = posts ? (totalLikes / posts).toFixed(1) : '0';
                             profileView.innerHTML = `<div style="font-size:14px;color:#fff;font-weight:700;">${profile.username || profile.email || window.currentUserId.slice(0,8)}</div>
-                                                    <div style="font-size:12px;color:#ccc;margin-top:6px;">Posts: ${stats.postsCount || 0}</div>
-                                                    <div style="font-size:12px;color:#ccc;margin-top:6px;">Total Likes: ${stats.totalLikes || 0}</div>
-                                                    <div style="font-size:12px;color:#ccc;margin-top:8px;">States: ${profile.states || '—'}</div>`;
+                                                    <div style="font-size:12px;color:#ccc;margin-top:6px;">Posts: ${posts}</div>
+                                                    <div style="font-size:12px;color:#ccc;margin-top:6px;">Average Likes: ${avgLikes}</div>
+                                                    <div style="font-size:12px;color:#ccc;margin-top:6px;">Total Likes: ${totalLikes}</div>
+                                                    <div style="font-size:12px;color:#ccc;margin-top:8px;">States: ${profile.states || '—'}</div>
+                                                    <div style="margin-top:10px;"><button id="profileSignOutBtn" style="padding:6px 10px;border-radius:6px;border:none;background:#ef4444;color:#fff;cursor:pointer;">Sign out</button></div>`;
+                            // wire sign-out button
+                            setTimeout(() => {
+                                const sb = document.getElementById('profileSignOutBtn');
+                                if (sb) sb.addEventListener('click', (e)=>{ e.preventDefault(); doSignOut(); document.getElementById('profileModal').style.display='none'; });
+                            }, 60);
                         } catch (err) { profileView.innerHTML = '<div style="color:#f00">Failed loading profile</div>'; }
                     } else {
                         // show signup form
@@ -3006,7 +3086,7 @@
         <div class="modal-content">
             <!-- Zone Predictor - Simplified (Auto-detected only) -->
             <div style="padding: 12px 16px; background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; margin-bottom: 16px;">
-                <div style="display: flex; align-items: center; justify-content: flex-start; gap: 8px;">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
                     <span style="font-size: 14px; color: #888;">Posting to:</span>
                     <span id="zonePredictor" style="font-size: 12px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; background-color: #1a1a1a; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif;">Detecting location...</span>
                 </div>
@@ -13214,10 +13294,7 @@
                         box.style.boxShadow = 'none';
                     };
                             box.onclick = () => {
-                                const nd = getNearestPOIAndDistance();
-                                if (!isNearPOI()) {
-                                    showNotification(`Posting is allowed away from POIs; nearest: ${nd.poi ? nd.poi.name : 'unknown'} — ${formatDistanceMeters(nd.distance)}`);
-                                }
+                                // allow posting even away from POIs (notification removed)
                                 openModal(0);
                             };
                 } else {
@@ -13900,11 +13977,7 @@
 
         // Modal functions
         function openModal(boxIndex) {
-            if (!isNearPOI()) {
-                const nd = getNearestPOIAndDistance();
-                showNotification(`Posting is allowed away from POIs; nearest: ${nd.poi ? nd.poi.name : 'unknown'} — ${formatDistanceMeters(nd.distance)}`);
-                // allow posting even if not near POI
-            }
+            // allow posting even away from POIs (notification removed)
 
             // Prevent posting if user reached 5 posts
             if (userPostBoxes.length >= 5) {
@@ -16022,9 +16095,19 @@
         function formatEarthAreaTag(areaName) {
             // Logo is the earth emoji now — area tags display clean name, no emoji prefix.
             if (!areaName) return 'Local Area';
-            const cleaned = String(areaName)
-                .replace(/^[🌍🌎🌏📍✓🏙️🏘️🗺️🧭☕]\s*/u, '')
-                .trim();
+            let cleaned = String(areaName).replace(/^[🌍🌎🌏📍✓🏙️🏘️🗺️🧭☕]\s*/u, '').trim();
+            // If areaName looks like coordinates (lat, lon), format as "37.7749°N 122.4194°W"
+            const coordMatch = cleaned.match(/(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/);
+            if (coordMatch) {
+                const lat = parseFloat(coordMatch[1]);
+                const lon = parseFloat(coordMatch[2]);
+                if (!isNaN(lat) && !isNaN(lon)) {
+                    const latAbs = Math.abs(lat).toFixed(4) + '°' + (lat >= 0 ? 'N' : 'S');
+                    const lonAbs = Math.abs(lon).toFixed(4) + '°' + (lon >= 0 ? 'E' : 'W');
+                    return `${latAbs} ${lonAbs}`;
+                }
+            }
+            // Fallback: return cleaned area name
             return cleaned || 'Local Area';
         }
         
@@ -18897,8 +18980,7 @@
                     addContentBox.style.boxShadow = 'none';
                 };
                 addContentBox.onclick = () => {
-                    const nd = getNearestPOIAndDistance();
-                    if (!isNearPOI()) showNotification(`Posting is allowed away from POIs; nearest: ${nd.poi ? nd.poi.name : 'unknown'} — ${formatDistanceMeters(nd.distance)}`);
+                    // allow posting even away from POIs (notification removed)
                     openModal(0);
                 };
             }
