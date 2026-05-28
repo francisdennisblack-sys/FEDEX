@@ -11,6 +11,93 @@
             box-sizing: border-box;
         }
 
+        /**
+         * Update a post's zone/area on the server and adjust zone indexes.
+         * Attempts to remove the old zone index and add the new one.
+         */
+        async function updatePostZoneOnServer(postId, newZone, oldZone = null) {
+            try {
+                if (!postId || !database) return;
+                const postRef = ref(database, `posts/${postId}`);
+                const updatePayload = {
+                    county: newZone,
+                    zoneTag: newZone,
+                    area: newZone,
+                    region: newZone,
+                    updatedAt: Date.now()
+                };
+                await update(postRef, updatePayload);
+
+                // Update zone indexes: remove old index if known, add new one
+                try {
+                    if (oldZone) {
+                        const oldIdxRef = ref(database, `posts_by_zone/${oldZone}/${postId}`);
+                        await remove(oldIdxRef);
+                    }
+                } catch (e) { console.warn('Failed removing old zone index', e); }
+
+                try {
+                    const zoneKey = newZone || 'unknown_zone';
+                    const zonePostRef = ref(database, `posts_by_zone/${zoneKey}/${postId}`);
+                    await set(zonePostRef, { id: postId, timestamp: Date.now(), author: currentUserId || null });
+                } catch (e) { console.warn('Failed writing new zone index', e); }
+
+                console.log(`✅ Post ${postId} re-tagged on server to zone: ${newZone}`);
+            } catch (error) {
+                console.error('❌ Failed to update post zone on server for', postId, error);
+            }
+        }
+
+        /**
+         * Re-tag recent posts authored by the current user when they move zones.
+         * Looks for posts created within the last N minutes that are not locked.
+         */
+        async function retagRecentUserPosts() {
+            try {
+                if (!currentUserId) return;
+                const userPosts = userOwnPostsTracker[currentUserId] || {};
+                const now = Date.now();
+                const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+                for (const [postId, tracked] of Object.entries(userPosts)) {
+                    if (!tracked || !tracked.created) continue;
+                    if (now - tracked.created > WINDOW_MS) continue; // only recent posts
+
+                    // Skip locked posts
+                    if (tracked.areaTagLocked) continue;
+
+                    // Compute best new zone for current location
+                    let newZone = currentZoneTag || tracked.areaTag || tracked.originalAreaTag;
+                    if (userLocation && userLocation.lat && userLocation.lon) {
+                        const poiResult = findClosestPOIInZone(userLocation.lat, userLocation.lon);
+                        if (poiResult && poiResult.poi) {
+                            newZone = poiResult.poi.name;
+                        } else {
+                            const closestLoc = findClosestLocation(userLocation.lat, userLocation.lon);
+                            if (closestLoc && closestLoc.location) newZone = closestLoc.location.name;
+                        }
+                    }
+
+                    if (!newZone) continue;
+
+                    // If the new zone differs from tracked area, update server and tracker
+                    if (String(newZone) !== String(tracked.areaTag)) {
+                        const oldZone = tracked.areaTag || tracked.originalAreaTag || null;
+                        console.log(`🔁 Retagging recent post ${postId} ${oldZone} → ${newZone}`);
+                        // Update server copy
+                        await updatePostZoneOnServer(postId, newZone, oldZone);
+
+                        // Update local tracker
+                        tracked.areaTag = newZone;
+                        if (!tracked.areaHistory) tracked.areaHistory = [];
+                        tracked.areaHistory.push(newZone);
+                    }
+                }
+            } catch (e) {
+                console.warn('retagRecentUserPosts failed', e);
+            }
+        }
+
         html, body {
             width: 100%;
             height: 100%;
@@ -941,38 +1028,60 @@
             box-shadow: 0 0 15px rgba(96, 165, 250, 0.4);
         }
         .grid-box.badge-sell {
-            box-shadow: 0 10px 30px rgba(34,193,195,0.12) inset, 0 6px 18px rgba(34,193,195,0.06);
-            border: 2px solid rgba(34,193,195,0.25);
+            box-shadow: 0 16px 48px rgba(34,193,195,0.14) inset, 0 8px 26px rgba(34,193,195,0.08);
+            border: 2px solid rgba(34,193,195,0.35);
+            transform: translateZ(0);
+            transition: transform 180ms ease, box-shadow 180ms ease;
+        }
+        /* Stronger visual for sell posts */
+        .grid-box.badge-sell {
+            background: linear-gradient(180deg, rgba(18,74,72,0.12), rgba(6,16,17,0.06));
+            border: 2px solid rgba(34,193,195,0.45);
+            box-shadow: 0 22px 60px rgba(34,193,195,0.16), inset 0 6px 20px rgba(34,193,195,0.06);
         }
         .grid-box.badge-sell::before {
             content: "SELL";
             position: absolute;
             top: 8px;
             left: 8px;
-            background: linear-gradient(90deg, #22c1c3, #2a7f9f);
+            background: linear-gradient(90deg, #16a085, #22c1c3);
             color: white;
             font-weight: 900;
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-size: 11px;
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-size: 12px;
             letter-spacing: 0.6px;
+            box-shadow: 0 4px 14px rgba(16,150,140,0.18);
+            z-index: 12;
+            text-shadow: 0 1px 0 rgba(0,0,0,0.25);
+        }
+
+        /* Selected state for composer badge buttons */
+        #sellBtn.badge-selected {
+            background: linear-gradient(135deg,#06292a 0%, #0f5e5d 100%);
+            color: #a7fff6 !important;
+            border-color: #5fe6de !important;
+            box-shadow: 0 8px 28px rgba(34,193,195,0.28);
+            transform: translateY(-1px);
         }
         /* Boost visual flair */
         .grid-box.badge-boost {
-            box-shadow: 0 18px 50px rgba(102,126,234,0.14), inset 0 2px 10px rgba(102,126,234,0.06);
-            transform: translateZ(0);
+            box-shadow: 0 22px 68px rgba(102,126,234,0.18), inset 0 4px 16px rgba(102,126,234,0.08);
+            transform: translateZ(0) scale(1.01);
+            transition: transform 160ms ease, box-shadow 160ms ease;
         }
         .grid-box.badge-boost::after {
             content: '';
             position: absolute;
-            top: -6px;
-            right: -6px;
-            width: 40px;
-            height: 40px;
-            background: radial-gradient(circle at 30% 30%, rgba(102,158,255,0.9), rgba(102,126,234,0.25) 40%, transparent 60%);
+            top: -8px;
+            right: -8px;
+            width: 48px;
+            height: 48px;
+            background: radial-gradient(circle at 30% 30%, rgba(102,158,255,0.95), rgba(102,126,234,0.28) 40%, transparent 60%);
             border-radius: 50%;
-            filter: blur(6px);
+            filter: blur(8px);
             pointer-events: none;
+            z-index: 11;
         }
         /* Sell + Boost: half badge indicator */
         .grid-box.badge-sell.badge-boost::before {
@@ -2628,11 +2737,7 @@
                         📍 Nearby Areas
                     </button>
                 </div>
-                <!-- Quick Boost toggle (MVP: client-side highlight) -->
-                <div style="margin-top:10px; display:flex; align-items:center; gap:8px;">
-                    <input type="checkbox" id="boostToggle" style="width:18px;height:18px;" />
-                    <label for="boostToggle" style="color:#fff; font-size:13px; font-weight:700;">Boost (highlight post)</label>
-                </div>
+                <!-- Quick Boost UI removed: use Boost button / payment flow instead -->
                 
                 <!-- Autocomplete dropdown for area suggestions -->
                 <div id="autocompleteDropdown" style="
@@ -4920,6 +5025,12 @@
                             // Update area selector
                             if (typeof autoDetectClosestArea === 'function') {
                                 autoDetectClosestArea(userLocation);
+                                // After automatic area detection, attempt to re-tag recent posts authored by this user
+                                try {
+                                    setTimeout(() => {
+                                        if (typeof retagRecentUserPosts === 'function') retagRecentUserPosts();
+                                    }, 800);
+                                } catch (e) { console.warn('Failed to schedule retagRecentUserPosts', e); }
                             }
                         }
 
@@ -8549,15 +8660,9 @@
                 // trackPostLifecycle removed in cleanup build (diagnostics trimmed)
                 
             } else {
-                // User is signed out - sign in anonymously with persistent session
-                console.log('🔐 Signing in anonymously with persistent session...');
-                try {
-                    await setPersistence(auth, browserLocalPersistence);
-                    await signInAnonymously(auth);
-                    console.log('✅ Anonymous sign-in with local persistence successful');
-                } catch (error) {
-                    console.error('❌ Anonymous sign-in failed:', error);
-                }
+                // User is signed out — do not auto sign-in. Show sign-in gate so user explicitly chooses.
+                console.log('🔐 User is not signed in — showing sign-in gate');
+                try { createSignInGate(); } catch (e) { console.warn('createSignInGate error', e); }
             }
         });
 
@@ -12171,32 +12276,43 @@
         let userInactivityTimeout = null;
         const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
-        function updateUserActivity() {
-            if (!currentUserId) {
-                console.error('❌ Cannot update activity: no currentUserId');
-                return;
+        // Presence ID for unauthenticated users (persisted per browser)
+        window.presenceClientId = window.presenceClientId || localStorage.getItem('presenceClientId');
+        if (!window.presenceClientId) {
+            try {
+                window.presenceClientId = 'cli-' + (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : (Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4)));
+            } catch (e) {
+                window.presenceClientId = 'cli-' + Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4);
             }
-            
+            try { localStorage.setItem('presenceClientId', window.presenceClientId); } catch(e) {}
+        }
+
+        function updateUserActivity() {
             if (!database) {
                 console.error('❌ Cannot update activity: database not initialized');
                 return;
             }
-            
+
+            // Use authenticated user id when available, otherwise use local presence client id
+            const presenceId = currentUserId || window.presenceClientId || 'anon-' + (Date.now());
+
             try {
-                const userRef = ref(database, `onlineUsers/${currentUserId}`);
+                const userRef = ref(database, `onlineUsers/${presenceId}`);
                 const now = new Date().getTime();
-                
+
+                // Write a presence entry that marks whether this is an authenticated user
                 set(userRef, {
-                    uid: currentUserId,
+                    uid: currentUserId || null,
+                    anon: currentUserId ? false : true,
                     lastSeen: now
                 }).then(() => {
-                    console.log(`✅ [${new Date(now).toLocaleTimeString()}] User activity updated`);
+                    console.log(`✅ [${new Date(now).toLocaleTimeString()}] Presence updated for ${presenceId}`);
                     const statusEl = document.getElementById('lastSeenStatus');
                     if (statusEl) statusEl.textContent = `lastSeen: ok ${new Date(now).toLocaleTimeString()}`;
                 }).catch((error) => {
-                    console.error('❌ Error updating online status:', error.message);
+                    console.error('❌ Error updating online status:', error && error.message ? error.message : error);
                     const statusEl = document.getElementById('lastSeenStatus');
-                    if (statusEl) statusEl.textContent = `lastSeen: ERR ${error.message}`;
+                    if (statusEl) statusEl.textContent = `lastSeen: ERR ${error && error.message ? error.message : 'err'}`;
                 });
             } catch (error) {
                 console.error('❌ Exception in updateUserActivity:', error);
@@ -12210,12 +12326,58 @@
             }, INACTIVITY_TIMEOUT);
         }
 
+        // Presence setup: use .info/connected + onDisconnect to reliably manage onlineUsers entries
+        function setupRealtimePresence() {
+            try {
+                if (!database) return;
+
+                // Use authenticated id if available, otherwise use persistent client id
+                const presenceId = currentUserId || window.presenceClientId;
+                if (!presenceId) return;
+
+                const connectedRef = ref(database, '.info/connected');
+                onValue(connectedRef, async (snap) => {
+                    if (snap && snap.val() === true) {
+                        const presenceRef = ref(database, `onlineUsers/${presenceId}`);
+                        const now = Date.now();
+                        try {
+                            // Write presence immediately (anon flag when not signed in)
+                            await set(presenceRef, { uid: currentUserId || null, anon: currentUserId ? false : true, lastSeen: now });
+                        } catch (e) {
+                            console.warn('Could not set presence node:', e && e.message ? e.message : e);
+                        }
+                        try {
+                            // Ensure presence is removed on disconnect
+                            const od = onDisconnect(presenceRef);
+                            od.remove().catch(err => console.warn('onDisconnect remove failed:', err && err.message ? err.message : err));
+                        } catch (e) {
+                            console.warn('onDisconnect setup failed:', e && e.message ? e.message : e);
+                        }
+
+                        // Counters are now authoritative via Cloud Function sync; client no longer bumps counters to avoid races
+                    }
+                });
+            } catch (err) {
+                console.warn('setupRealtimePresence failed:', err && err.message ? err.message : err);
+            }
+        }
+
         function removeUserFromOnline() {
-            if (!currentUserId) return;
-            const userRef = ref(database, `onlineUsers/${currentUserId}`);
-            remove(userRef).catch((error) => {
-                console.error('Error removing user from online:', error);
-            });
+            if (!database) return;
+            const presenceId = currentUserId || window.presenceClientId;
+            if (!presenceId) return;
+            const userRef = ref(database, `onlineUsers/${presenceId}`);
+            (async () => {
+                try {
+                    // Check if the user was present (so we know whether to decrement)
+                    const snap = await get(userRef);
+                    const existed = snap && snap.exists();
+                    await remove(userRef);
+                    // counters/onlineCount is maintained server-side by a Cloud Function; no client decrement required
+                } catch (error) {
+                    console.error('Error removing user from online:', error && error.message ? error.message : error);
+                }
+            })();
         }
 
         // ============================================================================
@@ -12386,29 +12548,45 @@
                         });
                     }
                     
-                    // Store count globally for use in scoring functions
-                    onlineUserCount = count;
-                    
-                    // Update the display
-                    const countElement = document.getElementById('onlineUserCount');
-                    if (countElement) {
-                        countElement.textContent = count + ' online';
-                        console.log(`👥 ONLINE COUNT UPDATE: ${count}/${totalUsers} active (${activeUsers.slice(0,3).join(', ')}${totalUsers > 3 ? '...' : ''})`);
-                    }
-                    // 🌍 Canvas globe engine — start rotation when others are online.
-                    try {
-                        const canvas = document.getElementById('brandGlobeCanvas');
-                        const isOnline = count > 1;
-                        if (canvas) canvas.classList.toggle('online', isOnline);
-                        if (isOnline) {
-                            window.brandGlobeEngine.start();
-                        } else {
-                            window.brandGlobeEngine.stop();
+                        // Use the larger of active count vs total tracked users so small fluctuations don't show 0
+                        onlineUserCount = Math.max(count, totalUsers || 0);
+
+                        // Update the display: show active / total when available
+                        const countElement = document.getElementById('onlineUserCount');
+                        if (countElement) {
+                            if (totalUsers && totalUsers !== count) {
+                                countElement.textContent = `${count} active • ${totalUsers} total`;
+                            } else {
+                                countElement.textContent = `${onlineUserCount} online`;
+                            }
+                            console.log(`👥 ONLINE COUNT UPDATE: active=${count} / total=${totalUsers} (${activeUsers.slice(0,3).join(', ')}${totalUsers > 3 ? '...' : ''})`);
                         }
-                    } catch (_) {}
+
+                        // 🌍 Canvas globe engine — start rotation when others are online (use total as fallback)
+                        try {
+                            const canvas = document.getElementById('brandGlobeCanvas');
+                            const isOnline = (count > 1) || (totalUsers > 1);
+                            if (canvas) canvas.classList.toggle('online', isOnline);
+                            if (isOnline) {
+                                window.brandGlobeEngine.start();
+                            } else {
+                                window.brandGlobeEngine.stop();
+                            }
+                        } catch (_) {}
                 }, (error) => {
-                    // Error handler: if listener fails, try to reconnect
-                    console.error('❌ Error in online user listener:', error);
+                    // Error handler: handle permission issues or transient errors
+                    console.error('❌ Error in online user listener:', error && error.message ? error.message : error);
+                    // If permission denied, degrade gracefully and show minimal count
+                    if (error && (error.code === 'database/permission-denied' || (error.message && error.message.toLowerCase().includes('permission')))) {
+                        console.warn('⚠️ Permission denied reading onlineUsers — falling back to safe default');
+                        onlineUserCount = 1;
+                        const countElement = document.getElementById('onlineUserCount');
+                        if (countElement) countElement.textContent = '1 online';
+                        // Also attempt a one-time fetch (may succeed even when listener fails)
+                        fetchOnlineUserCountOnce().catch(() => {});
+                        return;
+                    }
+                    // Otherwise, retry after a delay (transient network errors)
                     console.log('⏰ Will retry subscribing to online users in 5 seconds...');
                     setTimeout(() => {
                         console.log('🔄 Retrying online user subscription...');
@@ -12425,29 +12603,121 @@
             }
         }
 
+        // Create a simple sign-in gate overlay that prompts user to sign in or continue anonymously
+        function createSignInGate() {
+            try {
+                // If already present, show and return
+                let gate = document.getElementById('signinGate');
+                if (!gate) {
+                    gate = document.createElement('div');
+                    gate.id = 'signinGate';
+                    gate.style.position = 'fixed';
+                    gate.style.inset = '0';
+                    gate.style.zIndex = '100000';
+                    gate.style.display = 'flex';
+                    gate.style.alignItems = 'center';
+                    gate.style.justifyContent = 'center';
+                    gate.style.background = 'linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0.9))';
+
+                    const box = document.createElement('div');
+                    box.style.background = '#0b1220';
+                    box.style.padding = '24px';
+                    box.style.borderRadius = '12px';
+                    box.style.boxShadow = '0 12px 40px rgba(0,0,0,0.6)';
+                    box.style.color = '#e6fff9';
+                    box.style.maxWidth = '420px';
+                    box.style.textAlign = 'center';
+
+                    box.innerHTML = `<div style="font-size:20px; font-weight:800; margin-bottom:8px;">Sign in to view content</div>
+                        <div style="color:#9adbd8; margin-bottom:16px;">Create a quick anonymous session or sign in with Google to access the grid. You can sign in on multiple devices.</div>`;
+
+                    const anonBtn = document.createElement('button');
+                    anonBtn.textContent = 'Continue anonymously';
+                    anonBtn.style.margin = '6px';
+                    anonBtn.style.padding = '10px 14px';
+                    anonBtn.style.borderRadius = '8px';
+                    anonBtn.style.border = '2px solid #22c1c3';
+                    anonBtn.style.background = '#08202b';
+                    anonBtn.style.color = '#22c1c3';
+                    anonBtn.style.fontWeight = '700';
+                    anonBtn.onclick = async () => {
+                        try {
+                            if (!auth) throw new Error('Auth not ready');
+                            await setPersistence(auth, browserLocalPersistence);
+                            await signInAnonymously(auth);
+                            gate.remove();
+                            // initialize grid now that user signed in
+                            try { initializeGrid(); } catch (e) {}
+                            try { updateUserActivity(); } catch (e) {}
+                        } catch (e) {
+                            console.error('Anonymous sign-in failed', e);
+                            alert('Sign-in failed: ' + (e && e.message ? e.message : e));
+                        }
+                    };
+
+                    const googleBtn = document.createElement('button');
+                    googleBtn.textContent = 'Sign in with Google';
+                    googleBtn.style.margin = '6px';
+                    googleBtn.style.padding = '10px 14px';
+                    googleBtn.style.borderRadius = '8px';
+                    googleBtn.style.border = '2px solid #8b9aff';
+                    googleBtn.style.background = 'linear-gradient(135deg,#667eea,#764ba2)';
+                    googleBtn.style.color = '#fff';
+                    googleBtn.style.fontWeight = '700';
+                    googleBtn.onclick = async () => {
+                        try {
+                            if (!auth) throw new Error('Auth not ready');
+                            const provider = new GoogleAuthProvider();
+                            await signInWithPopup(auth, provider);
+                            gate.remove();
+                            try { initializeGrid(); } catch (e) {}
+                            try { updateUserActivity(); } catch (e) {}
+                        } catch (e) {
+                            console.error('Google sign-in failed', e);
+                            alert('Google sign-in failed: ' + (e && e.message ? e.message : e));
+                        }
+                    };
+
+                    const btnWrap = document.createElement('div');
+                    btnWrap.style.display = 'flex';
+                    btnWrap.style.justifyContent = 'center';
+                    btnWrap.appendChild(anonBtn);
+                    btnWrap.appendChild(googleBtn);
+
+                    box.appendChild(btnWrap);
+                    gate.appendChild(box);
+                    document.body.appendChild(gate);
+                } else {
+                    gate.style.display = 'flex';
+                }
+            } catch (e) {
+                console.warn('createSignInGate failed', e);
+            }
+        }
+
         // Initialize online user tracking when page loads
         function initializeOnlineTracking() {
-            console.log('🚀 Initializing online tracking for user:', currentUserId);
-            if (!currentUserId) {
-                console.error('Cannot initialize online tracking: no currentUserId');
-                return;
-            }
-            
-            // Ensure Firebase auth is ready before attempting writes or subscribing
-            if (!auth || !auth.currentUser) {
-                console.log('⏳ Auth not ready — deferring online tracking until auth initializes');
+            console.log('🚀 Initializing online tracking for user:', currentUserId || window.presenceClientId);
+
+            // Always subscribe to onlineUsers so anonymous viewers see an accurate total
+            subscribeToOnlineUserCount();
+
+            // Start presence writes immediately (will use presenceClientId if not signed-in)
+            try { setupRealtimePresence(); } catch (e) { console.warn('setupRealtimePresence call failed:', e); }
+
+            // Ensure we still update activity when auth becomes available so authenticated uid is recorded
+            if (auth && typeof onAuthStateChanged === 'function') {
                 const off = onAuthStateChanged(auth, (user) => {
                     if (user) {
                         try { off(); } catch (_) {}
-                        console.log('🔐 Auth available — starting online tracking now');
+                        console.log('🔐 Auth available — updating presence with authenticated id');
+                        // Migrate presence entry: remove anon entry and write new authenticated one
+                        try { removeUserFromOnline(); } catch (e) {}
+                        currentUserId = user.uid || currentUserId;
                         updateUserActivity();
-                        subscribeToOnlineUserCount();
+                        try { setupRealtimePresence(); } catch (e) { console.warn('setupRealtimePresence call failed after auth:', e); }
                     }
                 });
-            } else {
-                // Immediately update activity
-                updateUserActivity();
-                subscribeToOnlineUserCount();
             }
             
             // 🎯 SMART BACKGROUND PERSISTENCE: Aggressive heartbeat when tab is hidden
@@ -12498,6 +12768,11 @@
 
         // Initialize grid with infinite scroll
         function initializeGrid() {
+            // Require signed-in user to view content. Non-signed-in users see a sign-in gate.
+            if (!currentUserId) {
+                try { createSignInGate(); } catch (e) { console.warn('Failed to show sign-in gate', e); }
+                return;
+            }
             const grid = document.getElementById('grid');
             grid.innerHTML = '';
             userPostBoxes = []; // Reset user post tracking
@@ -12548,10 +12823,10 @@
                             if (postId) {
                                 openViewModalByPostId(postId);
                             }
-                        } else if (userPostBoxes.length < 5) {
+                        } else if (userPostBoxes.length < 1) {
                             openModal(i);
                         } else {
-                            alert('You can post up to 5 times per WiFi network');
+                            alert('You can post only once per WiFi network');
                         }
                     };
                 }
@@ -13630,18 +13905,7 @@
                     if (/^shop|^mall|^store/.test(q)) return new Set(['s']);
                     return null;
                 })();
-                const matchesQuery = (nameLower, typeCode) => {
-                    // 🎯 Polished priority ladder: exact > prefix > tokens > type/category > contains
-                    if (nameLower === q) return 'exact';
-                    if (nameLower.startsWith(q)) return 'prefix';
-                    // Multi-token: all tokens must appear (more specific than plain contains)
-                    if (qTokens.length >= 2 && qTokens.every(t => nameLower.includes(t))) return 'tokens';
-                    // Type-code shortcut: e.g. typing "high school" returns ALL high schools
-                    if (typeCodeFilter && typeCode && typeCodeFilter.has(typeCode)) return 'type';
-                    if (nameLower.includes(q)) return 'contains';
-                    return null;
-                };
-                const matchPriority = m =>
+
                     m === 'exact'    ? 0 :
                     m === 'prefix'   ? 1 :
                     m === 'tokens'   ? 2 :
@@ -18118,9 +18382,23 @@
             for (let i = 1; i < Math.min(16, maxGridSize); i++) {
                 const box = document.getElementById(`box-${i}`);
                 if (box) {
-                    box.classList.remove('filled');
-                    box.innerHTML = '';
-                    box.removeAttribute('data-post-id');
+                    const existingPostId = box.getAttribute('data-post-id');
+                    let preserve = false;
+                    if (existingPostId && window.postCache && postCache[existingPostId]) {
+                        try {
+                            if (postCache[existingPostId].authId === currentUserId) {
+                                preserve = true;
+                            }
+                        } catch (e) { preserve = false; }
+                    }
+                    if (!preserve) {
+                        box.classList.remove('filled');
+                        box.innerHTML = '';
+                        box.removeAttribute('data-post-id');
+                    } else {
+                        // For owned posts preserve inner content but clear transient badge classes
+                        box.classList.remove('badge-new', 'badge-hot', 'badge-rising', 'badge-trending', 'badge-controversial', 'badge-verified', 'badge-disliked', 'badge-balanced', 'badge-media-content', 'badge-spotlight', 'badge-crowned', 'badge-runner-up', 'badge-podium', 'badge-liked', 'badge-boost');
+                    }
                 }
             }
             
@@ -19089,12 +19367,28 @@
                 const box = document.getElementById(`box-${i}`);
                 const zoneTag = document.getElementById(`zone-${i}`);
                 if (box) {
-                    box.innerHTML = '';
-                    box.style.cssText = '';
-                    box.className = 'grid-box';
-                    box.classList.remove('filled');
-                    box.removeAttribute('data-post-id');
-                    box.classList.remove('badge-new', 'badge-hot', 'badge-rising', 'badge-trending', 'badge-controversial', 'badge-verified', 'badge-disliked', 'badge-balanced', 'badge-media-content', 'badge-spotlight', 'badge-crowned', 'badge-runner-up', 'badge-podium', 'badge-liked', 'badge-boost', 'badge-boost-crowned', 'badge-boost-podium', 'badge-boost-spotlight');
+                    const existingPostId = box.getAttribute('data-post-id');
+                    let preserve = false;
+                    if (existingPostId && window.postCache && postCache[existingPostId]) {
+                        try {
+                            if (postCache[existingPostId].authId === currentUserId) {
+                                preserve = true;
+                            }
+                        } catch (e) { preserve = false; }
+                    }
+                    if (!preserve) {
+                        box.innerHTML = '';
+                        box.style.cssText = '';
+                        box.className = 'grid-box';
+                        box.classList.remove('filled');
+                        box.removeAttribute('data-post-id');
+                        box.classList.remove('badge-new', 'badge-hot', 'badge-rising', 'badge-trending', 'badge-controversial', 'badge-verified', 'badge-disliked', 'badge-balanced', 'badge-media-content', 'badge-spotlight', 'badge-crowned', 'badge-runner-up', 'badge-podium', 'badge-liked', 'badge-boost', 'badge-boost-crowned', 'badge-boost-podium', 'badge-boost-spotlight');
+                    } else {
+                        // Preserve inner content for owned posts, but ensure transient classes are cleaned
+                        box.style.cssText = '';
+                        box.className = 'grid-box filled';
+                        box.classList.remove('badge-new', 'badge-hot', 'badge-rising', 'badge-trending', 'badge-controversial', 'badge-verified', 'badge-disliked', 'badge-balanced', 'badge-media-content', 'badge-spotlight');
+                    }
                 }
                 if (zoneTag) {
                     zoneTag.textContent = 'No zone';
@@ -19932,20 +20226,15 @@
                 sellSelected = !sellSelected;
                 sellBtn.setAttribute('aria-pressed', sellSelected ? 'true' : 'false');
                 if (sellSelected) {
-                    // Ensure 'sell' is present in selectedBadges
                     if (!window.selectedBadges.includes('sell')) window.selectedBadges.push('sell');
                     window.primaryBadge = 'sell';
-                    sellBtn.style.background = '#0f2b2c';
-                    sellBtn.style.color = '#8ef0ee';
-                    // reflect in preview text
+                    sellBtn.classList.add('badge-selected');
                     const previewText = document.getElementById('uploadPreviewText');
                     if (previewText) previewText.textContent = 'Sell post — media optional';
                 } else {
-                    // Remove sell
                     window.selectedBadges = window.selectedBadges.filter(b => b !== 'sell');
                     window.primaryBadge = null;
-                    sellBtn.style.background = '#08202b';
-                    sellBtn.style.color = '#22c1c3';
+                    sellBtn.classList.remove('badge-selected');
                     const previewText = document.getElementById('uploadPreviewText');
                     if (previewText) previewText.textContent = (selectedFile ? 'Media selected' : 'No media selected');
                 }
@@ -20768,7 +21057,8 @@
                 console.log(`   📊 Source: ${areaTagSource} | POIs: ${globalPOIDatabase?.length?.toLocaleString()} | Locations: ${globalLocationDatabase?.length?.toLocaleString()}`);
                 console.log(`   💾 SAVING WITH AREA TAG: "${areaTag}"`);
                 
-                const boostChecked = (document.getElementById('boostToggle') && document.getElementById('boostToggle').checked) || !!(window.pendingBoost && window.pendingBoost.armed && window.pendingBoost.paid);
+                // Boost is only applied when a paid boost has been completed via payment flow
+                const boostChecked = !!(window.pendingBoost && window.pendingBoost.paid);
 
                 const postData = {
                     id: postId,
@@ -20791,19 +21081,28 @@
                     isUserPost: true,
                     // 🚀 BOOST INTENT — set when user toggled boost in composer (MVP: immediate client-side boost)
                     boostRequested: !!boostChecked,
-                    boostIntent: boostChecked ? {
-                        armedAt: Date.now(),
+                    boostIntent: (boostChecked && window.pendingBoost) ? {
+                        armedAt: window.pendingBoost.armedAt || Date.now(),
                         client: 'composer-v1-mvp',
-                        priceCents: 0,
-                        paymentIntentId: null
+                        priceCents: (typeof window.boostPricingEngine === 'object' && typeof window.boostPricingEngine.getPrice === 'function') ? window.boostPricingEngine.getPrice() : 0,
+                        paymentIntentId: window.pendingBoost.paymentIntentId || null
                     } : null
                 };
 
-                // Persist the initial detected area tag so it remains stable across refreshes
+                // Persist the initial detected area tag but only lock it when confident
                 try {
                     postData.originalAreaTag = postData.county || null;
-                    postData.areaTagLocked = true; // lock until system decides to re-index
-                    postData.areaTagLockedAt = Date.now();
+                    // Only lock the area tag if it was derived from a POI or a confident location
+                    let lockArea = true;
+                    if (areaTagSource === 'zone') {
+                        // If zone is a coordinate fallback or loading state, don't lock yet
+                        if (!areaTag || String(areaTag).startsWith('📍') || areaTag === 'Loading...' || (userLocation && userLocation.accuracy && userLocation.accuracy > 200)) {
+                            lockArea = false;
+                        }
+                    }
+                    postData.areaTagLocked = !!lockArea;
+                    postData.areaPending = lockArea ? false : true; // mark for later re-evaluation
+                    postData.areaTagLockedAt = lockArea ? Date.now() : null;
                     // Also set zoneTag for indexing convenience
                     postData.zoneTag = postData.county || postData.customTag || null;
                 } catch (e) { console.warn('Failed to attach original area tag metadata', e); }
