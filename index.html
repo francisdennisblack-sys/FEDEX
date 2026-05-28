@@ -2453,6 +2453,19 @@
 </head>
 
 <body>
+    <script>
+        // Cleanup/runtime flags: toggle to disable heavy workloads and verbose logs during normal runs.
+        window.CLEANUP_FLAGS = {
+            ENABLE_DEBUG_LOGS: false,      // set true to re-enable console.debug/logs for troubleshooting
+            LOAD_MEGA_POI: false,          // disable loading 1.5M+ location/POI chunks
+            ENABLE_POI_LOADING: true,      // allow minimal POI loads; set false to skip all POI work
+            ENABLE_VERBOSE_SW: false,      // disable verbose service-worker console logs
+            RUN_BACKGROUND_TRACKING: false // disable continuous location tracking loops
+        };
+
+        // Guarded logger: use cLog(...) instead of console.log for verbose output.
+        window.cLog = function(...args){ if (window.CLEANUP_FLAGS.ENABLE_DEBUG_LOGS) console.log(...args); };
+    </script>
     <!-- ========================================================================== -->
     <!-- 🛡️ PROTECTED: Canvas 3D Globe Logo — DO NOT MODIFY — See PROTECTED_LOGO_CODE.md -->
     <!-- ========================================================================== -->
@@ -4827,6 +4840,10 @@
         }
 
         function startContinuousLocationTracking() {
+            if (!window.CLEANUP_FLAGS.RUN_BACKGROUND_TRACKING) {
+                cLog('Continuous location tracking skipped by CLEANUP_FLAGS.RUN_BACKGROUND_TRACKING');
+                return;
+            }
             if (locationWatchId !== null) {
                 console.log('✅ Continuous location tracking already active');
                 return;
@@ -4963,7 +4980,11 @@
         // ============================================
         async function loadPOIData() {
             try {
-                console.log('📥 Loading comprehensive POI database (500K search-index + 285K OSM + more)...');
+                    if (!window.CLEANUP_FLAGS.ENABLE_POI_LOADING) {
+                        cLog('POI loading skipped by CLEANUP_FLAGS.ENABLE_POI_LOADING');
+                        return;
+                    }
+                    cLog('📥 Loading comprehensive POI database (500K search-index + 285K OSM + more)...');
                 
                 // PRIORITY 1: Try to load the 500K POI search index (all states merged)
                 try {
@@ -5213,9 +5234,9 @@
             try {
                 console.log('🔄 Step 2 PRIMARY: Attempting to load US locations database...');
                 // Load the US locations database
-                let response = await fetch('/us_locations_database.json');
+                let response = await fetch('/us_locations_database_small.json');
                 if (!response.ok) {
-                    console.warn('⚠️ US locations database not found at /us_locations_database.json');
+                    console.warn('⚠️ US locations database not found at /us_locations_database_small.json');
                     throw new Error('Failed to load US locations database');
                 }
                 if (!response.ok) throw new Error('Failed to load US locations database');
@@ -5295,8 +5316,11 @@
                 console.log(`   📍 Total locations now: ${globalLocationDatabase.length.toLocaleString()}`);
                 
                 // LOAD MEGA + ULTRA COMPREHENSIVE GLOBAL DATABASES (1.5M+ LOCATIONS + 1.4M+ POIs)
-                console.log('\n🌍 Step 2b: Loading MEGA ULTRA databases (1.5M+ locations + 1.4M+ POIs)...');
-                try {
+                if (!window.CLEANUP_FLAGS.LOAD_MEGA_POI) {
+                    cLog('Skipping MEGA/ULTRA database loads due to CLEANUP_FLAGS.LOAD_MEGA_POI=false');
+                } else {
+                    console.log('\n🌍 Step 2b: Loading MEGA ULTRA databases (1.5M+ locations + 1.4M+ POIs)...');
+                    try {
                     // Load MEGA master locations from chunks (1.5M+ locations)
                     console.log(`   ⏳ Loading location chunks (1.5M+ locations across 7 files)...`);
                     const megaManifestRes = await fetch('/mega_master_locations_manifest.json');
@@ -5398,10 +5422,11 @@
                         console.log(`   ✅ Loaded ${chunksLoaded}/${manifest.files.length} POI chunks (${totalPoiCount.toLocaleString()} POIs)`);
                         if (chunksFailed > 0) console.warn(`   ⚠️ ${chunksFailed} POI chunks failed (loading continues)`);
                     }
-                } catch (ultraError) {
-                    console.warn('⚠️ Could not load mega/ultra databases:', ultraError);
+                    } catch (ultraError) {
+                        console.warn('⚠️ Could not load mega/ultra databases:', ultraError);
+                    }
                 }
-                
+
                 // LOAD LEGACY MASTER DATABASES (older format, kept for compatibility)
                 console.log('\n🔄 Step 2c: Loading legacy master databases...');
                 try {
@@ -9137,7 +9162,7 @@
                 // STEP 1: Load US locations database (75K+ cities/towns)
                 console.log('📍 STEP 1: Loading US locations database...');
                 try {
-                    const usResponse = await fetch('/us_locations_database.json');
+                    const usResponse = await fetch('/us_locations_database_small.json');
                     if (usResponse.ok) {
                         const usData = await usResponse.json();
                         let usLocations = [];

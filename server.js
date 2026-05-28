@@ -66,6 +66,14 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
 
+// Runtime flags for cleanup/perf
+const VERBOSE_SERVER = false;      // Set true to re-enable server logs
+const ENABLE_MODERATION = false;   // Set true to enable Cloud Vision/Video moderation
+
+function sLog(...args){ if (VERBOSE_SERVER) console.log(...args); }
+function sWarn(...args){ if (VERBOSE_SERVER) console.warn(...args); }
+function sErr(...args){ console.error(...args); }
+
 // Serve static files (index.html and assets)
 app.use(express.static(path.join(__dirname, '.')));
 
@@ -89,14 +97,14 @@ function loadDatabase() {
             const parsedData = JSON.parse(data);
             postsDatabase = parsedData.posts || {};
             postIdCounter = parsedData.idCounter || 0;
-            console.log(`[${new Date().toISOString()}] Loaded ${Object.keys(postsDatabase).length} zones from database`);
+            sLog(`[${new Date().toISOString()}] Loaded ${Object.keys(postsDatabase).length} zones from database`);
             
-            // Log zone info
+            // Log zone info (guarded)
             for (const zoneId in postsDatabase) {
-                console.log(`  - ${zoneId}: ${postsDatabase[zoneId].length} posts`);
+                sLog(`  - ${zoneId}: ${postsDatabase[zoneId].length} posts`);
             }
         } else {
-            console.log(`[${new Date().toISOString()}] No existing database found. Starting fresh.`);
+            sLog(`[${new Date().toISOString()}] No existing database found. Starting fresh.`);
         }
     } catch (error) {
         console.error(`Error loading database: ${error.message}`);
@@ -180,7 +188,7 @@ app.post('/api/posts', (req, res) => {
         for (const zid in postsDatabase) {
             const existing = postsDatabase[zid].find(p => p.clientId && p.clientId === clientId);
             if (existing) {
-                console.log(`[idempotency] duplicate post attempt detected for clientId=${clientId}, returning existing post id=${existing.id}`);
+                sLog(`[idempotency] duplicate post attempt detected for clientId=${clientId}, returning existing post id=${existing.id}`);
                 return res.json({ success: true, post: existing, duplicate: true });
             }
         }
@@ -190,7 +198,7 @@ app.post('/api/posts', (req, res) => {
         for (const zid in postsDatabase) {
             const existing = postsDatabase[zid].find(p => String(p.id) === String(providedPostId));
             if (existing) {
-                console.log(`[idempotency] duplicate post attempt detected for postId=${providedPostId}, returning existing post`);
+                sLog(`[idempotency] duplicate post attempt detected for postId=${providedPostId}, returning existing post`);
                 return res.json({ success: true, post: existing, duplicate: true });
             }
         }
@@ -316,7 +324,12 @@ app.post('/api/moderate-video', async (req, res) => {
     try {
         const { videoUrl, postId, zoneId } = req.body;
         
-        console.log('🎥 Video moderation check:', videoUrl);
+        sLog('🎥 Video moderation check:', videoUrl);
+
+        if (!ENABLE_MODERATION) {
+            sLog('[moderation] Video moderation disabled by ENABLE_MODERATION flag; allowing by default', videoUrl);
+            return res.json({ success: true, isFlagged: false, moderationReason: 'moderation-disabled', explicitConfidence: 0, violenceConfidence: 0, postId, zoneId });
+        }
         
         // IMPORTANT: Moderation is set to ALLOW ALL for now
         // Google Cloud Vision was too strict and blocking legitimate content
@@ -336,12 +349,11 @@ app.post('/api/moderate-video', async (req, res) => {
         };
         
         // Run moderation analysis
-        console.log('📡 Sending to Google Cloud Vision...');
+        sLog('📡 Sending to Google Cloud Vision...');
         const [operation] = await client.annotateVideo(request);
-        console.log('⏳ Waiting for analysis (this may take 30-60 seconds)...');
+        sLog('⏳ Waiting for analysis (this may take 30-60 seconds)...');
         const [response] = await operation.promise();
-        
-        console.log('✅ Analysis complete');
+        sLog('✅ Analysis complete');
         
         // Extract results
         const annotationResult = response.annotationResults[0] || {};
@@ -366,7 +378,7 @@ app.post('/api/moderate-video', async (req, res) => {
         if (MODERATION_ENABLED && explicitAnnotation.frames && explicitAnnotation.frames.length > 0) {
             const confidenceValues = explicitAnnotation.frames.map(f => f.pornographyLikelihood || 0);
             explicitConfidence = Math.max(...confidenceValues);
-            console.log('📊 Explicit content confidence:', explicitConfidence, '(5=VERY_LIKELY, 4=LIKELY)');
+            sLog('📊 Explicit content confidence:', explicitConfidence, '(5=VERY_LIKELY, 4=LIKELY)');
             
             if (explicitConfidence >= 4) {
                 isFlagged = true;
@@ -378,7 +390,7 @@ app.post('/api/moderate-video', async (req, res) => {
         if (MODERATION_ENABLED && !isFlagged && violenceAnnotations && violenceAnnotations.length > 0) {
             const violenceScores = violenceAnnotations.map(v => v.confidence || 0);
             violenceConfidence = Math.max(...violenceScores);
-            console.log('📊 Violence confidence:', violenceConfidence, '(0.85+ = flagged, reduced from 0.7)');
+            sLog('📊 Violence confidence:', violenceConfidence, '(0.85+ = flagged, reduced from 0.7)');
             
             if (violenceConfidence >= 0.85) {
                 isFlagged = true;
@@ -386,7 +398,7 @@ app.post('/api/moderate-video', async (req, res) => {
             }
         }
         
-        console.log(`✅ Moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
+        sLog(`✅ Moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
         
         res.json({
             success: true,
@@ -399,8 +411,8 @@ app.post('/api/moderate-video', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('❌ Moderation error:', error.message);
-        console.error('Full error:', error);
+        sErr('❌ Moderation error:', error.message);
+        sErr('Full error:', error);
         
         // Fail-open: allow upload if moderation service is down
         res.status(500).json({ 
@@ -416,7 +428,12 @@ app.post('/api/moderate-photo', async (req, res) => {
     try {
         const { imageUrl, postId, zoneId } = req.body;
         
-        console.log('📸 Photo moderation check:', imageUrl);
+        sLog('📸 Photo moderation check:', imageUrl);
+
+        if (!ENABLE_MODERATION) {
+            sLog('[moderation] Photo moderation disabled by ENABLE_MODERATION flag; allowing by default', imageUrl);
+            return res.json({ success: true, isFlagged: false, moderationReason: 'moderation-disabled', confidenceDetails: {}, postId, zoneId });
+        }
         
         // IMPORTANT: Moderation is set to ALLOW ALL for now
         // Google Cloud Vision was too strict and blocking legitimate content
@@ -432,14 +449,14 @@ app.post('/api/moderate-photo', async (req, res) => {
             }
         };
         
-        console.log('📡 Checking with Google Cloud Vision...');
+        sLog('📡 Checking with Google Cloud Vision...');
         const [result] = await visionClient.safeSearchDetection(request);
         const safeSearchResult = result.safeSearchAnnotation;
         
-        console.log('✅ Analysis complete');
-        console.log('  Adult likelihood:', safeSearchResult.adult);
-        console.log('  Violence likelihood:', safeSearchResult.violence);
-        console.log('  Racy likelihood:', safeSearchResult.racy);
+        sLog('✅ Analysis complete');
+        sLog('  Adult likelihood:', safeSearchResult.adult);
+        sLog('  Violence likelihood:', safeSearchResult.violence);
+        sLog('  Racy likelihood:', safeSearchResult.racy);
         
         let isFlagged = false;
         let moderationReason = '';
@@ -459,22 +476,22 @@ app.post('/api/moderate-photo', async (req, res) => {
         if (MODERATION_ENABLED && safeSearchResult.adult >= 4) {
             isFlagged = true;
             moderationReason = 'Explicit/Nudity content detected in photo';
-            console.log('🚫 Flagged for adult content:', safeSearchResult.adult);
+            sLog('🚫 Flagged for adult content:', safeSearchResult.adult);
         }
         
         if (MODERATION_ENABLED && !isFlagged && safeSearchResult.violence >= 4) {
             isFlagged = true;
             moderationReason = 'Violence detected in photo';
-            console.log('🚫 Flagged for violence:', safeSearchResult.violence);
+            sLog('🚫 Flagged for violence:', safeSearchResult.violence);
         }
         
         if (MODERATION_ENABLED && !isFlagged && safeSearchResult.racy >= 5) {
             isFlagged = true;
             moderationReason = 'Racy/Suggestive content detected in photo';
-            console.log('🚫 Flagged for racy content:', safeSearchResult.racy);
+            sLog('🚫 Flagged for racy content:', safeSearchResult.racy);
         }
         
-        console.log(`✅ Photo moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
+        sLog(`✅ Photo moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
         
         res.json({
             success: true,
@@ -486,8 +503,8 @@ app.post('/api/moderate-photo', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('❌ Photo moderation error:', error.message);
-        console.error('Full error:', error);
+        sErr('❌ Photo moderation error:', error.message);
+        sErr('Full error:', error);
         
         // Fail-open: allow upload if moderation service is down
         res.status(500).json({ 
@@ -548,11 +565,11 @@ app.get('/api/fetch-wifi', async (req, res) => {
     const userLon = parseFloat(lon);
     const tileKey = getTileKey(userLat, userLon);
     
-    console.log(`[${new Date().toISOString()}] 📍 WiFi request for tile: ${tileKey} (${userLat}, ${userLon})`);
+    sLog(`[${new Date().toISOString()}] 📍 WiFi request for tile: ${tileKey} (${userLat}, ${userLon})`);
     
     // Check cache first
     if (regionCache[tileKey] && regionCache[tileKey].timestamp > Date.now() - CACHE_EXPIRY) {
-        console.log(`[${new Date().toISOString()}] ✅ Cache HIT for tile: ${tileKey}`);
+        sLog(`[${new Date().toISOString()}] ✅ Cache HIT for tile: ${tileKey}`);
         const county = getCountyFromCoordinates(userLat, userLon);
         return res.json({
             success: true,
@@ -563,7 +580,7 @@ app.get('/api/fetch-wifi', async (req, res) => {
         });
     }
     
-    console.log(`[${new Date().toISOString()}] 🔄 Cache MISS for tile: ${tileKey}`);
+    sLog(`[${new Date().toISOString()}] 🔄 Cache MISS for tile: ${tileKey}`);
     
     try {
         // For now, return county without calling WiGLE (testing phase)
@@ -576,7 +593,7 @@ app.get('/api/fetch-wifi', async (req, res) => {
             timestamp: Date.now()
         };
         
-        console.log(`[${new Date().toISOString()}] 📍 Returning county: ${county}`);
+        sLog(`[${new Date().toISOString()}] 📍 Returning county: ${county}`);
         
         res.json({
             success: true,
@@ -645,7 +662,7 @@ app.get('/api/reverse-geocode', (req, res) => {
         // Check cache first
         const cachedResult = getGeocodeCache(latitude, longitude);
         if (cachedResult) {
-            console.log(`[Geocode Cache] HIT: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`);
+            sLog(`[Geocode Cache] HIT: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`);
             return res.json({
                 ...cachedResult,
                 source: 'cache'
@@ -655,7 +672,7 @@ app.get('/api/reverse-geocode', (req, res) => {
         // Call OpenStreetMap Nominatim API (free reverse geocoding)
         const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`;
         
-        console.log(`[Geocode Request] Fetching: ${url}`);
+        sLog(`[Geocode Request] Fetching: ${url}`);
         
         https.get(url, {
             headers: {
@@ -698,7 +715,7 @@ app.get('/api/reverse-geocode', (req, res) => {
                     // Cache the result
                     setGeocodeCache(latitude, longitude, result);
                     
-                    console.log(`[Geocode Success] ${prettyName} (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`);
+                    sLog(`[Geocode Success] ${prettyName} (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`);
                     
                     res.json({
                         ...result,
@@ -792,7 +809,7 @@ app.get('/api/boost-prices', (req, res) => {
             const parsed = JSON.parse(data);
             basePrices = parsed.basePrices;
             priceMultipliers = parsed.priceMultipliers;
-            console.log('📊 Loaded dynamic boost prices from file');
+            sLog('📊 Loaded dynamic boost prices from file');
         }
     } catch (e) {
         console.warn('⚠️ Could not load dynamic prices:', e.message);
@@ -832,7 +849,7 @@ app.post('/api/boost-prices', (req, res) => {
             lastUpdated: Date.now()
         }, null, 2));
         
-        console.log('💰 Updated boost prices:', basePrices);
+        sLog('💰 Updated boost prices:', basePrices);
         res.json({ success: true, basePrices, priceMultipliers });
     } catch (e) {
         console.error('Error saving prices:', e);
@@ -889,10 +906,10 @@ app.get('*', (req, res) => {
 const PORT = process.env.PORT || 5001;
 
 const server = app.listen(PORT, () => {
-    console.log(`[${new Date().toISOString()}] Server running on http://localhost:${PORT}`);
+    sLog(`[${new Date().toISOString()}] Server running on http://localhost:${PORT}`);
 });
 
 server.on('error', (err) => {
-    console.error('Server error:', err);
+    sErr('Server error:', err);
     // Keep process alive for transient server errors; allow operator to investigate.
 });
