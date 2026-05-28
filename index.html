@@ -3114,7 +3114,7 @@
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
         import { getDatabase, ref, set, get, update, remove, onValue } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
         import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
-        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
+        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, GoogleAuthProvider, signInWithPopup, linkWithPopup } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
 
         const firebaseConfig = {
             apiKey: "AIzaSyD5A_MF7gRvqnHd_DD3lReYpEkRph6msX4",
@@ -8508,6 +8508,33 @@
                     console.log('⚠️ Subscribing anyway with fallback...');
                     subscribeToFirebasePostsWithReconnect();
                     try { flushQueuedPosts().catch(e => console.warn('Queued flush error:', e)); } catch(e) { console.warn('flushQueuedPosts not available yet', e); }
+                    // Add 'Link with Google' UI button (small and non-intrusive)
+                    try {
+                        const linkBtn = document.createElement('button');
+                        linkBtn.id = 'linkGoogleBtn';
+                        linkBtn.textContent = 'Link with Google';
+                        linkBtn.style.position = 'fixed';
+                        linkBtn.style.right = '12px';
+                        linkBtn.style.bottom = '12px';
+                        linkBtn.style.zIndex = 99999;
+                        linkBtn.style.padding = '8px 12px';
+                        linkBtn.style.background = '#4285F4';
+                        linkBtn.style.color = '#fff';
+                        linkBtn.style.border = 'none';
+                        linkBtn.style.borderRadius = '6px';
+                        linkBtn.style.boxShadow = '0 2px 6px rgba(0,0,0,0.2)';
+                        linkBtn.style.cursor = 'pointer';
+                        linkBtn.addEventListener('click', async (e) => {
+                            e.preventDefault();
+                            try {
+                                await linkAccountWithGoogle();
+                            } catch (err) {
+                                console.error('Link with Google failed:', err);
+                                alert('Link with Google failed: ' + (err && err.message));
+                            }
+                        });
+                        document.body.appendChild(linkBtn);
+                    } catch (uiErr) { console.warn('Could not add Link with Google button:', uiErr); }
                 });
                 
                 // ✅ BACKGROUND TASKS: Keep minimal - only essential updates
@@ -10771,6 +10798,38 @@
                 }
             } catch (e) {
                 console.error('flushQueuedPosts error:', e);
+            }
+        }
+
+        // Link anonymous account to Google (one-click)
+        async function linkAccountWithGoogle() {
+            try {
+                if (!auth) throw new Error('Auth not initialized');
+                const user = auth.currentUser;
+                if (!user) throw new Error('No current user to link');
+
+                const provider = new GoogleAuthProvider();
+
+                // If user is anonymous, link their account to Google using a popup
+                if (user.isAnonymous) {
+                    console.log('🔗 Linking anonymous account to Google...');
+                    const result = await linkWithPopup(user, provider);
+                    console.log('✅ Account linked to Google:', result.user.uid);
+                    // Update mapping in Firebase users/ node
+                    try { await set(ref(database, `users/${currentUserId}/linkedProviders/google`), { linkedAt: Date.now(), googleUid: result.user.uid }); } catch (e) { console.warn('Failed writing linkedProviders metadata', e); }
+                    alert('Account successfully linked to Google. Your posts will stay with your account.');
+                    return result;
+                } else {
+                    // Not anonymous: perform a regular sign-in or prompt to link
+                    console.log('User is not anonymous; prompting Google sign-in');
+                    const result = await signInWithPopup(auth, provider);
+                    console.log('✅ Signed in with Google:', result.user.uid);
+                    alert('Signed in with Google');
+                    return result;
+                }
+            } catch (err) {
+                console.error('linkAccountWithGoogle error:', err);
+                throw err;
             }
         }
 
