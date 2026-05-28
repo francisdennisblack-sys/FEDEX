@@ -20776,6 +20776,22 @@
                 console.log(`   County field will be: "${postData.county}"`);
                 console.log(`   Nearest POI: ${areaTag}`);
 
+                // Ensure each post has a client-generated id to allow idempotent saves
+                function generateClientId() {
+                    try {
+                        if (window.crypto && window.crypto.randomUUID) return `cli-${window.crypto.randomUUID()}`;
+                    } catch (e) {
+                        // fall through
+                    }
+                    // Fallback simple random ID
+                    return 'cli-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+                }
+
+                if (!postData.clientId) {
+                    postData.clientId = generateClientId();
+                    console.log('  🔑 Assigned clientId for idempotency:', postData.clientId);
+                }
+
                 // 🚨 CRITICAL VALIDATION: Ensure currentUserId is set
                 if (!currentUserId || currentUserId === 'null' || currentUserId === null) {
                     console.error('🚨 CRITICAL ERROR: currentUserId is null/empty!');
@@ -20836,8 +20852,20 @@
                 console.log(`📝 Saving post: ${postId.substring(0, 12)}... to ${areaTag || 'Local Zone'} by ${authUserId.substring(0, 12)}...`);
                 
                 // Save to SHARED posts collection (not per-user)
-                await savePostToFirebaseShared(postId, postData);
-                console.log(`✅ Post saved to shared collection - all users will see it`);
+                // Use a single retry on transient failure, keeping the same clientId so server dedupes.
+                try {
+                    await savePostToFirebaseShared(postId, postData);
+                    console.log(`✅ Post saved to shared collection - all users will see it`);
+                } catch (firstErr) {
+                    console.warn('⚠️ savePostToFirebaseShared failed, retrying once...', firstErr);
+                    try {
+                        await savePostToFirebaseShared(postId, postData);
+                        console.log(`✅ Post saved on retry to shared collection`);
+                    } catch (secondErr) {
+                        console.error('❌ savePostToFirebaseShared retry failed:', secondErr);
+                        throw secondErr;
+                    }
+                }
 
                 // 🚀 POST IS NOW IN SHARED COLLECTION - ALL USERS SEE IT
                 // With shared posts collection, distribution is automatic
