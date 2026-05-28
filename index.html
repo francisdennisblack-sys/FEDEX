@@ -2632,6 +2632,14 @@
             RUN_BACKGROUND_TRACKING: false // disable continuous location tracking loops
         };
 
+        // Data source configuration: default to using small local samples for development.
+        // Set `window.DATA_SOURCES = { useSamples: false, remoteBase: 'https://cdn.example.com/data' }` in production.
+        window.DATA_SOURCES = window.DATA_SOURCES || {
+            useSamples: true,
+            samplePath: '/data/samples',
+            remoteBase: ''
+        };
+
         // Guarded logger: use cLog(...) instead of console.log for verbose output.
         window.cLog = function(...args){ if (window.CLEANUP_FLAGS.ENABLE_DEBUG_LOGS) console.log(...args); };
 
@@ -5898,7 +5906,7 @@
                 // PRIORITY 3: Load original expanded POI database as additional source
                 try {
                     console.log('📦 Loading fallback POI database (38K expanded)...');
-                    const poiResponse = await fetch('poi_database_expanded.json');
+                    const poiResponse = await fetch(resolveDataPath('poi_database_expanded.json', true));
                     const poiData = await poiResponse.json();
                     
                     // Flatten the cities structure into a single array of POIs for easier lookup
@@ -6088,10 +6096,25 @@
                     cLog('Skipping MEGA/ULTRA database loads due to CLEANUP_FLAGS.LOAD_MEGA_POI=false');
                 } else {
                     console.log('\n🌍 Step 2b: Loading MEGA ULTRA databases (1.5M+ locations + 1.4M+ POIs)...');
+                        // helper to resolve where to load large data from (samples, remote CDN, or local files)
+                        const _ds = window.DATA_SOURCES || { useSamples: true, samplePath: '/data/samples', remoteBase: '' };
+                        function resolveDataPath(name, sampleFallback = false) {
+                            if (_ds.useSamples) {
+                                // map large single-file names to their sample equivalents when requested
+                                if (sampleFallback) {
+                                    if (name.includes('master_pois')) return `${_ds.samplePath}/master_pois_sample.json`;
+                                    if (name.includes('master_locations')) return `${_ds.samplePath}/master_locations_sample.json`;
+                                    if (name.includes('poi_database_expanded')) return `${_ds.samplePath}/poi_database_expanded_sample.json`;
+                                }
+                                return `${_ds.samplePath}/${name}`;
+                            }
+                            if (_ds.remoteBase) return _ds.remoteBase.replace(/\/$/, '') + '/' + name;
+                            return '/' + name;
+                        }
                     try {
                     // Load MEGA master locations from chunks (1.5M+ locations)
                     console.log(`   ⏳ Loading location chunks (1.5M+ locations across 7 files)...`);
-                    const megaManifestRes = await fetch('/mega_master_locations_manifest.json');
+                    const megaManifestRes = await fetch(resolveDataPath('mega_master_locations_manifest.json'));
                     if (megaManifestRes.ok) {
                         const megaManifest = await megaManifestRes.json();
                         let totalMegaLocCount = 0;
@@ -6100,7 +6123,7 @@
                         
                         for (const fileInfo of megaManifest.files) {
                             try {
-                                const chunkRes = await fetch(`/${fileInfo.filename}`);
+                                const chunkRes = await fetch(resolveDataPath(fileInfo.filename));
                                 if (chunkRes.ok) {
                                     const chunkData = await chunkRes.json();
                                     if (chunkData.data && Array.isArray(chunkData.data)) {
@@ -6143,7 +6166,7 @@
                     
                     // Load ULTRA POIs (1.4M+) from chunks
                     console.log(`   ⏳ Loading POI chunks (1.4M+ POIs across 15 files)...`);
-                    const manifestRes = await fetch('/ultra_master_pois_manifest.json');
+                    const manifestRes = await fetch(resolveDataPath('ultra_master_pois_manifest.json'));
                     if (manifestRes.ok) {
                         const manifest = await manifestRes.json();
                         let totalPoiCount = 0;
@@ -6152,7 +6175,7 @@
                         
                         for (const fileInfo of manifest.files) {
                             try {
-                                const chunkRes = await fetch(`/${fileInfo.filename}`);
+                                const chunkRes = await fetch(resolveDataPath(fileInfo.filename));
                                 if (chunkRes.ok) {
                                     const chunkData = await chunkRes.json();
                                     if (chunkData.data && Array.isArray(chunkData.data)) {
@@ -6199,7 +6222,7 @@
                 console.log('\n🔄 Step 2c: Loading legacy master databases...');
                 try {
                     // Load master locations database (all states with real city names)
-                    const masterLocRes = await fetch('/master_locations_database.json');
+                    const masterLocRes = await fetch(resolveDataPath('master_locations_database.json', true));
                     if (masterLocRes.ok) {
                         const masterLocData = await masterLocRes.json();
                         let masterLocCount = 0;
@@ -6233,7 +6256,7 @@
                     }
                     
                     // Load master POIs database (all categories and locations)
-                    const masterPoiRes = await fetch('/master_pois_database.json');
+                    const masterPoiRes = await fetch(resolveDataPath('master_pois_database.json', true));
                     if (masterPoiRes.ok) {
                         const masterPoiData = await masterPoiRes.json();
                         let masterPoiCount = 0;
@@ -10024,7 +10047,7 @@
                 // STEP 3: Load expanded POI database (300K+ locations)
                 console.log('🌐 STEP 3: Loading expanded POI database...');
                 try {
-                    const expandedResponse = await fetch('/poi_database_expanded.json');
+                    const expandedResponse = await fetch(resolveDataPath('poi_database_expanded.json', true));
                     if (expandedResponse.ok) {
                         const expandedData = await expandedResponse.json();
                         let expandedLocations = [];
