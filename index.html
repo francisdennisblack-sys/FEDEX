@@ -21034,6 +21034,50 @@
                 console.log('⚡ LAZY LOAD: Loading posts from Firebase...');
                 subscribeToFirebasePostsWithReconnect();
             }, 200); // Defer to allow geolocation to start
+
+            // Poll local server for posts as a fallback for development/testing when Firebase is unavailable
+            function pollLocalServerPosts() {
+                try {
+                    if (!userLocation || !userLocation.lat || !userLocation.lon) return;
+                    const zoneKey = getTileKey(userLocation.lat, userLocation.lon);
+                    fetch(`/api/posts/${encodeURIComponent(zoneKey)}`)
+                        .then(r => r.json())
+                        .then(data => {
+                            if (!data || !data.posts) return;
+                            // Merge into shared-posts key without duplicating
+                            const contentKey = 'shared-posts';
+                            if (!gridContent[contentKey]) gridContent[contentKey] = [];
+                            const existingIds = new Set(gridContent[contentKey].map(p => p.id));
+                            let added = 0;
+                            data.posts.forEach(p => {
+                                if (!p || !p.id) return;
+                                if (!existingIds.has(p.id)) {
+                                    // Normalize minimal fields to match Firebase shape
+                                    const normalized = Object.assign({}, p, {
+                                        id: String(p.id),
+                                        authId: p.authId || p.clientId || null,
+                                        userId: p.userId || p.authId || p.clientId || null,
+                                        createdBy: p.createdBy || p.authId || p.clientId || null,
+                                        timestamp: p.timestamp || Date.now()
+                                    });
+                                    gridContent[contentKey].push(normalized);
+                                    postCache[normalized.id] = normalized;
+                                    existingIds.add(normalized.id);
+                                    added++;
+                                }
+                            });
+                            if (added > 0) {
+                                console.log(`📡 Local server posts merged: ${added} posts into ${contentKey}`);
+                                renderGrid();
+                            }
+                        }).catch(err => {
+                            // ignore - local server may be unreachable from some devices
+                        });
+                } catch (e) {
+                    // ignore
+                }
+            }
+            setInterval(pollLocalServerPosts, 5000);
             
             // 🌐 LAZY LOAD: WiFi connection check
             setTimeout(() => {
