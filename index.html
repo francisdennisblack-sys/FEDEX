@@ -10363,8 +10363,27 @@
             // Get external posts WITH FALLBACK TIERS
             const externalPosts = getExternalContentWithFallbacks(userAreaTag, externalSlots, densityMetrics);
             
-            // Combine
-            const gridContent = [...localPosts, ...externalPosts];
+            // Combine local + external
+            let gridContent = [...localPosts, ...externalPosts];
+
+            // STRONGER FALLBACK: Always merge in `shared-posts` so the rendered
+            // feed includes globally-shared posts even when local/external exist.
+            // This prevents empty feeds for signed-in users and improves content
+            // diversity. We only add until we reach `gridSize` to avoid overfill.
+            try {
+                const shared = gridContentStore('shared-posts') || gridContent['shared-posts'] || gridContent['shared-posts'];
+            } catch(e) { /* noop */ }
+            if (gridContent['shared-posts'] || window.gridContent && window.gridContent['shared-posts']) {
+                const sharedList = (gridContent['shared-posts'] || window.gridContent['shared-posts'] || []).slice();
+                const existingIds = new Set(gridContent.map(p => p && p.id));
+                for (const sp of sharedList) {
+                    if (!sp || !sp.id) continue;
+                    if (existingIds.has(sp.id)) continue;
+                    if (gridContent.length >= gridSize) break;
+                    gridContent.push(sp);
+                    existingIds.add(sp.id);
+                }
+            }
             
             // Check fillability
             const fillability = calculateFillableSlots(userAreaTag, gridContent, densityMetrics);
@@ -10424,6 +10443,26 @@
                             ...post,
                             contentSource: 'LOCAL',
                             displayAreaTag: areaTag
+                        });
+                    }
+                });
+            }
+
+            // THIRD: Fallback to shared-posts when area-specific posts are missing
+            // This ensures signed-in users still see the global feed if no area-keyed
+            // entries exist for their detected areaTag.
+            if (posts.length < limit && gridContent['shared-posts']) {
+                gridContent['shared-posts'].forEach(post => {
+                    if (!post || !post.id) return;
+                    if (seenIds.has(post.id)) return;
+                    // If areaTag is present, prefer posts that match it; otherwise include all
+                    if (areaTag && post.county && String(post.county) !== String(areaTag)) return;
+                    if (posts.length < limit) {
+                        seenIds.add(post.id);
+                        posts.push({
+                            ...post,
+                            contentSource: 'SHARED',
+                            displayAreaTag: post.county || areaTag
                         });
                     }
                 });
@@ -18598,12 +18637,27 @@
             }
             
             // Then add posts from other keys (backfilled content)
+            // ALWAYS MERGE shared-posts next so global feed is visible to every viewer
+            if (gridContent['shared-posts'] && Array.isArray(gridContent['shared-posts'])) {
+                gridContent['shared-posts'].forEach(post => {
+                    if (!post || !post.id) return;
+                    if (!seenPostIds.has(post.id)) {
+                        seenPostIds.add(post.id);
+                        // Mark contentSource so downstream algorithms can prefer local posts
+                        if (!post.contentSource) post.contentSource = 'SHARED';
+                        allPosts.push(post);
+                    }
+                });
+            }
+
+            // Then add posts from other keys (backfilled content)
             for (const key in gridContent) {
-                if (key !== contentKey && gridContent[key]) {
+                if (key !== contentKey && key !== 'shared-posts' && gridContent[key]) {
                     // Add posts from other keys that aren't already included
                     gridContent[key].forEach(post => {
+                        if (!post || !post.id) return;
                         if (!seenPostIds.has(post.id)) {
-                        seenPostIds.add(post.id);
+                            seenPostIds.add(post.id);
                             allPosts.push(post);
                         }
                     });
