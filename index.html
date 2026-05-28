@@ -2932,6 +2932,41 @@
                 }
 
                 // Phone auth: send verification SMS using reCAPTCHA
+                // SMS sign-in configuration and attempt tracking
+                window.SMS_SIGNIN_SETTINGS = window.SMS_SIGNIN_SETTINGS || {
+                    maxAttempts: 10,            // client-side allowed attempts before stronger cooldown
+                    baseCooldownSeconds: 60,    // base cooldown applied after rate error
+                    backoffMultiplier: 2        // multiplier for exponential backoff
+                };
+
+                function _smsKey(phone) {
+                    try { return 'smsAttempts:' + phone; } catch (e) { return null; }
+                }
+                function getSmsAttemptData(phone) {
+                    try {
+                        const k = _smsKey(phone);
+                        if (!k) return { count: 0, last: 0 };
+                        const raw = localStorage.getItem(k);
+                        if (!raw) return { count: 0, last: 0 };
+                        return JSON.parse(raw);
+                    } catch (e) { return { count: 0, last: 0 }; }
+                }
+                function setSmsAttemptData(phone, data) {
+                    try { const k = _smsKey(phone); if (!k) return; localStorage.setItem(k, JSON.stringify(data)); } catch (e) {}
+                }
+                function incrementSmsAttempt(phone) {
+                    try {
+                        const d = getSmsAttemptData(phone);
+                        d.count = (d.count || 0) + 1;
+                        d.last = Date.now();
+                        setSmsAttemptData(phone, d);
+                        return d;
+                    } catch (e) { return { count: 1, last: Date.now() }; }
+                }
+                function resetSmsAttempts(phone) {
+                    try { const k = _smsKey(phone); if (!k) return; localStorage.removeItem(k); } catch (e) {}
+                }
+
                 async function sendSignInCode(phone, username) {
                     try {
                         if (!window.auth) throw new Error('Auth not initialized');
@@ -2970,6 +3005,14 @@
                                 await window.setPersistence(window.auth, window.browserLocalPersistence);
                             }
                         } catch (e) { console.warn('Could not set auth persistence for phone sign-in', e); }
+                        // track attempts locally — can't override server SMS quota, but allows us to
+                        // tune client-side retry behaviour for testing and UX
+                        const attemptData = incrementSmsAttempt(phone);
+                        // If attempts exceed client-side max, warn user but still try (server may still accept)
+                        if (attemptData.count > (window.SMS_SIGNIN_SETTINGS.maxAttempts || 10)) {
+                            showNotification && showNotification(`You've requested codes ${attemptData.count} times. Further requests may be rate-limited.`);
+                        }
+
                         const confirmationResult = await signInWithPhoneNumber(auth, phone, appVerifier);
                         window.__confirmationResult = confirmationResult;
                         // temporarily store username to write after confirmation
@@ -2986,11 +3029,16 @@
                             // clear recaptcha instance so the next attempt recreates it cleanly
                             try { if (window.recaptchaVerifier && typeof window.recaptchaVerifier.clear === 'function') { window.recaptchaVerifier.clear(); } } catch(e){}
                             window.recaptchaVerifier = null;
-                            // disable send button and show cooldown
+                            // disable send button and show cooldown using exponential backoff based on attempts
                             try {
                                 const btn = document.getElementById('doSendCode');
                                 if (btn) {
-                                    startButtonCooldown(btn, 180); // 3-minute cooldown
+                                    const d = getSmsAttemptData(phone);
+                                    const attempts = d.count || 1;
+                                    const base = window.SMS_SIGNIN_SETTINGS.baseCooldownSeconds || 60;
+                                    const mult = window.SMS_SIGNIN_SETTINGS.backoffMultiplier || 2;
+                                    const cooldown = Math.min(60 * 60, Math.floor(base * Math.pow(mult, Math.max(0, attempts - (window.SMS_SIGNIN_SETTINGS.maxAttempts || 10)))));
+                                    startButtonCooldown(btn, cooldown);
                                 }
                             } catch (e) { console.warn('Cooldown start failed', e); }
                         }
@@ -23164,10 +23212,20 @@
             }
             _stripePR.on('paymentmethod', async (ev) => {
                 try {
-                    const resp = await fetch('/api/boost/create-intent', {
+                    // If Sell is also armed, create a combined PaymentIntent server-side
+                    let createUrl = '/api/boost/create-intent';
+                    let body = { priceCents: priceCents, userId: window.currentUserId || 'anon' };
+                    let combined = false;
+                    if (window.pendingSell && window.pendingSell.armed) {
+                        combined = true;
+                        createUrl = '/api/checkout/create-intent';
+                        body = { items: [{ kind: 'boost', priceCents: priceCents }, { kind: 'sell', priceCents: 200 }], userId: window.currentUserId || 'anon' };
+                    }
+
+                    const resp = await fetch(createUrl, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ priceCents: priceCents, userId: window.currentUserId || 'anon' })
+                        body: JSON.stringify(body)
                     });
                     const data = await resp.json();
                     if (!data.clientSecret) throw new Error(data.error || 'no client secret');
@@ -23181,6 +23239,13 @@
                     window.pendingBoost.paid = true;
                     window.pendingBoost.paymentMethodId = ev.paymentMethod.id;
                     window.pendingBoost.paymentIntentId = paymentIntent.id;
+                    if (combined) {
+                        // also mark sell as paid and persist intent id for reconciliation
+                        window.pendingSell.paid = true;
+                        window.pendingSell.paymentIntentId = paymentIntent.id;
+                        try { localStorage.setItem('pendingSellPaymentIntentId', paymentIntent.id); } catch (e) {}
+                        _showSellPaid();
+                    }
                     _showBoostPaid();
                 } catch (e) {
                     ev.complete('fail');
@@ -23210,20 +23275,28 @@
             const errEl = document.getElementById('boostCardError');
             if (errEl) errEl.style.display = 'none';
             try {
-                const priceCents = _currentBoostPrice();
-                const resp = await fetch('/api/boost/create-intent', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ priceCents: priceCents, userId: window.currentUserId || 'anon' })
-                });
+                const boostPrice = _currentBoostPrice();
+                let createUrl = '/api/boost/create-intent';
+                let body = { priceCents: boostPrice, userId: window.currentUserId || 'anon' };
+                let combined = false;
+                if (window.pendingSell && window.pendingSell.armed) {
+                    combined = true;
+                    createUrl = '/api/checkout/create-intent';
+                    body = { items: [{ kind: 'boost', priceCents: boostPrice }, { kind: 'sell', priceCents: 200 }], userId: window.currentUserId || 'anon' };
+                }
+                const resp = await fetch(createUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 const data = await resp.json();
                 if (!data.clientSecret) throw new Error(data.error || 'no client secret');
-                const { error, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, {
-                    payment_method: { card: _stripeCardElement }
-                });
+                const { error, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, { payment_method: { card: _stripeCardElement } });
                 if (error) { _showBoostError(error.message); return; }
                 window.pendingBoost.paid = true;
                 window.pendingBoost.paymentIntentId = paymentIntent.id;
+                if (combined) {
+                    window.pendingSell.paid = true;
+                    window.pendingSell.paymentIntentId = paymentIntent.id;
+                    try { localStorage.setItem('pendingSellPaymentIntentId', paymentIntent.id); } catch (e) {}
+                    _showSellPaid();
+                }
                 _showBoostPaid();
             } catch (e) {
                 _showBoostError(e.message || 'card payment failed');
@@ -23333,7 +23406,16 @@
             }
             _stripeSellPR.on('paymentmethod', async (ev) => {
                 try {
-                    const resp = await fetch('/api/sell/create-intent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ priceCents: priceCents, userId: window.currentUserId || 'anon' }) });
+                    let createUrl = '/api/sell/create-intent';
+                    let body = { priceCents: priceCents, userId: window.currentUserId || 'anon' };
+                    let combined = false;
+                    if (window.pendingBoost && window.pendingBoost.armed) {
+                        combined = true;
+                        createUrl = '/api/checkout/create-intent';
+                        body = { items: [{ kind: 'boost', priceCents: _currentBoostPrice() }, { kind: 'sell', priceCents: priceCents }], userId: window.currentUserId || 'anon' };
+                    }
+
+                    const resp = await fetch(createUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                     const data = await resp.json();
                     if (!data.clientSecret) throw new Error(data.error || 'no client secret');
                     const { error, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, { payment_method: ev.paymentMethod.id }, { handleActions: false });
@@ -23343,6 +23425,11 @@
                     window.pendingSell.paymentMethodId = ev.paymentMethod.id;
                     window.pendingSell.paymentIntentId = paymentIntent.id;
                     try { localStorage.setItem('pendingSellPaymentIntentId', paymentIntent.id); } catch(e){}
+                    if (combined) {
+                        window.pendingBoost.paid = true;
+                        window.pendingBoost.paymentIntentId = paymentIntent.id;
+                        _showBoostPaid();
+                    }
                     _showSellPaid();
                 } catch (e) {
                     ev.complete('fail');
@@ -23371,7 +23458,15 @@
             if (errEl) errEl.style.display = 'none';
             try {
                 const priceCents = 200;
-                const resp = await fetch('/api/sell/create-intent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ priceCents: priceCents, userId: window.currentUserId || 'anon' }) });
+                let createUrl = '/api/sell/create-intent';
+                let body = { priceCents: priceCents, userId: window.currentUserId || 'anon' };
+                let combined = false;
+                if (window.pendingBoost && window.pendingBoost.armed) {
+                    combined = true;
+                    createUrl = '/api/checkout/create-intent';
+                    body = { items: [{ kind: 'boost', priceCents: _currentBoostPrice() }, { kind: 'sell', priceCents: priceCents }], userId: window.currentUserId || 'anon' };
+                }
+                const resp = await fetch(createUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 const data = await resp.json();
                 if (!data.clientSecret) throw new Error(data.error || 'no client secret');
                 const { error, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, { payment_method: { card: _stripeSellCardElement } });
@@ -23379,6 +23474,11 @@
                 window.pendingSell.paid = true;
                 window.pendingSell.paymentIntentId = paymentIntent.id;
                 try { localStorage.setItem('pendingSellPaymentIntentId', paymentIntent.id); } catch(e){}
+                if (combined) {
+                    window.pendingBoost.paid = true;
+                    window.pendingBoost.paymentIntentId = paymentIntent.id;
+                    _showBoostPaid();
+                }
                 _showSellPaid();
             } catch (e) {
                 _showSellError(e.message || 'card payment failed');
