@@ -18954,7 +18954,7 @@
             // FEED VOLUME TARGET: Keep active feed between 120 and 2000 posts
             // (raised floor — ML was under-surfacing on smaller pools)
             // ========================================================================
-            const FEED_MIN_POSTS = 120;
+            const FEED_MIN_POSTS = 100; // Lowered minimum to ensure signed-in users see content
             const FEED_MAX_POSTS = Math.min(2000, maxGridSize - 1);
 
             if (sortedPosts.length < FEED_MIN_POSTS && allPosts.length > sortedPosts.length) {
@@ -18975,6 +18975,41 @@
                 }
 
                 console.log(`📈 FEED BACKFILL: boosted feed from fallback pool to ${sortedPosts.length} posts`);
+            }
+
+            // AGGRESSIVE FALLBACK: If still under minimum, pull from all gridContent keys and postCache
+            if (sortedPosts.length < FEED_MIN_POSTS) {
+                console.log(`⚠️ AGGRESSIVE FALLBACK: need ${FEED_MIN_POSTS - sortedPosts.length} more posts`);
+                const existingIds = new Set(sortedPosts.map(p => p.id));
+
+                // 1) Merge any remaining posts from gridContent (including other users and area keys)
+                for (const key in gridContent) {
+                    if (!gridContent[key] || !Array.isArray(gridContent[key])) continue;
+                    for (const post of gridContent[key]) {
+                        if (!post || !post.id) continue;
+                        if (existingIds.has(post.id)) continue;
+                        if (hiddenForThisWiFi.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) continue;
+                        sortedPosts.push(post);
+                        existingIds.add(post.id);
+                        if (sortedPosts.length >= FEED_MIN_POSTS) break;
+                    }
+                    if (sortedPosts.length >= FEED_MIN_POSTS) break;
+                }
+
+                // 2) As a last resort, consume from postCache (client-side backup) to reach the minimum
+                if (sortedPosts.length < FEED_MIN_POSTS) {
+                    for (const id in postCache) {
+                        const post = postCache[id];
+                        if (!post || !post.id) continue;
+                        if (existingIds.has(post.id)) continue;
+                        if (hiddenForThisWiFi.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) continue;
+                        sortedPosts.push(post);
+                        existingIds.add(post.id);
+                        if (sortedPosts.length >= FEED_MIN_POSTS) break;
+                    }
+                }
+
+                console.log(`✅ AGGRESSIVE FALLBACK result: ${sortedPosts.length} posts available`);
             }
 
             if (sortedPosts.length > FEED_MAX_POSTS) {
