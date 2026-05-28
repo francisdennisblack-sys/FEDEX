@@ -50,7 +50,15 @@ self.addEventListener('activate', (event) => {
     })
   );
   self.clients.claim(); // Take control of all clients immediately
-  if (VERBOSE_SW) console.log('[Service Worker] Now controlling all clients');
+  // Notify open clients that a new service worker version is active so they can refresh
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
+      clientList.forEach(client => {
+        try { client.postMessage({ type: 'NEW_VERSION_AVAILABLE' }); } catch (e) {}
+      });
+    })
+  );
+  if (VERBOSE_SW) console.log('[Service Worker] Now controlling all clients (and notified clients of new version)');
 });
 
 // 🌐 FETCH: Network-first for navigations/index to ensure Visit shows latest deployment,
