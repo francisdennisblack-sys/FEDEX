@@ -10856,6 +10856,38 @@
                 console.error('ERROR CODE:', error.code);
                 console.error('ERROR:', error);
                 console.error('❌'.repeat(35) + '\n');
+                // Try local server fallback to persist post when Firebase is blocked (permissions/network)
+                try {
+                    console.warn('Attempting local server fallback: POST /api/posts');
+                    const fallbackBody = {
+                        zoneId: postData.zoneTag || null,
+                        lat: postData.latitude || (postData.geolocation && postData.geolocation.lat) || null,
+                        lon: postData.longitude || (postData.geolocation && postData.geolocation.lon) || null,
+                        content: postData.content || '',
+                        imageData: postData.photoURL || null,
+                        timestamp: postData.timestamp || Date.now(),
+                        clientId: postData.clientId || null
+                    };
+
+                    const resp = await fetch('/api/posts', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(fallbackBody)
+                    });
+
+                    if (resp.ok) {
+                        const json = await resp.json();
+                        console.log('✅ Local server fallback saved post:', json.post ? json.post.id : '(unknown id)');
+                        return { success: true, path: `local:/posts/${json.post ? json.post.id : 'unknown'}` };
+                    } else {
+                        const text = await resp.text();
+                        console.error('Local fallback failed, status:', resp.status, 'body:', text);
+                    }
+                } catch (fbFallbackErr) {
+                    console.error('Local fallback also failed:', fbFallbackErr);
+                }
+
+                // Re-throw original Firebase error if fallback didn't succeed
                 throw error;
             }
         }
