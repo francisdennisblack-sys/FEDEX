@@ -2628,6 +2628,11 @@
                         📍 Nearby Areas
                     </button>
                 </div>
+                <!-- Quick Boost toggle (MVP: client-side highlight) -->
+                <div style="margin-top:10px; display:flex; align-items:center; gap:8px;">
+                    <input type="checkbox" id="boostToggle" style="width:18px;height:18px;" />
+                    <label for="boostToggle" style="color:#fff; font-size:13px; font-weight:700;">Boost (highlight post)</label>
+                </div>
                 
                 <!-- Autocomplete dropdown for area suggestions -->
                 <div id="autocompleteDropdown" style="
@@ -20763,6 +20768,8 @@
                 console.log(`   📊 Source: ${areaTagSource} | POIs: ${globalPOIDatabase?.length?.toLocaleString()} | Locations: ${globalLocationDatabase?.length?.toLocaleString()}`);
                 console.log(`   💾 SAVING WITH AREA TAG: "${areaTag}"`);
                 
+                const boostChecked = (document.getElementById('boostToggle') && document.getElementById('boostToggle').checked) || !!(window.pendingBoost && window.pendingBoost.armed && window.pendingBoost.paid);
+
                 const postData = {
                     id: postId,
                     authId: currentUserId,
@@ -20782,14 +20789,13 @@
                     likes: 0,
                     dislikes: 0,
                     isUserPost: true,
-                    // 🚀 BOOST INTENT — set when user toggled boost in composer.
-                    // Backend will validate payment + assign boost parameters
-                    boostRequested: !!(window.pendingBoost && window.pendingBoost.armed && window.pendingBoost.paid),
-                    boostIntent: (window.pendingBoost && window.pendingBoost.armed && window.pendingBoost.paid) ? {
-                        armedAt: window.pendingBoost.armedAt || Date.now(),
-                        client: 'composer-v1',
-                        priceCents: window.boostPricingEngine.getPrice(),
-                        paymentIntentId: window.pendingBoost.paymentIntentId || null
+                    // 🚀 BOOST INTENT — set when user toggled boost in composer (MVP: immediate client-side boost)
+                    boostRequested: !!boostChecked,
+                    boostIntent: boostChecked ? {
+                        armedAt: Date.now(),
+                        client: 'composer-v1-mvp',
+                        priceCents: 0,
+                        paymentIntentId: null
                     } : null
                 };
 
@@ -20799,6 +20805,17 @@
                 // internalBadge tracking (calculated later) - kept for position tracking but not shown when primaryBadge is 'sell'
                 postData.internalBadges = [];
                 
+                // If composer-level boost was requested, add a boost badge for immediate highlighting
+                if (postData.boostRequested) {
+                    try {
+                        if (!Array.isArray(postData.badges)) postData.badges = [];
+                        if (!postData.badges.includes('boost')) postData.badges.push('boost');
+                        postData.boostBadge = 'boost';
+                        postData.boostPaidAt = postData.boostIntent ? postData.boostIntent.armedAt : Date.now();
+                        postData.boostExpiresAt = postData.boostPaidAt + (24*60*60*1000); // 24h default for MVP
+                        postData.boostStatus = 'active';
+                    } catch (e) { console.warn('Failed to attach boost metadata', e); }
+                }
                 // 🚀 BOOST TRACKING: If boost requested, calculate expiration times
                 if (postData.boostRequested && postData.boostIntent) {
                     const boostDuration = 24*60*60*1000;  // Fixed 24 hour duration
