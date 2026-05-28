@@ -2,7 +2,7 @@
 <!-- FEDEX BUILD: 2026-05-24 Version 1.0.4 - Fixed delete button function scope -->
 <html>
 <head>
-    <title>WiFi Grid - Local Community</title>
+            <title>Local Grid - POI Proximity</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
     <style>
         * {
@@ -2614,6 +2614,48 @@
 
         // Guarded logger: use cLog(...) instead of console.log for verbose output.
         window.cLog = function(...args){ if (window.CLEANUP_FLAGS.ENABLE_DEBUG_LOGS) console.log(...args); };
+
+        // POI proximity helpers - treat 'WiFi' as distance to nearest POI
+        function haversineMeters(lat1, lon1, lat2, lon2) {
+            if (!lat1 || !lon1 || !lat2 || !lon2) return Infinity;
+            const toRad = v => v * Math.PI / 180;
+            const R = 6371000; // metres
+            const dLat = toRad(lat2 - lat1);
+            const dLon = toRad(lon2 - lon1);
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+
+        function getNearestPOIAndDistance() {
+            try {
+                if (!window.CLEANUP_FLAGS.ENABLE_POI_LOADING) return { poi: null, distance: Infinity };
+                if (!userLocation || !userLocation.lat || !userLocation.lon) return { poi: null, distance: Infinity };
+                if (!window.globalPOIDatabase || !Array.isArray(window.globalPOIDatabase) || window.globalPOIDatabase.length === 0) return { poi: null, distance: Infinity };
+                let best = null;
+                let bestDist = Infinity;
+                for (const p of window.globalPOIDatabase) {
+                    if (!p || p.lat === undefined || p.lon === undefined) continue;
+                    const d = (typeof calculateDistance === 'function') ? (calculateDistance(userLocation.lat, userLocation.lon, p.lat, p.lon) * 1000) : haversineMeters(userLocation.lat, userLocation.lon, p.lat, p.lon);
+                    if (d < bestDist) { bestDist = d; best = p; }
+                }
+                return { poi: best, distance: bestDist };
+            } catch (e) {
+                console.warn('getNearestPOIAndDistance error', e);
+                return { poi: null, distance: Infinity };
+            }
+        }
+
+        function formatDistanceMeters(m) {
+            if (!isFinite(m)) return 'unknown distance';
+            if (m < 1000) return `${Math.round(m)} m`;
+            return `${(m/1000).toFixed(2)} km`;
+        }
+
+        function isNearPOI(thresholdMeters = 500) {
+            const nd = getNearestPOIAndDistance();
+            return nd && isFinite(nd.distance) && nd.distance <= thresholdMeters;
+        }
     </script>
     <!-- ========================================================================== -->
     <!-- 🛡️ PROTECTED: Canvas 3D Globe Logo — DO NOT MODIFY — See PROTECTED_LOGO_CODE.md -->
@@ -8101,8 +8143,9 @@
         }
         
         function voteOnPost(postId, voteType) {
-            if (!isConnected) {
-                alert('Please connect to WiFi first');
+            if (!isNearPOI()) {
+                const nd = getNearestPOIAndDistance();
+                alert(`Move closer to a known POI to vote (nearest: ${nd.poi ? nd.poi.name : 'unknown'} — ${formatDistanceMeters(nd.distance)})`);
                 return;
             }
             
@@ -12847,13 +12890,15 @@
                         box.style.background = 'linear-gradient(135deg, #1a3a1a 0%, #0d2d0d 100%)';
                         box.style.boxShadow = 'none';
                     };
-                    box.onclick = () => {
-                        if (isConnected) {
-                            openModal(0);
-                        } else {
-                            alert('Connect to WiFi first');
-                        }
-                    };
+                            box.onclick = () => {
+                                if (isNearPOI()) {
+                                    openModal(0);
+                                } else {
+                                    const nd = getNearestPOIAndDistance();
+                                    const dist = formatDistanceMeters(nd.distance);
+                                    alert(`Move closer to a known POI to post (nearest: ${nd.poi ? nd.poi.name : 'unknown'} — ${dist})`);
+                                }
+                            };
                 } else {
                     box.onclick = (e) => {
                         // Check if this is a filled box
@@ -12865,7 +12910,7 @@
                         } else if (userPostBoxes.length < 1) {
                             openModal(i);
                         } else {
-                            alert('You can post only once per WiFi network');
+                            alert('You can post only once per POI');
                         }
                     };
                 }
@@ -13532,14 +13577,15 @@
 
         // Modal functions
         function openModal(boxIndex) {
-            if (!isConnected) {
-                alert('Connect to WiFi first');
+            if (!isNearPOI()) {
+                const nd = getNearestPOIAndDistance();
+                alert(`Move closer to a known POI to post (nearest: ${nd.poi ? nd.poi.name : 'unknown'} — ${formatDistanceMeters(nd.distance)})`);
                 return;
             }
 
             // Prevent posting if user reached 5 posts
             if (userPostBoxes.length >= 5) {
-                alert('You can post up to 5 times per WiFi network');
+                alert('You can post up to 5 times per POI');
                 return;
             }
 
@@ -18530,10 +18576,12 @@
                     addContentBox.style.boxShadow = 'none';
                 };
                 addContentBox.onclick = () => {
-                    if (isConnected) {
+                    if (isNearPOI()) {
                         openModal(0);
                     } else {
-                        alert('Connect to WiFi first');
+                        const nd = getNearestPOIAndDistance();
+                        const dist = formatDistanceMeters(nd.distance);
+                        alert(`Move closer to a known POI to post (nearest: ${nd.poi ? nd.poi.name : 'unknown'} — ${dist})`);
                     }
                 };
             }
@@ -20888,13 +20936,14 @@
                 return;
             }
 
-            if (!isConnected) {
-                alert('Please connect to WiFi first');
+            if (!isNearPOI()) {
+                const nd = getNearestPOIAndDistance();
+                alert(`Move closer to a known POI to upload (nearest: ${nd.poi ? nd.poi.name : 'unknown'} — ${formatDistanceMeters(nd.distance)})`);
                 return;
             }
 
             if (userPostBoxes.length >= 5) {
-                alert('You can post up to 5 times per WiFi network');
+                alert('You can post up to 5 times per POI');
                 return;
             }
 
