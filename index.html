@@ -2786,13 +2786,16 @@
                                     <div id="profileForm" style="display:none;">
                                         <label style="font-size:12px;color:#ccc;">Username</label>
                                         <input id="signupUsername" type="text" style="width:100%; padding:8px; margin:6px 0;" />
-                                        <label style="font-size:12px;color:#ccc;">Email</label>
-                                        <input id="signupEmail" type="email" style="width:100%; padding:8px; margin:6px 0;" />
-                                        <label style="font-size:12px;color:#ccc;">Password</label>
-                                        <input id="signupPassword" type="password" style="width:100%; padding:8px; margin:6px 0;" />
+                                        <label style="font-size:12px;color:#ccc;">Phone number</label>
+                                        <input id="signupPhone" type="tel" placeholder="+15551234567" style="width:100%; padding:8px; margin:6px 0;" />
+                                        <div id="recaptcha-container" style="display:none;"></div>
+                                        <div id="codeEntry" style="display:none; margin-top:8px;">
+                                            <label style="font-size:12px;color:#ccc;">Verification code</label>
+                                            <input id="signupCode" type="text" style="width:100%; padding:8px; margin:6px 0;" />
+                                        </div>
                                         <div style="display:flex; gap:8px; margin-top:8px;">
-                                            <button id="doCreateAccount" style="flex:1; padding:10px; background:#4ade80; border:none; border-radius:6px;">Create Account</button>
-                                            <button id="doSignInExisting" style="flex:1; padding:10px; background:#0ea5e9; border:none; border-radius:6px;">Sign In</button>
+                                            <button id="doSendCode" style="flex:1; padding:10px; background:#4ade80; border:none; border-radius:6px;">Send Code</button>
+                                            <button id="doConfirmCode" style="flex:1; padding:10px; background:#0ea5e9; border:none; border-radius:6px; display:none;">Confirm Code</button>
                                         </div>
                                     </div>
                                     <div id="profileMsg" style="font-size:12px;color:#888;margin-top:8px;"></div>
@@ -2813,22 +2816,25 @@
                             modalEl.style.display = 'none';
                         }
                     });
-                    document.getElementById('doCreateAccount').addEventListener('click', async () => {
+                    document.getElementById('doSendCode').addEventListener('click', async () => {
                         const username = document.getElementById('signupUsername').value.trim();
-                        const email = document.getElementById('signupEmail').value.trim();
-                        const password = document.getElementById('signupPassword').value;
+                        const phone = document.getElementById('signupPhone').value.trim();
+                        if (!phone) return alert('Enter phone number in international format, e.g. +15551234567');
                         try {
-                            await createAccountWithEmail(email, password, username);
-                            document.getElementById('profileModal').style.display = 'none';
-                        } catch (err) { alert('Create account failed: ' + (err && err.message)); }
+                            await sendSignInCode(phone, username);
+                            // show code entry
+                            document.getElementById('codeEntry').style.display = 'block';
+                            document.getElementById('doConfirmCode').style.display = 'inline-block';
+                            document.getElementById('doSendCode').style.display = 'none';
+                        } catch (err) { alert('Sending code failed: ' + (err && err.message)); }
                     });
-                    document.getElementById('doSignInExisting').addEventListener('click', async () => {
-                        const email = document.getElementById('signupEmail').value.trim();
-                        const password = document.getElementById('signupPassword').value;
+                    document.getElementById('doConfirmCode').addEventListener('click', async () => {
+                        const code = document.getElementById('signupCode').value.trim();
+                        if (!code) return alert('Enter verification code');
                         try {
-                            await signInWithEmailFlow(email, password);
+                            await confirmPhoneCode(code);
                             document.getElementById('profileModal').style.display = 'none';
-                        } catch (err) { alert('Sign-in failed: ' + (err && err.message)); }
+                        } catch (err) { alert('Code confirmation failed: ' + (err && err.message)); }
                     });
                 }
 
@@ -2863,6 +2869,54 @@
                     modal.style.display = 'block';
                 }
 
+                // Phone auth: send verification SMS using reCAPTCHA
+                async function sendSignInCode(phone, username) {
+                    try {
+                        if (!window.auth) throw new Error('Auth not initialized');
+                        // initialize invisible reCAPTCHA once
+                        if (!window.recaptchaVerifier) {
+                            window.recaptchaVerifier = new RecaptchaVerifier('recaptcha-container', { size: 'invisible' }, auth);
+                            try { window.recaptchaVerifier.render().catch(()=>{}); } catch(e){}
+                        }
+                        const appVerifier = window.recaptchaVerifier;
+                        const confirmationResult = await signInWithPhoneNumber(auth, phone, appVerifier);
+                        window.__confirmationResult = confirmationResult;
+                        // temporarily store username to write after confirmation
+                        window.__pendingUsername = username;
+                        showNotification && showNotification('Verification code sent to ' + phone);
+                        return true;
+                    } catch (err) {
+                        console.error('sendSignInCode failed', err);
+                        throw err;
+                    }
+                }
+
+                async function confirmPhoneCode(code) {
+                    try {
+                        if (!window.__confirmationResult) throw new Error('No confirmation pending');
+                        const cred = await window.__confirmationResult.confirm(code);
+                        const firebaseUid = cred.user.uid;
+                        const phoneNumber = cred.user.phoneNumber;
+                        const canonicalUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
+                        const database = getDatabase();
+                        if (database) {
+                            await set(ref(database, `users/${canonicalUid}/profile`), { username: window.__pendingUsername || phoneNumber, phone: phoneNumber, createdAt: Date.now(), linkedFirebaseUid: firebaseUid });
+                            await set(ref(database, `users/${canonicalUid}/stats`), { postsCount: 0, totalLikes: 0 });
+                        }
+                        window.currentUserId = canonicalUid;
+                        window.currentUserPhone = phoneNumber;
+                        updateAccountUI();
+                        showNotification && showNotification('Signed in', phoneNumber);
+                        // clear pending
+                        window.__confirmationResult = null;
+                        window.__pendingUsername = null;
+                        return cred.user;
+                    } catch (err) {
+                        console.error('confirmPhoneCode failed', err);
+                        throw err;
+                    }
+                }
+
                 async function doSignOut() {
                     try {
                         if (window.auth && typeof signOut === 'function') {
@@ -2880,31 +2934,14 @@
                     const btn = document.getElementById('signInBtn');
                     if (btn) btn.addEventListener('click', (e) => { e.preventDefault(); showProfileModal(); });
 
-                    const fbtn = document.getElementById('forceSignInBtn');
-                    if (fbtn) fbtn.addEventListener('click', (e) => { e.preventDefault(); showProfileModal(); });
-
-                    const ubr = document.getElementById('unregisterSwBtn');
-                    if (ubr) ubr.addEventListener('click', async (e) => {
-                        e.preventDefault();
-                        try {
-                            if ('serviceWorker' in navigator) {
-                                const regs = await navigator.serviceWorker.getRegistrations();
-                                if (regs.length === 0) {
-                                    console.log('No active service workers to unregister');
-                                    alert('No active service workers found');
-                                } else {
-                                    await Promise.all(regs.map(r => r.unregister()));
-                                    console.log('All service workers unregistered');
-                                    alert('Service workers unregistered — reloading');
-                                }
-                            } else {
-                                alert('Service Worker API not supported in this browser');
-                            }
-                        } catch (err) { console.error('Failed to unregister SWs', err); alert('Failed to unregister: ' + (err && err.message)); }
-                        // Force reload without cache
-                        try { window.location.reload(true); } catch(e) { window.location.reload(); }
-                        });
-                    });
+                    // expose profile helpers globally for other code to call
+                    try {
+                        window.showProfileModal = showProfileModal;
+                        window.doSignOut = doSignOut;
+                        window.sendSignInCode = sendSignInCode;
+                        window.confirmPhoneCode = confirmPhoneCode;
+                    } catch (e) { console.warn('Failed to expose profile helpers', e); }
+                });
                     // expose profile helpers globally for other code to call
                     try {
                         window.showProfileModal = showProfileModal;
@@ -3476,7 +3513,7 @@
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
         import { getDatabase, ref, set, get, update, remove, onValue, runTransaction } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
         import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
-        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
+        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, RecaptchaVerifier, signInWithPhoneNumber, signOut } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
 
         const firebaseConfig = {
             apiKey: "AIzaSyD5A_MF7gRvqnHd_DD3lReYpEkRph6msX4",
@@ -3514,9 +3551,9 @@
         window.getStorage = getStorage;
         window.getAuth = getAuth;
         window.runTransaction = runTransaction;
-        // Email/password auth helpers
-        window.createUserWithEmailAndPassword = createUserWithEmailAndPassword;
-        window.signInWithEmailAndPassword = signInWithEmailAndPassword;
+        // Phone auth helpers
+        window.RecaptchaVerifier = RecaptchaVerifier;
+        window.signInWithPhoneNumber = signInWithPhoneNumber;
         window.signOut = signOut;
         window.setPersistence = setPersistence;
         window.browserLocalPersistence = browserLocalPersistence;
