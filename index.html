@@ -2923,13 +2923,20 @@
                         const cred = await window.__confirmationResult.confirm(code);
                         const firebaseUid = cred.user.uid;
                         const phoneNumber = cred.user.phoneNumber;
-                        const canonicalUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
+                        const permanentUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
                         const database = getDatabase();
                         if (database) {
-                            await set(ref(database, `users/${canonicalUid}/profile`), { username: window.__pendingUsername || phoneNumber, phone: phoneNumber, createdAt: Date.now(), linkedFirebaseUid: firebaseUid });
-                            await set(ref(database, `users/${canonicalUid}/stats`), { postsCount: 0, totalLikes: 0 });
+                            // Write profile under the authenticated Firebase UID so DB rules allow it
+                            await set(ref(database, `users/${firebaseUid}/profile`), { username: window.__pendingUsername || phoneNumber, phone: phoneNumber, createdAt: Date.now(), linkedPermanentUid: permanentUid });
+                            // init stats under firebase uid
+                            await set(ref(database, `users/${firebaseUid}/stats`), { postsCount: 0, totalLikes: 0 });
+                            // store a mapping from our local permanent id to firebase uid so server-side migration/linking can be done later
+                            try {
+                                await set(ref(database, `users_by_permanent/${permanentUid}`), { firebaseUid: firebaseUid, linkedAt: Date.now() });
+                            } catch (e) { console.warn('Failed writing permanent->firebase mapping', e); }
                         }
-                        window.currentUserId = canonicalUid;
+                        // Use Firebase UID as the canonical current user for subsequent DB writes (matches DB rules)
+                        window.currentUserId = firebaseUid;
                         window.currentUserPhone = phoneNumber;
                         updateAccountUI();
                         showNotification && showNotification('Signed in', phoneNumber);
