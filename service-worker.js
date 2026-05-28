@@ -7,17 +7,19 @@ const urlsToCache = [
   '/',
   '/index.html',
   '/firebase-config.js',
-  '/firebase-db.js',
   '/service-worker.js'
 ];
 
+// Toggle verbose logs for service worker (keep false for production/cleanup)
+const VERBOSE_SW = false;
+
 // 📦 INSTALL: Cache essential files and skip waiting
 self.addEventListener('install', (event) => {
-  console.log('[Service Worker] Installing...');
+  if (VERBOSE_SW) console.log('[Service Worker] Installing...');
   event.waitUntil(
     Promise.all([
       caches.open(CACHE_NAME).then((cache) => {
-        console.log('[Service Worker] Caching essential files');
+        if (VERBOSE_SW) console.log('[Service Worker] Caching essential files');
         return cache.addAll(urlsToCache).catch(err => {
           console.warn('[Service Worker] Some files could not be cached:', err);
           return Promise.resolve();
@@ -25,7 +27,7 @@ self.addEventListener('install', (event) => {
       }),
       // Initialize posts cache
       caches.open(POSTS_CACHE).then(() => {
-        console.log('[Service Worker] Posts cache ready');
+        if (VERBOSE_SW) console.log('[Service Worker] Posts cache ready');
       })
     ])
   );
@@ -34,13 +36,13 @@ self.addEventListener('install', (event) => {
 
 // 🚀 ACTIVATE: Clean up old caches and take control
 self.addEventListener('activate', (event) => {
-  console.log('[Service Worker] Activating...');
+  if (VERBOSE_SW) console.log('[Service Worker] Activating...');
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cacheName) => {
           if (cacheName !== CACHE_NAME && cacheName !== POSTS_CACHE) {
-            console.log('[Service Worker] Deleting old cache:', cacheName);
+            if (VERBOSE_SW) console.log('[Service Worker] Deleting old cache:', cacheName);
             return caches.delete(cacheName);
           }
         })
@@ -48,7 +50,7 @@ self.addEventListener('activate', (event) => {
     })
   );
   self.clients.claim(); // Take control of all clients immediately
-  console.log('[Service Worker] Now controlling all clients');
+  if (VERBOSE_SW) console.log('[Service Worker] Now controlling all clients');
 });
 
 // 🌐 FETCH: Serve from cache, update from network
@@ -86,7 +88,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     caches.match(event.request)
       .then((response) => {
-        if (response) {
+            if (response) {
           return response;
         }
         
@@ -102,11 +104,15 @@ self.addEventListener('fetch', (event) => {
           });
       })
       .catch(() => {
-        // Offline fallback
-        return new Response('Content not available offline', {
-          status: 503,
-          statusText: 'Service Unavailable'
-        });
+                // Offline fallback: prefer cached index.html (SPA) so app still loads
+        return caches.match('/index.html').then((cached) => {
+          if (cached) return cached;
+          // Fallback to plain text when nothing cached
+          return new Response('Content not available offline', {
+            status: 503,
+            statusText: 'Service Unavailable'
+          });
+        })
       })
   );
 });
@@ -128,7 +134,7 @@ self.addEventListener('message', (event) => {
           });
           cache.put(`/api/post/${post.id}`, response);
         });
-        console.log(`[Service Worker] Cached ${posts.length} posts`);
+        if (VERBOSE_SW) console.log(`[Service Worker] Cached ${posts.length} posts`);
       });
     }
   }
@@ -136,7 +142,7 @@ self.addEventListener('message', (event) => {
 
 // 🔄 BACKGROUND SYNC: Keep syncing even when tab is closed
 self.addEventListener('sync', (event) => {
-  console.log('[Service Worker] Background sync triggered:', event.tag);
+  if (VERBOSE_SW) console.log('[Service Worker] Background sync triggered:', event.tag);
   
   if (event.tag === 'firebase-sync' || event.tag === 'post-sync') {
     event.waitUntil(
@@ -147,7 +153,7 @@ self.addEventListener('sync', (event) => {
             includeUncontrolled: true
           });
           
-          if (clients.length > 0) {
+            if (clients.length > 0) {
             clients.forEach(client => {
               client.postMessage({
                 type: 'BACKGROUND_SYNC_TRIGGER',
@@ -155,14 +161,14 @@ self.addEventListener('sync', (event) => {
                 tag: event.tag
               });
             });
-            console.log('[Service Worker] Sent sync to', clients.length, 'clients');
+            if (VERBOSE_SW) console.log('[Service Worker] Sent sync to', clients.length, 'clients');
           }
         } catch (err) {
-          console.error('[Service Worker] Background sync error:', err);
+          if (VERBOSE_SW) console.error('[Service Worker] Background sync error:', err);
         }
       })()
     );
   }
 });
 
-console.log('[Service Worker] Loaded - offline-first mode active, background sync enabled');
+if (VERBOSE_SW) console.log('[Service Worker] Loaded - offline-first mode active, background sync enabled');

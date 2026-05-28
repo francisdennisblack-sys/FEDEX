@@ -5,11 +5,21 @@ const path = require('path');
 const https = require('https');
 const app = express();
 
-// Google Cloud Video Intelligence (for videos)
-const video = require('@google-cloud/video-intelligence');
+// Google Cloud Video Intelligence (for videos) - optional
+let video = null;
+try {
+    video = require('@google-cloud/video-intelligence');
+} catch (e) {
+    console.warn('[server] Optional module @google-cloud/video-intelligence not installed:', e.message);
+}
 
-// Google Cloud Vision (for images/photos)
-const vision = require('@google-cloud/vision');
+// Google Cloud Vision (for images/photos) - optional
+let vision = null;
+try {
+    vision = require('@google-cloud/vision');
+} catch (e) {
+    console.warn('[server] Optional module @google-cloud/vision not installed:', e.message);
+}
 
 // ============================================
 // SYSTEM PARAMETERS & CONSTANTS
@@ -56,6 +66,14 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
 
+// Runtime flags for cleanup/perf
+const VERBOSE_SERVER = false;      // Set true to re-enable server logs
+const ENABLE_MODERATION = false;   // Set true to enable Cloud Vision/Video moderation
+
+function sLog(...args){ if (VERBOSE_SERVER) console.log(...args); }
+function sWarn(...args){ if (VERBOSE_SERVER) console.warn(...args); }
+function sErr(...args){ console.error(...args); }
+
 // Serve static files (index.html and assets)
 app.use(express.static(path.join(__dirname, '.')));
 
@@ -68,7 +86,7 @@ app.get('/', (req, res) => {
 const dbPath = path.join(__dirname, 'wifi_database.json');
 
 // In-memory storage for posts (loaded from disk on startup)
-let postsDatabase = {}; // { networkId: [post1, post2, ...] }
+let postsDatabase = {}; // { zoneId: [post1, post2, ...] }
 let postIdCounter = 0;
 
 // Load posts from disk on startup
@@ -79,14 +97,14 @@ function loadDatabase() {
             const parsedData = JSON.parse(data);
             postsDatabase = parsedData.posts || {};
             postIdCounter = parsedData.idCounter || 0;
-            console.log(`[${new Date().toISOString()}] Loaded ${Object.keys(postsDatabase).length} WiFi networks from database`);
+            sLog(`[${new Date().toISOString()}] Loaded ${Object.keys(postsDatabase).length} zones from database`);
             
-            // Log network info
-            for (const networkId in postsDatabase) {
-                console.log(`  - ${networkId}: ${postsDatabase[networkId].length} posts`);
+            // Log zone info (guarded)
+            for (const zoneId in postsDatabase) {
+                sLog(`  - ${zoneId}: ${postsDatabase[zoneId].length} posts`);
             }
         } else {
-            console.log(`[${new Date().toISOString()}] No existing database found. Starting fresh.`);
+            sLog(`[${new Date().toISOString()}] No existing database found. Starting fresh.`);
         }
     } catch (error) {
         console.error(`Error loading database: ${error.message}`);
@@ -112,91 +130,132 @@ function saveDatabase() {
 // Load database on startup
 loadDatabase();
 
-// Get network ID based on client IP
-app.get('/api/network-id', (req, res) => {
-    // Get client IP from request headers
+// Get zone ID based on provided coordinates (lat/lon) or fallback to client IP
+app.get('/api/zone-id', (req, res) => {
+    const { lat, lon } = req.query;
+
+    if (lat && lon) {
+        const latitude = parseFloat(lat);
+        const longitude = parseFloat(lon);
+        const zoneId = getTileKey(latitude, longitude);
+        const county = getCountyFromCoordinates(latitude, longitude);
+        return res.json({ zoneId, latitude, longitude, county });
+    }
+
+    // Fallback: derive a coarse zone from client IP (legacy support)
     const clientIp = req.headers['x-forwarded-for'] || 
                      req.headers['x-real-ip'] || 
                      req.connection.remoteAddress || 
                      req.socket.remoteAddress;
 
-    // For local networks, use the first 3 octets (e.g., 192.168.1.x)
-    // For public networks, use full IP
-    let networkId;
-    
-    if (clientIp && (clientIp.startsWith('192.168.') || 
-                     clientIp.startsWith('10.') || 
-                     clientIp.startsWith('172.'))) {
-        // Local network - use subnet
+    let zoneId;
+    if (clientIp && (clientIp.startsWith('192.168.') || clientIp.startsWith('10.') || clientIp.startsWith('172.'))) {
         const ipParts = clientIp.split('.');
-        networkId = `${ipParts[0]}.${ipParts[1]}.${ipParts[2]}.0/24`;
+        zoneId = `${ipParts[0]}.${ipParts[1]}.${ipParts[2]}.0/24`;
     } else {
-        // Public network - use full IP
-        networkId = clientIp;
+        zoneId = clientIp || 'unknown-ip';
     }
 
-    res.json({ 
-        networkId: networkId,
-        ip: clientIp 
-    });
+    res.json({ zoneId, ip: clientIp });
 });
 
-// Get all posts for a network
-app.get('/api/posts/:networkId', (req, res) => {
-    const networkId = req.params.networkId;
-    const posts = postsDatabase[networkId] || [];
+// Get all posts for a zone
+app.get('/api/posts/:zoneId', (req, res) => {
+    const zoneId = req.params.zoneId;
+    const posts = postsDatabase[zoneId] || [];
     res.json({ posts });
 });
 
-// Create a new post
+// Create a new post (zone-based)
 app.post('/api/posts', (req, res) => {
-    const { networkId, content, imageData, timestamp } = req.body;
-    
-    if (!networkId) {
-        return res.status(400).json({ error: 'networkId required' });
+    // Support either explicit zoneId or lat/lon to compute zone
+    let { zoneId, lat, lon, content, imageData, timestamp, clientId, postId: providedPostId } = req.body;
+
+    if (!zoneId) {
+        if (lat && lon) {
+            const latitude = parseFloat(lat);
+            const longitude = parseFloat(lon);
+            zoneId = getTileKey(latitude, longitude);
+        }
     }
-    
-    if (!postsDatabase[networkId]) {
-        postsDatabase[networkId] = [];
+
+    if (!zoneId) {
+        return res.status(400).json({ error: 'zoneId or lat/lon required' });
     }
-    
+
+    // Idempotency: if client provides a `clientId` or `postId`, return existing post instead of creating duplicates
+    if (clientId) {
+        for (const zid in postsDatabase) {
+            const existing = postsDatabase[zid].find(p => p.clientId && p.clientId === clientId);
+            if (existing) {
+                sLog(`[idempotency] duplicate post attempt detected for clientId=${clientId}, returning existing post id=${existing.id}`);
+                return res.json({ success: true, post: existing, duplicate: true });
+            }
+        }
+    }
+
+    if (providedPostId) {
+        for (const zid in postsDatabase) {
+            const existing = postsDatabase[zid].find(p => String(p.id) === String(providedPostId));
+            if (existing) {
+                sLog(`[idempotency] duplicate post attempt detected for postId=${providedPostId}, returning existing post`);
+                return res.json({ success: true, post: existing, duplicate: true });
+            }
+        }
+    }
+
+    if (!postsDatabase[zoneId]) {
+        postsDatabase[zoneId] = [];
+    }
+
+    // Use providedPostId when available so client-side generated ids are preserved
+    const assignedId = providedPostId ? String(providedPostId) : String(postIdCounter++);
     const post = {
-        id: postIdCounter++,
-        networkId,
+        id: assignedId,
+        zoneId,
+        clientId: clientId || null,
         content,
         imageData,
         timestamp: timestamp || Date.now(),
         likes: 0,
         dislikes: 0
     };
-    
-    postsDatabase[networkId].push(post);
+
+    // Preserve optional attribution and geo fields if provided by client fallback
+    if (req.body.authId) post.authId = req.body.authId;
+    if (req.body.userId) post.userId = req.body.userId;
+    if (req.body.createdBy) post.createdBy = req.body.createdBy;
+    if (req.body.zoneTag) post.zoneTag = req.body.zoneTag;
+    if (req.body.latitude) post.latitude = req.body.latitude;
+    if (req.body.longitude) post.longitude = req.body.longitude;
+
+    postsDatabase[zoneId].push(post);
     saveDatabase(); // Save to disk immediately
-    
+
     res.json({ success: true, post });
 });
 
 // Delete a post
 app.delete('/api/posts/:postId', (req, res) => {
-    const postId = parseInt(req.params.postId);
-    
-    // Find and remove the post from all networks
-    for (let networkId in postsDatabase) {
-        postsDatabase[networkId] = postsDatabase[networkId].filter(p => p.id !== postId);
+    const postId = req.params.postId;
+
+    // Find and remove the post from all zones
+    for (let zoneId in postsDatabase) {
+        postsDatabase[zoneId] = postsDatabase[zoneId].filter(p => String(p.id) !== String(postId));
     }
-    
+
     saveDatabase(); // Save to disk
     res.json({ success: true });
 });
 
 // Update post votes
 app.put('/api/posts/:postId', (req, res) => {
-    const postId = parseInt(req.params.postId);
+    const postId = req.params.postId;
     const { likes, dislikes } = req.body;
-    
-    // Find and update the post
-    for (let networkId in postsDatabase) {
-        const post = postsDatabase[networkId].find(p => p.id === postId);
+
+    // Find and update the post across all zones
+    for (let zoneId in postsDatabase) {
+        const post = postsDatabase[zoneId].find(p => String(p.id) === String(postId));
         if (post) {
             if (likes !== undefined) post.likes = likes;
             if (dislikes !== undefined) post.dislikes = dislikes;
@@ -204,34 +263,34 @@ app.put('/api/posts/:postId', (req, res) => {
             return res.json({ success: true, post });
         }
     }
-    
+
     res.status(404).json({ error: 'Post not found' });
 });
 
 // Get database status
 app.get('/api/status', (req, res) => {
-    const networkCount = Object.keys(postsDatabase).length;
+    const zoneCount = Object.keys(postsDatabase).length;
     const totalPosts = Object.values(postsDatabase).reduce((sum, posts) => sum + posts.length, 0);
-    
+
     res.json({
         status: 'online',
-        networks: networkCount,
+        zoneCount: zoneCount,
         totalPosts: totalPosts,
         postIdCounter: postIdCounter,
         dbPath: dbPath,
         dbExists: fs.existsSync(dbPath),
-        networks: Object.keys(postsDatabase).map(networkId => ({
-            networkId,
-            postCount: postsDatabase[networkId].length
+        zones: Object.keys(postsDatabase).map(zoneId => ({
+            zoneId,
+            postCount: postsDatabase[zoneId].length
         }))
     });
 });
 
-// Admin: Get all networks and posts
-app.get('/api/admin/networks', (req, res) => {
-    const networks = {};
-    for (const networkId in postsDatabase) {
-        networks[networkId] = postsDatabase[networkId].map(post => ({
+// Admin: Get all zones and posts
+app.get('/api/admin/zones', (req, res) => {
+    const zones = {};
+    for (const zoneId in postsDatabase) {
+        zones[zoneId] = postsDatabase[zoneId].map(post => ({
             id: post.id,
             content: post.content ? post.content.substring(0, 50) + '...' : 'No text',
             timestamp: new Date(post.timestamp).toISOString(),
@@ -240,32 +299,37 @@ app.get('/api/admin/networks', (req, res) => {
             hasImage: !!post.imageData
         }));
     }
-    res.json({ networks });
+    res.json({ zones });
 });
 
-// Admin: Clear a network's posts (protected)
-app.delete('/api/admin/network/:networkId', (req, res) => {
+// Admin: Clear a zone's posts (protected)
+app.delete('/api/admin/zone/:zoneId', (req, res) => {
     const password = req.headers['x-admin-password'];
     if (password !== process.env.ADMIN_PASSWORD && password !== '19696') {
         return res.status(403).json({ error: 'Unauthorized' });
     }
     
-    const networkId = req.params.networkId;
-    if (postsDatabase[networkId]) {
-        delete postsDatabase[networkId];
+    const zoneId = req.params.zoneId;
+    if (postsDatabase[zoneId]) {
+        delete postsDatabase[zoneId];
         saveDatabase();
-        res.json({ success: true, message: `Cleared network: ${networkId}` });
+        res.json({ success: true, message: `Cleared zone: ${zoneId}` });
     } else {
-        res.status(404).json({ error: 'Network not found' });
+        res.status(404).json({ error: 'Zone not found' });
     }
 });
 
 // Video Moderation Endpoint
 app.post('/api/moderate-video', async (req, res) => {
     try {
-        const { videoUrl, postId, networkId } = req.body;
+        const { videoUrl, postId, zoneId } = req.body;
         
-        console.log('🎥 Video moderation check:', videoUrl);
+        sLog('🎥 Video moderation check:', videoUrl);
+
+        if (!ENABLE_MODERATION) {
+            sLog('[moderation] Video moderation disabled by ENABLE_MODERATION flag; allowing by default', videoUrl);
+            return res.json({ success: true, isFlagged: false, moderationReason: 'moderation-disabled', explicitConfidence: 0, violenceConfidence: 0, postId, zoneId });
+        }
         
         // IMPORTANT: Moderation is set to ALLOW ALL for now
         // Google Cloud Vision was too strict and blocking legitimate content
@@ -285,12 +349,11 @@ app.post('/api/moderate-video', async (req, res) => {
         };
         
         // Run moderation analysis
-        console.log('📡 Sending to Google Cloud Vision...');
+        sLog('📡 Sending to Google Cloud Vision...');
         const [operation] = await client.annotateVideo(request);
-        console.log('⏳ Waiting for analysis (this may take 30-60 seconds)...');
+        sLog('⏳ Waiting for analysis (this may take 30-60 seconds)...');
         const [response] = await operation.promise();
-        
-        console.log('✅ Analysis complete');
+        sLog('✅ Analysis complete');
         
         // Extract results
         const annotationResult = response.annotationResults[0] || {};
@@ -315,7 +378,7 @@ app.post('/api/moderate-video', async (req, res) => {
         if (MODERATION_ENABLED && explicitAnnotation.frames && explicitAnnotation.frames.length > 0) {
             const confidenceValues = explicitAnnotation.frames.map(f => f.pornographyLikelihood || 0);
             explicitConfidence = Math.max(...confidenceValues);
-            console.log('📊 Explicit content confidence:', explicitConfidence, '(5=VERY_LIKELY, 4=LIKELY)');
+            sLog('📊 Explicit content confidence:', explicitConfidence, '(5=VERY_LIKELY, 4=LIKELY)');
             
             if (explicitConfidence >= 4) {
                 isFlagged = true;
@@ -327,7 +390,7 @@ app.post('/api/moderate-video', async (req, res) => {
         if (MODERATION_ENABLED && !isFlagged && violenceAnnotations && violenceAnnotations.length > 0) {
             const violenceScores = violenceAnnotations.map(v => v.confidence || 0);
             violenceConfidence = Math.max(...violenceScores);
-            console.log('📊 Violence confidence:', violenceConfidence, '(0.85+ = flagged, reduced from 0.7)');
+            sLog('📊 Violence confidence:', violenceConfidence, '(0.85+ = flagged, reduced from 0.7)');
             
             if (violenceConfidence >= 0.85) {
                 isFlagged = true;
@@ -335,7 +398,7 @@ app.post('/api/moderate-video', async (req, res) => {
             }
         }
         
-        console.log(`✅ Moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
+        sLog(`✅ Moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
         
         res.json({
             success: true,
@@ -344,12 +407,12 @@ app.post('/api/moderate-video', async (req, res) => {
             explicitConfidence,
             violenceConfidence,
             postId,
-            networkId
+            zoneId
         });
         
     } catch (error) {
-        console.error('❌ Moderation error:', error.message);
-        console.error('Full error:', error);
+        sErr('❌ Moderation error:', error.message);
+        sErr('Full error:', error);
         
         // Fail-open: allow upload if moderation service is down
         res.status(500).json({ 
@@ -363,9 +426,14 @@ app.post('/api/moderate-video', async (req, res) => {
 // Photo/Image Moderation Endpoint
 app.post('/api/moderate-photo', async (req, res) => {
     try {
-        const { imageUrl, postId, networkId } = req.body;
+        const { imageUrl, postId, zoneId } = req.body;
         
-        console.log('📸 Photo moderation check:', imageUrl);
+        sLog('📸 Photo moderation check:', imageUrl);
+
+        if (!ENABLE_MODERATION) {
+            sLog('[moderation] Photo moderation disabled by ENABLE_MODERATION flag; allowing by default', imageUrl);
+            return res.json({ success: true, isFlagged: false, moderationReason: 'moderation-disabled', confidenceDetails: {}, postId, zoneId });
+        }
         
         // IMPORTANT: Moderation is set to ALLOW ALL for now
         // Google Cloud Vision was too strict and blocking legitimate content
@@ -381,14 +449,14 @@ app.post('/api/moderate-photo', async (req, res) => {
             }
         };
         
-        console.log('📡 Checking with Google Cloud Vision...');
+        sLog('📡 Checking with Google Cloud Vision...');
         const [result] = await visionClient.safeSearchDetection(request);
         const safeSearchResult = result.safeSearchAnnotation;
         
-        console.log('✅ Analysis complete');
-        console.log('  Adult likelihood:', safeSearchResult.adult);
-        console.log('  Violence likelihood:', safeSearchResult.violence);
-        console.log('  Racy likelihood:', safeSearchResult.racy);
+        sLog('✅ Analysis complete');
+        sLog('  Adult likelihood:', safeSearchResult.adult);
+        sLog('  Violence likelihood:', safeSearchResult.violence);
+        sLog('  Racy likelihood:', safeSearchResult.racy);
         
         let isFlagged = false;
         let moderationReason = '';
@@ -408,22 +476,22 @@ app.post('/api/moderate-photo', async (req, res) => {
         if (MODERATION_ENABLED && safeSearchResult.adult >= 4) {
             isFlagged = true;
             moderationReason = 'Explicit/Nudity content detected in photo';
-            console.log('🚫 Flagged for adult content:', safeSearchResult.adult);
+            sLog('🚫 Flagged for adult content:', safeSearchResult.adult);
         }
         
         if (MODERATION_ENABLED && !isFlagged && safeSearchResult.violence >= 4) {
             isFlagged = true;
             moderationReason = 'Violence detected in photo';
-            console.log('🚫 Flagged for violence:', safeSearchResult.violence);
+            sLog('🚫 Flagged for violence:', safeSearchResult.violence);
         }
         
         if (MODERATION_ENABLED && !isFlagged && safeSearchResult.racy >= 5) {
             isFlagged = true;
             moderationReason = 'Racy/Suggestive content detected in photo';
-            console.log('🚫 Flagged for racy content:', safeSearchResult.racy);
+            sLog('🚫 Flagged for racy content:', safeSearchResult.racy);
         }
         
-        console.log(`✅ Photo moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
+        sLog(`✅ Photo moderation complete - Flagged: ${isFlagged}, Allowed: ${!isFlagged}`);
         
         res.json({
             success: true,
@@ -431,12 +499,12 @@ app.post('/api/moderate-photo', async (req, res) => {
             moderationReason,
             confidenceDetails,
             postId,
-            networkId
+            zoneId
         });
         
     } catch (error) {
-        console.error('❌ Photo moderation error:', error.message);
-        console.error('Full error:', error);
+        sErr('❌ Photo moderation error:', error.message);
+        sErr('Full error:', error);
         
         // Fail-open: allow upload if moderation service is down
         res.status(500).json({ 
@@ -497,11 +565,11 @@ app.get('/api/fetch-wifi', async (req, res) => {
     const userLon = parseFloat(lon);
     const tileKey = getTileKey(userLat, userLon);
     
-    console.log(`[${new Date().toISOString()}] 📍 WiFi request for tile: ${tileKey} (${userLat}, ${userLon})`);
+    sLog(`[${new Date().toISOString()}] 📍 WiFi request for tile: ${tileKey} (${userLat}, ${userLon})`);
     
     // Check cache first
     if (regionCache[tileKey] && regionCache[tileKey].timestamp > Date.now() - CACHE_EXPIRY) {
-        console.log(`[${new Date().toISOString()}] ✅ Cache HIT for tile: ${tileKey}`);
+        sLog(`[${new Date().toISOString()}] ✅ Cache HIT for tile: ${tileKey}`);
         const county = getCountyFromCoordinates(userLat, userLon);
         return res.json({
             success: true,
@@ -512,7 +580,7 @@ app.get('/api/fetch-wifi', async (req, res) => {
         });
     }
     
-    console.log(`[${new Date().toISOString()}] 🔄 Cache MISS for tile: ${tileKey}`);
+    sLog(`[${new Date().toISOString()}] 🔄 Cache MISS for tile: ${tileKey}`);
     
     try {
         // For now, return county without calling WiGLE (testing phase)
@@ -525,7 +593,7 @@ app.get('/api/fetch-wifi', async (req, res) => {
             timestamp: Date.now()
         };
         
-        console.log(`[${new Date().toISOString()}] 📍 Returning county: ${county}`);
+        sLog(`[${new Date().toISOString()}] 📍 Returning county: ${county}`);
         
         res.json({
             success: true,
@@ -594,7 +662,7 @@ app.get('/api/reverse-geocode', (req, res) => {
         // Check cache first
         const cachedResult = getGeocodeCache(latitude, longitude);
         if (cachedResult) {
-            console.log(`[Geocode Cache] HIT: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`);
+            sLog(`[Geocode Cache] HIT: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`);
             return res.json({
                 ...cachedResult,
                 source: 'cache'
@@ -604,7 +672,7 @@ app.get('/api/reverse-geocode', (req, res) => {
         // Call OpenStreetMap Nominatim API (free reverse geocoding)
         const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`;
         
-        console.log(`[Geocode Request] Fetching: ${url}`);
+        sLog(`[Geocode Request] Fetching: ${url}`);
         
         https.get(url, {
             headers: {
@@ -631,12 +699,13 @@ app.get('/api/reverse-geocode', (req, res) => {
                     const state = address.state || '';
                     const country = address.country || '';
                     
+                    const prettyName = city && state ? `${city}, ${state}` : (city || 'Unknown');
                     const result = {
-                        name: locationName,
+                        name: prettyName,
                         city: city,
                         state: state,
                         country: country,
-                        displayName: nominatimData.display_name || fullName,
+                        displayName: nominatimData.display_name || prettyName,
                         neighborhood: address.neighbourhood || address.suburb || null,
                         latitude: latitude,
                         longitude: longitude,
@@ -646,7 +715,7 @@ app.get('/api/reverse-geocode', (req, res) => {
                     // Cache the result
                     setGeocodeCache(latitude, longitude, result);
                     
-                    console.log(`[Geocode Success] ${locationName} (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`);
+                    sLog(`[Geocode Success] ${prettyName} (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`);
                     
                     res.json({
                         ...result,
@@ -740,7 +809,7 @@ app.get('/api/boost-prices', (req, res) => {
             const parsed = JSON.parse(data);
             basePrices = parsed.basePrices;
             priceMultipliers = parsed.priceMultipliers;
-            console.log('📊 Loaded dynamic boost prices from file');
+            sLog('📊 Loaded dynamic boost prices from file');
         }
     } catch (e) {
         console.warn('⚠️ Could not load dynamic prices:', e.message);
@@ -780,7 +849,7 @@ app.post('/api/boost-prices', (req, res) => {
             lastUpdated: Date.now()
         }, null, 2));
         
-        console.log('💰 Updated boost prices:', basePrices);
+        sLog('💰 Updated boost prices:', basePrices);
         res.json({ success: true, basePrices, priceMultipliers });
     } catch (e) {
         console.error('Error saving prices:', e);
@@ -807,8 +876,8 @@ app.post('/api/boost/create-intent', async (req, res) => {
             clientSecret: intent.client_secret,
             paymentIntentId: intent.id,
             amountCents: priceCents,
-            currency: t.currency,
-            label: t.label
+            currency: intent.currency || 'usd',
+            label: BOOST_TIERS.standard && BOOST_TIERS.standard.label ? BOOST_TIERS.standard.label : '$?'
         });
     } catch (e) {
         console.error('[boost] create-intent failed', e);
@@ -837,10 +906,10 @@ app.get('*', (req, res) => {
 const PORT = process.env.PORT || 5001;
 
 const server = app.listen(PORT, () => {
-    console.log(`[${new Date().toISOString()}] Server running on http://localhost:${PORT}`);
+    sLog(`[${new Date().toISOString()}] Server running on http://localhost:${PORT}`);
 });
 
 server.on('error', (err) => {
-    console.error('Server error:', err);
-    process.exit(1);
+    sErr('Server error:', err);
+    // Keep process alive for transient server errors; allow operator to investigate.
 });
