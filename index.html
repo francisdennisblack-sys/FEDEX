@@ -11214,25 +11214,39 @@
         async function linkAccountWithGoogle() {
             try {
                 if (!auth) throw new Error('Auth not initialized');
-                const user = auth.currentUser;
-                if (!user) throw new Error('No current user to link');
 
+                let user = auth.currentUser;
                 const provider = new GoogleAuthProvider();
 
-                // If user is anonymous, link their account to Google using a popup
+                // If there's no current user, create an anonymous session first so we
+                // can link that anonymous account to Google (preserves local posts).
+                if (!user) {
+                    console.log('🔐 No current user — signing in anonymously first...');
+                    try {
+                        const anonResult = await signInAnonymously(auth);
+                        user = anonResult.user;
+                        console.log('✅ Anonymous sign-in succeeded:', user && user.uid);
+                        // Ensure our local persistent id mapping is kept in sync
+                        try { currentUserId = currentUserId || getPermanentUserId(); localStorage.setItem('userId', currentUserId); } catch(e){}
+                    } catch (e) {
+                        console.error('❌ Anonymous sign-in failed:', e);
+                        throw e;
+                    }
+                }
+
+                // If user is anonymous, link to Google using a popup (keeps posts)
                 if (user.isAnonymous) {
                     console.log('🔗 Linking anonymous account to Google...');
                     const result = await linkWithPopup(user, provider);
                     console.log('✅ Account linked to Google:', result.user.uid);
-                    // Update mapping in Firebase users/ node
                     try { await set(ref(database, `users/${currentUserId}/linkedProviders/google`), { linkedAt: Date.now(), googleUid: result.user.uid }); } catch (e) { console.warn('Failed writing linkedProviders metadata', e); }
                     alert('Account successfully linked to Google. Your posts will stay with your account.');
                     try { updateAccountUI(); } catch (e) {}
                     try { updateQueuedCount(); } catch (e) {}
                     return result;
                 } else {
-                    // Not anonymous: perform a regular sign-in or prompt to link
-                    console.log('User is not anonymous; prompting Google sign-in');
+                    // Not anonymous: perform a regular sign-in
+                    console.log('User already has an account; prompting Google sign-in');
                     const result = await signInWithPopup(auth, provider);
                     console.log('✅ Signed in with Google:', result.user.uid);
                     alert('Signed in with Google');
