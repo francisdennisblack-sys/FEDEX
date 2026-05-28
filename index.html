@@ -2725,90 +2725,169 @@
                 <div id="signedInAs" style="font-size:12px; color:#ccc;">Signed in as: -</div>
                 <div id="onlineUserCount" style="font-size:12px; color:#888;">0 online</div>
             </div>
-            <button id="signInBtn" title="Sign in with Google" style="background:#4285F4;color:#fff;border:none;padding:8px 12px;border-radius:8px;font-weight:700;cursor:pointer;margin-left:6px;">Sign in</button>
-            <button id="forceSignInBtn" title="Force redirect sign-in" style="background:#0ea5e9;color:#032; border:none;padding:8px 10px;border-radius:8px;font-weight:700;cursor:pointer;margin-left:6px;">Force Sign-in</button>
+            <button id="signInBtn" title="Profile / Sign in" style="background:#4b5563;color:#fff;border:none;padding:8px 12px;border-radius:8px;font-weight:700;cursor:pointer;margin-left:6px;">Profile</button>
+            <button id="forceSignInBtn" title="Sign in (email)" style="background:#0ea5e9;color:#032; border:none;padding:8px 10px;border-radius:8px;font-weight:700;cursor:pointer;margin-left:6px;">Sign In</button>
             <button id="unregisterSwBtn" title="Unregister Service Workers & reload" style="background:#ef4444;color:#fff;border:none;padding:8px 10px;border-radius:8px;font-weight:700;cursor:pointer;margin-left:6px;">Unregister SW</button>
             <button id="accountMenuBtn" aria-haspopup="true" aria-expanded="false" title="Account menu" style="width:30px;height:30px;border-radius:50%;border:1px solid #333;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;margin-left:6px;">
                 ☻
             </button>
             <div id="accountMenu" style="display:none; position:absolute; right:18px; top:44px; background:#111; border:1px solid #333; padding:12px; border-radius:8px; min-width:220px; box-shadow:0 6px 18px rgba(0,0,0,0.4); z-index:10001;">
                 <div style="font-size:12px;color:#ccc;margin-bottom:8px;">Account</div>
-                <button id="accountLinkGoogle" style="width:100%; padding:12px 14px; background:#4285F4; color:#fff; border:none; border-radius:8px; cursor:pointer; font-size:14px; font-weight:600;">Link with Google</button>
-                <div style="font-size:11px;color:#888;margin-top:8px;">Optional — keeps posts with your account</div>
+                <button id="accountViewProfile" style="width:100%; padding:12px 14px; background:#111; color:#fff; border:1px solid #333; border-radius:8px; cursor:pointer; font-size:14px; font-weight:600; margin-bottom:8px;">View Profile</button>
+                <button id="accountSignOut" style="width:100%; padding:12px 14px; background:#ef4444; color:#fff; border:none; border-radius:8px; cursor:pointer; font-size:14px; font-weight:600;">Sign Out</button>
             </div>
         </div>
         <!-- Centered Google sign-in removed; use profile menu in top-right -->
     </div>
 
         <script>
-            // Client-friendly sign-in helper: try popup, fall back to redirect
+            // Email/password signup + profile modal (replaces Google sign-in flows)
             (function(){
-                async function _signInWithGoogle() {
-                    // IMPORTANT: For popups to succeed the signInWithPopup call must
-                    // occur as a direct result of a user gesture (click). Awaiting
-                    // async persistence calls before calling popup can break that
-                    // gesture in some browsers/extensions. Therefore we kick off
-                    // persistence asynchronously and immediately attempt popup.
+                async function createAccountWithEmail(email, password, username) {
                     try {
-                        const provider = (typeof GoogleAuthProvider === 'function') ? new GoogleAuthProvider() : null;
-                        if (!provider) { alert('Auth provider not ready yet — try again in a moment'); return; }
-
-                        // Try popup first (best UX). Do not await setPersistence to preserve user gesture.
-                        if (window.setPersistence && window.browserLocalPersistence && window.auth) {
-                            setPersistence(window.auth, browserLocalPersistence).catch(e => console.warn('setPersistence failed', e));
+                        if (!window.auth) throw new Error('Auth not initialized');
+                        const res = await createUserWithEmailAndPassword(window.auth, email, password);
+                        const firebaseUid = res.user.uid;
+                        const database = getDatabase();
+                        // Use permanent local id as canonical user id so local posts remain linked
+                        const canonicalUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
+                        if (database) {
+                            await set(ref(database, `users/${canonicalUid}/profile`), { username: username || email.split('@')[0], email: email, createdAt: Date.now(), linkedFirebaseUid: firebaseUid });
+                            // init stats
+                            await set(ref(database, `users/${canonicalUid}/stats`), { postsCount: 0, totalLikes: 0 });
                         }
-
-                        if (typeof signInWithPopup === 'function') {
-                            try {
-                                const result = await signInWithPopup(window.auth, provider);
-                                console.log('✅ Signed in via popup:', result.user && result.user.uid);
-                                return result;
-                            } catch (errPopup) {
-                                console.warn('Popup sign-in failed or was blocked, falling back to redirect:', errPopup);
-                                // If popup failed (blocked), try redirect next
-                            }
-                        }
-
-                        // Fallback to redirect (more robust when popups blocked)
-                        if (typeof signInWithRedirect === 'function') {
-                            try {
-                                console.log('🔐 Falling back to redirect sign-in');
-                                await signInWithRedirect(window.auth, provider);
-                                return;
-                            } catch (errRedirect) {
-                                console.error('Redirect sign-in failed:', errRedirect);
-                                alert('Sign-in failed: ' + (errRedirect && errRedirect.message));
-                            }
-                        } else {
-                            alert('Sign-in not available in this browser. Try another browser or enable popups.');
-                        }
+                        window.currentUserId = canonicalUid;
+                        window.currentUserEmail = email;
+                        updateAccountUI();
+                        showNotification && showNotification('Account created', `Welcome ${username || email}`);
+                        return res.user;
                     } catch (err) {
-                        console.error('signInWithGoogle error:', err);
-                        alert('Sign-in failed: ' + (err && err.message));
+                        console.error('createAccountWithEmail error', err);
+                        throw err;
                     }
                 }
 
-                window.signInWithGoogle = _signInWithGoogle;
-                // Wire button (if present)
+                async function signInWithEmailFlow(email, password) {
+                    try {
+                        if (!window.auth) throw new Error('Auth not initialized');
+                        const res = await signInWithEmailAndPassword(window.auth, email, password);
+                        const user = res.user;
+                        // Map Firebase-authenticated session to canonical local id
+                        const canonicalUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
+                        window.currentUserId = canonicalUid;
+                        window.currentUserEmail = user.email;
+                        updateAccountUI();
+                        showNotification && showNotification('Signed in', `${user.email}`);
+                        return user;
+                    } catch (err) {
+                        console.error('signInWithEmailFlow error', err);
+                        throw err;
+                    }
+                }
+
+                // Create a simple modal for sign-up / profile view
+                function ensureProfileModal() {
+                    if (document.getElementById('profileModal')) return;
+                    const html = `
+                        <div id="profileModal" class="modal" style="display:none; z-index:10002;">
+                            <div class="modal-content" style="width:320px; max-width:94%;">
+                                <div class="modal-header"><h2>Profile</h2></div>
+                                <div class="modal-body" style="padding:12px;">
+                                    <div id="profileView" style="display:none;"></div>
+                                    <div id="profileForm" style="display:none;">
+                                        <label style="font-size:12px;color:#ccc;">Username</label>
+                                        <input id="signupUsername" type="text" style="width:100%; padding:8px; margin:6px 0;" />
+                                        <label style="font-size:12px;color:#ccc;">Email</label>
+                                        <input id="signupEmail" type="email" style="width:100%; padding:8px; margin:6px 0;" />
+                                        <label style="font-size:12px;color:#ccc;">Password</label>
+                                        <input id="signupPassword" type="password" style="width:100%; padding:8px; margin:6px 0;" />
+                                        <div style="display:flex; gap:8px; margin-top:8px;">
+                                            <button id="doCreateAccount" style="flex:1; padding:10px; background:#4ade80; border:none; border-radius:6px;">Create Account</button>
+                                            <button id="doSignInExisting" style="flex:1; padding:10px; background:#0ea5e9; border:none; border-radius:6px;">Sign In</button>
+                                        </div>
+                                    </div>
+                                    <div id="profileMsg" style="font-size:12px;color:#888;margin-top:8px;"></div>
+                                </div>
+                                <div style="padding:12px; text-align:right;"><button id="closeProfileModal" style="padding:8px 12px;border-radius:6px;background:#333;border:none;color:#fff;">Close</button></div>
+                            </div>
+                        </div>
+                    `;
+                    const div = document.createElement('div');
+                    div.innerHTML = html;
+                    document.body.appendChild(div);
+
+                    // Wire modal buttons
+                    document.getElementById('closeProfileModal').addEventListener('click', () => { document.getElementById('profileModal').style.display = 'none'; });
+                    document.getElementById('doCreateAccount').addEventListener('click', async () => {
+                        const username = document.getElementById('signupUsername').value.trim();
+                        const email = document.getElementById('signupEmail').value.trim();
+                        const password = document.getElementById('signupPassword').value;
+                        try {
+                            await createAccountWithEmail(email, password, username);
+                            document.getElementById('profileModal').style.display = 'none';
+                        } catch (err) { alert('Create account failed: ' + (err && err.message)); }
+                    });
+                    document.getElementById('doSignInExisting').addEventListener('click', async () => {
+                        const email = document.getElementById('signupEmail').value.trim();
+                        const password = document.getElementById('signupPassword').value;
+                        try {
+                            await signInWithEmailFlow(email, password);
+                            document.getElementById('profileModal').style.display = 'none';
+                        } catch (err) { alert('Sign-in failed: ' + (err && err.message)); }
+                    });
+                }
+
+                async function showProfileModal() {
+                    ensureProfileModal();
+                    const modal = document.getElementById('profileModal');
+                    const profileView = document.getElementById('profileView');
+                    const profileForm = document.getElementById('profileForm');
+                    const msg = document.getElementById('profileMsg');
+                    profileView.innerHTML = '';
+                    msg.textContent = '';
+                    if (window.currentUserId) {
+                        // show profile view
+                        profileForm.style.display = 'none';
+                        profileView.style.display = 'block';
+                        const database = getDatabase();
+                        try {
+                            const snap = await get(ref(database, `users/${window.currentUserId}`));
+                            const data = snap && snap.val ? snap.val() : {};
+                            const profile = (data && data.profile) || {};
+                            const stats = (data && data.stats) || { postsCount: 0, totalLikes: 0 };
+                            profileView.innerHTML = `<div style="font-size:14px;color:#fff;font-weight:700;">${profile.username || profile.email || window.currentUserId.slice(0,8)}</div>
+                                                    <div style="font-size:12px;color:#ccc;margin-top:6px;">Posts: ${stats.postsCount || 0}</div>
+                                                    <div style="font-size:12px;color:#ccc;margin-top:6px;">Total Likes: ${stats.totalLikes || 0}</div>
+                                                    <div style="font-size:12px;color:#ccc;margin-top:8px;">States: ${profile.states || '—'}</div>`;
+                        } catch (err) { profileView.innerHTML = '<div style="color:#f00">Failed loading profile</div>'; }
+                    } else {
+                        // show signup form
+                        profileView.style.display = 'none';
+                        profileForm.style.display = 'block';
+                    }
+                    modal.style.display = 'block';
+                }
+
+                async function doSignOut() {
+                    try {
+                        if (window.auth && typeof signOut === 'function') {
+                            await signOut(window.auth);
+                        }
+                    } catch (err) { console.warn('signOut failed', err); }
+                    window.currentUserId = null;
+                    window.currentUserEmail = null;
+                    updateAccountUI();
+                    showNotification && showNotification('Signed out');
+                }
+
+                // Wire header buttons after DOM ready
                 document.addEventListener('DOMContentLoaded', () => {
                     const btn = document.getElementById('signInBtn');
-                    if (btn) btn.addEventListener('click', (e) => { e.preventDefault(); _signInWithGoogle(); });
+                    if (btn) btn.addEventListener('click', (e) => { e.preventDefault(); showProfileModal(); });
 
-                    // Force redirect sign-in button
                     const fbtn = document.getElementById('forceSignInBtn');
-                    if (fbtn) fbtn.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        console.log('🔐 Forcing sign-in via redirect...');
-                        try {
-                            if (typeof signInWithRedirect === 'function' && window.auth) {
-                                signInWithRedirect(window.auth, new GoogleAuthProvider());
-                            } else {
-                                alert('Redirect sign-in not available.');
-                            }
-                        } catch (err) { console.error('Force redirect failed', err); alert('Force redirect failed: ' + err.message); }
-                    });
+                    if (fbtn) fbtn.addEventListener('click', (e) => { e.preventDefault(); showProfileModal(); });
 
-                    // Unregister Service Worker & reload
                     const ubr = document.getElementById('unregisterSwBtn');
                     if (ubr) ubr.addEventListener('click', async (e) => {
                         e.preventDefault();
@@ -2829,9 +2908,16 @@
                         } catch (err) { console.error('Failed to unregister SWs', err); alert('Failed to unregister: ' + (err && err.message)); }
                         // Force reload without cache
                         try { window.location.reload(true); } catch(e) { window.location.reload(); }
+                        });
                     });
-                });
-            })();
+                    // expose profile helpers globally for other code to call
+                    try {
+                        window.showProfileModal = showProfileModal;
+                        window.doSignOut = doSignOut;
+                        window.createAccountWithEmail = createAccountWithEmail;
+                        window.signInWithEmailFlow = signInWithEmailFlow;
+                    } catch (e) { console.warn('Failed to expose profile helpers', e); }
+                })();
         </script>
 
     <div class="container">
@@ -3393,9 +3479,9 @@
         console.log('📦 Firebase module loading...');
         // Import Firebase functions
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
-        import { getDatabase, ref, set, get, update, remove, onValue } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
+        import { getDatabase, ref, set, get, update, remove, onValue, runTransaction } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
         import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
-        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, GoogleAuthProvider, signInWithPopup, signInWithRedirect, linkWithPopup } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
+        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
 
         const firebaseConfig = {
             apiKey: "AIzaSyD5A_MF7gRvqnHd_DD3lReYpEkRph6msX4",
@@ -3432,11 +3518,15 @@
         window.getDatabase = getDatabase;
         window.getStorage = getStorage;
         window.getAuth = getAuth;
-        window.GoogleAuthProvider = GoogleAuthProvider;
-        window.signInWithPopup = signInWithPopup;
-        window.signInWithRedirect = signInWithRedirect;
+        window.runTransaction = runTransaction;
+        // Email/password auth helpers
+        window.createUserWithEmailAndPassword = createUserWithEmailAndPassword;
+        window.signInWithEmailAndPassword = signInWithEmailAndPassword;
+        window.signOut = signOut;
         window.setPersistence = setPersistence;
         window.browserLocalPersistence = browserLocalPersistence;
+        // Database transaction helper
+        // runTransaction exported below from database import
         window.getDownloadURL = getDownloadURL;
         window.uploadBytes = uploadBytes;
         window.deleteObject = deleteObject;
@@ -11182,7 +11272,8 @@
             try {
                 const btn = document.getElementById('accountMenuBtn');
                 const menu = document.getElementById('accountMenu');
-                const linkBtn = document.getElementById('accountLinkGoogle');
+                const viewBtn = document.getElementById('accountViewProfile');
+                const signOutBtn = document.getElementById('accountSignOut');
                 if (!btn || !menu) return;
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -11197,17 +11288,22 @@
                         btn.setAttribute('aria-expanded', 'false');
                     }
                 });
-                // Wire Link with Google
-                if (linkBtn) {
-                    linkBtn.addEventListener('click', async (e) => {
+                // Wire View Profile
+                if (viewBtn) {
+                    viewBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        try { showProfileModal(); } catch (err) { console.error('Show profile failed', err); }
+                        menu.style.display = 'none';
+                    });
+                }
+                // Wire Sign Out
+                if (signOutBtn) {
+                    signOutBtn.addEventListener('click', async (e) => {
                         e.stopPropagation();
                         try {
-                            await linkAccountWithGoogle();
+                            await doSignOut();
                             menu.style.display = 'none';
-                        } catch (err) {
-                            console.error('Header Link with Google failed:', err);
-                            alert('Link with Google failed: ' + (err && err.message));
-                        }
+                        } catch (err) { console.error('Sign out failed', err); alert('Sign out failed'); }
                     });
                 }
             } catch (err) { console.warn('initAccountMenu error', err); }
@@ -11219,52 +11315,9 @@
 
         // Link anonymous account to Google (one-click)
         async function linkAccountWithGoogle() {
-            try {
-                if (!auth) throw new Error('Auth not initialized');
-
-                let user = auth.currentUser;
-                const provider = new GoogleAuthProvider();
-
-                // If there's no current user, create an anonymous session first so we
-                // can link that anonymous account to Google (preserves local posts).
-                if (!user) {
-                    console.log('🔐 No current user — signing in anonymously first...');
-                    try {
-                        const anonResult = await signInAnonymously(auth);
-                        user = anonResult.user;
-                        console.log('✅ Anonymous sign-in succeeded:', user && user.uid);
-                        // Ensure our local persistent id mapping is kept in sync
-                        try { currentUserId = currentUserId || getPermanentUserId(); localStorage.setItem('userId', currentUserId); } catch(e){}
-                    } catch (e) {
-                        console.error('❌ Anonymous sign-in failed:', e);
-                        throw e;
-                    }
-                }
-
-                // If user is anonymous, link to Google using a popup (keeps posts)
-                if (user.isAnonymous) {
-                    console.log('🔗 Linking anonymous account to Google...');
-                    const result = await linkWithPopup(user, provider);
-                    console.log('✅ Account linked to Google:', result.user.uid);
-                    try { await set(ref(database, `users/${currentUserId}/linkedProviders/google`), { linkedAt: Date.now(), googleUid: result.user.uid }); } catch (e) { console.warn('Failed writing linkedProviders metadata', e); }
-                    alert('Account successfully linked to Google. Your posts will stay with your account.');
-                    try { updateAccountUI(); } catch (e) {}
-                    try { updateQueuedCount(); } catch (e) {}
-                    return result;
-                } else {
-                    // Not anonymous: perform a regular sign-in
-                    console.log('User already has an account; prompting Google sign-in');
-                    const result = await signInWithPopup(auth, provider);
-                    console.log('✅ Signed in with Google:', result.user.uid);
-                    alert('Signed in with Google');
-                    try { updateAccountUI(); } catch (e) {}
-                    try { updateQueuedCount(); } catch (e) {}
-                    return result;
-                }
-            } catch (err) {
-                console.error('linkAccountWithGoogle error:', err);
-                throw err;
-            }
+            // Google account linking removed — use email/password signup instead.
+            alert('Google account linking is disabled. Use Profile → Create Account (email/password) instead.');
+            throw new Error('Google linking disabled');
         }
 
         // SHARED POST COLLECTION - NEW ARCHITECTURE
@@ -11308,6 +11361,20 @@
                         };
                         await set(userPostRef, userMeta);
                         console.log('✅ Wrote user index:', `users/${postData.authId}/posts/${postId}`);
+
+                        // Increment user stats.postsCount atomically
+                        try {
+                            const statsRef = ref(database, `users/${postData.authId}/stats`);
+                            await runTransaction(statsRef, (current) => {
+                                if (!current) return { postsCount: 1, totalLikes: 0 };
+                                current.postsCount = (current.postsCount || 0) + 1;
+                                if (typeof current.totalLikes === 'undefined') current.totalLikes = 0;
+                                return current;
+                            });
+                            console.log('✅ Incremented user postsCount for', postData.authId);
+                        } catch (statErr) {
+                            console.warn('⚠️ Failed to update user stats (non-fatal):', statErr);
+                        }
                     }
 
                     const zoneKey = postData.zoneTag || postData.county || 'unknown_zone';
@@ -12885,7 +12952,7 @@
                     box.style.textAlign = 'center';
 
                     box.innerHTML = `<div style="font-size:20px; font-weight:800; margin-bottom:8px;">Sign in to view content</div>
-                        <div style="color:#9adbd8; margin-bottom:16px;">Create a quick anonymous session or sign in with Google to access the grid. You can sign in on multiple devices.</div>`;
+                        <div style="color:#9adbd8; margin-bottom:16px;">Create a quick anonymous session or sign up / sign in with email to access the grid. You can sign in on multiple devices.</div>`;
 
                     const anonBtn = document.createElement('button');
                     anonBtn.textContent = 'Continue anonymously';
@@ -12912,7 +12979,7 @@
                     };
 
                     const googleBtn = document.createElement('button');
-                    googleBtn.textContent = 'Sign in with Google';
+                    googleBtn.textContent = 'Sign up / Sign in (email)';
                     googleBtn.style.margin = '6px';
                     googleBtn.style.padding = '10px 14px';
                     googleBtn.style.borderRadius = '8px';
@@ -12922,15 +12989,17 @@
                     googleBtn.style.fontWeight = '700';
                     googleBtn.onclick = async () => {
                         try {
-                            if (!auth) throw new Error('Auth not ready');
-                            const provider = new GoogleAuthProvider();
-                            await signInWithPopup(auth, provider);
-                            gate.remove();
-                            try { initializeGrid(); } catch (e) {}
-                            try { updateUserActivity(); } catch (e) {}
+                            if (typeof showProfileModal === 'function') {
+                                showProfileModal();
+                                gate.remove();
+                                try { initializeGrid(); } catch (e) {}
+                                try { updateUserActivity(); } catch (e) {}
+                            } else {
+                                alert('Sign-in UI not ready yet');
+                            }
                         } catch (e) {
-                            console.error('Google sign-in failed', e);
-                            alert('Google sign-in failed: ' + (e && e.message ? e.message : e));
+                            console.error('Sign-in failed', e);
+                            alert('Sign-in failed: ' + (e && e.message ? e.message : e));
                         }
                     };
 
