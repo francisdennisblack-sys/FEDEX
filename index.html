@@ -2552,6 +2552,20 @@
             transition: background-color 0.3s ease;
             display: none;
         " title="Theme toggle disabled"></button>
+        <div id="accountArea" style="display:flex; gap:12px; align-items:center; position:absolute; right:18px; top:12px;">
+            <div id="signedInAs" style="font-size:12px; color:#ccc;">Signed in as: -</div>
+            <div id="queuedIndicator" style="font-size:12px; color:#ffdd57; background:#222; padding:4px 8px; border-radius:6px; border:1px solid #333;">
+                Pending: <span id="queuedCount">0</span>
+            </div>
+            <button id="accountMenuBtn" aria-haspopup="true" aria-expanded="false" title="Account menu" style="width:30px;height:30px;border-radius:50%;border:1px solid #333;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;margin-left:6px;">
+                ☻
+            </button>
+            <div id="accountMenu" style="display:none; position:absolute; right:18px; top:44px; background:#111; border:1px solid #333; padding:8px; border-radius:6px; min-width:140px; box-shadow:0 6px 18px rgba(0,0,0,0.4); z-index:10001;">
+                <div style="font-size:12px;color:#ccc;margin-bottom:6px;">Account</div>
+                <button id="accountLinkGoogle" style="width:100%; padding:8px; background:#4285F4; color:#fff; border:none; border-radius:6px; cursor:pointer;">Link with Google</button>
+                <div style="font-size:11px;color:#888;margin-top:8px;">Optional — keeps posts with your account</div>
+            </div>
+        </div>
     </div>
 
     <div class="container">
@@ -8338,6 +8352,8 @@
                 currentUserId = newUserId;
                 localStorage.setItem('userId', currentUserId);
                 isConnected = true;
+                try { updateAccountUI(); } catch (err) { console.warn('updateAccountUI failed', err); }
+                try { updateQueuedCount(); } catch (err) { /* ignore */ }
                 console.log(`\n✅ Step 2: userId LOCKED to PERMANENT ID`);
                 console.log(`  Permanent ID: ${newUserId}`);
                 console.log(`  Firebase UID: ${user.uid} (backup, may change)`);
@@ -8451,7 +8467,8 @@
                         // Background sync trigger (existing behavior)
                         if (event.data.type === 'BACKGROUND_SYNC_TRIGGER') {
                             console.log('📱 Service Worker triggered sync from background');
-                            subscribeToFirebasePostsWithReconnect();
+                            try { flushQueuedPosts().catch(e => console.warn('Queued flush error (sw message):', e)); } catch(e) { console.warn('flushQueuedPosts not available yet', e); }
+                            try { subscribeToFirebasePostsWithReconnect(); } catch (e) { console.warn('subscribeToFirebasePostsWithReconnect error', e); }
                         }
                         // New version available - reload so client loads latest deployment
                         if (event.data.type === 'NEW_VERSION_AVAILABLE') {
@@ -8508,33 +8525,7 @@
                     console.log('⚠️ Subscribing anyway with fallback...');
                     subscribeToFirebasePostsWithReconnect();
                     try { flushQueuedPosts().catch(e => console.warn('Queued flush error:', e)); } catch(e) { console.warn('flushQueuedPosts not available yet', e); }
-                    // Add 'Link with Google' UI button (small and non-intrusive)
-                    try {
-                        const linkBtn = document.createElement('button');
-                        linkBtn.id = 'linkGoogleBtn';
-                        linkBtn.textContent = 'Link with Google';
-                        linkBtn.style.position = 'fixed';
-                        linkBtn.style.right = '12px';
-                        linkBtn.style.bottom = '12px';
-                        linkBtn.style.zIndex = 99999;
-                        linkBtn.style.padding = '8px 12px';
-                        linkBtn.style.background = '#4285F4';
-                        linkBtn.style.color = '#fff';
-                        linkBtn.style.border = 'none';
-                        linkBtn.style.borderRadius = '6px';
-                        linkBtn.style.boxShadow = '0 2px 6px rgba(0,0,0,0.2)';
-                        linkBtn.style.cursor = 'pointer';
-                        linkBtn.addEventListener('click', async (e) => {
-                            e.preventDefault();
-                            try {
-                                await linkAccountWithGoogle();
-                            } catch (err) {
-                                console.error('Link with Google failed:', err);
-                                alert('Link with Google failed: ' + (err && err.message));
-                            }
-                        });
-                        document.body.appendChild(linkBtn);
-                    } catch (uiErr) { console.warn('Could not add Link with Google button:', uiErr); }
+                    // No floating Link button — header menu handles optional linking
                 });
                 
                 // ✅ BACKGROUND TASKS: Keep minimal - only essential updates
@@ -10733,7 +10724,20 @@
                     const tx = db.transaction('posts', 'readwrite');
                     const store = tx.objectStore('posts');
                     const req = store.add(Object.assign({}, item, { enqueueAt: Date.now() }));
-                    req.onsuccess = (e) => { resolve(e.target.result); db.close(); };
+                    req.onsuccess = (e) => {
+                        const id = e.target.result;
+                        try { updateQueuedCount(); } catch (err) { console.warn('updateQueuedCount failed', err); }
+                        // Try to register background sync so the service worker will wake and request a flush
+                        if ('serviceWorker' in navigator && navigator.serviceWorker.ready) {
+                            navigator.serviceWorker.ready.then(reg => {
+                                if (reg && reg.sync && typeof reg.sync.register === 'function') {
+                                    reg.sync.register('post-sync').catch(err => console.warn('Background sync registration failed:', err));
+                                }
+                            }).catch(err => {/* ignore readiness errors */});
+                        }
+                        resolve(id);
+                        db.close();
+                    };
                     req.onerror = (e) => { reject(e.target.error || new Error('IDB add error')); db.close(); };
                 } catch (err) { reject(err); }
             });
@@ -10759,7 +10763,7 @@
                     const tx = db.transaction('posts', 'readwrite');
                     const store = tx.objectStore('posts');
                     const req = store.delete(enqueueId);
-                    req.onsuccess = (e) => { resolve(true); db.close(); };
+                    req.onsuccess = (e) => { try { updateQueuedCount(); } catch (err) {} resolve(true); db.close(); };
                     req.onerror = (e) => { reject(e.target.error || new Error('IDB delete error')); db.close(); };
                 } catch (err) { reject(err); }
             });
@@ -10796,10 +10800,71 @@
                         // don't remove; will retry later
                     }
                 }
+                try { updateQueuedCount(); } catch (err) { console.warn('updateQueuedCount after flush failed', err); }
             } catch (e) {
                 console.error('flushQueuedPosts error:', e);
             }
         }
+
+        // Update visible queued-post count in header
+        async function updateQueuedCount() {
+            try {
+                const queued = await getAllQueuedPosts();
+                const el = document.getElementById('queuedCount');
+                if (el) el.textContent = (queued && queued.length) ? queued.length : '0';
+            } catch (err) { console.warn('updateQueuedCount error', err); }
+        }
+
+        // Update account/profile area
+        function updateAccountUI() {
+            try {
+                const el = document.getElementById('signedInAs');
+                if (!el) return;
+                const email = (window.currentUserEmail) || (typeof auth !== 'undefined' && auth && auth.currentUser && auth.currentUser.email) || null;
+                if (email) el.textContent = `Signed in as: ${email}`;
+                else if (window.currentUserId) el.textContent = `Signed in as: ${window.currentUserId.slice ? window.currentUserId.slice(0,8) : window.currentUserId}`;
+                else el.textContent = 'Signed in as: -';
+            } catch (err) { console.warn('updateAccountUI error', err); }
+        }
+
+        // Initialize header account menu interactions
+        function initAccountMenu() {
+            try {
+                const btn = document.getElementById('accountMenuBtn');
+                const menu = document.getElementById('accountMenu');
+                const linkBtn = document.getElementById('accountLinkGoogle');
+                if (!btn || !menu) return;
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const isOpen = menu.style.display === 'block';
+                    menu.style.display = isOpen ? 'none' : 'block';
+                    btn.setAttribute('aria-expanded', (!isOpen).toString());
+                });
+                // Close on outside click
+                document.addEventListener('click', () => {
+                    if (menu.style.display === 'block') {
+                        menu.style.display = 'none';
+                        btn.setAttribute('aria-expanded', 'false');
+                    }
+                });
+                // Wire Link with Google
+                if (linkBtn) {
+                    linkBtn.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        try {
+                            await linkAccountWithGoogle();
+                            menu.style.display = 'none';
+                        } catch (err) {
+                            console.error('Header Link with Google failed:', err);
+                            alert('Link with Google failed: ' + (err && err.message));
+                        }
+                    });
+                }
+            } catch (err) { console.warn('initAccountMenu error', err); }
+        }
+
+        // Initialize immediately (DOM exists at this script point)
+        try { initAccountMenu(); } catch (e) { /* ignore init errors */ }
 
         // Link anonymous account to Google (one-click)
         async function linkAccountWithGoogle() {
@@ -10818,6 +10883,8 @@
                     // Update mapping in Firebase users/ node
                     try { await set(ref(database, `users/${currentUserId}/linkedProviders/google`), { linkedAt: Date.now(), googleUid: result.user.uid }); } catch (e) { console.warn('Failed writing linkedProviders metadata', e); }
                     alert('Account successfully linked to Google. Your posts will stay with your account.');
+                    try { updateAccountUI(); } catch (e) {}
+                    try { updateQueuedCount(); } catch (e) {}
                     return result;
                 } else {
                     // Not anonymous: perform a regular sign-in or prompt to link
@@ -10825,6 +10892,8 @@
                     const result = await signInWithPopup(auth, provider);
                     console.log('✅ Signed in with Google:', result.user.uid);
                     alert('Signed in with Google');
+                    try { updateAccountUI(); } catch (e) {}
+                    try { updateQueuedCount(); } catch (e) {}
                     return result;
                 }
             } catch (err) {
@@ -11530,6 +11599,7 @@
         window.addEventListener('online', () => {
             console.log('✅ Connection restored - syncing offline votes...');
             syncOfflineVotes();
+            try { flushQueuedPosts().catch(e => console.warn('Queued flush error (online):', e)); } catch (e) { console.warn('flushQueuedPosts not available', e); }
         });
         
         // Periodic sync every 30 seconds
