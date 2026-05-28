@@ -17233,6 +17233,33 @@
             
             console.log(`🎯 AUTO-DETECT START: User at (${userLocation.lat}, ${userLocation.lon}) accuracy: ${userLocation.accuracy}m`);
             
+            // FAST PATH: If a spatial GeoIndex is available, use it (O(1)) instead of scanning
+            // the large `globalLocationDatabase` array which can be very slow on mobile.
+            try {
+                if (window.GeoIndex && typeof window.GeoIndex.nearby === 'function') {
+                    const tGeo = performance.now();
+                    // GeoIndex.nearby expects miles; request ~31 miles ~= 50km radius
+                    const hits = window.GeoIndex.nearby(userLocation.lat, userLocation.lon, 31);
+                    if (hits && hits.length) {
+                        // Prefer POIs/locations that look like neighbourhoods or cities
+                        const pick = hits.find(h => h && h.poi && h.poi.type && /(neighborhood|city|town|village|suburb)/i.test(String(h.poi.type))) || hits[0];
+                        const closestPoi = pick.poi;
+                        const distMi = pick.distanceMi;
+                        const distKm = (distMi * 1.60934).toFixed(2);
+                        const areaName = closestPoi && (closestPoi.name || closestPoi.city) ? (closestPoi.name || closestPoi.city) : null;
+                        if (areaName) {
+                            const autoDisplay = document.getElementById('autoAreaText');
+                            if (autoDisplay) {
+                                autoDisplay.textContent = `✓ ${areaName} (${(distMi).toFixed(1)}mi)`;
+                                autoDisplay.style.color = '#fff';
+                            }
+                            console.log(`🗺️ GeoIndex fast-match: ${areaName} (${distKm}km) in ${(performance.now() - tGeo).toFixed(1)}ms`);
+                            return areaName;
+                        }
+                    }
+                }
+            } catch (e) { console.warn('⚠️ GeoIndex fast-path failed:', e); }
+
             // ENHANCED ML: Use intelligent 3-tier search on 383K+ location database
             if (globalLocationDatabase && globalLocationDatabase.length > 0) {
                 console.log(`   📊 ML Database: ${globalLocationDatabase.length.toLocaleString()} locations available`);
