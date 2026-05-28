@@ -161,7 +161,7 @@ app.get('/api/posts/:zoneId', (req, res) => {
 // Create a new post (zone-based)
 app.post('/api/posts', (req, res) => {
     // Support either explicit zoneId or lat/lon to compute zone
-    let { zoneId, lat, lon, content, imageData, timestamp } = req.body;
+    let { zoneId, lat, lon, content, imageData, timestamp, clientId } = req.body;
 
     if (!zoneId) {
         if (lat && lon) {
@@ -175,6 +175,17 @@ app.post('/api/posts', (req, res) => {
         return res.status(400).json({ error: 'zoneId or lat/lon required' });
     }
 
+    // Idempotency: if client provides a `clientId`, return existing post instead of creating duplicates
+    if (clientId) {
+        for (const zid in postsDatabase) {
+            const existing = postsDatabase[zid].find(p => p.clientId && p.clientId === clientId);
+            if (existing) {
+                console.log(`[idempotency] duplicate post attempt detected for clientId=${clientId}, returning existing post id=${existing.id}`);
+                return res.json({ success: true, post: existing, duplicate: true });
+            }
+        }
+    }
+
     if (!postsDatabase[zoneId]) {
         postsDatabase[zoneId] = [];
     }
@@ -182,6 +193,7 @@ app.post('/api/posts', (req, res) => {
     const post = {
         id: postIdCounter++,
         zoneId,
+        clientId: clientId || null,
         content,
         imageData,
         timestamp: timestamp || Date.now(),
