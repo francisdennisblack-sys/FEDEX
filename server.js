@@ -213,6 +213,14 @@ app.post('/api/posts', (req, res) => {
         dislikes: 0
     };
 
+    // Preserve optional attribution and geo fields if provided by client fallback
+    if (req.body.authId) post.authId = req.body.authId;
+    if (req.body.userId) post.userId = req.body.userId;
+    if (req.body.createdBy) post.createdBy = req.body.createdBy;
+    if (req.body.zoneTag) post.zoneTag = req.body.zoneTag;
+    if (req.body.latitude) post.latitude = req.body.latitude;
+    if (req.body.longitude) post.longitude = req.body.longitude;
+
     postsDatabase[zoneId].push(post);
     saveDatabase(); // Save to disk immediately
 
