@@ -2950,12 +2950,19 @@
                         }
                         phone = raw;
 
-                        // initialize invisible reCAPTCHA once
-                        if (!window.recaptchaVerifier) {
-                            // Firebase modular SDK signature: new RecaptchaVerifier(auth, containerOrId, parameters)
+                        // initialize invisible reCAPTCHA (clear any previous instance to avoid double-render)
+                        try {
+                            const container = document.getElementById('recaptcha-container');
+                            // If an old verifier exists, try to clear it first
+                            if (window.recaptchaVerifier) {
+                                try { if (typeof window.recaptchaVerifier.clear === 'function') window.recaptchaVerifier.clear(); } catch (e) { console.warn('recaptcha clear failed', e); }
+                                window.recaptchaVerifier = null;
+                            }
+                            if (container) container.innerHTML = '';
+                            // Create a fresh verifier instance
                             window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', { size: 'invisible' });
-                            try { window.recaptchaVerifier.render().catch(()=>{}); } catch(e){}
-                        }
+                            try { await window.recaptchaVerifier.render(); } catch (e) { console.warn('recaptcha render failed', e); }
+                        } catch (e) { console.warn('recaptcha init failed', e); }
                         const appVerifier = window.recaptchaVerifier;
                         // Ensure auth state persists across page reloads in this browser
                         try {
@@ -3398,6 +3405,20 @@
                     <div id="boostCardMount" style="background:#0f172a; border:1px solid #334155; border-radius:6px; padding:10px;"></div>
                     <button type="button" id="boostCardPayBtn" onclick="payBoostWithCard()" style="width:100%; margin-top:6px; padding:8px; background:#fbbf24; color:#111827; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay <span class="boost-price-inline">$2.99</span> with card</button>
                     <div id="boostCardError" style="display:none; color:#ef4444; font-size:11px; margin-top:4px; text-align:center;"></div>
+                </div>
+            </div>
+            <!-- Sell badge purchase hint (mirrors boost UI) -->
+            <div id="sellHint" style="display:none; margin-top:8px; padding:10px; background:rgba(59,130,246,0.04); border:1px solid rgba(59,130,246,0.12); border-radius:8px; color:#60a5fa; font-size:12px; font-weight:600;">
+                <div id="sellHintText" style="text-align:center; margin-bottom:8px;">💠 Buy badge armed — $2.00</div>
+                <div id="sellPayRequestMount" style="min-height:0;"></div>
+                <div id="sellPayStatus" style="display:none; text-align:center; margin-top:6px; color:#10b981; font-size:11px;"></div>
+                <div style="text-align:center; margin-top:6px;">
+                    <button type="button" id="sellOtherWaysBtn" onclick="toggleSellOtherWays()" style="background:none; border:none; color:#94a3b8; font-size:11px; text-decoration:underline; cursor:pointer; padding:2px 4px;">card</button>
+                </div>
+                <div id="sellCardWrap" style="display:none; margin-top:8px;">
+                    <div id="sellCardMount" style="background:#0f172a; border:1px solid #334155; border-radius:6px; padding:10px;"></div>
+                    <button type="button" id="sellCardPayBtn" onclick="paySellWithCard()" style="width:100%; margin-top:6px; padding:8px; background:#3b82f6; color:#fff; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay $2.00 with card</button>
+                    <div id="sellCardError" style="display:none; color:#ef4444; font-size:11px; margin-top:4px; text-align:center;"></div>
                 </div>
             </div>
         </div>
@@ -20968,24 +20989,12 @@
         window.primaryBadge = window.primaryBadge || null; // 'sell' when active
         let sellSelected = false;
 
+        // Replace simple toggle with purchase flow: clicking Sell starts a $2 payment flow (Stripe)
         if (sellBtn) {
             sellBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                sellSelected = !sellSelected;
-                sellBtn.setAttribute('aria-pressed', sellSelected ? 'true' : 'false');
-                if (sellSelected) {
-                    if (!window.selectedBadges.includes('sell')) window.selectedBadges.push('sell');
-                    window.primaryBadge = 'sell';
-                    sellBtn.classList.add('badge-selected');
-                    const previewText = document.getElementById('uploadPreviewText');
-                    if (previewText) previewText.textContent = 'Sell post — media optional';
-                } else {
-                    window.selectedBadges = window.selectedBadges.filter(b => b !== 'sell');
-                    window.primaryBadge = null;
-                    sellBtn.classList.remove('badge-selected');
-                    const previewText = document.getElementById('uploadPreviewText');
-                    if (previewText) previewText.textContent = (selectedFile ? 'Media selected' : 'No media selected');
-                }
+                // open the sell purchase flow (mirrors boost UX)
+                try { toggleSellPurchase(); } catch (err) { console.warn('toggleSellPurchase failed', err); }
             });
         }
 
@@ -21943,6 +21952,23 @@
                     
                     console.log(`🚀 DISTRIBUTION: Post will reach ${finalZones.length} zones (${distribution.label}): ${finalZones.slice(0, 3).join(', ')}${finalZones.length > 3 ? '...' : ''}`);
                 }
+
+                    // If composer-level SELL badge was paid, attach sell badge metadata to the post
+                    if (window.pendingSell && window.pendingSell.paid) {
+                        try {
+                            if (!Array.isArray(postData.badges)) postData.badges = [];
+                            if (!postData.badges.includes('sell')) postData.badges.push('sell');
+                            postData.sellBadge = {
+                                paymentIntentId: window.pendingSell.paymentIntentId || (localStorage && localStorage.getItem ? localStorage.getItem('pendingSellPaymentIntentId') : null),
+                                purchasedAt: Date.now(),
+                                amountCents: 200,
+                                currency: 'usd',
+                                label: 'Buy',
+                                sizeMultiplier: 1.25
+                            };
+                            postData.primaryBadge = 'sell';
+                        } catch (e) { console.warn('Failed to attach sell badge metadata', e); }
+                    }
 
                 console.log('📊 Post data prepared:', postData);
                 console.log(`   County field will be: "${postData.county}"`);
@@ -23275,6 +23301,157 @@
         window.resetBoostButton    = resetBoostButton;
         window.toggleBoostOtherWays = toggleBoostOtherWays;
         window.payBoostWithCard     = payBoostWithCard;
+        // SELL badge payment helpers (mirror boost flow for a fixed $2 purchase)
+        window.pendingSell = window.pendingSell || { armed: false, armedAt: 0, paid: false, paymentMethodId: null, paymentIntentId: null, clientSecret: null };
+        let _stripeSellPR = null;
+        let _stripeSellPRButton = null;
+        let _stripeSellCardElement = null;
+
+        async function _initSellPaymentRequest() {
+            const stripe = _getStripe();
+            if (!stripe) return;
+            const priceCents = 200; // fixed $2
+            const mount = document.getElementById('sellPayRequestMount');
+            if (!mount) return;
+            mount.innerHTML = '';
+            _stripeSellPR = stripe.paymentRequest({
+                country: 'US',
+                currency: 'usd',
+                total: { label: 'Buy Sell badge', amount: priceCents },
+                requestPayerName: false,
+                requestPayerEmail: false
+            });
+            const elements = stripe.elements();
+            _stripeSellPRButton = elements.create('paymentRequestButton', { paymentRequest: _stripeSellPR, style: { paymentRequestButton: { type: 'default', theme: 'dark', height: '40px' } } });
+            const result = await _stripeSellPR.canMakePayment();
+            if (result) {
+                _stripeSellPRButton.mount('#sellPayRequestMount');
+            } else {
+                const wrap = document.getElementById('sellCardWrap');
+                if (wrap) wrap.style.display = 'block';
+                _mountSellCardElement();
+            }
+            _stripeSellPR.on('paymentmethod', async (ev) => {
+                try {
+                    const resp = await fetch('/api/sell/create-intent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ priceCents: priceCents, userId: window.currentUserId || 'anon' }) });
+                    const data = await resp.json();
+                    if (!data.clientSecret) throw new Error(data.error || 'no client secret');
+                    const { error, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, { payment_method: ev.paymentMethod.id }, { handleActions: false });
+                    if (error) { ev.complete('fail'); _showSellError(error.message); return; }
+                    ev.complete('success');
+                    window.pendingSell.paid = true;
+                    window.pendingSell.paymentMethodId = ev.paymentMethod.id;
+                    window.pendingSell.paymentIntentId = paymentIntent.id;
+                    try { localStorage.setItem('pendingSellPaymentIntentId', paymentIntent.id); } catch(e){}
+                    _showSellPaid();
+                } catch (e) {
+                    ev.complete('fail');
+                    _showSellError(e.message || 'payment failed');
+                }
+            });
+        }
+        function _mountSellCardElement() {
+            const stripe = _getStripe();
+            if (!stripe || _stripeSellCardElement) return;
+            const elements = stripe.elements();
+            _stripeSellCardElement = elements.create('card', { style: { base: { color: '#fff', fontSize: '14px', '::placeholder': { color: '#64748b' } } } });
+            _stripeSellCardElement.mount('#sellCardMount');
+        }
+        function toggleSellOtherWays() {
+            const wrap = document.getElementById('sellCardWrap');
+            if (!wrap) return;
+            const showing = wrap.style.display !== 'none';
+            wrap.style.display = showing ? 'none' : 'block';
+            if (!showing) _mountSellCardElement();
+        }
+        async function paySellWithCard() {
+            const stripe = _getStripe();
+            if (!stripe || !_stripeSellCardElement) return;
+            const errEl = document.getElementById('sellCardError');
+            if (errEl) errEl.style.display = 'none';
+            try {
+                const priceCents = 200;
+                const resp = await fetch('/api/sell/create-intent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ priceCents: priceCents, userId: window.currentUserId || 'anon' }) });
+                const data = await resp.json();
+                if (!data.clientSecret) throw new Error(data.error || 'no client secret');
+                const { error, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, { payment_method: { card: _stripeSellCardElement } });
+                if (error) { _showSellError(error.message); return; }
+                window.pendingSell.paid = true;
+                window.pendingSell.paymentIntentId = paymentIntent.id;
+                try { localStorage.setItem('pendingSellPaymentIntentId', paymentIntent.id); } catch(e){}
+                _showSellPaid();
+            } catch (e) {
+                _showSellError(e.message || 'card payment failed');
+            }
+        }
+        function _showSellPaid() {
+            const s = document.getElementById('sellPayStatus');
+            const t = document.getElementById('sellHintText');
+            const m = document.getElementById('sellPayRequestMount');
+            const w = document.getElementById('sellCardWrap');
+            const o = document.getElementById('sellOtherWaysBtn');
+            if (s) { s.textContent = '✅ Sell badge equipped — hit send to publish'; s.style.display = 'block'; }
+            if (t) t.textContent = '💠 Sell badge ready';
+            if (m) m.style.display = 'none';
+            if (w) w.style.display = 'none';
+            if (o) o.style.display = 'none';
+            // mark composer selection and primary badge
+            if (!window.selectedBadges) window.selectedBadges = [];
+            if (!window.selectedBadges.includes('sell')) window.selectedBadges.push('sell');
+            window.primaryBadge = 'sell';
+            const sellBtnEl = document.getElementById('sellBtn');
+            if (sellBtnEl) {
+                sellBtnEl.setAttribute('aria-pressed', 'true');
+                sellBtnEl.classList.add('badge-selected');
+                sellBtnEl.style.background = 'linear-gradient(135deg, #3b82f6 0%, #1e40af 100%)';
+                sellBtnEl.style.color = '#fff';
+                sellBtnEl.style.borderColor = '#1e40af';
+                sellBtnEl.style.boxShadow = '0 6px 20px rgba(59,130,246,0.35)';
+            }
+        }
+        function _showSellError(msg) {
+            const errEl = document.getElementById('sellCardError');
+            if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; }
+            console.warn('💠 sell payment error:', msg);
+        }
+        function toggleSellPurchase() {
+            const btn = document.getElementById('sellBtn');
+            const hint = document.getElementById('sellHint');
+            if (!btn) return;
+            window.pendingSell.armed = !window.pendingSell.armed;
+            if (window.pendingSell.armed) {
+                window.pendingSell.armedAt = Date.now();
+                btn.setAttribute('aria-pressed', 'true');
+                btn.style.background = 'linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%)';
+                btn.style.color = '#fff';
+                btn.style.borderColor = '#3b82f6';
+                btn.style.boxShadow = '0 6px 20px rgba(59,130,246,0.35)';
+                if (hint) hint.style.display = 'block';
+                _initSellPaymentRequest();
+            } else {
+                resetSellButton();
+            }
+        }
+        function resetSellButton() {
+            window.pendingSell = { armed: false, armedAt: 0, paid: false, paymentMethodId: null, paymentIntentId: null, clientSecret: null };
+            try { localStorage.removeItem('pendingSellPaymentIntentId'); } catch(e){}
+            const btn = document.getElementById('sellBtn');
+            const hint = document.getElementById('sellHint');
+            if (btn) {
+                btn.setAttribute('aria-pressed', 'false');
+                btn.style.background = 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)';
+                btn.style.color = '#22c1c3';
+                btn.style.borderColor = '#22c1c3';
+                btn.style.boxShadow = '';
+            }
+            if (hint) hint.style.display = 'none';
+            try { if (_stripeSellPRButton) _stripeSellPRButton.unmount(); } catch(e){}
+            try { if (_stripeSellCardElement) { _stripeSellCardElement.unmount(); _stripeSellCardElement = null; } } catch(e){}
+            _stripeSellPRButton = null; _stripeSellPR = null; _stripeSellCardElement = null;
+        }
+        window.toggleSellPurchase = toggleSellPurchase;
+        window.resetSellButton = resetSellButton;
+        window.paySellWithCard = paySellWithCard;
         
         // Enable touch scrolling on the grid for mobile devices
         const grid = document.getElementById('grid');

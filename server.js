@@ -777,6 +777,8 @@ app.get('/api/reverse-geocode', (req, res) => {
 const BOOST_TIERS = {
     standard: { amountCents: 299, currency: 'usd', label: '$2.99', durationHours: 24 }
 };
+// SELL BADGE - Fixed price product for composer 'Sell' badge
+const SELL_PRICE = { amountCents: 200, currency: 'usd', label: '$2.00' };
 let _stripeClient = null;
 function getStripeClient() {
     if (_stripeClient) return _stripeClient;
@@ -894,6 +896,49 @@ app.post('/api/boost/confirm', async (req, res) => {
         res.json({ ok, status: intent && intent.status, postId, tier: intent && intent.metadata && intent.metadata.tier });
     } catch (e) {
         console.error('[boost] confirm failed', e);
+        res.status(500).json({ error: e.message || 'confirm failed' });
+    }
+});
+
+// 🚀 SELL BADGE ENDPOINTS (Stripe PaymentIntent flow similar to boost)
+// /api/sell/create-intent -> creates a PaymentIntent for $2.00
+// /api/sell/confirm       -> retrieves and validates the PaymentIntent
+app.post('/api/sell/create-intent', async (req, res) => {
+    try {
+        const { priceCents = SELL_PRICE.amountCents, userId = 'anon' } = req.body || {};
+        const stripe = getStripeClient();
+        if (!stripe) {
+            return res.status(503).json({ error: 'Stripe not configured. Set STRIPE_SECRET_KEY env var and `npm i stripe`.' });
+        }
+        const intent = await stripe.paymentIntents.create({
+            amount: priceCents,
+            currency: SELL_PRICE.currency,
+            automatic_payment_methods: { enabled: true },
+            metadata: { kind: 'post_sell', priceCents, userId }
+        });
+        res.json({
+            clientSecret: intent.client_secret,
+            paymentIntentId: intent.id,
+            amountCents: priceCents,
+            currency: intent.currency || SELL_PRICE.currency,
+            label: SELL_PRICE.label
+        });
+    } catch (e) {
+        console.error('[sell] create-intent failed', e);
+        res.status(500).json({ error: e.message || 'create-intent failed' });
+    }
+});
+
+app.post('/api/sell/confirm', async (req, res) => {
+    try {
+        const { paymentIntentId, postId } = req.body || {};
+        const stripe = getStripeClient();
+        if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
+        const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+        const ok = intent && intent.status === 'succeeded' && intent.metadata && intent.metadata.kind === 'post_sell';
+        res.json({ ok, status: intent && intent.status, postId, amountCents: intent && intent.amount });
+    } catch (e) {
+        console.error('[sell] confirm failed', e);
         res.status(500).json({ error: e.message || 'confirm failed' });
     }
 });
