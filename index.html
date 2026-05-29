@@ -2993,17 +2993,35 @@
                         }
                         phone = raw;
 
-                        // initialize invisible reCAPTCHA (clear any previous instance to avoid double-render)
+                        // initialize invisible reCAPTCHA safely (avoid double-render errors)
                         try {
-                            const container = document.getElementById('recaptcha-container');
-                            // If an old verifier exists, try to clear it first
+                            const container = document.getElementById('recaptcha-container') || (function(){ const d = document.createElement('div'); d.id='recaptcha-container'; document.body.appendChild(d); return d; })();
+
+                            // If an old verifier exists, try to clear it and remove its child node
                             if (window.recaptchaVerifier) {
-                                try { if (typeof window.recaptchaVerifier.clear === 'function') window.recaptchaVerifier.clear(); } catch (e) { console.warn('recaptcha clear failed', e); }
+                                try {
+                                    if (typeof window.recaptchaVerifier.clear === 'function') window.recaptchaVerifier.clear();
+                                } catch (e) { console.warn('recaptcha clear failed', e); }
                                 window.recaptchaVerifier = null;
                             }
-                            if (container) container.innerHTML = '';
-                            // Create a fresh verifier instance
-                            window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', { size: 'invisible' });
+                            // Remove previous child container if we created one earlier
+                            try {
+                                if (window.__recaptchaChildId) {
+                                    const old = document.getElementById(window.__recaptchaChildId);
+                                    if (old && old.parentNode) old.parentNode.removeChild(old);
+                                    window.__recaptchaChildId = null;
+                                }
+                            } catch(e){ console.warn('failed to remove old recaptcha child', e); }
+
+                            // Create a unique child div so grecaptcha won't complain about double-render
+                            const childId = 'recaptcha-child-' + Date.now() + '-' + Math.floor(Math.random()*10000);
+                            const child = document.createElement('div');
+                            child.id = childId;
+                            container.appendChild(child);
+                            window.__recaptchaChildId = childId;
+
+                            // Create a fresh verifier instance bound to the new child
+                            window.recaptchaVerifier = new RecaptchaVerifier(auth, childId, { size: 'invisible' });
                             try { await window.recaptchaVerifier.render(); } catch (e) { console.warn('recaptcha render failed', e); }
                         } catch (e) { console.warn('recaptcha init failed', e); }
                         const appVerifier = window.recaptchaVerifier;
