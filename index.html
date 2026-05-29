@@ -8030,6 +8030,11 @@
             }
             
             const startTime = performance.now();
+            // Capture positions for FLIP animation so boxes can move smoothly
+            try {
+                ensureGridFlipStyles();
+                var _prevGridRects = captureGridRects();
+            } catch (e) { var _prevGridRects = new Map(); }
             const dbSize = globalLocationDatabase.length;
             
             // Search in proximity layers: 5km → 15km → 50km → global
@@ -10687,21 +10692,88 @@
             for (const [userId, posts] of Object.entries(userOwnPostsTracker)) {
                 if (posts[postId]) {
                     const trackedPost = posts[postId];
-                    const newPopulation = estimateAreaPopulation(trackedPost.areaTag) + engagementMetrics.screenCount * 10;
+                    // Compute new perceived population based on current area estimates + visibility
+                    const basePopulation = estimateAreaPopulation(trackedPost.areaTag);
+                    const newPopulation = basePopulation + (engagementMetrics.screenCount || 0) * 10 + (engagementMetrics.likes || 0) * 50;
                     const newHierarchy = getAreaHierarchyLevel(newPopulation, engagementMetrics);
-                    
-                    // If hierarchy changed, update it
-                    if (newHierarchy !== trackedPost.areaHierarchyLevel) {
+
+                    // Ensure forward-only progression: only promote to larger scope
+                    const currentScope = getAreaScopeLevel(trackedPost.areaHierarchyLevel || 'POI');
+                    const newScope = getAreaScopeLevel(newHierarchy);
+                    if (newScope > currentScope) {
                         console.log(`🚀 POST PROMOTED: "${postId.substring(0, 8)}" ${trackedPost.areaHierarchyLevel} → ${newHierarchy}`);
                         trackedPost.areaHierarchyLevel = newHierarchy;
-                        trackedPost.areaHistory.push(newHierarchy);
+                        // Record hierarchy promotion in history (keep previous tags intact)
+                        if (!trackedPost.areaHistory.includes(newHierarchy)) trackedPost.areaHistory.push(newHierarchy);
                     }
-                    
-                    // Update metrics
-                    trackedPost.reach.screenCount = engagementMetrics.screenCount || 0;
-                    trackedPost.reach.uniqueUsers = engagementMetrics.uniqueUsers || new Set();
-                    trackedPost.likes = engagementMetrics.likes || 0;
-                    
+
+                    // Update reach metrics
+                    trackedPost.reach.screenCount = Math.max(trackedPost.reach.screenCount || 0, engagementMetrics.screenCount || 0);
+                    // Merge unique users set if provided
+                    try {
+                        if (engagementMetrics.uniqueUsers && engagementMetrics.uniqueUsers instanceof Set) {
+                            const cur = trackedPost.reach.uniqueUsers instanceof Set ? trackedPost.reach.uniqueUsers : new Set(trackedPost.reach.uniqueUsers || []);
+                            engagementMetrics.uniqueUsers.forEach(u => cur.add(u));
+                            trackedPost.reach.uniqueUsers = cur;
+                        }
+                    } catch (e) { /* ignore set merge failures */ }
+                    trackedPost.likes = engagementMetrics.likes || trackedPost.likes || 0;
+                    trackedPost.dislikes = engagementMetrics.dislikes || trackedPost.dislikes || 0;
+
+                    // If engagement originated from a new area, add it to areasCovered and areaHistory
+                    const engagementArea = engagementMetrics.area || engagementMetrics.areaTag || (typeof getCurrentUserArea === 'function' ? getCurrentUserArea() : null) || (userLocation && (userLocation.areaName || userLocation.county || userLocation.name));
+                    let addedNewArea = false;
+                    if (engagementArea) {
+                        const areas = trackedPost.reach.areasCovered || [];
+                        if (!areas.includes(engagementArea)) {
+                            areas.push(engagementArea);
+                            trackedPost.reach.areasCovered = areas;
+                            // Add to areaHistory (preserve previous tags)
+                            if (!trackedPost.areaHistory.includes(engagementArea)) trackedPost.areaHistory.push(engagementArea);
+                            addedNewArea = true;
+                            console.log(`🔁 Post ${postId.substring(0,8)} expanded to new area: ${engagementArea}`);
+                        }
+                    }
+
+                    // Persist changes to Firebase so area tags remain across devices
+                    try {
+                        const updates = {
+                            areaHistory: trackedPost.areaHistory,
+                            areasCovered: trackedPost.reach.areasCovered,
+                            areaHierarchyLevel: trackedPost.areaHierarchyLevel,
+                            likes: trackedPost.likes,
+                            dislikes: trackedPost.dislikes
+                        };
+                        // Optionally set a displayAreaTag when a new area becomes primary (but keep originals)
+                        if (addedNewArea) updates.lastAreaExpandedAt = Date.now();
+
+                        update(ref(database, `posts/${postId}`), updates).then(() => {
+                            console.log(`💾 Persisted area tags for post ${postId.substring(0,8)}`);
+                        }).catch(err => {
+                            console.warn('⚠️ Failed to persist area tags to Firebase:', err);
+                        });
+
+                        // Update local caches immediately
+                        if (postCache && postCache[postId]) {
+                            postCache[postId].areaHistory = trackedPost.areaHistory.slice();
+                            postCache[postId].areasCovered = (trackedPost.reach.areasCovered || []).slice();
+                            postCache[postId].areaHierarchyLevel = trackedPost.areaHierarchyLevel;
+                        }
+                        // Update gridContent entries
+                        for (const key in gridContent) {
+                            if (!Array.isArray(gridContent[key])) continue;
+                            const idx = gridContent[key].findIndex(p => p.id === postId);
+                            if (idx >= 0) {
+                                const p = gridContent[key][idx];
+                                p.areaHistory = trackedPost.areaHistory.slice();
+                                p.areasCovered = (trackedPost.reach.areasCovered || []).slice();
+                                p.areaHierarchyLevel = trackedPost.areaHierarchyLevel;
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('⚠️ Failed to persist area tagging updates:', err);
+                    }
+
                     break;
                 }
             }
@@ -12412,17 +12484,41 @@
                 localStorage.setItem(`userVotes_${userId}`, JSON.stringify(userVotes));
                 console.log(`💾 Vote saved to localStorage for post ${postId}`);
                 
-                // THEN save to Firebase
-                const voteRef = ref(database, `user-votes/${userId}/${voteKey}`);
-                
+                // THEN save to Firebase using per-post votes to ensure unique user counts
+                // Write user's vote under post-votes/{postId}/{userId}
+                const postVoteRef = ref(database, `post-votes/${postId}/${userId}`);
+                const userVoteRef = ref(database, `user-votes/${userId}/${postId}`);
+
                 if (voteType === null) {
-                    // Remove vote
-                    await remove(voteRef);
-                    console.log(`🗑️  Removed vote for post ${postId} from Firebase`);
+                    // Remove vote entries
+                    await remove(postVoteRef);
+                    try { await remove(userVoteRef); } catch (e) { /* ignore */ }
+                    console.log(`🗑️  Removed vote for post ${postId} from Firebase (per-post & per-user)`);
                 } else {
-                    // Save vote (like or dislike)
-                    await set(voteRef, voteType);
-                    console.log(`✅ Saved ${voteType} vote for post ${postId} to Firebase`);
+                    // Save vote (like or dislike) in both per-post and per-user locations
+                    await set(postVoteRef, voteType);
+                    try { await set(userVoteRef, voteType); } catch (e) { /* ignore */ }
+                    console.log(`✅ Saved ${voteType} vote for post ${postId} to Firebase (per-post & per-user)`);
+                }
+
+                // Recompute aggregate likes/dislikes from post-votes to ensure unique-user totals
+                try {
+                    const votesSnapshot = await get(ref(database, `post-votes/${postId}`));
+                    let likeCount = 0, dislikeCount = 0;
+                    if (votesSnapshot && votesSnapshot.exists()) {
+                        const votesObj = votesSnapshot.val();
+                        for (const uid in votesObj) {
+                            const v = votesObj[uid];
+                            if (v === 'like') likeCount++;
+                            else if (v === 'dislike') dislikeCount++;
+                        }
+                    }
+
+                    // Persist aggregated totals on the post object
+                    await update(ref(database, `posts/${postId}`), { likes: likeCount, dislikes: dislikeCount });
+                    console.log(`🔢 Aggregated post ${postId} votes: likes=${likeCount}, dislikes=${dislikeCount}`);
+                } catch (e) {
+                    console.warn('⚠️ Failed to recompute aggregated post votes:', e);
                 }
             } catch (error) {
                 console.error(`❌ Error saving vote to Firebase (attempt ${retryCount + 1}):`, error);
@@ -14003,6 +14099,71 @@
                 try { renderGrid(); } catch (e) { console.warn('renderGrid scheduled run failed', e); }
                 _renderGridTimeout = null;
             }, 800);
+        }
+
+        // Ensure lightweight CSS for FLIP animations exists
+        function ensureGridFlipStyles() {
+            if (document.getElementById('grid-flip-styles')) return;
+            const s = document.createElement('style');
+            s.id = 'grid-flip-styles';
+            s.textContent = `
+                #grid .grid-box { will-change: transform, opacity; transition: transform 260ms cubic-bezier(.2,.9,.2,1), opacity 160ms ease; }
+                #grid .grid-box.animating { transition-duration: 320ms; }
+            `;
+            document.head.appendChild(s);
+        }
+
+        // Capture current positions of grid boxes: Map<Element, DOMRect>
+        function captureGridRects() {
+            try {
+                const boxes = Array.from(document.querySelectorAll('#grid .grid-box'));
+                const map = new Map();
+                boxes.forEach(b => {
+                    try {
+                        const rect = b.getBoundingClientRect();
+                        map.set(b, rect);
+                    } catch (e) { /* ignore */ }
+                });
+                return map;
+            } catch (e) { return new Map(); }
+        }
+
+        // Play FLIP animation from previous rects to current positions
+        function runFLIP(prevMap) {
+            if (!prevMap || prevMap.size === 0) return;
+            ensureGridFlipStyles();
+            const boxes = Array.from(document.querySelectorAll('#grid .grid-box'));
+            boxes.forEach(b => {
+                try {
+                    // Find previous entry by matching post-id or id
+                    let prevEntry = null;
+                    for (const [el, rect] of prevMap.entries()) {
+                        const pidPrev = el.getAttribute && (el.getAttribute('data-post-id') || el.id);
+                        const pidCur = b.getAttribute && (b.getAttribute('data-post-id') || b.id);
+                        if (pidPrev && pidCur && pidPrev === pidCur) { prevEntry = rect; break; }
+                    }
+                    if (!prevEntry) return;
+                    const newRect = b.getBoundingClientRect();
+                    const dx = prevEntry.left - newRect.left;
+                    const dy = prevEntry.top - newRect.top;
+                    if (dx === 0 && dy === 0) return;
+                    // Invert
+                    b.style.transition = 'none';
+                    b.style.transform = `translate(${dx}px, ${dy}px)`;
+                    // Force reflow
+                    b.offsetHeight;
+                    // Play
+                    b.classList.add('animating');
+                    b.style.transition = '';
+                    b.style.transform = 'translate(0, 0)';
+                    const cleanup = () => {
+                        b.style.transform = '';
+                        b.classList.remove('animating');
+                        b.removeEventListener('transitionend', cleanup);
+                    };
+                    b.addEventListener('transitionend', cleanup);
+                } catch (e) { /* continue gracefully */ }
+            });
         }
 
         function sharePost() {
@@ -20894,6 +21055,13 @@
                 firstRenderComplete = true;
                 console.log('✅ First render complete');
             }
+
+            // Play FLIP animation from previous positions to new positions
+            try {
+                requestAnimationFrame(() => {
+                    try { runFLIP(_prevGridRects); } catch (e) { /* ignore */ }
+                });
+            } catch (e) { /* ignore */ }
         }
 
         function getNewBadgeDurationMs() {
@@ -22719,22 +22887,27 @@
             const html = document.documentElement;
             const body = document.body;
             
-            // DON'T use fixed - it breaks the layout
-            // Just make sure sizes are locked
+            // On touch devices avoid forcing overflow:hidden or scrolling — this blocks user scroll
+            const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+
             html.style.width = '100%';
             html.style.height = '100%';
-            html.style.overflow = 'hidden';
-            
+            html.style.minHeight = '100vh';
+            html.style.overflow = isTouch ? 'auto' : 'hidden';
+
             body.style.width = '100%';
             body.style.height = '100%';
-            body.style.overflow = 'hidden';
-            
-            // Force scroll to 0
-            window.scrollTo(0, 0);
-            html.scrollLeft = 0;
-            html.scrollTop = 0;
-            body.scrollLeft = 0;
-            body.scrollTop = 0;
+            body.style.minHeight = '100vh';
+            body.style.overflow = isTouch ? 'auto' : 'hidden';
+
+            // Do not force-scroll on mobile; only attempt to correct extreme shifts on desktop
+            if (!isTouch) {
+                try { window.scrollTo(0, 0); } catch (e) {}
+                html.scrollLeft = 0;
+                html.scrollTop = 0;
+                body.scrollLeft = 0;
+                body.scrollTop = 0;
+            }
         }
         
         // Lock dimensions on load, trust CSS for responsive rendering
@@ -22781,17 +22954,11 @@
         });
         
         // Track scroll events (which could indicate zoom)
+        // Keep scroll listener passive to avoid blocking touch scrolling on mobile
         window.addEventListener('scroll', () => {
-            console.warn('⚠️ SCROLL EVENT FIRED:', {
-                scrollX: window.scrollX,
-                scrollY: window.scrollY,
-                windowInnerWidth: window.innerWidth,
-                windowInnerHeight: window.innerHeight,
-                timestamp: new Date().toLocaleTimeString()
-            });
-            // Try to prevent scroll-based zoom
-            lockDimensions();
-        }, { passive: false });
+            // Minimal logging to avoid heavy work on scroll
+            // Avoid invoking lockDimensions on every scroll to prevent scroll jank
+        }, { passive: true });
         
         // Monitor document orientation changes
         window.addEventListener('orientationchange', () => {
@@ -22880,8 +23047,8 @@
             console.log('⚠️ ResizeObserver not available');
         }
         
-        // Continuous lock every 100ms as safety net (more aggressive)
-        setInterval(lockDimensions, 100);
+        // Continuous lock as a light safety net; run less frequently to avoid blocking
+        setInterval(lockDimensions, 2000);
         
         // NUCLEAR OPTION: Watch for ANY changes to html/body styles and immediately fix them
         const styleObserver = new MutationObserver((mutations) => {
