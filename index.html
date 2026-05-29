@@ -3478,6 +3478,21 @@
                 ">
                 </div>
             </div>
+
+            <!-- Searchable Area Picker Modal (lazy/incremental load from globalLocationDatabase) -->
+            <div id="areaPickerModal" style="display:none; position:fixed; inset:0; z-index:2000; align-items:center; justify-content:center;">
+                <div id="areaPickerOverlay" style="position:absolute; inset:0; background:rgba(0,0,0,0.6);" onclick="closeAreaPickerModal()"></div>
+                <div style="position:relative; width:92%; max-width:820px; max-height:80%; background:#0f1113; border:1px solid #222; border-radius:10px; overflow:hidden; box-shadow:0 12px 48px rgba(0,0,0,0.6);">
+                    <div style="display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid #1a1a1a;">
+                        <input id="areaPickerSearch" placeholder="Search areas, cities, states, or POIs" style="flex:1; padding:10px 12px; border-radius:8px; border:1px solid #2a2a2a; background:#0b0b0b; color:#fff; font-size:14px;" oninput="handleAreaPickerSearch(event)" />
+                        <button onclick="closeAreaPickerModal()" style="padding:8px 12px; border-radius:8px; background:#181818; border:1px solid #2a2a2a; color:#ddd; cursor:pointer;">Close</button>
+                    </div>
+                    <div id="areaPickerList" style="padding:8px; overflow:auto; max-height:calc(100% - 60px); background:#0b0b0b;">
+                        <!-- incremental results appended here -->
+                    </div>
+                    <div id="areaPickerFooter" style="padding:8px; border-top:1px solid #111; text-align:center; font-size:12px; color:#999;">Scroll to load more</div>
+                </div>
+            </div>
             
             <!-- Media button placeholder — moved below the text box (compact button) -->
             <div id="uploadAreaPlaceholder" style="display:none;" aria-hidden="true"></div>
@@ -19192,6 +19207,13 @@
             
             // Enhanced: Show ML recommendations PLUS all available locations AND POIs
             let html = '';
+
+            // Quick search trigger: opens full searchable picker (lazy loads DB)
+            html += `
+                <div style="padding:8px 12px; border-bottom:1px solid #222; background:#0f1113;">
+                    <input id="mlDropdownSearchTrigger" placeholder="Search all areas..." onfocus="openAreaPickerModal()" onclick="openAreaPickerModal()" style="width:100%; padding:10px 12px; border-radius:8px; border:1px solid #222; background:#0b0b0b; color:#fff;" />
+                </div>
+            `;
             
             // SECTION 1: ML Recommendations (if available)
             const recs = window.postRecommendationSystem.getRecommendedAreas(currentUserId) || [];
@@ -19487,6 +19509,154 @@
                 }
             }
         });
+
+        // -------------------------
+        // Searchable Area Picker
+        // -------------------------
+        window.areaPickerState = window.areaPickerState || { page: 0, pageSize: 60, filter: '', filteredList: null, loading: false };
+
+        function openAreaPickerModal() {
+            const modal = document.getElementById('areaPickerModal');
+            const input = document.getElementById('areaPickerSearch');
+            const list = document.getElementById('areaPickerList');
+            if (!modal || !list) return;
+            modal.style.display = 'flex';
+            // reset state
+            window.areaPickerState.page = 0;
+            window.areaPickerState.filter = '';
+            window.areaPickerState.filteredList = null;
+            list.innerHTML = '';
+            document.getElementById('areaPickerFooter').textContent = 'Scroll to load more';
+            // attach scroll listener
+            list.removeEventListener('scroll', areaPickerScrollHandler);
+            list.addEventListener('scroll', areaPickerScrollHandler);
+            if (input) {
+                input.value = '';
+                setTimeout(() => input.focus(), 60);
+            }
+            renderAreaPickerPage();
+        }
+
+        function closeAreaPickerModal() {
+            const modal = document.getElementById('areaPickerModal');
+            const list = document.getElementById('areaPickerList');
+            if (!modal) return;
+            modal.style.display = 'none';
+            if (list) list.removeEventListener('scroll', areaPickerScrollHandler);
+        }
+
+        function areaPickerScrollHandler(e) {
+            const el = e.target;
+            if (!el) return;
+            const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 120;
+            if (nearBottom) loadMoreAreaPickerItems();
+        }
+
+        function handleAreaPickerSearch(evt) {
+            const v = (evt && evt.target && evt.target.value) ? String(evt.target.value).trim() : '';
+            // debounce simple
+            if (window._areaPickerSearchTimeout) clearTimeout(window._areaPickerSearchTimeout);
+            window._areaPickerSearchTimeout = setTimeout(() => {
+                window.areaPickerState.page = 0;
+                window.areaPickerState.filter = v.toLowerCase();
+                window.areaPickerState.filteredList = null;
+                const list = document.getElementById('areaPickerList');
+                if (list) list.innerHTML = '';
+                renderAreaPickerPage();
+            }, 180);
+        }
+
+        function loadMoreAreaPickerItems() {
+            if (window.areaPickerState.loading) return;
+            renderAreaPickerPage();
+        }
+
+        function renderAreaPickerPage() {
+            const state = window.areaPickerState;
+            const listEl = document.getElementById('areaPickerList');
+            const footer = document.getElementById('areaPickerFooter');
+            if (!listEl || !footer) return;
+            if (state.loading) return;
+            state.loading = true;
+
+            // Helper to append items array
+            function appendItems(arr, appendOnly) {
+                if (!Array.isArray(arr) || arr.length === 0) return 0;
+                const frag = document.createDocumentFragment();
+                arr.forEach(item => {
+                    const div = document.createElement('div');
+                    div.style.padding = '10px';
+                    div.style.borderBottom = '1px solid #111';
+                    div.style.cursor = 'pointer';
+                    div.style.color = '#ddd';
+                    div.style.fontSize = '14px';
+                    div.innerHTML = `<div style="font-weight:600">${escapeHtml((item.name || item.display || item.value || '').toString())}</div>${item.state ? `<div style="font-size:12px;color:#888;margin-top:3px">${escapeHtml(item.state)}</div>` : ''}`;
+                    div.onclick = () => selectAreaFromPicker((item.display || item.value || item.name || '').toString());
+                    frag.appendChild(div);
+                });
+                listEl.appendChild(frag);
+                return arr.length;
+            }
+
+            // If there is a filter, build or use cached filtered list
+            if (state.filter && state.filter.length > 0) {
+                if (!state.filteredList) {
+                    // build filtered list once
+                    const out = [];
+                    try {
+                        const db = Array.isArray(window.globalLocationDatabase) ? window.globalLocationDatabase : [];
+                        for (let i = 0; i < db.length; i++) {
+                            const loc = db[i];
+                            const hay = `${(loc.name||'').toLowerCase()} ${(loc.state||'').toLowerCase()} ${(loc.country||'').toLowerCase()}`;
+                            if (hay.indexOf(state.filter) !== -1) out.push(loc);
+                            if (out.length >= 5000) break; // cap
+                        }
+                    } catch (e) { console.warn('area picker filter build failed', e); }
+                    state.filteredList = out;
+                }
+
+                const start = state.page * state.pageSize;
+                const slice = state.filteredList.slice(start, start + state.pageSize);
+                const added = appendItems(slice);
+                state.page += 1;
+                if (start + state.pageSize >= state.filteredList.length) {
+                    footer.textContent = 'End of results';
+                } else {
+                    footer.textContent = 'Scroll to load more';
+                }
+                state.loading = false;
+                return;
+            }
+
+            // No filter: incremental slice of the database
+            try {
+                const db = Array.isArray(window.globalLocationDatabase) ? window.globalLocationDatabase : [];
+                const start = state.page * state.pageSize;
+                const slice = db.slice(start, start + state.pageSize);
+                const toAppend = slice.map(loc => ({ name: loc.name || `${loc.city || ''}`, state: loc.state || loc.region || '', value: `${loc.name}${loc.state ? ', ' + loc.state : ''}`, display: `${loc.name}${loc.state ? ', ' + loc.state : ''}` }));
+                const added = appendItems(toAppend);
+                state.page += 1;
+                if (start + state.pageSize >= db.length) {
+                    footer.textContent = 'End of locations';
+                } else {
+                    footer.textContent = 'Scroll to load more';
+                }
+            } catch (e) { console.warn('area picker render failed', e); }
+
+            state.loading = false;
+        }
+
+        function selectAreaFromPicker(value) {
+            if (!value) return;
+            // Reuse existing selection handler
+            try { selectMLArea(value, null); } catch(e) { console.warn('selectMLArea failed', e); }
+            closeAreaPickerModal();
+        }
+
+        // Small HTML-escaping helper
+        function escapeHtml(str) {
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
         
         /**
          * Area badge scope ladder (POI → Community → Big Area → City → Region → County → State → Country → Viral)
