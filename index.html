@@ -15484,8 +15484,94 @@
                 `;
             }).join('');
             
-            dropdown.innerHTML = headerHTML + itemsHTML;
+            // If suggestions are very large, use virtualized renderer to avoid DOM bloat
+            if (suggestions.length > 300) {
+                createVirtualDropdown(dropdown, suggestions, headerHTML);
+            } else {
+                dropdown.innerHTML = headerHTML + itemsHTML;
+            }
             dropdown.style.display = 'block';
+        }
+
+        // Lightweight virtualized dropdown renderer for large suggestion sets
+        function createVirtualDropdown(dropdown, items, headerHTML) {
+            // Clear existing
+            dropdown.innerHTML = '';
+            dropdown.style.display = 'block';
+
+            // Basic sizes
+            const ITEM_HEIGHT = 42; // px (approx per item)
+            const BUFFER = 6; // items before/after
+
+            // Container structure: header + viewport + spacers
+            const header = document.createElement('div');
+            header.innerHTML = headerHTML;
+            dropdown.appendChild(header);
+
+            const viewport = document.createElement('div');
+            viewport.style.overflow = 'auto';
+            viewport.style.maxHeight = '320px';
+            viewport.style.position = 'relative';
+            dropdown.appendChild(viewport);
+
+            const topSpacer = document.createElement('div');
+            const content = document.createElement('div');
+            const bottomSpacer = document.createElement('div');
+            content.style.position = 'relative';
+            viewport.appendChild(topSpacer);
+            viewport.appendChild(content);
+            viewport.appendChild(bottomSpacer);
+
+            const total = items.length;
+            const totalHeight = total * ITEM_HEIGHT;
+            topSpacer.style.height = '0px';
+            bottomSpacer.style.height = totalHeight + 'px';
+
+            let renderedRange = [0, -1];
+
+            function render() {
+                const scrollTop = viewport.scrollTop;
+                const viewHeight = viewport.clientHeight;
+                const firstVisible = Math.floor(scrollTop / ITEM_HEIGHT);
+                const lastVisible = Math.min(total - 1, Math.ceil((scrollTop + viewHeight) / ITEM_HEIGHT));
+                const start = Math.max(0, firstVisible - BUFFER);
+                const end = Math.min(total - 1, lastVisible + BUFFER);
+
+                if (start === renderedRange[0] && end === renderedRange[1]) return;
+                renderedRange = [start, end];
+
+                // adjust spacers
+                topSpacer.style.height = (start * ITEM_HEIGHT) + 'px';
+                bottomSpacer.style.height = ((total - end - 1) * ITEM_HEIGHT) + 'px';
+
+                // render slice
+                content.innerHTML = '';
+                for (let i = start; i <= end; i++) {
+                    const s = items[i];
+                    const div = document.createElement('div');
+                    div.style.height = ITEM_HEIGHT + 'px';
+                    div.style.boxSizing = 'border-box';
+                    div.style.padding = '8px 12px';
+                    div.style.borderBottom = '1px solid #333';
+                    div.style.cursor = s.type === 'separator' ? 'default' : 'pointer';
+                    div.style.color = s.type === 'separator' ? '#666' : '#ddd';
+                    if (s.type === 'separator') {
+                        div.textContent = s.display;
+                        div.style.textAlign = 'center';
+                        div.style.fontWeight = '700';
+                        div.style.fontSize = '11px';
+                    } else {
+                        const clickValue = (s.type === 'poi' && s.value) ? s.value : s.display;
+                        div.innerHTML = `<div style="font-size:13px">${escapeHtml(s.display)}</div>`;
+                        div.onclick = (e) => { e.stopPropagation(); selectAutocomplete(clickValue); };
+                    }
+                    content.appendChild(div);
+                }
+            }
+
+            // initial render
+            render();
+            viewport.addEventListener('scroll', () => { requestAnimationFrame(render); }, { passive: true });
         }
         
         function selectAutocomplete(value) {
@@ -19306,9 +19392,10 @@
             // SECTION 2: Nearby POIs (if user location available)
             try {
                 if (userLocation && window.poiManagementSystem && typeof poiManagementSystem.getNearbyPOIs === 'function') {
-                    const pois = poiManagementSystem.getNearbyPOIs(userLocation.latitude, userLocation.longitude, 10).slice(0, 12);
+                    // Ask for more POIs from the management system (larger window)
+                    const pois = poiManagementSystem.getNearbyPOIs(userLocation.latitude, userLocation.longitude, 50).slice(0, 200);
                     if (pois && pois.length > 0) {
-                        html += '<div style="max-height: 220px; overflow:auto;">';
+                        html += '<div style="max-height: 420px; overflow:auto;">';
                         pois.forEach(poi => {
                             html += `<div style="padding: 8px 12px; border-bottom: 1px solid #2a2a2a; cursor:pointer; display:flex; align-items:center; gap:8px;" onclick="selectMLArea('${(poi.emoji||'📍')+' '+poi.name.replace(/'/g, "\\'")}', event)">`;
                             html += `<div style="font-size:16px">${poi.emoji || '📍'}</div><div style="flex:1;"><div style="font-weight:600;font-size:13px;">${poi.name}</div><div style="font-size:11px;color:#888;">${poi.city || ''} ${(poi.category||'')}</div></div>`;
@@ -19327,8 +19414,8 @@
                         return { loc, d: calculateDistance(userLocation.latitude, userLocation.longitude, loc.lat || 0, loc.lon || 0) };
                     }).filter(x => x.d !== undefined && x.d !== null).sort((a,b) => a.d - b.d).slice(0, 12);
                     if (withDist.length > 0) {
-                        html += '<div style="padding:8px 12px; background:#0f1419; color:#888; font-size:10px; text-transform:uppercase; border-top:1px solid #222; font-weight:600; margin-top:8px;">Nearby Places</div>';
-                        html += '<div style="max-height:220px; overflow:auto;">';
+                        html += '<div style="padding:8px 12px; background:#0f1419; color:#888; font-size:10px; text-transform:uppercase; border-top:1px solid #222; font-weight:600; margin-top:8px;'>Nearby Places</div>';
+                        html += '<div style="max-height:420px; overflow:auto;">';
                         withDist.forEach(item => {
                             const l = item.loc;
                             const display = `${l.name}${l.state ? ', ' + l.state : ''}`;
@@ -19563,7 +19650,8 @@
         // -------------------------
         // Searchable Area Picker
         // -------------------------
-        window.areaPickerState = window.areaPickerState || { page: 0, pageSize: 60, filter: '', filteredList: null, loading: false };
+        // Larger pageSize and higher filter cap to allow browsing a much bigger DB
+        window.areaPickerState = window.areaPickerState || { page: 0, pageSize: 200, filter: '', filteredList: null, loading: false };
 
         function openAreaPickerModal() {
             const modal = document.getElementById('areaPickerModal');
@@ -19650,7 +19738,7 @@
 
             // If there is a filter, build or use cached filtered list
             if (state.filter && state.filter.length > 0) {
-                if (!state.filteredList) {
+                    if (!state.filteredList) {
                     // build filtered list once
                     const out = [];
                     try {
@@ -19659,7 +19747,8 @@
                             const loc = db[i];
                             const hay = `${(loc.name||'').toLowerCase()} ${(loc.state||'').toLowerCase()} ${(loc.country||'').toLowerCase()}`;
                             if (hay.indexOf(state.filter) !== -1) out.push(loc);
-                            if (out.length >= 5000) break; // cap
+                            // Allow much larger filtered result set (cap to avoid memory blowups)
+                            if (out.length >= 50000) break; // cap
                         }
                     } catch (e) { console.warn('area picker filter build failed', e); }
                     state.filteredList = out;
@@ -20877,6 +20966,46 @@
                 }
 
                 console.log(`✅ ML CHECK: User has ${userPosts.length} posts, ${sortedPosts.slice(0, initialVisibleCount).filter(p => p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId).length} visible in first 12 boxes`);
+            }
+
+            // ========================================================================
+            // OWNER PRIORITY: Ensure current user's own posts appear first (top 20),
+            // ordered by descending likes so the most-liked own posts are most visible.
+            // This enforces the user's request to always see their own content first.
+            // ========================================================================
+            try {
+                if (currentUserId && Array.isArray(sortedPosts) && sortedPosts.length > 0) {
+                    const ownSet = new Set();
+                    const ownPosts = [];
+                    for (const p of sortedPosts) {
+                        if (!p || !p.id) continue;
+                        if (p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId) {
+                            ownPosts.push(p);
+                            ownSet.add(p.id);
+                        }
+                    }
+
+                    if (ownPosts.length > 0) {
+                        // Sort own posts by likes (desc), then by timestamp (desc)
+                        ownPosts.sort((a, b) => {
+                            const la = Number(a.likes || 0);
+                            const lb = Number(b.likes || 0);
+                            if (lb !== la) return lb - la;
+                            return (b.timestamp || 0) - (a.timestamp || 0);
+                        });
+
+                        const topOwn = ownPosts.slice(0, 20);
+
+                        // Remove these from the main list while preserving order for others
+                        const remaining = sortedPosts.filter(p => !ownSet.has(p.id));
+
+                        // Prepend topOwn to the sorted list
+                        sortedPosts = [...topOwn, ...remaining];
+                        console.log(`🔰 OWN-FIRST: Placed ${topOwn.length} user posts at top (most liked first)`);
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ OWNER PRIORITY reordering failed:', e);
             }
 
             // ========================================================================
