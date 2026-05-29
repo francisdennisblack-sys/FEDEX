@@ -2755,6 +2755,13 @@
                         }
                         window.currentUserId = canonicalUid;
                         window.currentUserEmail = email;
+                        try {
+                            localStorage.setItem('lastSignedInFirebaseUid', firebaseUid);
+                            localStorage.setItem('lastSignedInAt', String(Date.now()));
+                            localStorage.setItem('userId', canonicalUid);
+                            localStorage.setItem('permanentUserId', canonicalUid);
+                            localStorage.setItem('isSignedIn', '1');
+                        } catch (e) { console.warn('Could not persist sign-in markers for email create', e); }
                         updateAccountUI();
                         showNotification && showNotification('Account created', `Welcome ${username || email}`);
                         return res.user;
@@ -2773,6 +2780,13 @@
                         const canonicalUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
                         window.currentUserId = canonicalUid;
                         window.currentUserEmail = user.email;
+                        try {
+                            localStorage.setItem('lastSignedInFirebaseUid', user.uid || '');
+                            localStorage.setItem('lastSignedInAt', String(Date.now()));
+                            localStorage.setItem('userId', canonicalUid);
+                            if (canonicalUid) localStorage.setItem('permanentUserId', canonicalUid);
+                            localStorage.setItem('isSignedIn', '1');
+                        } catch (e) { console.warn('Could not persist sign-in markers for email sign-in', e); }
                         updateAccountUI();
                         showNotification && showNotification('Signed in', `${user.email}`);
                         return user;
@@ -3175,6 +3189,15 @@
                         }
                         console.groupEnd();
                     } catch (err) { console.warn('signOut failed', err); }
+                    // Clear app-level sign-in markers so restore doesn't reapply
+                    try {
+                        localStorage.removeItem('lastSignedInFirebaseUid');
+                        localStorage.removeItem('lastSignedInPhone');
+                        localStorage.removeItem('lastSignedInAt');
+                        localStorage.removeItem('userId');
+                        localStorage.removeItem('lastSessionAuthId');
+                        localStorage.removeItem('isSignedIn');
+                    } catch (e) { console.warn('Could not clear local sign-in markers', e); }
                     window.currentUserId = null;
                     window.currentUserEmail = null;
                     updateAccountUI();
@@ -3854,6 +3877,63 @@
                 console.warn('Could not initialize auth persistence on startup', e);
             });
         } catch (e) { console.warn('Auth persistence init error', e); }
+
+        // Explicit restore path: prefer lastSignedInFirebaseUid and attempt silent reauth/restore
+        async function attemptRestoreSession() {
+            try {
+                const lastFirebaseUid = (function(){ try { return localStorage.getItem('lastSignedInFirebaseUid'); } catch(e){ return null; } })();
+                const lastPhone = (function(){ try { return localStorage.getItem('lastSignedInPhone'); } catch(e){ return null; } })();
+                const permanentUid = (function(){ try { return localStorage.getItem('permanentUserId') || localStorage.getItem('userId'); } catch(e){ return null; } })();
+                if (!lastFirebaseUid && !permanentUid) return;
+                console.log('Attempting session restore', { lastFirebaseUid, permanentUid });
+
+                // If Firebase already rehydrated a session, prefer that
+                if (auth && auth.currentUser && auth.currentUser.uid) {
+                    if (lastFirebaseUid && auth.currentUser.uid === lastFirebaseUid) {
+                        window.currentUserId = lastFirebaseUid;
+                        window.currentUserPhone = lastPhone || window.currentUserPhone;
+                        updateAccountUI();
+                        return;
+                    } else {
+                        // A different active Firebase session exists; prefer the live session
+                        window.currentUserId = auth.currentUser.uid;
+                        updateAccountUI();
+                        return;
+                    }
+                }
+
+                // No active firebase session — attempt a silent anonymous sign-in to establish an auth session
+                // (This is best-effort: without a custom token or saved credential we cannot fully re-authenticate
+                // to the original Firebase UID client-side. We surface the `lastSignedInFirebaseUid` as the
+                // app-level identity so UI and local data restore coherently.)
+                try {
+                    if (typeof signInAnonymously === 'function') {
+                        await signInAnonymously(auth);
+                        console.log('Signed in anonymously to establish local session for UI restore');
+                    }
+                } catch (e) {
+                    console.warn('Silent anonymous sign-in failed', e);
+                }
+
+                // Prefer exposing lastSignedInFirebaseUid as app-level id when available
+                if (lastFirebaseUid) {
+                    window.currentUserId = lastFirebaseUid;
+                    window.currentUserPhone = lastPhone || window.currentUserPhone;
+                    try {
+                        localStorage.setItem('userId', lastFirebaseUid);
+                        localStorage.setItem('lastSessionAuthId', lastFirebaseUid);
+                    } catch (e) { console.warn('Could not persist session markers during restore', e); }
+                } else if (permanentUid) {
+                    window.currentUserId = permanentUid;
+                }
+                updateAccountUI();
+                showNotification && showNotification('Session restored (local)');
+            } catch (e) {
+                console.warn('attemptRestoreSession failed', e);
+            }
+        }
+        // Give Firebase a short moment to rehydrate from persistence, then run our restore fallback
+        setTimeout(() => { try { attemptRestoreSession(); } catch(e){ console.warn('restore attempt failed', e); } }, 800);
 
         // Lightweight diagnostics helper to aid debugging sign-out-on-refresh issues.
         // Call `window.dumpAuthDiagnostics()` from console after reproducing the issue.
