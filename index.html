@@ -9309,12 +9309,33 @@
             // This prevents the post from moving positions on the grid
             updateVoteDisplayInDOM(postId, newLikes, newDislikes);
             
-            // Schedule a FULL re-render for 3 seconds later (after voting interaction is done)
-            // This allows the algorithm to reorganize posts, but only after user has finished voting
-            setTimeout(() => {
-                console.log(`🔄 Scheduling full grid re-render (3s after vote)`);
-                renderGrid();
-            }, 3000);
+            // Defer full grid re-render until the vote has been persisted to Firebase.
+            // This prevents the post from moving prematurely while the write is still pending.
+            // Fallback: if saving takes too long, render after 5s to avoid leaving UI stale.
+            (async () => {
+                const FALLBACK_MS = 5000;
+                let fallbackTimer = null;
+                try {
+                    fallbackTimer = setTimeout(() => {
+                        try { console.warn('Vote save taking long — performing fallback render'); renderGrid(); } catch(e){}
+                    }, FALLBACK_MS);
+
+                    // First persist the per-post and per-user vote and recompute aggregates
+                    await saveVoteToFirebase(currentUserId, postId, userVotes[userVoteKey]);
+
+                    // Once persisted, trigger a full grid re-render so the post can be re-positioned
+                    console.log('🔄 Vote persisted — performing grid re-render');
+                    try { renderGrid(); } catch (e) { console.warn('renderGrid failed after vote persist', e); }
+                } catch (err) {
+                    console.warn('Failed to persist vote before render, scheduling fallback render', err);
+                    try { renderGrid(); } catch(e){}
+                } finally {
+                    if (fallbackTimer) clearTimeout(fallbackTimer);
+
+                    // Still attempt the lightweight shared-collection update (best-effort)
+                    try { updatePostVotesFirebase(currentUserId, postId, { likes: newLikes, dislikes: newDislikes }); } catch(e){ console.warn('updatePostVotesFirebase call failed', e); }
+                }
+            })();
             
             // CRITICAL: Check if we need to load more posts after rendering
             // If visible posts fall below threshold, load more to keep grid full
