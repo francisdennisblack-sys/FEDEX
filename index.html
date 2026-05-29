@@ -3358,6 +3358,31 @@
                             }
                         } catch (e) { console.warn('storage event handler failed', e); }
                     });
+
+                    // Ensure header reflects any present profile info quickly. Poll briefly
+                    // to cover timing races between Firebase restore and UI setup.
+                    function reflectProfileInHeader() {
+                        try {
+                            const el = document.getElementById('signInBtn');
+                            if (!el) return;
+                            const stored = (function(){ try { return localStorage.getItem('displayName'); } catch(e){ return null; } })();
+                            const name = window.currentDisplayName || stored || null;
+                            if (name) {
+                                el.textContent = name;
+                                return true;
+                            }
+                            return false;
+                        } catch (e) { return false; }
+                    }
+
+                    // Poll for up to 3s to capture late restores (runs every 250ms)
+                    (function pollHeaderName(attemptsLeft){
+                        try {
+                            if (reflectProfileInHeader()) return;
+                            if (attemptsLeft <= 0) return;
+                            setTimeout(() => pollHeaderName(attemptsLeft - 1), 250);
+                        } catch (e) { /* ignore */ }
+                    })(12);
                 });
                     // expose profile helpers globally for other code to call
                     try {
@@ -4100,6 +4125,7 @@
                 }
                 updateAccountUI();
                 showNotification && showNotification('Session restored (local)');
+                try { if (typeof reflectProfileInHeader === 'function') reflectProfileInHeader(); } catch(e){}
             } catch (e) {
                 console.warn('attemptRestoreSession failed', e);
             }
@@ -9489,6 +9515,7 @@
                 localStorage.setItem('userId', currentUserId);
                 isConnected = true;
                 try { updateAccountUI(); } catch (err) { console.warn('updateAccountUI failed', err); }
+                try { if (typeof reflectProfileInHeader === 'function') reflectProfileInHeader(); } catch(e){}
                 try { updateQueuedCount(); } catch (err) { /* ignore */ }
                 console.log(`\n✅ Step 2: userId LOCKED to PERMANENT ID`);
                 console.log(`  Permanent ID: ${newUserId}`);
