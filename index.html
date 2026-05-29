@@ -23696,6 +23696,11 @@
             if (m) m.style.display = 'none';
             if (w) w.style.display = 'none';
             if (o) o.style.display = 'none';
+            // Assign boost badge to the selected post (or currentPostId if none selected)
+            try {
+                const pid = selectedPostId || window.currentPostId || null;
+                if (pid) applyPurchaseBadges(pid, { boost: true, sell: false });
+            } catch (e) { console.warn('Failed to apply boost badge locally', e); }
         }
         function _showBoostError(msg) {
             const errEl = document.getElementById('boostCardError');
@@ -23915,6 +23920,11 @@
                 sellBtnEl.style.borderColor = '#1e40af';
                 sellBtnEl.style.boxShadow = '0 6px 20px rgba(59,130,246,0.35)';
             }
+            // Assign sell badge to the selected post (or currentPostId if none selected)
+            try {
+                const pid = selectedPostId || window.currentPostId || null;
+                if (pid) applyPurchaseBadges(pid, { boost: false, sell: true });
+            } catch (e) { console.warn('Failed to apply sell badge locally', e); }
         }
         function _showSellError(msg) {
             const errEl = document.getElementById('sellCardError');
@@ -23961,6 +23971,83 @@
             try { if (_stripeSellPRButton) _stripeSellPRButton.unmount(); } catch(e){}
             try { if (_stripeSellCardElement) { _stripeSellCardElement.unmount(); _stripeSellCardElement = null; } } catch(e){}
             _stripeSellPRButton = null; _stripeSellPR = null; _stripeSellCardElement = null;
+        }
+        
+        // Apply purchase badges to a post and persist to Firebase & local caches
+        async function applyPurchaseBadges(postId, { boost = false, sell = false } = {}) {
+            if (!postId) return;
+            try {
+                // Find post in local caches
+                let post = null;
+                if (typeof postCache !== 'undefined' && postCache && postCache[postId]) post = postCache[postId];
+                if (!post && typeof gridContent !== 'undefined') {
+                    for (const key in gridContent) {
+                        const found = (gridContent[key] || []).find(p => p.id === postId);
+                        if (found) { post = found; break; }
+                    }
+                }
+
+                // Ensure badges array
+                post = post || {};
+                const existingBadges = Array.isArray(post.badges) ? post.badges.slice() : [];
+                const newBadgesSet = new Set(existingBadges);
+                if (sell) newBadgesSet.add('sell');
+                if (boost) newBadgesSet.add('boost');
+                const updates = { badges: Array.from(newBadgesSet) };
+
+                // If boost purchased, set boostExpiresAt (24h) and status
+                if (boost) {
+                    updates.boostExpiresAt = Date.now() + (24 * 60 * 60 * 1000);
+                    updates.boostStatus = 'active';
+                }
+
+                // Persist to Firebase shared posts collection if available
+                try {
+                    if (typeof database !== 'undefined' && typeof ref === 'function' && typeof update === 'function') {
+                        const postRef = ref(database, `posts/${postId}`);
+                        await update(postRef, updates);
+                        console.log(`✅ Persisted purchase badges to Firebase for ${postId}:`, updates);
+                    }
+                } catch (e) {
+                    console.warn('⚠️ Failed to persist purchase badges to Firebase:', e);
+                    const queued = JSON.parse(localStorage.getItem('queuedBadgeUpdates') || '[]');
+                    queued.push({ postId, updates, ts: Date.now() });
+                    localStorage.setItem('queuedBadgeUpdates', JSON.stringify(queued));
+                }
+
+                // Update local caches so UI reflects immediately
+                try {
+                    if (typeof postCache !== 'undefined' && postCache && postCache[postId]) {
+                        postCache[postId].badges = updates.badges;
+                        if (updates.boostExpiresAt) postCache[postId].boostExpiresAt = updates.boostExpiresAt;
+                        if (updates.boostStatus) postCache[postId].boostStatus = updates.boostStatus;
+                    }
+                    if (typeof gridContent !== 'undefined') {
+                        for (const key in gridContent) {
+                            (gridContent[key] || []).forEach(p => {
+                                if (p.id === postId) {
+                                    p.badges = updates.badges;
+                                    if (updates.boostExpiresAt) p.boostExpiresAt = updates.boostExpiresAt;
+                                    if (updates.boostStatus) p.boostStatus = updates.boostStatus;
+                                }
+                            });
+                        }
+                    }
+                } catch (e) { console.warn('Failed updating local caches for badges', e); }
+
+                // Update rendered elements immediately if present
+                try {
+                    const box = document.querySelector(`.grid-box[data-post-id="${postId}"]`);
+                    if (box) {
+                        box.classList.remove('badge-sell', 'badge-boost');
+                        Array.from(updates.badges || []).forEach(b => box.classList.add(`badge-${b}`));
+                    }
+                } catch (e) { /* ignore DOM update failures */ }
+
+                scheduleRenderGrid();
+            } catch (e) {
+                console.error('❌ applyPurchaseBadges failed', e);
+            }
         }
         window.toggleSellPurchase = toggleSellPurchase;
         window.resetSellButton = resetSellButton;
