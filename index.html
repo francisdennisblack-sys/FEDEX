@@ -8812,20 +8812,20 @@
             
             voteDebounceMap[voteKey] = now;
             
-            // DISABLE VOTE BUTTONS: Prevent clicks during submission
-            const allVoteButtons = document.querySelectorAll(`[onclick*="voteOnPost('${postId}'"]`);
+            // DISABLE VOTE BUTTONS: target only buttons for this post (avoid expensive global queries)
+            const allVoteButtons = Array.from(document.querySelectorAll(`[data-post-id="${postId}"] .like-btn, [data-post-id="${postId}"] .dislike-btn`));
+            if (allVoteButtons.length === 0) {
+                // fallback to previous selector if data attributes aren't present anywhere
+                try { allVoteButtons.push(...document.querySelectorAll(`[onclick*=\"voteOnPost('${postId}'\")]`)); } catch(e){}
+            }
             allVoteButtons.forEach(btn => {
-                btn.disabled = true;
-                btn.style.opacity = '0.5';
-                btn.style.cursor = 'not-allowed';
+                try { btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; } catch(e){}
             });
-            
+
             // Re-enable buttons after 1 second (or when response comes back)
             const reenableTimeout = setTimeout(() => {
                 allVoteButtons.forEach(btn => {
-                    btn.disabled = false;
-                    btn.style.opacity = '1';
-                    btn.style.cursor = 'pointer';
+                    try { btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer'; } catch(e){}
                 });
             }, 1000);
             
@@ -8899,17 +8899,77 @@
                 }
             }
             
-            // 🧠 ML TAG SYSTEM: Track where this post gets engagement
-            if (window.mlTagRewritingSystem && userLocation && post.lat && post.lon) {
-                window.mlTagRewritingSystem.trackEngagement(
-                    postId,
-                    userLocation.latitude,
-                    userLocation.longitude,
-                    post.lat,
-                    post.lon,
-                    voteType
-                );
-                console.log(`🧠 Tracked ${voteType} for ML tag rewriting at distance from post origin`);
+            // Defer heavy processing (ML, badge recalcs, cache learning) to idle time
+            function scheduleHeavyVoteProcessing() {
+                const task = () => {
+                    try {
+                        // 🧠 ML TAG SYSTEM: Track where this post gets engagement
+                        try {
+                            const ulat = userLocation && (userLocation.latitude || userLocation.lat);
+                            const ulon = userLocation && (userLocation.longitude || userLocation.lon);
+                            if (window.mlTagRewritingSystem && ulat && ulon && post.lat && post.lon) {
+                                try {
+                                    window.mlTagRewritingSystem.trackEngagement(postId, ulat, ulon, post.lat, post.lon, voteType);
+                                } catch(e) { console.warn('mlTagRewritingSystem.trackEngagement failed', e); }
+                            }
+                        } catch(e){ console.warn('ML tag tracking wrapper failed', e); }
+
+                        // 🚀 BOOST PERFORMANCE TRACKING
+                        try {
+                            if (post.boostRequested && post.boostIntent && window.boostPerformanceSystem) {
+                                try { window.boostPerformanceSystem.trackEngagement(post.id, newLikes); } catch(e){}
+                                try {
+                                    const engagement = window.boostPerformanceSystem.getEngagementScore(post.id);
+                                    console.log(`🚀 BOOST ENGAGEMENT: Post ${post.id.substring(0,8)} now has ${newLikes} likes (${(engagement||0).toFixed(1)}% engagement)`);
+                                } catch(e){}
+                            }
+                        } catch(e){ console.warn('boostPerformanceSystem processing failed', e); }
+
+                        // Update ML preferences and scores (deferred)
+                        try { if (typeof updateUserPreferences === 'function') updateUserPreferences(currentUserId); } catch(e){ console.warn('updateUserPreferences failed', e); }
+                        try { if (typeof updateMLScores === 'function') updateMLScores(); } catch(e){ console.warn('updateMLScores failed', e); }
+
+                        // Tag engagement & area updates
+                        try { if (typeof updateTagEngagementOnVote === 'function') updateTagEngagementOnVote(post, voteType); } catch(e){ console.warn('updateTagEngagementOnVote failed', e); }
+                        try {
+                            if (typeof updatePostAreaTags === 'function') {
+                                updatePostAreaTags(postId, { likes: newLikes, dislikes: newDislikes, screenCount: (post.screenCount || 0) + 1, uniqueUsers: new Set([currentUserId]) });
+                            }
+                        } catch(e){ console.warn('updatePostAreaTags failed', e); }
+
+                        // Rebadge posts for area (deferred)
+                        try {
+                            const postArea = post.county || (typeof getCurrentUserArea === 'function' ? getCurrentUserArea() : null);
+                            const allPostsInArea = (gridContent[currentUserId] || []).filter(p => p.county === postArea || p.county === post.county);
+                            const totalOnlineUsers = (typeof onlineUserCount !== 'undefined' && onlineUserCount) ? onlineUserCount : 1;
+                            if (window.adaptiveBadgeSystem && allPostsInArea.length > 0) {
+                                try {
+                                    const badgeResult = window.adaptiveBadgeSystem.rebadgePostForArea(post, postArea, allPostsInArea, totalOnlineUsers);
+                                    if (badgeResult && badgeResult.badgeChanged) {
+                                        window.adaptiveBadgeSystem.updateBadgesForArea(postArea, allPostsInArea, totalOnlineUsers);
+                                    }
+                                } catch(e) { console.warn('adaptiveBadgeSystem failed', e); }
+                            }
+                        } catch(e){ console.warn('rebadge wrapper failed', e); }
+
+                        // CACHE LEARNING
+                        try {
+                            if (window.postCacheSystem && gridContent[currentUserId]) {
+                                try {
+                                    window.postCacheSystem.learnUserPreferences(userVotes, gridContent[currentUserId].reduce((acc, p) => { acc[p.id] = p; return acc; }, {}));
+                                } catch(e) { console.warn('postCacheSystem.learnUserPreferences failed', e); }
+                            }
+                        } catch(e){ console.warn('cache learning wrapper failed', e); }
+                    } catch (err) {
+                        console.warn('Deferred heavy vote processing failed', err);
+                    }
+                };
+
+                if (typeof window.requestIdleCallback === 'function') {
+                    try { requestIdleCallback(task, {timeout: 2000}); } catch(e){ setTimeout(task, 200); }
+                } else {
+                    setTimeout(task, 200);
+                }
             }
             
             // CRITICAL: Only update vote counts without mutating other properties
@@ -8985,49 +9045,8 @@
                 }
             }, 100);
             
-            // Update ML preferences based on this vote (real-time learning)
-            updateUserPreferences(currentUserId);
-            updateMLScores();
-            
-            // Track custom tag interactions (learn user's tag preferences)
-            updateTagEngagementOnVote(post, voteType);
-            
-            // 📍 UPDATE AREA TAGS BASED ON ENGAGEMENT
-            // Posts that get likes get promoted to bigger areas
-            updatePostAreaTags(postId, {
-                likes: newLikes,
-                dislikes: newDislikes,
-                screenCount: (post.screenCount || 0) + 1,
-                uniqueUsers: new Set([currentUserId])
-            });
-            console.log(`📍 Post area tags updated based on engagement`);
-            
-            // 🎯 REBADGE POSTS - Adaptive Badge System ML Learning
-            // When post gets voted on, recalculate what badge it SHOULD have in this area
-            // Scales from 1 user (small likes) to 100M users (millions of likes)
-            const postArea = post.county || getCurrentUserArea();
-            const allPostsInArea = (gridContent[currentUserId] || []).filter(p => p.county === postArea || p.county === post.county);
-            const totalOnlineUsers = onlineUserCount || 1; // Get total user count for scaling
-            
-            if (window.adaptiveBadgeSystem && allPostsInArea.length > 0) {
-                // Rebadge with total user count for logarithmic scaling
-                const badgeResult = window.adaptiveBadgeSystem.rebadgePostForArea(post, postArea, allPostsInArea, totalOnlineUsers);
-                if (badgeResult.badgeChanged) {
-                    console.log(`🎯 POST REBADGED: "${post.content?.substring(0, 30)}..." badge changed - ${badgeResult.reasoning}`);
-                    // Update badges for ALL posts in this area with user count awareness
-                    window.adaptiveBadgeSystem.updateBadgesForArea(postArea, allPostsInArea, totalOnlineUsers);
-                }
-            }
-            
-            // ⚡ CACHE LEARNING: Update ML cache predictions based on this vote
-            if (window.postCacheSystem && gridContent[currentUserId]) {
-                window.postCacheSystem.learnUserPreferences(userVotes, 
-                    gridContent[currentUserId].reduce((acc, p) => {
-                        acc[p.id] = p;
-                        return acc;
-                    }, {})
-                );
-            }
+            // Schedule deferred heavy processing so UI stays snappy
+            scheduleHeavyVoteProcessing();
             
             // Update Firebase asynchronously without blocking UI
             updatePostVotesFirebase(currentUserId, postId, {
