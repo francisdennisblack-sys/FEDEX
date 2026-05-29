@@ -15625,7 +15625,7 @@
 
             const val = customTagInput.value.trim();
             
-            // If field is empty on focus, show nearby locations
+            // If field is empty on focus, show nearby locations (and browse option)
             if (val.length === 0) {
                 console.log('📍 Specify area field focused and empty - showing nearby locations');
                 showNearbyLocationsDropdown();
@@ -15694,6 +15694,55 @@
             } else {
                 html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">Loading locations...</div>';
             }
+
+            // --- Add POI quick list (try GeoIndex first, then globalPOIDatabase) ---
+            try {
+                const uLat = userLocation && (userLocation.lat || userLocation.latitude);
+                const uLon = userLocation && (userLocation.lon || userLocation.longitude);
+                if (uLat && uLon) {
+                    html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-top: 1px solid #2a2a2a; font-weight: 600; margin-top:8px;">Nearby POIs</div>';
+
+                    let poiItems = [];
+                    if (window.GeoIndex && typeof window.GeoIndex.nearby === 'function') {
+                        // ask GeoIndex for 100 closest
+                        const hits = window.GeoIndex.nearby(uLat, uLon, 100);
+                        poiItems = hits.map(h => ({ poi: h.poi, mi: h.distanceMi }));
+                    } else if (Array.isArray(globalPOIDatabase) && globalPOIDatabase.length) {
+                        // Fallback: find nearest POIs but limit scanning to a slice for performance
+                        const sample = globalPOIDatabase.slice(0, Math.min(globalPOIDatabase.length, 100000));
+                        const out = [];
+                        for (let i = 0; i < sample.length; i++) {
+                            const p = sample[i];
+                            if (!p || !p.lat || !p.lon) continue;
+                            const km = calculateDistance(uLat, uLon, p.lat, p.lon);
+                            const mi = (km || 0) * 0.621371;
+                            if (mi <= 100) out.push({ poi: p, mi });
+                        }
+                        out.sort((a, b) => a.mi - b.mi);
+                        poiItems = out.slice(0, 200);
+                    }
+
+                    if (poiItems && poiItems.length) {
+                        // show initial 20, include 'Load more' if more exist
+                        const displayCount = Math.min(20, poiItems.length);
+                        for (let i = 0; i < displayCount; i++) {
+                            const { poi, mi } = poiItems[i];
+                            const safeName = String(poi.name).replace(/'/g, "&#39;");
+                            const emoji = poi.emoji || '📍';
+                            const cat = poi.category || poi.type || '';
+                            html += `\n                                <div style="padding: 10px 12px; border-bottom: 1px solid #2a2a2a; cursor: pointer; background-color: #0f1419; font-size: 12px; color: #bbb; user-select: none; display:flex; justify-content:space-between; align-items:center;" onclick="selectAutocomplete('${safeName}', event)" title="Select ${safeName}">\n                                    <div style="font-weight:600">${emoji} ${safeName}</div>\n                                    <div style="color:#666; font-size:11px">${mi.toFixed(1)}mi • ${cat}</div>\n                                </div>`;
+                        }
+                        if (poiItems.length > displayCount) {
+                            html += `<div style="padding:10px;text-align:center;color:#9aa;cursor:pointer;border-top:1px solid #111;" onclick="openAreaPickerModal();">Load more POIs / Browse all</div>`;
+                        }
+                    } else {
+                        html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">No nearby POIs found</div>';
+                    }
+                }
+            } catch (e) { console.warn('Nearby POI enrichment failed:', e); }
+
+            // Add a clear 'Browse all locations' button to open full picker (supports millions via incremental load)
+            html += '<div style="padding:10px 12px; border-top:1px solid #111; text-align:center; background:#0f1419;"><button onclick="openAreaPickerModal()" style="padding:8px 12px; border-radius:8px; background:#1f2937; border:1px solid #2a2a2a; color:#fff; cursor:pointer;">Browse all locations (full database)</button></div>';
             
             dropdown.innerHTML = html;
             dropdown.style.display = 'block';
