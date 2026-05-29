@@ -2488,33 +2488,59 @@
         }
 
         .view-modal {
-            display: none;
+            /* Keep modal in DOM to avoid layout thrash; toggle visibility with opacity/pointer-events */
+            display: flex;
             position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: rgba(0, 0, 0, 0.9);
+            inset: 0;
+            background-color: rgba(0, 0, 0, 0.85);
             z-index: 1001;
             align-items: center;
             justify-content: center;
             padding: 20px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 200ms ease;
         }
 
         .view-modal.active {
-            display: flex;
+            opacity: 1;
+            pointer-events: auto;
         }
 
         .view-modal-content {
             background-color: #1a1a1a;
             border: 1px solid #333;
             border-radius: 12px;
-            padding: 32px;
+            padding: 24px;
             width: 95%;
             max-width: 700px;
             max-height: 85vh;
             overflow-y: auto;
-            transition: background-color 0.8s ease, border-color 0.8s ease, color 0.8s ease;
+            /* Use transform/opacity for smooth, GPU-accelerated entrance */
+            transform: translateY(12px) scale(0.995);
+            opacity: 0;
+            transition: transform 220ms cubic-bezier(.2,.9,.2,1), opacity 220ms ease, box-shadow 220ms ease;
+            will-change: transform, opacity;
+        }
+
+        .view-modal.active .view-modal-content {
+            transform: translateY(0) scale(1);
+            opacity: 1;
+        }
+
+        /* Vote button visual classes with transitions to avoid inline style thrash */
+        .vote-button {
+            transition: background-color 160ms ease, color 160ms ease, transform 120ms ease;
+        }
+        .vote-button.voted-like {
+            background-color: #fff !important;
+            color: #111827 !important;
+            transform: translateY(-1px);
+        }
+        .vote-button.voted-dislike {
+            background-color: #f44336 !important;
+            color: #fff !important;
+            transform: translateY(-1px);
         }
 
         /* Modal glow effects matching post badges */
@@ -13859,6 +13885,7 @@
             // Save the user's vote preference
             saveVoteToFirebase(currentUserId, selectedPostId, userVotes[voteKey]);
 
+            // Update modal & grid counters without forcing a full reflow immediately
             updateVoteDisplay();
         }
 
@@ -13909,6 +13936,7 @@
             // Save the user's vote preference
             saveVoteToFirebase(currentUserId, selectedPostId, userVotes[voteKey]);
 
+            // Update modal & grid counters without forcing a full reflow immediately
             updateVoteDisplay();
         }
 
@@ -13930,8 +13958,11 @@
             }
             if (!post) return;
 
-            document.getElementById('likeCount').textContent = post.likes || 0;
-            document.getElementById('dislikeCount').textContent = post.dislikes || 0;
+            // Update the counts in the modal if present
+            const likeCountEl = document.getElementById('likeCount');
+            const dislikeCountEl = document.getElementById('dislikeCount');
+            if (likeCountEl) likeCountEl.textContent = post.likes || 0;
+            if (dislikeCountEl) dislikeCountEl.textContent = post.dislikes || 0;
 
             const voteKey = `${currentUserId}_${selectedPostId}`;
             const currentVote = userVotes[voteKey];
@@ -13939,19 +13970,39 @@
             const likeBtn = document.getElementById('likeBtn');
             const dislikeBtn = document.getElementById('dislikeBtn');
 
-            if (currentVote === 'like') {
-                likeBtn.style.backgroundColor = '#fff';
-                dislikeBtn.style.backgroundColor = '#333';
-            } else if (currentVote === 'dislike') {
-                likeBtn.style.backgroundColor = '#333';
-                dislikeBtn.style.backgroundColor = '#f44336';
-            } else {
-                likeBtn.style.backgroundColor = '#333';
-                dislikeBtn.style.backgroundColor = '#333';
+            // Toggle CSS classes rather than manipulating styles directly
+            if (likeBtn) {
+                likeBtn.classList.toggle('voted-like', currentVote === 'like');
+                likeBtn.classList.toggle('vote-button', true);
             }
-            
-            // Update grid to show new vote counts on the grid squares
-            renderGrid();
+            if (dislikeBtn) {
+                dislikeBtn.classList.toggle('voted-dislike', currentVote === 'dislike');
+                dislikeBtn.classList.toggle('vote-button', true);
+            }
+
+            // Update the rendered grid box counts if that box exists, but avoid full re-render for responsiveness
+            try {
+                const gridBox = document.querySelector(`.grid-box[data-post-id="${selectedPostId}"]`);
+                if (gridBox) {
+                    const badgeLike = gridBox.querySelector('.grid-like-count');
+                    const badgeDislike = gridBox.querySelector('.grid-dislike-count');
+                    if (badgeLike) badgeLike.textContent = post.likes || 0;
+                    if (badgeDislike) badgeDislike.textContent = post.dislikes || 0;
+                }
+            } catch (e) { /* ignore DOM update failures */ }
+
+            // Schedule an occasional full grid re-render but debounce to avoid layout thrash
+            scheduleRenderGrid();
+        }
+
+        // Debounced re-rendering: if multiple votes happen quickly, only rerender once after the burst
+        let _renderGridTimeout = null;
+        function scheduleRenderGrid() {
+            if (_renderGridTimeout) return; // already scheduled
+            _renderGridTimeout = setTimeout(() => {
+                try { renderGrid(); } catch (e) { console.warn('renderGrid scheduled run failed', e); }
+                _renderGridTimeout = null;
+            }, 800);
         }
 
         function sharePost() {
