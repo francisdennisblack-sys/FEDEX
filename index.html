@@ -24,6 +24,25 @@
                     zoneTag: newZone,
                     area: newZone,
                     region: newZone,
+                            // Persist display name and local identifiers so UI can remain signed-in
+                            try {
+                                const display = window.__pendingUsername || phoneNumber || '';
+                                if (display) {
+                                    localStorage.setItem('displayName', display);
+                                    window.currentDisplayName = display;
+                                }
+                                // Derive a stable grid ID from permanentUid or firebaseUid
+                                const gridId = permanentUid || firebaseUid || ('local-' + (Date.now()));
+                                localStorage.setItem('userGridId', gridId);
+                                window.currentGridId = gridId;
+                                // Ensure there's at least one local post id for the user to reference
+                                let postId = localStorage.getItem('userPostId');
+                                if (!postId) {
+                                    postId = 'post-' + gridId + '-' + Date.now();
+                                    localStorage.setItem('userPostId', postId);
+                                }
+                                window.currentPostId = postId;
+                            } catch (e3) { console.warn('Could not persist displayName/grid/post ids', e3); }
                     updatedAt: Date.now()
                 };
                 await update(postRef, updatePayload);
@@ -2761,6 +2780,23 @@
                             localStorage.setItem('userId', canonicalUid);
                             localStorage.setItem('permanentUserId', canonicalUid);
                             localStorage.setItem('isSignedIn', '1');
+                            // Persist displayName/grid/post ids for email-created accounts
+                            try {
+                                const display = username || (email && email.split('@')[0]) || '';
+                                if (display) {
+                                    localStorage.setItem('displayName', display);
+                                    window.currentDisplayName = display;
+                                }
+                                const gridId = canonicalUid || ('local-' + (Date.now()));
+                                localStorage.setItem('userGridId', gridId);
+                                window.currentGridId = gridId;
+                                let postId = localStorage.getItem('userPostId');
+                                if (!postId) {
+                                    postId = 'post-' + gridId + '-' + Date.now();
+                                    localStorage.setItem('userPostId', postId);
+                                }
+                                window.currentPostId = postId;
+                            } catch (e) { console.warn('Could not persist displayName/grid/post ids for email create', e); }
                         } catch (e) { console.warn('Could not persist sign-in markers for email create', e); }
                         updateAccountUI();
                         showNotification && showNotification('Account created', `Welcome ${username || email}`);
@@ -2786,6 +2822,23 @@
                             localStorage.setItem('userId', canonicalUid);
                             if (canonicalUid) localStorage.setItem('permanentUserId', canonicalUid);
                             localStorage.setItem('isSignedIn', '1');
+                        // Persist displayName/grid/post ids for email sign-ins
+                        try {
+                            const display = canonicalUid || (user && user.email ? user.email.split('@')[0] : '');
+                            if (display) {
+                                localStorage.setItem('displayName', display);
+                                window.currentDisplayName = display;
+                            }
+                            const gridId = canonicalUid || ('local-' + (Date.now()));
+                            localStorage.setItem('userGridId', gridId);
+                            window.currentGridId = gridId;
+                            let postId = localStorage.getItem('userPostId');
+                            if (!postId) {
+                                postId = 'post-' + gridId + '-' + Date.now();
+                                localStorage.setItem('userPostId', postId);
+                            }
+                            window.currentPostId = postId;
+                        } catch (e) { console.warn('Could not persist displayName/grid/post ids for email sign-in', e); }
                         } catch (e) { console.warn('Could not persist sign-in markers for email sign-in', e); }
                         updateAccountUI();
                         showNotification && showNotification('Signed in', `${user.email}`);
@@ -2893,7 +2946,7 @@
                         const avgLikes = posts ? (totalLikes / posts).toFixed(1) : '0';
 
                         // update profile button label only (move stats + sign-out to profile modal)
-                        signInBtn.textContent = profile.username || 'Profile';
+                        signInBtn.textContent = window.currentDisplayName || profile.username || 'Profile';
                         // remove any header accountStats / signOutBtn if present
                         if (accountStats && accountStats.parentNode) accountStats.parentNode.removeChild(accountStats);
                         if (signOutBtn && signOutBtn.parentNode) signOutBtn.parentNode.removeChild(signOutBtn);
@@ -3197,6 +3250,9 @@
                         localStorage.removeItem('userId');
                         localStorage.removeItem('lastSessionAuthId');
                         localStorage.removeItem('isSignedIn');
+                        localStorage.removeItem('displayName');
+                        localStorage.removeItem('userGridId');
+                        localStorage.removeItem('userPostId');
                     } catch (e) { console.warn('Could not clear local sign-in markers', e); }
                     window.currentUserId = null;
                     window.currentUserEmail = null;
@@ -3884,6 +3940,9 @@
                 const lastFirebaseUid = (function(){ try { return localStorage.getItem('lastSignedInFirebaseUid'); } catch(e){ return null; } })();
                 const lastPhone = (function(){ try { return localStorage.getItem('lastSignedInPhone'); } catch(e){ return null; } })();
                 const permanentUid = (function(){ try { return localStorage.getItem('permanentUserId') || localStorage.getItem('userId'); } catch(e){ return null; } })();
+                const displayName = (function(){ try { return localStorage.getItem('displayName'); } catch(e){ return null; } })();
+                const gridId = (function(){ try { return localStorage.getItem('userGridId'); } catch(e){ return null; } })();
+                const postId = (function(){ try { return localStorage.getItem('userPostId'); } catch(e){ return null; } })();
                 if (!lastFirebaseUid && !permanentUid) return;
                 console.log('Attempting session restore', { lastFirebaseUid, permanentUid });
 
@@ -3892,11 +3951,17 @@
                     if (lastFirebaseUid && auth.currentUser.uid === lastFirebaseUid) {
                         window.currentUserId = lastFirebaseUid;
                         window.currentUserPhone = lastPhone || window.currentUserPhone;
+                        if (displayName) window.currentDisplayName = displayName;
+                        if (gridId) window.currentGridId = gridId;
+                        if (postId) window.currentPostId = postId;
                         updateAccountUI();
                         return;
                     } else {
                         // A different active Firebase session exists; prefer the live session
                         window.currentUserId = auth.currentUser.uid;
+                        if (displayName) window.currentDisplayName = displayName;
+                        if (gridId) window.currentGridId = gridId;
+                        if (postId) window.currentPostId = postId;
                         updateAccountUI();
                         return;
                     }
@@ -3919,12 +3984,18 @@
                 if (lastFirebaseUid) {
                     window.currentUserId = lastFirebaseUid;
                     window.currentUserPhone = lastPhone || window.currentUserPhone;
+                    if (displayName) window.currentDisplayName = displayName;
+                    if (gridId) window.currentGridId = gridId;
+                    if (postId) window.currentPostId = postId;
                     try {
                         localStorage.setItem('userId', lastFirebaseUid);
                         localStorage.setItem('lastSessionAuthId', lastFirebaseUid);
                     } catch (e) { console.warn('Could not persist session markers during restore', e); }
                 } else if (permanentUid) {
                     window.currentUserId = permanentUid;
+                    if (displayName) window.currentDisplayName = displayName;
+                    if (gridId) window.currentGridId = gridId;
+                    if (postId) window.currentPostId = postId;
                 }
                 updateAccountUI();
                 showNotification && showNotification('Session restored (local)');
