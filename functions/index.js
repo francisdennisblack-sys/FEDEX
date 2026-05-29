@@ -28,7 +28,39 @@ exports.postMetricsAggregator = functions.database.ref('/posts/{postId}').onCrea
 exports.createCheckoutSession = functions.https.onRequest(async (req,res)=>{
   setDefaultCors(res); if(req.method==='OPTIONS'){res.status(204).send('');return;} if(!stripe) return res.status(500).json({error:'Stripe not configured'});
   try{ const {postId,kind,amount,currency,success_url,cancel_url} = req.body||{}; if(!postId||!kind||!amount) return res.status(400).json({error:'postId,kind,amount required'});
-    const session = await stripe.checkout.sessions.create({ payment_method_types:['card'], mode:'payment', line_items:[{price_data:{currency:currency||'usd',product_data:{name:`${kind} for post ${postId}`},unit_amount:Math.round(Number(amount))},quantity:1}], success_url:success_url||'https://example.com/success', cancel_url:cancel_url||'https://example.com/cancel', metadata:{postId:String(postId),kind:String(kind)} });
+    // Normalize and validate amount: accept cents (integer) or dollars (decimal string)
+    let unit_amount;
+    const rawAmount = amount;
+    if(typeof rawAmount === 'string' && rawAmount.indexOf('.')!==-1){
+      const v = parseFloat(rawAmount.replace(/[^0-9.\-]/g,''));
+      unit_amount = Number.isFinite(v) ? Math.round(v*100) : NaN;
+    } else {
+      unit_amount = Math.round(Number(String(rawAmount).replace(/[^0-9\-]/g,'')));
+    }
+    if(!Number.isInteger(unit_amount) || unit_amount <= 0) return res.status(400).json({error:'invalid amount; provide integer cents or decimal dollars'});
+    // Validate URLs
+    let okSuccess = success_url || 'https://example.com/success';
+    let okCancel = cancel_url || 'https://example.com/cancel';
+    try{ new URL(okSuccess); new URL(okCancel); }catch(e){ return res.status(400).json({error:'invalid success_url or cancel_url'}); }
+    // Sanitize metadata values to avoid remote API pattern rejections
+    const metaPostId = String(postId).replace(/[^a-zA-Z0-9_\-\.]/g,'_');
+    const metaKind = String(kind).replace(/[^a-zA-Z0-9_\-]/g,'_');
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types:['card'],
+      mode:'payment',
+      line_items:[{
+        price_data:{
+          currency:(currency||'usd').toLowerCase(),
+          product_data:{name:`${kind} for post ${postId}`},
+          unit_amount:unit_amount
+        },
+        quantity:1
+      }],
+      success_url: okSuccess,
+      cancel_url: okCancel,
+      metadata:{postId:metaPostId,kind:metaKind}
+    });
     return res.json({id:session.id,url:session.url});
   }catch(e){ console.error(e); return res.status(500).json({error:e&&e.message}); }
 });
