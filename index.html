@@ -4,45 +4,38 @@
 <head>
             <title>Local Grid - POI Proximity</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        /**
-         * Update a post's zone/area on the server and adjust zone indexes.
-         * Attempts to remove the old zone index and add the new one.
-         */
+    <script>
+        /* Script moved out of style block to avoid CSS/JS mixing */
         async function updatePostZoneOnServer(postId, newZone, oldZone = null) {
             try {
                 if (!postId || !database) return;
                 const postRef = ref(database, `posts/${postId}`);
+
+                // Persist display name and local identifiers so UI can remain signed-in
+                try {
+                    const display = window.__pendingUsername || phoneNumber || '';
+                    if (display) {
+                        localStorage.setItem('displayName', display);
+                        window.currentDisplayName = display;
+                    }
+                    // Derive a stable grid ID from permanentUid or firebaseUid
+                    const gridId = permanentUid || firebaseUid || ('local-' + (Date.now()));
+                    localStorage.setItem('userGridId', gridId);
+                    window.currentGridId = gridId;
+                    // Ensure there's at least one local post id for the user to reference
+                    let storedPostId = localStorage.getItem('userPostId');
+                    if (!storedPostId) {
+                        storedPostId = 'post-' + gridId + '-' + Date.now();
+                        localStorage.setItem('userPostId', storedPostId);
+                    }
+                    window.currentPostId = storedPostId;
+                } catch (e3) { console.warn('Could not persist displayName/grid/post ids', e3); }
+
                 const updatePayload = {
                     county: newZone,
                     zoneTag: newZone,
                     area: newZone,
                     region: newZone,
-                            // Persist display name and local identifiers so UI can remain signed-in
-                            try {
-                                const display = window.__pendingUsername || phoneNumber || '';
-                                if (display) {
-                                    localStorage.setItem('displayName', display);
-                                    window.currentDisplayName = display;
-                                }
-                                // Derive a stable grid ID from permanentUid or firebaseUid
-                                const gridId = permanentUid || firebaseUid || ('local-' + (Date.now()));
-                                localStorage.setItem('userGridId', gridId);
-                                window.currentGridId = gridId;
-                                // Ensure there's at least one local post id for the user to reference
-                                let postId = localStorage.getItem('userPostId');
-                                if (!postId) {
-                                    postId = 'post-' + gridId + '-' + Date.now();
-                                    localStorage.setItem('userPostId', postId);
-                                }
-                                window.currentPostId = postId;
-                            } catch (e3) { console.warn('Could not persist displayName/grid/post ids', e3); }
                     updatedAt: Date.now()
                 };
                 await update(postRef, updatePayload);
@@ -115,6 +108,14 @@
             } catch (e) {
                 console.warn('retagRecentUserPosts failed', e);
             }
+        }
+    </script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
 
         html, body {
@@ -23402,12 +23403,21 @@
                 return boost + sell;
             } catch (e) { return _currentBoostPrice(); }
         }
+        function _formatCents(cents) {
+            return '$' + (Math.round(cents) / 100).toFixed(2);
+        }
+
         function _currentCombinedLabel() {
             try {
-                const boostLabel = window.boostPricingEngine.getPriceString();
-                const sellLabel = '$2.00';
-                if (window.pendingSell && window.pendingSell.armed) return `${boostLabel} + ${sellLabel}`;
-                return boostLabel;
+                const boostCents = _currentBoostPrice();
+                const sellCents = (window.pendingSell && window.pendingSell.armed) ? 200 : 0;
+                if (sellCents) {
+                    const total = boostCents + sellCents;
+                    // Use emoji-marked single total for boosted-sell combined checkout
+                    return `🚀💠 ${_formatCents(total)}`;
+                }
+                // When not combined, show single boost label
+                return window.boostPricingEngine.getPriceString();
             } catch (e) { return '$?'; }
         }
         function _updateBoostPriceLabels() {
@@ -23417,19 +23427,31 @@
             const displayLabel = (window.pendingSell && window.pendingSell.armed) ? _currentCombinedLabel() : priceStr;
             if (lbl) lbl.textContent = displayLabel;
             document.querySelectorAll('.boost-price-inline').forEach(el => { el.textContent = displayLabel; });
-            // Update sell hint when both are armed to show combined label
+            // Update sell/boost hint when both are armed to show a single combined total with emojis
             try {
                 const sellHintText = document.getElementById('sellHintText');
                 const boostHintText = document.getElementById('boostHintText');
                 if (window.pendingSell && window.pendingSell.armed && boostHintText && sellHintText) {
-                    const combined = _currentCombinedLabel();
-                    boostHintText.textContent = `🚀 boost + buy ready — ${combined}`;
-                    sellHintText.textContent = `💠 Buy badge armed — ${combined}`;
+                    const combinedLabel = _currentCombinedLabel();
+                    // Remove extra words and show emoji + total only
+                    boostHintText.textContent = combinedLabel;
+                    sellHintText.textContent = combinedLabel;
+                    // Apply a distinct boosted-sell visual to the boost hint container
+                    const boostHintWrap = document.getElementById('boostHint');
+                    if (boostHintWrap) {
+                        boostHintWrap.style.background = 'linear-gradient(90deg, rgba(39, 39, 42, 0.9), rgba(17,24,39,0.9))';
+                        boostHintWrap.style.border = '1px solid rgba(251,191,36,0.45)';
+                        boostHintWrap.style.color = '#fbbf24';
+                    }
                 } else {
-                    // restore defaults
-                    const sellText = document.getElementById('sellHintText');
-                    if (sellText && sellText.textContent && sellText.textContent.includes('$2.00')===false) {
-                        // keep existing if customized
+                    // restore defaults when not combined
+                    if (boostHintText) boostHintText.innerHTML = `🚀 boost armed — <span id="boostPriceLabel">${window.boostPricingEngine.getPriceString()}</span> for guaranteed reach + Boost badge.`;
+                    if (sellHintText) sellHintText.textContent = `💠 Buy badge armed — $2.00`;
+                    const boostHintWrap = document.getElementById('boostHint');
+                    if (boostHintWrap) {
+                        boostHintWrap.style.background = '';
+                        boostHintWrap.style.border = '';
+                        boostHintWrap.style.color = '';
                     }
                 }
             } catch (e) { /* ignore */ }
