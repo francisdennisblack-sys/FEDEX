@@ -3339,6 +3339,8 @@
                         window.sendSignInCode = sendSignInCode;
                         window.confirmPhoneCode = confirmPhoneCode;
                     } catch (e) { console.warn('Failed to expose profile helpers', e); }
+                    // Ensure account UI reflects any restored session immediately
+                    try { updateAccountUI(); } catch (e) { console.warn('updateAccountUI on DOMContentLoaded failed', e); }
                 });
                     // expose profile helpers globally for other code to call
                     try {
@@ -12569,6 +12571,82 @@
             }
         }
 
+        /**
+         * Atomically set/remove a user's vote for a post using a transaction on `post-votes/{postId}`.
+         * This prevents race conditions when many users vote at once. After committing the
+         * per-post votes map, we compute aggregated counts and write them to `posts/{postId}`.
+         */
+        async function submitVoteTransaction(userId, postId, voteType) {
+            try {
+                const postVotesRef = ref(database, `post-votes/${postId}`);
+                const result = await runTransaction(postVotesRef, (current) => {
+                    current = current || {};
+                    // Extract and remove any counts meta if present
+                    const countsMeta = current.__counts || null;
+                    if (voteType === null) {
+                        // Remove this user's vote
+                        if (current[userId] !== undefined) delete current[userId];
+                    } else {
+                        current[userId] = voteType;
+                    }
+                    // Clean any internal keys from iteration
+                    if (countsMeta) current.__counts = countsMeta; // preserve if present
+                    return current;
+                });
+
+                if (!result || !result.committed) {
+                    console.warn('submitVoteTransaction: transaction not committed for', postId);
+                    throw new Error('transaction-not-committed');
+                }
+
+                const snapshot = result.snapshot;
+                const votesObj = snapshot.val() || {};
+                // Compute aggregated counts excluding internal keys
+                let likeCount = 0, dislikeCount = 0;
+                for (const k in votesObj) {
+                    if (!Object.prototype.hasOwnProperty.call(votesObj, k)) continue;
+                    if (k === '__counts') continue;
+                    const v = votesObj[k];
+                    if (v === 'like') likeCount++; else if (v === 'dislike') dislikeCount++;
+                }
+
+                // Persist aggregated totals to posts/{postId}
+                try {
+                    const postRef = ref(database, `posts/${postId}`);
+                    await update(postRef, { likes: likeCount, dislikes: dislikeCount });
+                } catch (e) {
+                    console.warn('Failed to update posts/{postId} counts after transaction:', e);
+                }
+
+                // Mirror to user-votes/{userId}/{postId} for quick per-user lookup (best-effort)
+                try {
+                    const userVoteRef = ref(database, `user-votes/${userId}/${postId}`);
+                    if (voteType === null) await remove(userVoteRef); else await set(userVoteRef, voteType);
+                } catch (e) { /* ignore mirror failures */ }
+
+                // Update local cache & UI
+                try {
+                    if (postCache && postCache[postId]) {
+                        postCache[postId].likes = likeCount;
+                        postCache[postId].dislikes = dislikeCount;
+                    }
+                    // Update any rendered grid box counts immediately
+                    const gridBox = document.querySelector(`.grid-box[data-post-id="${postId}"]`);
+                    if (gridBox) {
+                        const badgeLike = gridBox.querySelector('.grid-like-count');
+                        const badgeDislike = gridBox.querySelector('.grid-dislike-count');
+                        if (badgeLike) badgeLike.textContent = likeCount;
+                        if (badgeDislike) badgeDislike.textContent = dislikeCount;
+                    }
+                } catch (e) { /* ignore UI sync errors */ }
+
+                return { likes: likeCount, dislikes: dislikeCount };
+            } catch (err) {
+                console.error('submitVoteTransaction error:', err);
+                throw err;
+            }
+        }
+
         // ============================================
         // POST TRACKING SYSTEM - Firebase Integration
         // Tracks user's posts, retrieves history, manages post lifecycle
@@ -13972,17 +14050,16 @@
                 userVotes[voteKey] = 'like';
             }
 
-            // Update Firebase with new counts
-            updatePostVotesFirebase(currentUserId, selectedPostId, {
-                likes: newLikes,
-                dislikes: newDislikes
-            });
-
-            // Save the user's vote preference
-            saveVoteToFirebase(currentUserId, selectedPostId, userVotes[voteKey]);
-
-            // Update modal & grid counters without forcing a full reflow immediately
+            const desiredVote = (currentVote === 'like') ? null : 'like';
+            // Optimistically update local state/UI
+            if (desiredVote === null) delete userVotes[voteKey]; else userVotes[voteKey] = desiredVote;
             updateVoteDisplay();
+            // Submit transaction to Firebase to update per-post votes atomically
+            submitVoteTransaction(currentUserId, selectedPostId, desiredVote).catch(err => {
+                console.warn('submitVoteTransaction failed, will retry saving vote:', err);
+                // Fallback: persist to localStorage for later sync
+                try { localStorage.setItem(`userVotes_${currentUserId}`, JSON.stringify(userVotes)); } catch(e){}
+            });
         }
 
         function toggleDislike() {
@@ -14023,17 +14100,13 @@
                 userVotes[voteKey] = 'dislike';
             }
 
-            // Update Firebase with new counts
-            updatePostVotesFirebase(currentUserId, selectedPostId, {
-                likes: newLikes,
-                dislikes: newDislikes
-            });
-
-            // Save the user's vote preference
-            saveVoteToFirebase(currentUserId, selectedPostId, userVotes[voteKey]);
-
-            // Update modal & grid counters without forcing a full reflow immediately
+            const desiredVote = (currentVote === 'dislike') ? null : 'dislike';
+            if (desiredVote === null) delete userVotes[voteKey]; else userVotes[voteKey] = desiredVote;
             updateVoteDisplay();
+            submitVoteTransaction(currentUserId, selectedPostId, desiredVote).catch(err => {
+                console.warn('submitVoteTransaction failed, will retry saving vote:', err);
+                try { localStorage.setItem(`userVotes_${currentUserId}`, JSON.stringify(userVotes)); } catch(e){}
+            });
         }
 
         function updateVoteDisplay() {
