@@ -19199,7 +19199,7 @@
             if (recs.length > 0) {
                 html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600;">Recommended for You</div>';
                 
-                recs.slice(0, 5).forEach((rec, idx) => {
+                recs.slice(0, 6).forEach((rec, idx) => {
                     const scorePercent = Math.round(rec.score);
                     let scoreColor = '#ff4444';  // Red = far
                     if (scorePercent >= 80) scoreColor = '#fff';  // White = very close
@@ -19231,10 +19231,46 @@
                 html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600;">Nearby POIs & Locations</div>';
             }
             
-            // NOTE: POI/location browsing intentionally removed from this specify-area dropdown.
-            // POIs are surfaced from the Nearby button's dropdown to keep the "Specify area" field
-            // focused on manual entry and ML recommendations only.
-            dropdown.innerHTML = html || '<div style="padding: 12px; color: #999; text-align: center;">Loading locations...</div>';
+            // SECTION 2: Nearby POIs (if user location available)
+            try {
+                if (userLocation && window.poiManagementSystem && typeof poiManagementSystem.getNearbyPOIs === 'function') {
+                    const pois = poiManagementSystem.getNearbyPOIs(userLocation.latitude, userLocation.longitude, 10).slice(0, 12);
+                    if (pois && pois.length > 0) {
+                        html += '<div style="max-height: 220px; overflow:auto;">';
+                        pois.forEach(poi => {
+                            html += `<div style="padding: 8px 12px; border-bottom: 1px solid #2a2a2a; cursor:pointer; display:flex; align-items:center; gap:8px;" onclick="selectMLArea('${(poi.emoji||'📍')+' '+poi.name.replace(/'/g, "\\'")}', event)">`;
+                            html += `<div style="font-size:16px">${poi.emoji || '📍'}</div><div style="flex:1;"><div style="font-weight:600;font-size:13px;">${poi.name}</div><div style="font-size:11px;color:#888;">${poi.city || ''} ${(poi.category||'')}</div></div>`;
+                            html += `</div>`;
+                        });
+                        html += '</div>';
+                    }
+                }
+            } catch (e) { console.warn('populateMLAreaDropdown POI section failed', e); }
+
+            // SECTION 3: Nearby places from global location DB (fallback if no ML recs)
+            try {
+                if (userLocation && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
+                    // compute distances and show top 12 nearest
+                    const withDist = globalLocationDatabase.map(loc => {
+                        return { loc, d: calculateDistance(userLocation.latitude, userLocation.longitude, loc.lat || 0, loc.lon || 0) };
+                    }).filter(x => x.d !== undefined && x.d !== null).sort((a,b) => a.d - b.d).slice(0, 12);
+                    if (withDist.length > 0) {
+                        html += '<div style="padding:8px 12px; background:#0f1419; color:#888; font-size:10px; text-transform:uppercase; border-top:1px solid #222; font-weight:600; margin-top:8px;">Nearby Places</div>';
+                        html += '<div style="max-height:220px; overflow:auto;">';
+                        withDist.forEach(item => {
+                            const l = item.loc;
+                            const display = `${l.name}${l.state ? ', ' + l.state : ''}`;
+                            html += `<div style="padding:8px 12px; border-bottom:1px solid #222; cursor:pointer;" onclick="selectMLArea('${display.replace(/'/g, "\\'")}', event)">${display} <span style='color:#888;font-size:11px;'>${(item.d*0.621371).toFixed(1)}mi</span></div>`;
+                        });
+                        html += '</div>';
+                    }
+                }
+            } catch (e) { console.warn('populateMLAreaDropdown nearby places failed', e); }
+
+            // If nothing else, show helpful message
+            if (!html || html.trim() === '') html = '<div style="padding: 12px; color: #999; text-align: center;">No recommendations available</div>';
+
+            dropdown.innerHTML = html;
         }
         
         /**
