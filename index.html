@@ -13087,7 +13087,8 @@
             viewport.addEventListener('scroll', () => { requestAnimationFrame(render); }, { passive: true });
         }
         
-        function selectAutocomplete(value) {
+        function selectAutocomplete(value, event) {
+            if (event) event.stopPropagation();
             console.log(`✅ AUTOCOMPLETE SELECT: User selected "${value}"`);
             const customTagInput = document.getElementById('customZoneTag');
             const dropdown = document.getElementById('autocompleteDropdown');
@@ -13222,9 +13223,14 @@
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
 
+            // Lazy-load the global POI search index on first interaction so users can find ANY POI in the country.
+            if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                window.ensureGlobalPoiSearchIndex();
+            }
+
             const val = customTagInput.value.trim();
             
-            // If field is empty on focus, show nearby locations (and browse option)
+            // If field is empty on focus, show nearby locations AND all searchable options (locations + POIs)
             if (val.length === 0) {
                 console.log('📍 Specify area field focused and empty - showing nearby locations');
                 showNearbyLocationsDropdown();
@@ -13241,7 +13247,7 @@
             let html = '';
             
             // Header
-            html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600;">Nearby Locations</div>';
+            html += '<div style="padding: 10px 12px; background-color: #1f2937; border-bottom: 2px solid #667eea; color: #667eea; font-size: 11px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; font-weight: 600;">📍 Locations & POIs Near You</div>';
             
             // Show nearby locations from database
             if (userLocation && globalLocationDatabase && globalLocationDatabase.length > 0) {
@@ -13262,28 +13268,34 @@
                             return distA - distB;
                         }); // Show ALL nearby locations through scrolling
                     
-                    nearbyLocations.forEach(loc => {
-                        const dist = calculateDistance(userLat, userLon, loc.lat, loc.lon);
-                        const displayName = `${loc.name}, ${loc.state}`;
-                        html += `
-                            <div style="
-                                padding: 10px 12px;
-                                border-bottom: 1px solid #333;
-                                cursor: pointer;
-                                transition: background-color 0.1s;
-                                background-color: #1a1a1a;
-                                user-select: none;
-                                font-size: 12px;
-                                color: #bbb;
-                            " onmouseover="this.style.backgroundColor='#2a2a2a'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='#1a1a1a'; this.style.color='#bbb'" onclick="selectLocationFromSpecifyField('${displayName}', event)" title="Select: ${displayName}">
-                                <div style="font-weight: 500;">${displayName}</div>
-                                <div style="color: #777; margin-top: 2px; font-size: 10px;">${(dist * 0.621371).toFixed(1)}mi away</div>
-                            </div>
-                        `;
-                    });
-                    
                     if (nearbyLocations.length > 0) {
-                        console.log(`📍 Showing ${nearbyLocations.length} nearby locations`);
+                        html += '<div style="padding: 6px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; font-weight: 600; margin-top:4px;">Cities & Towns</div>';
+                        nearbyLocations.slice(0, 25).forEach(loc => {
+                            const dist = calculateDistance(userLat, userLon, loc.lat, loc.lon);
+                            const displayName = `${loc.name}, ${loc.state}`;
+                            html += `
+                                <div style="
+                                    padding: 10px 12px;
+                                    border-bottom: 1px solid #333;
+                                    cursor: pointer;
+                                    transition: background-color 0.1s;
+                                    background-color: #0a0a0a;
+                                    user-select: none;
+                                    font-size: 13px;
+                                    color: #ddd;
+                                    display: flex;
+                                    justify-content: space-between;
+                                    align-items: center;
+                                " onmouseover="this.style.backgroundColor='#2a2a2a'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='#0a0a0a'; this.style.color='#ddd'" onclick="selectLocationFromSpecifyField('${displayName}', event)" title="Select: ${displayName}">
+                                    <span style="font-weight: 500;">📍 ${displayName}</span>
+                                    <span style="color: #777; font-size: 11px;">${(dist * 0.621371).toFixed(1)}mi</span>
+                                </div>
+                            `;
+                        });
+                        
+                        if (nearbyLocations.length > 25) {
+                            html += `<div style="padding:8px 12px;text-align:center;color:#9aa;cursor:pointer;border-top:1px solid #222;font-size:12px;" onclick="openAreaPickerModal();">+ ${nearbyLocations.length - 25} more locations</div>`;
+                        }
                     } else {
                         html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">No nearby locations found</div>';
                     }
@@ -13299,7 +13311,7 @@
                 const uLat = userLocation && (userLocation.lat || userLocation.latitude);
                 const uLon = userLocation && (userLocation.lon || userLocation.longitude);
                 if (uLat && uLon) {
-                    html += '<div style="padding: 8px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-top: 1px solid #2a2a2a; font-weight: 600; margin-top:8px;">Nearby POIs</div>';
+                    html += '<div style="padding: 6px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; border-top: 1px solid #2a2a2a; font-weight: 600; margin-top:8px;">Places & Landmarks</div>';
 
                     let poiItems = [];
                     if (window.GeoIndex && typeof window.GeoIndex.nearby === 'function') {
@@ -13329,10 +13341,10 @@
                             const safeName = String(poi.name).replace(/'/g, "&#39;");
                             const emoji = poi.emoji || '📍';
                             const cat = poi.category || poi.type || '';
-                            html += `\n                                <div style="padding: 10px 12px; border-bottom: 1px solid #2a2a2a; cursor: pointer; background-color: #0f1419; font-size: 12px; color: #bbb; user-select: none; display:flex; justify-content:space-between; align-items:center;" onclick="selectAutocomplete('${safeName}', event)" title="Select ${safeName}">\n                                    <div style="font-weight:600">${emoji} ${safeName}</div>\n                                    <div style="color:#666; font-size:11px">${mi.toFixed(1)}mi • ${cat}</div>\n                                </div>`;
+                            html += `\n                                <div style="padding: 10px 12px; border-bottom: 1px solid #2a2a2a; cursor: pointer; background-color: #0a0a0a; font-size: 13px; color: #ddd; user-select: none; display:flex; justify-content:space-between; align-items:center;" onmouseover="this.style.backgroundColor='#2a2a2a'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='#0a0a0a'; this.style.color='#ddd'" onclick="selectAutocomplete('${safeName}', event)" title="Select ${safeName}">\n                                    <div style="font-weight:600">${emoji} ${safeName}</div>\n                                    <div style="color:#666; font-size:11px">${mi.toFixed(1)}mi</div>\n                                </div>`;
                         }
                         if (poiItems.length > displayCount) {
-                            html += `<div style="padding:10px;text-align:center;color:#9aa;cursor:pointer;border-top:1px solid #111;" onclick="openAreaPickerModal();">Load more POIs / Browse all</div>`;
+                            html += `<div style="padding:10px;text-align:center;color:#9aa;cursor:pointer;border-top:1px solid #222;font-size:12px;" onclick="openAreaPickerModal();">+ ${poiItems.length - displayCount} more POIs</div>`;
                         }
                     } else {
                         html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">No nearby POIs found</div>';
@@ -13341,7 +13353,7 @@
             } catch (e) { console.warn('Nearby POI enrichment failed:', e); }
 
             // Add a clear 'Browse all locations' button to open full picker (supports millions via incremental load)
-            html += '<div style="padding:10px 12px; border-top:1px solid #111; text-align:center; background:#0f1419;"><button onclick="openAreaPickerModal()" style="padding:8px 12px; border-radius:8px; background:#1f2937; border:1px solid #2a2a2a; color:#fff; cursor:pointer;">Browse all locations (full database)</button></div>';
+            html += '<div style="padding:12px; border-top:1px solid #1a1a1a; text-align:center; background:#0a0a0a;"><button onclick="openAreaPickerModal()" style="padding:8px 16px; border-radius:6px; background:#667eea; border:none; color:#fff; cursor:pointer; font-weight:600;">🔍 Browse All Areas (Full Database)</button></div>';
             
             dropdown.innerHTML = html;
             dropdown.style.display = 'block';
