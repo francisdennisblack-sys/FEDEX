@@ -3694,7 +3694,7 @@
                 <!-- Tiny inline card form, hidden until 'other ways' clicked -->
                 <div id="boostCardWrap" style="display:none; margin-top:8px;">
                     <div id="boostCardMount" style="background:#0f172a; border:1px solid #334155; border-radius:6px; padding:10px;"></div>
-                    <button type="button" id="boostCardPayBtn" onclick="payBoostWithCard()" style="width:100%; margin-top:6px; padding:8px; background:#fbbf24; color:#111827; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay <span class="boost-price-inline">$2.99</span> with card</button>
+                    <button type="button" id="boostCardPayBtn" onclick="window.initiateCheckout('new_post_boost', 299, 'boost')" style="width:100%; margin-top:6px; padding:8px; background:#fbbf24; color:#111827; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay <span class="boost-price-inline">$2.99</span> with card</button>
                     <div id="boostCardError" style="display:none; color:#ef4444; font-size:11px; margin-top:4px; text-align:center;"></div>
                 </div>
             </div>
@@ -3708,7 +3708,7 @@
                 </div>
                 <div id="sellCardWrap" style="display:none; margin-top:8px;">
                     <div id="sellCardMount" style="background:#0f172a; border:1px solid #334155; border-radius:6px; padding:10px;"></div>
-                    <button type="button" id="sellCardPayBtn" onclick="paySellWithCard()" style="width:100%; margin-top:6px; padding:8px; background:#3b82f6; color:#fff; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay $2.00 with card</button>
+                    <button type="button" id="sellCardPayBtn" onclick="window.initiateCheckout('new_post_sell', 200, 'sell')" style="width:100%; margin-top:6px; padding:8px; background:#3b82f6; color:#fff; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay $2.00 with card</button>
                     <div id="sellCardError" style="display:none; color:#ef4444; font-size:11px; margin-top:4px; text-align:center;"></div>
                 </div>
             </div>
@@ -4026,6 +4026,80 @@
         window.RecaptchaVerifier = RecaptchaVerifier;
         window.signInWithPhoneNumber = signInWithPhoneNumber;
         window.signOut = signOut;
+
+        // ==========================================================================
+        // 💳 STRIPE PAYMENT FLOW
+        // ==========================================================================
+        // This function is the entry point for all purchases (boost, sell, etc.).
+        // It calls our secure backend endpoint, which then creates a Stripe Checkout session.
+        async function initiateCheckout(postId, amount, type, metadata = {}) {
+            try {
+                console.log(`[Checkout] Initiating for postId: ${postId}, amount: ${amount}, type: ${type}`);
+                
+                // 1. Get the callable function for our backend endpoint.
+                // We lazy-load this to ensure Firebase is fully initialized.
+                if (!window.functions) {
+                    const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
+                    window.functions = getFunctions(window.app, 'us-central1');
+                    window.httpsCallable = httpsCallable;
+                }
+
+                const createCheckoutSession = window.httpsCallable(window.functions, 'createCheckoutSession');
+
+                // 2. Prepare the data payload for the backend.
+                // The backend will validate this information.
+                const data = {
+                    postId: postId,
+                    amount: amount, // The backend expects an integer in cents.
+                    type: type,     // 'boost' or 'sell'
+                    metadata: {
+                        ...metadata,
+                        clientPostId: postId,
+                        clientUserId: window.currentUserId || 'anonymous'
+                    },
+                    // URLs for Stripe to redirect to after payment
+                    successUrl: window.location.href,
+                    cancelUrl: window.location.href,
+                };
+
+                console.log('[Checkout] Calling backend with data:', data);
+
+                // 3. Call the backend function.
+                const result = await createCheckoutSession(data);
+                
+                console.log('[Checkout] Backend response:', result);
+
+                // 4. Redirect the user to the Stripe Checkout page.
+                if (result && result.data && result.data.url) {
+                    window.location.href = result.data.url;
+                } else {
+                    throw new Error('Invalid response from server; missing checkout URL.');
+                }
+
+            } catch (error) {
+                console.error('❌ Error initiating checkout:', error);
+                // Display a user-friendly error message.
+                const errorMessage = error.message || 'Could not connect to the payment server. Please try again.';
+                if (type === 'boost') {
+                    const boostErrorEl = document.getElementById('boostCardError');
+                    if (boostErrorEl) {
+                        boostErrorEl.textContent = errorMessage;
+                        boostErrorEl.style.display = 'block';
+                    }
+                } else if (type === 'sell') {
+                    const sellErrorEl = document.getElementById('sellCardError');
+                    if (sellErrorEl) {
+                        sellErrorEl.textContent = errorMessage;
+                        sellErrorEl.style.display = 'block';
+                    }
+                }
+                // Also show a general notification
+                if (window.showNotification) {
+                    window.showNotification('Payment Error', errorMessage, 'error');
+                }
+            }
+        }
+        window.initiateCheckout = initiateCheckout; // Expose for button clicks
 
         // DEV: disable app verification when running on localhost to allow testing
         try {
@@ -22584,6 +22658,11 @@
             renderGrid();
         };
 
+        // Utility: coerce various payment flags that may be stored as strings into booleans
+        function __isPaidFlag(v) {
+            return v === true || v === 'true' || v === 1 || v === '1';
+        }
+
         async function uploadPost() {
             console.log('🟢 uploadPost() CALLED - button clicked');
             // Enforce global per-user post limit (20 posts total)
@@ -22611,7 +22690,7 @@
             }
 
             // 🚀 BOOST GUARD: if user armed a boost but hasn't completed payment, stop here.
-            if (window.pendingBoost && window.pendingBoost.armed && !window.pendingBoost.paid) {
+            if (window.pendingBoost && window.pendingBoost.armed && !__isPaidFlag(window.pendingBoost.paid)) {
                 showErrorNotification && showErrorNotification('Finish boost payment', 'Tap Apple Pay / Google Pay (or the card option) to complete your boost before sending.');
                 return;
             }
@@ -22887,7 +22966,7 @@
                 console.log(`   💾 SAVING WITH AREA TAG: "${areaTag}"`);
                 
                 // Boost is only applied when a paid boost has been completed via payment flow
-                const boostChecked = !!(window.pendingBoost && window.pendingBoost.paid);
+                const boostChecked = !!(window.pendingBoost && __isPaidFlag(window.pendingBoost.paid));
 
                 const postData = {
                     id: postId,
@@ -22934,6 +23013,8 @@
                     postData.areaTagLockedAt = lockArea ? Date.now() : null;
                     // Also set zoneTag for indexing convenience
                     postData.zoneTag = postData.county || postData.customTag || null;
+                    // Persist area source so server-side metrics can distinguish POI vs location vs custom
+                    postData.areaSource = areaTagSource || 'zone';
                 } catch (e) { console.warn('Failed to attach original area tag metadata', e); }
 
                 // Composer-selected badges: include user-initialized badges (e.g., 'sell')
@@ -23031,7 +23112,7 @@
                 }
 
                     // If composer-level SELL badge was paid, attach sell badge metadata to the post
-                    if (window.pendingSell && window.pendingSell.paid) {
+                    if (window.pendingSell && __isPaidFlag(window.pendingSell.paid)) {
                         try {
                             if (!Array.isArray(postData.badges)) postData.badges = [];
                             if (!postData.badges.includes('sell')) postData.badges.push('sell');
