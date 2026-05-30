@@ -939,7 +939,7 @@
             <!-- Custom Zone Tag - More Specific Areas with Autocomplete -->
             <div style="position: relative; margin-bottom: 16px;">
                 <div style="display: flex; gap: 8px; align-items: stretch;">
-                    <input id="customZoneTag" placeholder="Specify area (optional): e.g., 'Downtown', 'Westside', 'By the Park'" style="
+                    <input id="customZoneTag" placeholder="Refine location (optional): e.g., 'Downtown', 'Westside', 'By the Park'" style="
                         padding: 12px 16px;
                         border: 2px solid transparent;
                         background: linear-gradient(#1a1a1a, #1a1a1a) padding-box,
@@ -12364,14 +12364,6 @@
             selectedBoxIndex = boxIndex;
             document.getElementById('uploadModal').classList.add('active');
             
-            // Clear the area search box (start empty, not pre-filled)
-            const customTagInput = document.getElementById('customZoneTag');
-            if (customTagInput) {
-                customTagInput.value = '';
-                const dropdown = document.getElementById('autocompleteDropdown');
-                if (dropdown) dropdown.style.display = 'none';
-            }
-            
             // CRITICAL: Ensure location is determined BEFORE showing modal
             // Never disappoint users with "Detecting location..." on first load
             if (!userLocation || !userLocation.lat || !userLocation.lon) {
@@ -12389,6 +12381,8 @@
                             console.log('📍 Location acquired:', userLocation);
                             updateZonePredictor();
                             populateNearbyLocations();
+                            // Auto-populate area with nearest location
+                            autoPopulateNearestArea();
                         },
                         (error) => {
                             console.warn('Geolocation error:', error);
@@ -12396,7 +12390,14 @@
                         }
                     );
                 }
+            } else {
+                // Location already available - auto-populate area with nearest location
+                autoPopulateNearestArea();
             }
+            
+            // Hide dropdown if open
+            const dropdown = document.getElementById('autocompleteDropdown');
+            if (dropdown) dropdown.style.display = 'none';
             
             // Update zone predictor with best available location
             updateZonePredictor();
@@ -13275,6 +13276,57 @@
             }
             
             console.log('✅ Custom tag cleared - field is now empty');
+        }
+
+        /**
+         * Auto-populate area field with nearest location or POI
+         */
+        function autoPopulateNearestArea() {
+            if (!userLocation || !userLocation.lat || !userLocation.lon) {
+                console.log('⚠️ User location not available - cannot auto-populate area');
+                return;
+            }
+
+            const customTagInput = document.getElementById('customZoneTag');
+            if (!customTagInput) return;
+
+            let nearestName = null;
+            let nearestDistance = Infinity;
+
+            // Search through locations database
+            if (globalLocationDatabase && globalLocationDatabase.length > 0) {
+                for (let i = 0; i < globalLocationDatabase.length; i++) {
+                    const loc = globalLocationDatabase[i];
+                    const distance = calculateDistance(userLocation.lat, userLocation.lon, loc.lat, loc.lon);
+                    if (distance < nearestDistance) {
+                        nearestDistance = distance;
+                        nearestName = `${loc.name}${loc.state ? ', ' + loc.state : ''}`;
+                    }
+                }
+            }
+
+            // Also check POI database for closer match
+            if (globalPOIDatabase && globalPOIDatabase.length > 0) {
+                for (let i = 0; i < Math.min(globalPOIDatabase.length, 50000); i++) {
+                    const poi = globalPOIDatabase[i];
+                    if (!poi || !poi.lat || !poi.lon) continue;
+                    const distance = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                    if (distance < nearestDistance) {
+                        nearestDistance = distance;
+                        nearestName = poi.name;
+                    }
+                }
+            }
+
+            // Populate if found
+            if (nearestName) {
+                customTagInput.value = nearestName;
+                const distanceMiles = (nearestDistance * 0.621371).toFixed(1);
+                console.log(`📍 Auto-populated area: ${nearestName} (${distanceMiles}mi away)`);
+            } else {
+                customTagInput.value = '';
+                console.log('⚠️ No nearby locations found in database');
+            }
         }
         
         // Update the zone predictor display as user types custom tag
