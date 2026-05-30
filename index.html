@@ -805,6 +805,9 @@
 
     <div class="container">
         <div class="grid-wrapper">
+            <div id="pull-to-refresh-indicator" style="display: none; text-align: center; padding: 10px; font-size: 16px; color: #888;">
+                <span>🔄</span> Refreshing...
+            </div>
             <div class="grid" id="grid">
                 <!-- Grid boxes will be generated here -->
             </div>
@@ -1700,6 +1703,110 @@
         window.signInAnonymously = signInAnonymously;
         window.onAuthStateChanged = onAuthStateChanged;
         
+        // ============================================================================
+        // 🔄 PULL-TO-REFRESH IMPLEMENTATION
+        // ============================================================================
+        const gridContainer = document.getElementById('grid');
+        const ptrIndicator = document.getElementById('pull-to-refresh-indicator');
+        let touchstartY = 0;
+        let touchstartX = 0;
+        const ptrThreshold = 100; // How far the user needs to pull down (in pixels)
+        let isRefreshing = false;
+
+        gridContainer.addEventListener('touchstart', (e) => {
+            if (isRefreshing) return;
+            // Only track pulls from the top of the grid
+            if (gridContainer.scrollTop === 0) {
+                touchstartY = e.touches[0].clientY;
+                touchstartX = e.touches[0].clientX;
+            }
+        }, { passive: true });
+
+        gridContainer.addEventListener('touchmove', (e) => {
+            if (isRefreshing || touchstartY === 0) return;
+
+            const touchY = e.touches[0].clientY;
+            const touchX = e.touches[0].clientX;
+            const pullDistance = touchY - touchstartY;
+            const horizontalDistance = touchX - touchstartX;
+
+            // Ignore horizontal scrolls
+            if (Math.abs(horizontalDistance) > Math.abs(pullDistance)) {
+                touchstartY = 0; // Reset
+                return;
+            }
+
+            // If scrolled to the top and pulling down
+            if (gridContainer.scrollTop === 0 && pullDistance > 0) {
+                e.preventDefault(); // Prevent browser's default pull-to-refresh
+                ptrIndicator.style.display = 'block';
+                ptrIndicator.style.opacity = Math.min(1, pullDistance / ptrThreshold);
+                gridContainer.style.transform = `translateY(${pullDistance / 2.5}px)`;
+            }
+        }, { passive: false }); // Not passive, we need to preventDefault
+
+        gridContainer.addEventListener('touchend', (e) => {
+            if (isRefreshing || touchstartY === 0) return;
+
+            const pullDistance = e.changedTouches[0].clientY - touchstartY;
+
+            // Reset styles
+            gridContainer.style.transform = 'translateY(0)';
+            ptrIndicator.style.opacity = 0;
+
+
+            if (pullDistance > ptrThreshold) {
+                if (gridContainer.scrollTop === 0) {
+                    isRefreshing = true;
+                    ptrIndicator.style.display = 'block';
+                    ptrIndicator.style.opacity = 1;
+                    console.log('🔄 Pull-to-refresh triggered! Forcing grid refresh.');
+                    forceGridRefresh().finally(() => {
+                        isRefreshing = false;
+                        ptrIndicator.style.display = 'none';
+                    });
+                }
+            } else {
+                 ptrIndicator.style.display = 'none';
+            }
+
+            touchstartY = 0; // Reset
+        });
+
+
+        /**
+         * Forces a complete refresh of the grid content, preserving the user's own posts.
+         */
+        async function forceGridRefresh() {
+            console.log('🔥 forceGridRefresh: Starting full grid refresh.');
+            if (!currentUserId) {
+                console.warn('Cannot refresh grid without a currentUserId.');
+                return;
+            }
+
+            // 1. Preserve user's own posts
+            const userPosts = (gridContent[currentUserId] || []).filter(post => post.userId === currentUserId);
+            console.log(`  - Preserving ${userPosts.length} of the user's own posts.`);
+
+            // 2. Clear the existing grid content (except for the user's posts)
+            gridContent[currentUserId] = userPosts;
+            
+            // Clear post cache for all non-user posts to ensure fresh data
+            for (const postId in postCache) {
+                if (postCache[postId].userId !== currentUserId) {
+                    delete postCache[postId];
+                }
+            }
+
+            // 3. Re-run the main data fetching and rendering logic
+            // The existing renderGrid() function is perfect for this, as it will
+            // fetch new posts from Firebase to fill the grid.
+            console.log('  - Calling renderGrid() to fetch new content...');
+            await renderGrid();
+
+            console.log('✅ forceGridRefresh: Grid has been updated with new content.');
+        }
+
         console.log('✅ Firebase objects exposed to global window scope');
         // Immediately check storage support and warn if IndexedDB/localStorage appear blocked
         try {
