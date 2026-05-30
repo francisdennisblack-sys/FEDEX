@@ -3668,6 +3668,11 @@
                         // Re-detect zone with new location
                         console.log('🔄 Re-detecting zone for new location...');
                         detectUserGrid();
+                        
+                        // Auto-populate area field with nearest location/POI
+                        if (typeof autoPopulateNearestArea === 'function') {
+                            autoPopulateNearestArea();
+                        }
 
                         // Check if zone changed
                         if (currentZoneTag !== lastDetectedZone) {
@@ -5761,8 +5766,8 @@
             console.log(`📍 User location: ${userLocation?.lat.toFixed(4)}, ${userLocation?.lon.toFixed(4)}`);
             
             if (!userLocation) {
-                console.error('❌ No geolocation - using generic zone');
-                currentZoneTag = '📍 Local Area';
+                console.error('❌ No geolocation - will use nearest location when available');
+                currentZoneTag = '🔍 Detecting...';
                 currentGridRadius = 0.02;
                 currentContentScope = 'LOCAL';
                 return;
@@ -14928,7 +14933,7 @@
 
         function formatEarthAreaTag(areaName) {
             // Logo is the earth emoji now — area tags display clean name, no emoji prefix.
-            if (!areaName) return 'Local Area';
+            if (!areaName) return 'Nearby Area';
             let cleaned = String(areaName).replace(/^[🌍🌎🌏📍✓🏙️🏘️🗺️🧭☕]\s*/u, '').trim();
             // If areaName looks like coordinates (lat, lon), format as "37.7749°N 122.4194°W"
             const coordMatch = cleaned.match(/(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/);
@@ -14942,7 +14947,7 @@
                 }
             }
             // Fallback: return cleaned area name
-            return cleaned || 'Local Area';
+            return cleaned || 'Nearby Area';
         }
         
         /**
@@ -17472,10 +17477,34 @@
             const uLat = userLocation && (userLocation.lat || userLocation.latitude);
             const uLon = userLocation && (userLocation.lon || userLocation.longitude);
             
+            // If location not available, request it
             if (!uLat || !uLon) {
-                html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">Unable to detect location</div>';
-                dropdown.innerHTML = html;
-                dropdown.style.display = 'block';
+                console.log('⚠️ User location not available - requesting geolocation...');
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            userLocation = {
+                                lat: position.coords.latitude,
+                                lon: position.coords.longitude,
+                                latitude: position.coords.latitude,
+                                longitude: position.coords.longitude
+                            };
+                            console.log('📍 Location acquired:', userLocation);
+                            // Retry showing POIs with new location
+                            showNearbyPOIsDropdown();
+                        },
+                        (error) => {
+                            console.warn('Geolocation error:', error);
+                            html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">Unable to detect location</div>';
+                            dropdown.innerHTML = html;
+                            dropdown.style.display = 'block';
+                        }
+                    );
+                } else {
+                    html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;">Geolocation not available</div>';
+                    dropdown.innerHTML = html;
+                    dropdown.style.display = 'block';
+                }
                 return;
             }
             
@@ -17507,8 +17536,8 @@
             if (poiItems.length > 0) {
                 html += `<div style="padding: 6px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; font-weight: 600; margin-top:4px;">📊 Found ${poiItems.length} Nearby POIs</div>`;
                 
-                // Show first 100 POIs (scrollable)
-                const displayCount = Math.min(100, poiItems.length);
+                // Show first 30 POIs (scrollable)
+                const displayCount = Math.min(30, poiItems.length);
                 for (let i = 0; i < displayCount; i++) {
                     const { poi, mi } = poiItems[i];
                     const safeName = String(poi.name).replace(/'/g, "&#39;");
