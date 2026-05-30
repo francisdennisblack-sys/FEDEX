@@ -6716,201 +6716,115 @@
         }
         
         function voteOnPost(postId, voteType) {
-            if (!isNearPOI()) {
-                // POI proximity message removed per UX request — still allow voting
-            }
+            console.log(`🗳️ voteOnPost called: postId=${postId.substring(0,8)}, type=${voteType}`);
             
-            // DEBOUNCE CHECK: Prevent duplicate votes within 500ms
-            const voteKey = `${postId}_${voteType}`;
-            const lastVoteTime = voteDebounceMap[voteKey] || 0;
-            const now = Date.now();
-            
-            if (now - lastVoteTime < VOTE_DEBOUNCE_TIME) {
-                console.log(`⏳ Vote debounced - same ${voteType} already submitted for ${postId.substring(0,8)} within 500ms`);
+            if (!currentUserId) {
+                console.warn('⚠️ Cannot vote: no currentUserId');
+                showNotification && showNotification('Please sign in to vote');
                 return;
             }
             
-            voteDebounceMap[voteKey] = now;
-            
-            // DISABLE VOTE BUTTONS: target only buttons for this post (avoid expensive global queries)
-            const allVoteButtons = Array.from(document.querySelectorAll(`[data-post-id="${postId}"] .like-btn, [data-post-id="${postId}"] .dislike-btn`));
-            if (allVoteButtons.length === 0) {
-                // fallback to previous selector if data attributes aren't present anywhere
-                try { allVoteButtons.push(...document.querySelectorAll(`[onclick*=\"voteOnPost('${postId}'\")]`)); } catch(e){}
+            // Get the post from cache
+            const post = postCache[postId];
+            if (!post) {
+                console.warn(`⚠️ Post not found in cache: ${postId}`);
+                return;
             }
-            allVoteButtons.forEach(btn => {
-                try { btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; } catch(e){}
-            });
-
-            // OPTIMISTIC UI: Update vote display immediately
-            updateVoteDisplayInDOM(postId, newLikes, newDislikes);
-
-            // Re-enable buttons immediately for a responsive feel
-            allVoteButtons.forEach(btn => {
-                try { btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer'; } catch(e){}
-            });
-            clearTimeout(reenableTimeout); // Clear the original timeout
-
-            // Defer heavy processing (ML, badge recalcs, cache learning) to idle time
-            function scheduleHeavyVoteProcessing() {
-                const task = () => {
-                    try {
-                        // 🧠 ML TAG SYSTEM: Track where this post gets engagement
-                        try {
-                            const ulat = userLocation && (userLocation.latitude || userLocation.lat);
-                            const ulon = userLocation && (userLocation.longitude || userLocation.lon);
-                            if (window.mlTagRewritingSystem && ulat && ulon && post.lat && post.lon) {
-                                try {
-                                    window.mlTagRewritingSystem.trackEngagement(postId, ulat, ulon, post.lat, post.lon, voteType);
-                                } catch(e) { console.warn('mlTagRewritingSystem.trackEngagement failed', e); }
-                            }
-                        } catch(e){ console.warn('ML tag tracking wrapper failed', e); }
-
-                        // 🚀 BOOST PERFORMANCE TRACKING
-                        try {
-                            if (post.boostRequested && post.boostIntent && window.boostPerformanceSystem) {
-                                try { window.boostPerformanceSystem.trackEngagement(post.id, newLikes); } catch(e){}
-                                try {
-                                    const engagement = window.boostPerformanceSystem.getEngagementScore(post.id);
-                                    console.log(`🚀 BOOST ENGAGEMENT: Post ${post.id.substring(0,8)} now has ${newLikes} likes (${(engagement||0).toFixed(1)}% engagement)`);
-                                } catch(e){}
-                            }
-                        } catch(e){ console.warn('boostPerformanceSystem processing failed', e); }
-
-                        // Update ML preferences and scores (deferred)
-                        try { if (typeof updateUserPreferences === 'function') updateUserPreferences(currentUserId); } catch(e){ console.warn('updateUserPreferences failed', e); }
-                        try { if (typeof updateMLScores === 'function') updateMLScores(); } catch(e){ console.warn('updateMLScores failed', e); }
-
-                        // Tag engagement & area updates
-                        try { if (typeof updateTagEngagementOnVote === 'function') updateTagEngagementOnVote(post, voteType); } catch(e){ console.warn('updateTagEngagementOnVote failed', e); }
-                        try {
-                            if (typeof updatePostAreaTags === 'function') {
-                                updatePostAreaTags(postId, { likes: newLikes, dislikes: newDislikes, screenCount: (post.screenCount || 0) + 1, uniqueUsers: new Set([currentUserId]) });
-                            }
-                        } catch(e){ console.warn('updatePostAreaTags failed', e); }
-
-                        // Rebadge posts for area (deferred)
-                        try {
-                            const postArea = post.county || (typeof getCurrentUserArea === 'function' ? getCurrentUserArea() : null);
-                            const allPostsInArea = (gridContent[currentUserId] || []).filter(p => p.county === postArea || p.county === post.county);
-                            const totalOnlineUsers = (typeof onlineUserCount !== 'undefined' && onlineUserCount) ? onlineUserCount : 1;
-                            if (window.adaptiveBadgeSystem && allPostsInArea.length > 0) {
-                                try {
-                                    const badgeResult = window.adaptiveBadgeSystem.rebadgePostForArea(post, postArea, allPostsInArea, totalOnlineUsers);
-                                    if (badgeResult && badgeResult.badgeChanged) {
-                                        window.adaptiveBadgeSystem.updateBadgesForArea(postArea, allPostsInArea, totalOnlineUsers);
-                                    }
-                                } catch(e) { console.warn('adaptiveBadgeSystem failed', e); }
-                            }
-                        } catch(e){ console.warn('rebadge wrapper failed', e); }
-
-                        // CACHE LEARNING
-                        try {
-                            if (window.postCacheSystem && gridContent[currentUserId]) {
-                                try {
-                                    window.postCacheSystem.learnUserPreferences(userVotes, gridContent[currentUserId].reduce((acc, p) => { acc[p.id] = p; return acc; }, {}));
-                                } catch(e) { console.warn('postCacheSystem.learnUserPreferences failed', e); }
-                            }
-                        } catch(e){ console.warn('cache learning wrapper failed', e); }
-                    } catch (err) {
-                        console.warn('Deferred heavy vote processing failed', err);
-                    }
-                };
-
-                if (typeof window.requestIdleCallback === 'function') {
-                    try { requestIdleCallback(task, {timeout: 2000}); } catch(e){ setTimeout(task, 200); }
+            
+            // DEBOUNCE: Prevent rapid-fire duplicate votes
+            const voteKey = `${currentUserId}_${postId}_${voteType}`;
+            const lastVoteTime = window.voteDebounceMap ? (window.voteDebounceMap[voteKey] || 0) : 0;
+            if (Date.now() - lastVoteTime < 500) {
+                console.log('⏳ Vote debounced - too soon');
+                return;
+            }
+            if (!window.voteDebounceMap) window.voteDebounceMap = {};
+            window.voteDebounceMap[voteKey] = Date.now();
+            
+            // Track original state for rollback
+            const originalLikes = post.likes || 0;
+            const originalDislikes = post.dislikes || 0;
+            const userVoteKey = `${currentUserId}_${postId}`;
+            const originalVote = userVotes[userVoteKey];
+            
+            // Calculate new vote counts
+            let newLikes = originalLikes;
+            let newDislikes = originalDislikes;
+            
+            if (voteType === 'like') {
+                if (originalVote === 'like') {
+                    newLikes = Math.max(0, originalLikes - 1);
+                    userVotes[userVoteKey] = null;
                 } else {
-                    setTimeout(task, 200);
+                    newLikes = originalLikes + 1;
+                    if (originalVote === 'dislike') {
+                        newDislikes = Math.max(0, originalDislikes - 1);
+                    }
+                    userVotes[userVoteKey] = 'like';
+                }
+            } else if (voteType === 'dislike') {
+                if (originalVote === 'dislike') {
+                    newDislikes = Math.max(0, originalDislikes - 1);
+                    userVotes[userVoteKey] = null;
+                } else {
+                    newDislikes = originalDislikes + 1;
+                    if (originalVote === 'like') {
+                        newLikes = Math.max(0, originalLikes - 1);
+                    }
+                    userVotes[userVoteKey] = 'dislike';
                 }
             }
             
-            // CRITICAL: Only update vote counts without mutating other properties
-            console.log(`   Updating post votes: ${newLikes} likes, ${newDislikes} dislikes`);
+            console.log(`   Votes: ${originalLikes}→${newLikes} likes, ${originalDislikes}→${newDislikes} dislikes`);
+            
+            // OPTIMISTIC UI: Update immediately
             post.likes = newLikes;
             post.dislikes = newDislikes;
             
-            // 🚀 BOOST PERFORMANCE TRACKING: Track engagement if post is boosted
-            if (post.boostRequested && post.boostIntent) {
-                try {
-                    window.boostPerformanceSystem.trackEngagement(post.id, newLikes);
-                    const engagement = window.boostPerformanceSystem.getEngagementScore(post.id);
-                    console.log(`🚀 BOOST ENGAGEMENT: Post ${post.id.substring(0,8)} now has ${newLikes} likes (${engagement.toFixed(1)}% engagement)`);
-                } catch (e) {
-                    console.warn('⚠️ Failed to track boost engagement:', e);
-                }
-            }
-            
-            // CRITICAL: Preserve all post properties when updating references
-            // Update the same post in all gridContent keys (by reference) but ensure content is NOT lost
+            // Update all references to this post
             if (postCache[postId]) {
                 postCache[postId].likes = newLikes;
                 postCache[postId].dislikes = newDislikes;
-                // Ensure content is preserved
-                if (!postCache[postId].content && post.content) {
-                    postCache[postId].content = post.content;
-                }
             }
             
-            // Update in all gridContent arrays to maintain consistency
-            // CRITICAL: Only update votes, never delete or clear other properties
             for (let key in gridContent) {
-                const postInKey = gridContent[key].find(p => p.id === postId);
-                if (postInKey) {
-                    postInKey.likes = newLikes;
-                    postInKey.dislikes = newDislikes;
-                    // SAFETY: Never clear content
-                    if (!postInKey.content && post.content) {
-                        postInKey.content = post.content;
-                    }
+                const p = gridContent[key].find(x => x.id === postId);
+                if (p) {
+                    p.likes = newLikes;
+                    p.dislikes = newDislikes;
                 }
             }
             
-            // 🔍 DEBUG: Check post state after vote but before renderGrid
-            console.log(`📝 voteOnPost AFTER UPDATE:`);
-            console.log(`   Content: "${(post.content || '').substring(0, 50)}"...`);
-            console.log(`   Likes: ${post.likes} | Dislikes: ${post.dislikes}`);
-            
-            // 🎯 CRITICAL FIX: Update vote display in DOM WITHOUT full re-render
-            // This prevents the post from moving positions on the grid
+            // Update DOM immediately
             updateVoteDisplayInDOM(postId, newLikes, newDislikes);
             
-            // 🎯 OPTIMISTIC UI UPDATE: Instantly update the DOM for the voting user.
-            // This provides immediate feedback without a full grid re-render.
-            updateVoteDisplayInDOM(postId, newLikes, newDislikes);
-
-            // Re-enable buttons immediately for a responsive feel.
-            allVoteButtons.forEach(btn => {
-                try { btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer'; } catch(e){}
-            });
-            clearTimeout(reenableTimeout); // Clear the original timeout
-
-            // Asynchronously persist the vote and then trigger a full re-render for data consistency.
-            // This full render can be slightly delayed as the active user has already seen the result.
+            // Persist to Firebase asynchronously
             (async () => {
                 try {
-                    await saveVoteToFirebase(currentUserId, postId, userVotes[userVoteKey]);
-                    console.log('✅ Vote successfully persisted. Queuing grid-rerender.');
-
-                    // Now that the vote is saved, re-render the grid to ensure correct sorting for all users.
-                    // This happens after the user has already received instant feedback.
-                    if (typeof renderGrid === 'function') {
-                        // Use a small timeout to allow the browser to remain responsive.
-                        setTimeout(() => renderGrid(), 50);
+                    const userVoteRef = ref(database, `user-votes/${currentUserId}/${postId}`);
+                    const currentVote = userVotes[userVoteKey];
+                    
+                    if (currentVote) {
+                        await set(userVoteRef, { type: currentVote, timestamp: Date.now() });
+                    } else {
+                        await remove(userVoteRef);
                     }
-
+                    
+                    // Update post vote counts in Firebase
+                    const postRef = ref(database, `posts/${postId}`);
+                    await update(postRef, { likes: newLikes, dislikes: newDislikes });
+                    
+                    console.log(`✅ Vote persisted to Firebase`);
                 } catch (err) {
-                    console.error('🔥 Failed to persist vote to Firebase:', err);
-                    // TODO: Implement a rollback for the optimistic UI update.
-                    // For now, we will revert the vote counts in the local cache and re-render.
+                    console.error('❌ Failed to persist vote:', err);
+                    // Rollback
                     post.likes = originalLikes;
                     post.dislikes = originalDislikes;
                     userVotes[userVoteKey] = originalVote;
                     updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
+                    showNotification && showNotification('Failed to save vote');
                 }
             })();
-
-            // Schedule non-critical heavy processing for later.
-            scheduleHeavyVoteProcessing();
         }
         
         /**
@@ -20799,6 +20713,76 @@
             
             console.log('✅ UI initialized - showing skeleton immediately');
             console.log('🚀 FEDEX v1.0.3 - Loading content in background...');
+            
+            // 🔄 DESKTOP REFRESH: Support mouse wheel and drag-down refresh on desktop
+            const gridContainer = document.getElementById('grid');
+            if (gridContainer) {
+                let wheelDeltaY = 0;
+                let refreshCooldown = false;
+                
+                gridContainer.addEventListener('wheel', (e) => {
+                    if (gridContainer.scrollTop === 0) {
+                        wheelDeltaY += e.deltaY;
+                        
+                        // Trigger refresh if user scrolls up with strong force (negative delta)
+                        if (wheelDeltaY < -150 && !refreshCooldown) {
+                            wheelDeltaY = 0;
+                            refreshCooldown = true;
+                            console.log('🔄 Desktop wheel-up refresh triggered');
+                            forceGridRefresh();
+                            setTimeout(() => { refreshCooldown = false; }, 2000);
+                        }
+                    } else {
+                        wheelDeltaY = 0;
+                    }
+                }, { passive: true });
+                
+                // Mouse drag-down refresh on desktop
+                let mouseDownY = 0;
+                gridContainer.addEventListener('mousedown', (e) => {
+                    if (gridContainer.scrollTop === 0) {
+                        mouseDownY = e.clientY;
+                    }
+                });
+                
+                gridContainer.addEventListener('mousemove', (e) => {
+                    if (mouseDownY > 0 && gridContainer.scrollTop === 0) {
+                        const dragDistance = e.clientY - mouseDownY;
+                        if (dragDistance > 80) {
+                            gridContainer.style.transform = `translateY(${dragDistance / 3}px)`;
+                            document.getElementById('pull-to-refresh-indicator').style.display = 'block';
+                            document.getElementById('pull-to-refresh-indicator').style.opacity = Math.min(1, dragDistance / 150);
+                        }
+                    }
+                }, { passive: true });
+                
+                gridContainer.addEventListener('mouseup', (e) => {
+                    const dragDistance = e.clientY - mouseDownY;
+                    gridContainer.style.transform = 'translateY(0)';
+                    document.getElementById('pull-to-refresh-indicator').style.opacity = 0;
+                    
+                    if (dragDistance > 80 && gridContainer.scrollTop === 0 && !refreshCooldown) {
+                        refreshCooldown = true;
+                        console.log('🔄 Desktop drag-down refresh triggered');
+                        forceGridRefresh();
+                        setTimeout(() => { refreshCooldown = false; }, 2000);
+                    }
+                    
+                    mouseDownY = 0;
+                });
+            }
+            
+            // 🚫 DISABLE DOUBLE-CLICK ZOOM
+            document.addEventListener('dblclick', (e) => {
+                e.preventDefault();
+            }, { passive: false });
+            
+            // Also prevent pinch-zoom on desktop (two-finger scroll)
+            document.addEventListener('wheel', (e) => {
+                if (e.ctrlKey || e.metaKey) {
+                    e.preventDefault();
+                }
+            }, { passive: false });
             
             // 📍 LAZY LOAD: Heavy operations happen AFTER content is visible
             // This provides instant visual feedback to user
