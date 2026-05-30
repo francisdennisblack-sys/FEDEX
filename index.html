@@ -6286,43 +6286,57 @@
                 // Display zone tag with POI info
                 let displayZone = currentZoneTag || 'Local Zone';
                 
-                // Verify displayZone is valid - never show "Loading..." or coordinates to user
-                if (!displayZone || displayZone === 'Loading...' || displayZone.includes('Loading') || displayZone.includes(',')) {
-                    // CRITICAL: Trigger area auto-detection immediately if not ready yet
+                // Verify displayZone is valid - never show "Loading...", "Detecting...", or coordinates to user
+                if (!displayZone || displayZone === 'Loading...' || displayZone === 'Detecting location...' || displayZone.includes('Loading') || displayZone.includes('Detecting') || displayZone.includes(',')) {
+                    // Strategy 1: Try auto-detection
                     if (userLocation && typeof autoDetectClosestArea === 'function') {
-                        console.log(`⚡ IMMEDIATE AUTO-DETECT: Calling autoDetectClosestArea on modal open`);
+                        console.log(`⚡ AUTO-DETECT: Calling autoDetectClosestArea`);
                         const detectedArea = autoDetectClosestArea(userLocation);
-                        if (detectedArea && detectedArea !== currentZoneTag) {
+                        if (detectedArea && detectedArea !== 'Detecting location...' && detectedArea !== currentZoneTag) {
                             currentZoneTag = detectedArea;
                             displayZone = detectedArea;
                         }
-                    } else if (userLocation && userLocation.lat && userLocation.lon && poiDatabase && poiDatabase.length > 0) {
-                        // Try to find nearest POI from database
-                        let nearestPOI = null;
-                        let minDistance = Infinity;
-                        
-                        poiDatabase.forEach(poi => {
-                            const distance = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
-                            if (distance < minDistance) {
-                                minDistance = distance;
-                                nearestPOI = poi;
-                            }
-                        });
-                        
-                        if (nearestPOI) {
-                            displayZone = `${nearestPOI.name || nearestPOI.city}`;
-                        } else if (userLocation) {
-                            // Fallback to location lookup
-                            displayZone = getLocationName(userLocation.lat, userLocation.lon);
-                        } else {
-                            displayZone = 'Local Area';
-                        }
-                    } else if (userLocation) {
-                        // Use getLocationName as fallback
-                        displayZone = getLocationName(userLocation.lat, userLocation.lon);
-                    } else {
-                        displayZone = 'Detecting location...';
                     }
+                    
+                    // Strategy 2: Try to find nearest POI from database
+                    if (displayZone.includes(',') || displayZone.includes('Loading') || displayZone.includes('Detecting') || !displayZone) {
+                        if (userLocation && userLocation.lat && userLocation.lon && poiDatabase && poiDatabase.length > 0) {
+                            let nearestPOI = null;
+                            let minDistance = Infinity;
+                            
+                            poiDatabase.forEach(poi => {
+                                const distance = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                                if (distance < minDistance) {
+                                    minDistance = distance;
+                                    nearestPOI = poi;
+                                }
+                            });
+                            
+                            if (nearestPOI) {
+                                displayZone = `${nearestPOI.name || nearestPOI.city}`;
+                                console.log(`📍 Found nearest POI: ${displayZone}`);
+                            }
+                        }
+                    }
+                    
+                    // Strategy 3: Use getLocationName with location coordinates
+                    if (displayZone.includes(',') || displayZone.includes('Loading') || displayZone.includes('Detecting') || !displayZone) {
+                        if (userLocation && userLocation.lat && userLocation.lon) {
+                            displayZone = getLocationName(userLocation.lat, userLocation.lon);
+                            console.log(`🌍 Used getLocationName: ${displayZone}`);
+                        }
+                    }
+                    
+                    // Strategy 4: Final fallback
+                    if (!displayZone || displayZone.includes(',') || displayZone.includes('Loading') || displayZone.includes('Detecting')) {
+                        displayZone = 'Local Area';
+                        console.log(`📌 Using fallback: ${displayZone}`);
+                    }
+                }
+                
+                // Ensure we NEVER show coordinates or "Detecting location..."
+                if (displayZone.includes(',')) {
+                    displayZone = 'Local Area';
                 }
                 
                 zonePredictorElement.textContent = formatEarthAreaTag(displayZone);
@@ -6335,7 +6349,7 @@
                 zonePredictorElement.style.fontFamily = "'Segoe UI', 'Helvetica Neue', sans-serif";
                 zonePredictorElement.style.padding = '0 8px 6px 8px';
                 
-                console.log(`✅ Hyper-local zone: "${displayZone}" (Users can change in "Move post to" field)`);
+                console.log(`✅ Zone predictor: "${displayZone}"`);
             }
         }
 
@@ -12262,7 +12276,33 @@
                 if (dropdown) dropdown.style.display = 'none';
             }
             
-            // Update zone predictor
+            // CRITICAL: Ensure location is determined BEFORE showing modal
+            // Never disappoint users with "Detecting location..." on first load
+            if (!userLocation || !userLocation.lat || !userLocation.lon) {
+                console.log('⚠️  Location not ready - requesting geolocation...');
+                // Request geolocation synchronously if not available
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            userLocation = {
+                                lat: position.coords.latitude,
+                                lon: position.coords.longitude,
+                                latitude: position.coords.latitude,
+                                longitude: position.coords.longitude
+                            };
+                            console.log('📍 Location acquired:', userLocation);
+                            updateZonePredictor();
+                            populateNearbyLocations();
+                        },
+                        (error) => {
+                            console.warn('Geolocation error:', error);
+                            // Use fallback or default location
+                        }
+                    );
+                }
+            }
+            
+            // Update zone predictor with best available location
             updateZonePredictor();
             
             // Show nearby locations for quick selection
