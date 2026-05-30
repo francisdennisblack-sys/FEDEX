@@ -6750,44 +6750,43 @@
             // This prevents the post from moving positions on the grid
             updateVoteDisplayInDOM(postId, newLikes, newDislikes);
             
-            // OPTIMISTIC RENDER: Re-render the grid immediately for instant feedback.
-            // The user sees the post re-order right away.
-            try {
-                console.log('🔄 Optimistically re-rendering grid after vote');
-                renderGrid();
-            } catch (e) {
-                console.warn('Optimistic renderGrid failed', e);
-            }
+            // 🎯 OPTIMISTIC UI UPDATE: Instantly update the DOM for the voting user.
+            // This provides immediate feedback without a full grid re-render.
+            updateVoteDisplayInDOM(postId, newLikes, newDislikes);
 
-            // Asynchronously persist the vote to Firebase in the background.
+            // Re-enable buttons immediately for a responsive feel.
+            allVoteButtons.forEach(btn => {
+                try { btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer'; } catch(e){}
+            });
+            clearTimeout(reenableTimeout); // Clear the original timeout
+
+            // Asynchronously persist the vote and then trigger a full re-render for data consistency.
+            // This full render can be slightly delayed as the active user has already seen the result.
             (async () => {
                 try {
                     await saveVoteToFirebase(currentUserId, postId, userVotes[userVoteKey]);
-                    console.log('✅ Vote successfully persisted to Firebase.');
+                    console.log('✅ Vote successfully persisted. Queuing grid-rerender.');
 
-                    // Optional: a second renderGrid() could be called here if there's a chance
-                    // the background save resulted in new data that needs to be displayed.
-                    // For now, the optimistic render is sufficient.
+                    // Now that the vote is saved, re-render the grid to ensure correct sorting for all users.
+                    // This happens after the user has already received instant feedback.
+                    if (typeof renderGrid === 'function') {
+                        // Use a small timeout to allow the browser to remain responsive.
+                        setTimeout(() => renderGrid(), 50);
+                    }
 
                 } catch (err) {
                     console.error('🔥 Failed to persist vote to Firebase:', err);
-                    // TODO: Implement a rollback mechanism here.
-                    // If the save fails, we should revert the optimistic UI changes.
-                    // For now, we'll just log the error.
+                    // TODO: Implement a rollback for the optimistic UI update.
+                    // For now, we will revert the vote counts in the local cache and re-render.
+                    post.likes = originalLikes;
+                    post.dislikes = originalDislikes;
+                    userVotes[userVoteKey] = originalVote;
+                    updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
                 }
             })();
 
-            // Schedule deferred heavy processing so UI stays snappy
+            // Schedule non-critical heavy processing for later.
             scheduleHeavyVoteProcessing();
-            
-            // Update Firebase asynchronously without blocking UI
-            updatePostVotesFirebase(currentUserId, postId, {
-                likes: newLikes,
-                dislikes: newDislikes
-            });
-            
-            // Save the user's vote preference to Firebase
-            saveVoteToFirebase(currentUserId, postId, userVotes[userVoteKey]);
         }
         
         /**
