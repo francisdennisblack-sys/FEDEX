@@ -4354,6 +4354,82 @@
         }
 
         // ============================================
+        // LAZY-LOAD ENHANCED MASTER LOCATIONS DATABASE
+        // Loads 1.7M+ master locations on-demand when user opens dropdown
+        // ============================================
+        window.enhancedLocationsLoaded = false;
+        window.isLoadingEnhancedLocations = false;
+
+        async function lazyLoadEnhancedLocationDatabase() {
+            // Already loaded? Skip
+            if (window.enhancedLocationsLoaded) {
+                console.log('✅ Enhanced locations already loaded');
+                return;
+            }
+
+            // Currently loading? Wait
+            if (window.isLoadingEnhancedLocations) {
+                console.log('⏳ Enhanced locations already loading, waiting...');
+                return;
+            }
+
+            window.isLoadingEnhancedLocations = true;
+
+            try {
+                console.log('📦 Lazy-loading enhanced master locations database (1.7M+ locations)...');
+                const response = await fetch('/data/master_locations_database.json');
+                
+                if (!response.ok) {
+                    console.warn('⚠️ Master locations database not found');
+                    window.isLoadingEnhancedLocations = false;
+                    return;
+                }
+
+                const data = await response.json();
+                console.log(`📥 Downloaded master database (${data.length} states/regions)`);
+
+                // Parse hierarchical format
+                let enhancedLocations = [];
+                let stateCount = 0;
+
+                data.forEach(state => {
+                    stateCount++;
+                    if (state.locations && Array.isArray(state.locations)) {
+                        state.locations.forEach(loc => {
+                            if (loc.name && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
+                                enhancedLocations.push({
+                                    name: loc.name,
+                                    state: loc.state || state.stateCode || state.state || 'Unknown',
+                                    lat: loc.lat,
+                                    lon: loc.lon,
+                                    type: loc.type || 'location',
+                                    population: loc.population || 0,
+                                    source: 'master_database'
+                                });
+                            }
+                        });
+                    }
+                });
+
+                // Merge with existing
+                const beforeCount = globalLocationDatabase.length;
+                globalLocationDatabase.push(...enhancedLocations);
+
+                console.log(`✅ Enhanced database merged!`);
+                console.log(`   📍 Added: ${enhancedLocations.length.toLocaleString()} locations`);
+                console.log(`   📍 Before: ${beforeCount.toLocaleString()} | After: ${globalLocationDatabase.length.toLocaleString()}`);
+                console.log(`   🎯 Total searchable items: ${globalLocationDatabase.length.toLocaleString()} locations + ${globalPOIDatabase.length.toLocaleString()} POIs = ${(globalLocationDatabase.length + globalPOIDatabase.length).toLocaleString()}`);
+
+                window.enhancedLocationsLoaded = true;
+
+            } catch (error) {
+                console.error('❌ Failed to load enhanced locations:', error);
+            } finally {
+                window.isLoadingEnhancedLocations = false;
+            }
+        }
+
+        // ============================================
         // FIND CLOSEST POI WITH INTELLIGENT SCORING
         // Uses size, distance, and confidence scoring
         // ============================================
@@ -13224,9 +13300,14 @@
             const dropdown = document.getElementById('autocompleteDropdown');
             if (!dropdown) return;
 
-            // Lazy-load the global POI search index
+            // Lazy-load the global POI search index + enhanced locations
             if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
                 window.ensureGlobalPoiSearchIndex();
+            }
+
+            // Trigger lazy-load of enhanced locations in background
+            if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
+                window.lazyLoadEnhancedLocationDatabase().catch(e => console.log('Background enhance load:', e));
             }
 
             // Show full list of nearby locations and POIs
@@ -13241,9 +13322,14 @@
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
 
-            // Lazy-load the global POI search index on first interaction so users can find ANY POI in the country.
+            // Lazy-load the global POI search index and enhanced locations
             if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
                 window.ensureGlobalPoiSearchIndex();
+            }
+
+            // Trigger lazy-load of enhanced locations in background
+            if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
+                window.lazyLoadEnhancedLocationDatabase().catch(e => console.log('Background enhance load:', e));
             }
 
             const val = customTagInput.value.trim();
@@ -22423,6 +22509,7 @@
         window.handleCustomZoneInput = handleCustomZoneInput;
         window.clearLocationTag = clearLocationTag;
         window.updateZonePredictorWithCustom = updateZonePredictorWithCustom;
+        window.lazyLoadEnhancedLocationDatabase = lazyLoadEnhancedLocationDatabase;
         window.openModal = openModal;
         window.closeModal = closeModal;
         window.savePost = savePost;
