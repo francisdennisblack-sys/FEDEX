@@ -1029,7 +1029,6 @@
                 <span style="font-size: 14px; font-weight: 900; color: #fff; background-color: transparent; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; text-align: center; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 12px;">
                     <span style="color: #bbb; text-transform: uppercase; letter-spacing: 0.5px; font-size: 12px;">Sending to:</span>
                     <span id="zonePredictor" class="zone-predictor-loading" style="display: inline; color: #4ade80; font-weight: 900;">Detecting</span>
-                    <span style="margin-left: auto; color: #667eea; font-size: 14px; font-weight: 900;">▼</span>
                 </span>
             </div>
 
@@ -3893,263 +3892,93 @@
         // ============================================
         async function loadPOIData() {
             try {
-                    // Load city density info (used to size POI zones)
-                    try {
-                        const densityResp = await fetch('city_density.json');
-                        const densityJson = await densityResp.json();
-                        if (densityJson && densityJson.cityDensity) {
-                            window.cityDensityMap = densityJson.cityDensity;
-                            console.log('✅ Loaded city_density.json with', Object.keys(window.cityDensityMap).length, 'cities');
-                        }
-                    } catch (densErr) {
-                        console.warn('⚠️ Failed to load city_density.json:', densErr && densErr.message);
-                    }
                     if (!window.CLEANUP_FLAGS.ENABLE_POI_LOADING) {
                         cLog('POI loading skipped by CLEANUP_FLAGS.ENABLE_POI_LOADING');
                         return;
                     }
-                    cLog('📥 Loading comprehensive POI database (500K search-index + 285K OSM + more)...');
+                    
+                    // 🚀 MOBILE OPTIMIZATION: Load ONLY nearby state POIs on startup (lightweight)
+                    cLog('📥 MOBILE OPTIMIZED: Loading minimal POI data for current location...');
                 
-                // PRIORITY 1: Try to load the 500K POI search index (all states merged)
-                try {
-                    const searchIndexResponse = await fetch('pois/search-index.json');
-                    const searchIndexData = await searchIndexResponse.json();
-                    
-                    console.log(`✅ Loaded search index: ${searchIndexData.length} POIs`);
-                    
-                    // Build comprehensive POI database from search index
-                    globalPOIDatabase = searchIndexData.map(poi => ({
-                        name: poi.name,
-                        lat: poi.lat,
-                        lon: poi.lon,
-                        category: poi.category || poi.type || 'POI',
-                        type: poi.type || 'point_of_interest',
-                        state: poi.state || 'Unknown',
-                        source: 'search-index',
-                        subCategory: poi.subCategory || null,
-                        amenity: poi.amenity || null
-                    }));
-                    
-                    console.log(`🗺️ Base database: ${globalPOIDatabase.length} POIs loaded`);
-                    
-                    // PRIORITY 1B: Load OSM data in background to augment (285K additional POIs)
-                    console.log('📦 Loading 285K OpenStreetMap POIs in background...');
-                    const osmStates = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New_Hampshire', 'New_Jersey', 'New_Mexico', 'New_York', 'North_Carolina', 'North_Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode_Island', 'South_Carolina', 'South_Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West_Virginia', 'Wisconsin', 'Wyoming'];
-                    
-                    const osmPromises = osmStates.map(state =>
-                        fetch(`pois/osm/${state}.json`)
-                            .then(r => r.json())
-                            .then(data => {
-                                if (Array.isArray(data)) return data;
-                                if (data.pois) return data.pois;
-                                return [];
-                            })
-                            .catch(() => []) // Skip if not found
-                    );
-                    
-                    // Start OSM loading in background
-                    Promise.all(osmPromises)
-                        .then(results => {
-                            const osmPOIs = results.flat().map(poi => ({
-                                name: poi.name,
-                                lat: poi.lat,
-                                lon: poi.lon,
-                                category: poi.category || poi.type || 'POI',
-                                type: poi.type || 'point_of_interest',
-                                state: poi.state || 'Unknown',
-                                source: 'osm',
-                                emoji: poi.emoji || null,
-                                subCategory: poi.subCategory || null,
-                                amenity: poi.amenity || null
-                            }));
-                            
-                            const beforeCount = globalPOIDatabase.length;
-                            globalPOIDatabase = [...globalPOIDatabase, ...osmPOIs];
-                            const added = globalPOIDatabase.length - beforeCount;
-                            console.log(`✅ OSM integration: +${added} POIs from 52 state files → ${globalPOIDatabase.length} total`);
-                        })
-                        .catch(err => console.warn('⚠️ OSM load skipped:', err.message));
-                    
-                    return; // Success - use comprehensive database
-                } catch (searchErr) {
-                    console.warn('⚠️ Search index load failed, trying state-by-state...', searchErr);
-                }
-                
-                // PRIORITY 2: Load POI manifest and load relevant state files
-                try {
-                    const manifestResponse = await fetch('pois/manifest.json');
-                    const manifest = await manifestResponse.json();
-                    
-                    console.log(`📋 Manifest loaded: ${manifest.totalStates} states, ${manifest.totalPois} total POIs`);
-                    
-                    // For now, load all states (can be optimized per-state later)
-                    const statePromises = [];
-                    
-                    for (const [stateName, stateInfo] of Object.entries(manifest.states)) {
-                        if (stateInfo.file) {
-                            statePromises.push(
-                                fetch(stateInfo.file)
-                                    .then(r => r.json())
-                                    .then(data => {
-                                        // Ensure all POIs have state info
-                                        return (data.pois || data).map(poi => ({
-                                            ...poi,
-                                            state: stateName
-                                        }));
-                                    })
-                                    .catch(err => {
-                                        console.warn(`⚠️ Failed to load ${stateName}: ${err.message}`);
-                                        return [];
-                                    })
-                            );
-                        }
-                    }
-                    
-                    // Load first 5 states quickly, defer rest
-                    const priorityStates = statePromises.slice(0, 5);
-                    const deferredStates = statePromises.slice(5);
-                    
-                    const priorityResults = await Promise.all(priorityStates);
-                    const allPOIs = priorityResults.flat();
-                    
-                    globalPOIDatabase = allPOIs.map(poi => ({
-                        name: poi.name,
-                        lat: poi.lat,
-                        lon: poi.lon,
-                        category: poi.category || poi.type || 'POI',
-                        type: poi.type || 'point_of_interest',
-                        state: poi.state || 'Unknown',
-                        source: 'manifest',
-                        subCategory: poi.subCategory || null,
-                        amenity: poi.amenity || null
-                    }));
-                    
-                    console.log(`✅ Loaded ${globalPOIDatabase.length} POIs from priority states`);
-                    
-                    // Load remaining states in background
-                    Promise.all(deferredStates)
-                        .then(results => {
-                            const additionalPOIs = results.flat().map(poi => ({
-                                name: poi.name,
-                                lat: poi.lat,
-                                lon: poi.lon,
-                                category: poi.category || poi.type || 'POI',
-                                type: poi.type || 'point_of_interest',
-                                state: poi.state || 'Unknown',
-                                source: 'manifest',
-                                subCategory: poi.subCategory || null,
-                                amenity: poi.amenity || null
-                            }));
-                            
-                            globalPOIDatabase = [...globalPOIDatabase, ...additionalPOIs];
-                            console.log(`✅ Background load complete: ${globalPOIDatabase.length} total POIs`);
-                        })
-                        .catch(err => console.warn('⚠️ Background POI load failed:', err));
-                    
-                    return; // Success
-                } catch (manifestErr) {
-                    console.warn('⚠️ Manifest load failed, trying expanded database...', manifestErr);
-                }
-                
-                // PRIORITY 3: Load original expanded POI database as additional source
-                try {
-                    console.log('📦 Loading fallback POI database (38K expanded)...');
-                    const poiResponse = await fetch(resolveDataPath('poi_database_expanded.json', true));
-                    const poiData = await poiResponse.json();
-                    
-                    // Flatten the cities structure into a single array of POIs for easier lookup
-                    const fallbackPOIs = [];
-                    const cityList = [];
-                    
-                    for (const cityKey in poiData.cities) {
-                        const city = poiData.cities[cityKey];
-                        cityList.push({
-                            name: city.name || cityKey,
-                            country: city.country,
-                            lat: city.lat,
-                            lon: city.lon,
-                            poiCount: city.poiCount || 0
-                        });
+                    // Get user's state to load only that state's POIs
+                    const userState = getUserStateFromLocation();
+                    if (userState) {
+                        console.log(`📍 Loading POIs for state: ${userState}`);
                         
-                        if (city.pois && Array.isArray(city.pois)) {
-                            city.pois.forEach((poi, index) => {
-                                fallbackPOIs.push({
-                                    name: poi.name,
-                                    lat: poi.lat,
-                                    lon: poi.lon,
-                                    category: poi.category || poi.type || 'POI',
-                                    type: poi.type || 'point_of_interest',
-                                    state: 'Multiple',
-                                    source: 'expanded',
-                                    city: cityKey,
-                                    country: city.country
-                                });
-                            });
+                        try {
+                            const stateFile = `pois/osm/${userState}.json`;
+                            const stateResponse = await fetch(stateFile);
+                            const stateData = await stateResponse.json();
+                            
+                            const statePOIs = (Array.isArray(stateData) ? stateData : stateData.pois || []).map(poi => ({
+                                name: poi.name,
+                                lat: poi.lat,
+                                lon: poi.lon,
+                                category: poi.category || poi.type || 'POI',
+                                type: poi.type || 'point_of_interest',
+                                state: userState,
+                                source: 'osm-local',
+                                emoji: poi.emoji || null
+                            }));
+                            
+                            globalPOIDatabase = statePOIs;
+                            console.log(`✅ Loaded ${statePOIs.length} POIs for ${userState}`);
+                        } catch (stateErr) {
+                            console.warn(`⚠️ Could not load state POIs:`, stateErr.message);
+                            globalPOIDatabase = [];
                         }
-                    }
-                    
-                    // Add expanded fallback to database (if not already loaded)
-                    if (!globalPOIDatabase || globalPOIDatabase.length === 0) {
-                        globalPOIDatabase = fallbackPOIs;
-                        console.log(`✅ Loaded ${globalPOIDatabase.length} POIs from expanded database (fallback)`);
                     } else {
-                        // Append to existing database
-                        const beforeCount = globalPOIDatabase.length;
-                        globalPOIDatabase = [...globalPOIDatabase, ...fallbackPOIs];
-                        console.log(`✅ Added ${fallbackPOIs.length} expanded POIs → ${globalPOIDatabase.length} total`);
+                        globalPOIDatabase = [];
                     }
                     
-                    poiDatabase = fallbackPOIs;
-                    globalDensityData = cityList;
-                } catch (expandedErr) {
-                    console.warn('⚠️ Expanded database fallback failed:', expandedErr.message);
-                }
-                
-                // PRIORITY 4: Load worldwide POI database (8.5K major city POIs from 15 cities)
-                try {
-                    console.log('🌍 Loading worldwide POI database (8.5K POIs from major cities)...');
-                    const worldwideResponse = await fetch('poi_database_worldwide.json');
-                    const worldwideData = await worldwideResponse.json();
-                    
-                    const worldwidePOIs = [];
-                    for (const cityKey in worldwideData.cities) {
-                        const city = worldwideData.cities[cityKey];
-                        if (city.pois && Array.isArray(city.pois)) {
-                            city.pois.forEach(poi => {
-                                worldwidePOIs.push({
-                                    name: poi.name,
-                                    lat: poi.lat,
-                                    lon: poi.lon,
-                                    category: poi.category || poi.type || 'POI',
-                                    type: poi.type || 'point_of_interest',
-                                    state: 'International',
-                                    source: 'worldwide',
-                                    country: city.country,
-                                    emoji: poi.emoji || null
-                                });
-                            });
-                        }
+                    // DEFER: Load additional states and comprehensive data in background
+                    if (typeof requestIdleCallback !== 'undefined') {
+                        requestIdleCallback(() => { loadPOIDataInBackground(); }, { timeout: 8000 });
+                    } else {
+                        setTimeout(() => { loadPOIDataInBackground(); }, 3000);
                     }
                     
-                    const beforeWorldwide = globalPOIDatabase.length;
-                    globalPOIDatabase = [...globalPOIDatabase, ...worldwidePOIs];
-                    console.log(`✅ Added ${worldwidePOIs.length} worldwide POIs → ${globalPOIDatabase.length} total`);
-                } catch (worldwideErr) {
-                    console.warn('⚠️ Worldwide database load failed:', worldwideErr.message);
-                }
-                
-                console.log(`\n🎉 POI DATABASE READY: ${globalPOIDatabase.length} total POIs loaded`);
-                console.log(`📊 Coverage breakdown:`);
-                console.log(`   • Search Index: 500K POIs (all US states)`);
-                console.log(`   • OpenStreetMap: 285K POIs (52 state files, loading in background)`);
-                console.log(`   • Worldwide: 8.5K POIs (15 major cities)`);
-                console.log(`   • Expanded: 38K POIs (fallback)`);
-                console.log(`   📍 TOTAL COVERAGE: ${globalPOIDatabase.length} POIs + 75K+ US locations`);
-                
-                return; // Success
+                    return;
             } catch (error) {
-                console.error('❌ Error loading POI/density data:', error);
+                console.error('❌ Error loading POI data:', error);
                 if (!globalPOIDatabase) globalPOIDatabase = [];
+            }
+        }
+        
+        // Background POI loader - loads remaining states and comprehensive data without blocking
+        async function loadPOIDataInBackground() {
+            try {
+                console.log('[BACKGROUND] Starting comprehensive POI data load...');
+                
+                // Load all state files in parallel (non-critical)
+                const osmStates = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New_Hampshire', 'New_Jersey', 'New_Mexico', 'New_York', 'North_Carolina', 'North_Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode_Island', 'South_Carolina', 'South_Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West_Virginia', 'Wisconsin', 'Wyoming'];
+                
+                const osmPromises = osmStates.map(state =>
+                    fetch(`pois/osm/${state}.json`)
+                        .then(r => r.json())
+                        .then(data => Array.isArray(data) ? data : (data.pois || []))
+                        .catch(() => [])
+                );
+                
+                Promise.all(osmPromises).then(results => {
+                    const allStatesPOIs = results.flat().map(poi => ({
+                        name: poi.name,
+                        lat: poi.lat,
+                        lon: poi.lon,
+                        category: poi.category || poi.type || 'POI',
+                        type: poi.type || 'point_of_interest',
+                        state: poi.state || 'Unknown',
+                        source: 'osm',
+                        emoji: poi.emoji || null
+                    }));
+                    
+                    const before = globalPOIDatabase.length;
+                    globalPOIDatabase = [...globalPOIDatabase, ...allStatesPOIs];
+                    console.log(`✅ [BACKGROUND] Added ${globalPOIDatabase.length - before} POIs from all states → ${globalPOIDatabase.length} total`);
+                }).catch(err => console.warn('⚠️ [BACKGROUND] State files load failed:', err.message));
+                
+            } catch (error) {
+                console.warn('⚠️ Background POI load error:', error.message);
             }
         }
         
@@ -6374,15 +6203,59 @@
             }
         }
 
-        // Start Phase 0 immediately when DOM is ready
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => {
-                console.log('📄 DOM loaded - starting Phase 0');
-                initializePhase0();
-            });
-        } else {
-            console.log('📄 DOM already loaded - starting Phase 0');
-            initializePhase0();
+        // Helper: Get user's state from their current geolocation
+        function getUserStateFromLocation() {
+            if (!userLocation || !userLocation.lat || !userLocation.lon) return null;
+            
+            // Quick state lookup based on approximate latitude/longitude bounds
+            const lat = userLocation.lat;
+            const lon = userLocation.lon;
+            
+            // Simplified US state mapping by approximate lat/lon regions
+            if (lat >= 51.2 && lat <= 71.4 && lon >= -179 && lon <= -141) return 'Alaska';
+            if (lat >= 20 && lat <= 22 && lon >= -161 && lon <= -155) return 'Hawaii';
+            if (lat >= 48.4 && lat <= 49.1 && lon >= -116.5 && lon <= -104.1) return 'Montana';
+            if (lat >= 45 && lat <= 49.1 && lon >= -124.8 && lon <= -116.5) return 'Washington';
+            if (lat >= 42 && lat <= 46 && lon >= -124.5 && lon <= -116) return 'Oregon';
+            if (lat >= 32.5 && lat <= 42.1 && lon >= -124.6 && lon <= -114.1) return 'California';
+            if (lat >= 37 && lat <= 42 && lon >= -114.8 && lon <= -109) return 'Nevada';
+            if (lat >= 31 && lat <= 49 && lon >= -114.8 && lon <= -102.2) return 'Arizona';
+            if (lat >= 36.5 && lat <= 42 && lon >= -114.8 && lon <= -105) return 'Utah';
+            if (lat >= 37 && lat <= 41 && lon >= -109.1 && lon <= -102) return 'Colorado';
+            if (lat >= 35 && lat <= 42 && lon >= -109.1 && lon <= -102) return 'New_Mexico';
+            if (lat >= 25.8 && lat <= 31 && lon >= -106.6 && lon <= -93.5) return 'Texas';
+            if (lat >= 33 && lat <= 37.1 && lon >= -103.1 && lon <= -93.5) return 'Oklahoma';
+            if (lat >= 33.6 && lat <= 37 && lon >= -102.1 && lon <= -94) return 'Kansas';
+            if (lat >= 39.9 && lat <= 43.1 && lon >= -104.1 && lon <= -95) return 'Nebraska';
+            if (lat >= 42.5 && lat <= 49.4 && lon >= -104.1 && lon <= -96) return 'South_Dakota';
+            if (lat >= 43.5 && lat <= 49.4 && lon >= -104.1 && lon <= -96) return 'North_Dakota';
+            if (lat >= 40 && lat <= 43.5 && lon >= -104 && lon <= -94) return 'Wyoming';
+            if (lat >= 39 && lat <= 41.7 && lon >= -109.1 && lon <= -102) return 'Colorado';
+            if (lat >= 37 && lat <= 41 && lon >= -109.1 && lon <= -102.5) return 'Utah';
+            if (lat >= 30 && lat <= 36.5 && lon >= -106.7 && lon <= -93) return 'New_Mexico';
+            if (lat >= 25.8 && lat <= 30.8 && lon >= -97.5 && lon <= -93.5) return 'Texas';
+            if (lat >= 41 && lat <= 49.4 && lon >= -96.6 && lon <= -89.2) return 'Minnesota';
+            if (lat >= 40.4 && lat <= 43.5 && lon >= -97.2 && lon <= -90.1) return 'Iowa';
+            if (lat >= 41.7 && lat <= 47.3 && lon >= -92.9 && lon <= -87.0) return 'Wisconsin';
+            if (lat >= 39 && lat <= 41 && lon >= -91.5 && lon <= -87.4) return 'Illinois';
+            if (lat >= 37.7 && lat <= 40.6 && lon >= -91.4 && lon <= -84.8) return 'Missouri';
+            if (lat >= 35.5 && lat <= 37 && lon >= -89.7 && lon <= -81) return 'Tennessee';
+            if (lat >= 35.5 && lat <= 39.6 && lon >= -84.3 && lon <= -81.7) return 'North_Carolina';
+            if (lat >= 33.8 && lat <= 35.3 && lon >= -83.3 && lon <= -78.5) return 'South_Carolina';
+            if (lat >= 32 && lat <= 34.7 && lon >= -84.9 && lon <= -80.8) return 'Georgia';
+            if (lat >= 24.5 && lat <= 30.5 && lon >= -87.3 && lon <= -80) return 'Florida';
+            if (lat >= 38 && lat <= 42 && lon >= -73.9 && lon <= -71.9) return 'New_York';
+            if (lat >= 41.2 && lat <= 42.9 && lon >= -73.7 && lon <= -71.8) return 'Connecticut';
+            if (lat >= 42 && lat <= 47.7 && lon >= -90 && lon <= -83) return 'Michigan';
+            if (lat >= 39.8 && lat <= 42 && lon >= -85.8 && lon <= -80) return 'Ohio';
+            if (lat >= 38.4 && lat <= 41.7 && lon >= -88.1 && lon <= -84.8) return 'Indiana';
+            if (lat >= 37.7 && lat <= 41.8 && lon >= -88.1 && lon <= -86.1) return 'Illinois';
+            
+            // Default guess based on general location
+            if (lat > 42) return 'Massachusetts'; // Northeast
+            if (lat > 38 && lon < -75) return 'Virginia'; // Mid-Atlantic
+            if (lat > 36) return 'Georgia'; // Southeast
+            return 'California'; // Default to largest state
         }
         
         // Safety fallback: ensure Phase 0 runs
