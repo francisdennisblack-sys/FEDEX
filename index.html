@@ -6943,7 +6943,7 @@
         // MEMORY OPTIMIZATION: Periodic cleanup of old posts to prevent memory leaks
         // ============================================================================
         let lastCleanupTime = Date.now();
-        const CLEANUP_INTERVAL = 30000; // Cleanup every 30 seconds
+        const CLEANUP_INTERVAL = 10000; // AGGRESSIVE: Cleanup every 10 seconds (was 30s)
         
         function cleanupMemory() {
             const now = Date.now();
@@ -7552,10 +7552,10 @@
         // ============================================================================
         // MEMORY OPTIMIZATION: Limit postCache size to prevent crashes on mobile
         // ============================================================================
-        const MAX_CACHE_SIZE = 500; // Keep only 500 most recent posts in memory
-        const POST_CACHE_CLEANUP_THRESHOLD = 600; // Trigger cleanup at 600 items
-        const MAX_POSTS_PER_AREA = 200; // CRITICAL: Limit posts per area to prevent unbounded growth
-        const MAX_TOTAL_GRIDCONTENT = 2000; // Hard limit on total posts across all areas
+        const MAX_CACHE_SIZE = 100; // AGGRESSIVE: Keep only 100 most recent posts (was 500)
+        const POST_CACHE_CLEANUP_THRESHOLD = 120; // AGGRESSIVE: Trigger cleanup at 120 items (was 600)
+        const MAX_POSTS_PER_AREA = 50; // AGGRESSIVE: Limit posts per area (was 200)
+        const MAX_TOTAL_GRIDCONTENT = 300; // AGGRESSIVE: Hard limit on total posts (was 2000)
         
         function addToPostCache(post) {
             if (!post || !post.id) return;
@@ -14761,13 +14761,14 @@
                 window.firebaseLoadTimeoutId = firebaseTimeoutId;
             }
             
-            // Set up periodic heartbeat to reconnect if connection dies (every 5 seconds for constantly fresh data)
-            // This ensures the app always feels constantly up to date with votes and new posts
+            // Set up periodic heartbeat to reconnect if connection dies (INCREASED from 5s to 30s to prevent listener spam)
+            // Subscribing too frequently causes exponential memory growth from multiple listeners
             refreshInterval = setInterval(() => {
                 if (isConnected && currentUserId && !firebaseUnsubscribe) {
+                    console.log('📡 Heartbeat check - ensuring Firebase connection...');
                     subscribeToFirebasePostsWithReconnect();
                 }
-            }, 5000);
+            }, 30000);
         }
 
         function subscribeToFirebasePostsWithReconnect() {
@@ -14855,10 +14856,13 @@
                     gridContent[contentKey] = uniquePosts;
                     console.log(`  ✅ gridContent['${contentKey}'] updated with ${uniquePosts.length} posts`);
                     
-                    // 💾 BACKUP CACHE: Also store all posts in postCache by ID for modal lookups
-                    // This ensures posts are always findable even if gridContent is cleared
+            // 💾 BACKUP CACHE: Only add NEW posts to cache, don't re-add existing ones
+                    // This prevents memory explosion from Firebase firing multiple times per second
                     uniquePosts.forEach(post => {
-                        addToPostCache(post);
+                        // Only cache if not already cached OR if it's newer than cached version
+                        if (!postCache[post.id] || (post.timestamp && postCache[post.id].timestamp < post.timestamp)) {
+                            addToPostCache(post);
+                        }
                     });
 
                     // Extra verification: if the current user's own recently-created post exists,
