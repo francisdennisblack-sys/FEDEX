@@ -354,6 +354,81 @@
 
         // Global request batcher for location search
         window.locationSearchBatcher = new RequestBatcher(300, 10);
+
+        /**
+         * 🚀 PHASE 3: WEB WORKER SEARCH WRAPPER
+         * Offloads search to background thread, keeps UI responsive
+         */
+        class WebWorkerSearch {
+            constructor() {
+                this.worker = null;
+                this.isReady = false;
+                this.callbacks = new Map();
+                this.requestId = 0;
+                this.initWorker();
+            }
+            
+            initWorker() {
+                try {
+                    this.worker = new Worker('/search-worker.js');
+                    this.worker.onmessage = (event) => this.handleWorkerMessage(event);
+                    this.worker.onerror = (error) => {
+                        console.error('❌ Web Worker error:', error);
+                        this.isReady = false;
+                    };
+                    console.log('✅ Web Worker initialized');
+                    this.isReady = true;
+                } catch (e) {
+                    console.warn('⚠️ Web Worker not available:', e);
+                    this.isReady = false;
+                }
+            }
+            
+            handleWorkerMessage(event) {
+                const { type, requestId, results, query } = event.data;
+                
+                if (type === 'SEARCH_RESULTS') {
+                    const callback = this.callbacks.get(requestId);
+                    if (callback) {
+                        callback(results, query);
+                        this.callbacks.delete(requestId);
+                    }
+                }
+            }
+            
+            loadData(locations, pois) {
+                if (!this.isReady || !this.worker) return;
+                this.worker.postMessage({
+                    type: 'LOAD_DATA',
+                    locations: locations,
+                    pois: pois
+                });
+                console.log('✅ Web Worker: Data loaded');
+            }
+            
+            search(query, userLat, userLon, callback) {
+                if (!this.isReady || !this.worker) {
+                    // Fallback: run on main thread if worker unavailable
+                    console.warn('⚠️ Worker unavailable, using main thread');
+                    callback([]);
+                    return;
+                }
+                
+                const requestId = ++this.requestId;
+                this.callbacks.set(requestId, callback);
+                
+                this.worker.postMessage({
+                    type: 'SEARCH',
+                    requestId: requestId,
+                    query: query,
+                    userLat: userLat,
+                    userLon: userLon
+                });
+            }
+        }
+
+        // Global web worker search instance
+        window.webWorkerSearch = new WebWorkerSearch();
     </script>
     <!-- 🚀 MOBILE OPTIMIZATION: Auto-clear old caches on page load -->
     <script>
