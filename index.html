@@ -985,7 +985,7 @@
             <div id="pull-to-refresh-indicator" style="display: none; text-align: center; padding: 10px; font-size: 16px; color: #888; transition: opacity 0.3s ease;">
                 <span>🔄</span> Refreshing...
             </div>
-            <div class="grid" id="grid" style="transition: transform 0.3s ease;">
+            <div class="grid" id="grid" style="transition: transform 0.3s ease; contain: layout style paint; will-change: transform;">
                 <!-- Grid boxes will be generated here -->
             </div>
         </div>
@@ -6938,6 +6938,65 @@
         
         // Debounce render calls - batch vote updates into single render (100ms window)
         let renderScheduled = false;
+        
+        // ============================================================================
+        // MEMORY OPTIMIZATION: Periodic cleanup of old posts to prevent memory leaks
+        // ============================================================================
+        let lastCleanupTime = Date.now();
+        const CLEANUP_INTERVAL = 30000; // Cleanup every 30 seconds
+        
+        function cleanupMemory() {
+            const now = Date.now();
+            if (now - lastCleanupTime < CLEANUP_INTERVAL) return;
+            lastCleanupTime = now;
+            
+            console.log('🧹 Running periodic memory cleanup...');
+            
+            // 1. Clean up gridContent - remove posts older than 1 hour
+            let totalRemoved = 0;
+            const oneHourAgo = now - (60 * 60 * 1000);
+            
+            for (const key of Object.keys(gridContent)) {
+                if (!Array.isArray(gridContent[key])) continue;
+                
+                const beforeLen = gridContent[key].length;
+                gridContent[key] = gridContent[key].filter(post => {
+                    const postTime = post.timestamp || post.createdAt || now;
+                    return postTime > oneHourAgo;
+                });
+                
+                totalRemoved += (beforeLen - gridContent[key].length);
+                
+                // Remove empty categories
+                if (gridContent[key].length === 0) {
+                    delete gridContent[key];
+                }
+            }
+            
+            // 2. Clean up postCache if it exceeds MAX_CACHE_SIZE
+            const cacheKeys = Object.keys(postCache);
+            if (cacheKeys.length > MAX_CACHE_SIZE) {
+                const sortedByTime = cacheKeys
+                    .map(key => ({ key, timestamp: postCache[key].timestamp || 0 }))
+                    .sort((a, b) => b.timestamp - a.timestamp)
+                    .slice(0, MAX_CACHE_SIZE);
+                
+                const keysToKeep = new Set(sortedByTime.map(o => o.key));
+                cacheKeys.forEach(key => {
+                    if (!keysToKeep.has(key)) {
+                        delete postCache[key];
+                    }
+                });
+                
+                console.log(`🧹 Cleaned postCache: ${cacheKeys.length} → ${MAX_CACHE_SIZE}`);
+            }
+            
+            console.log(`✅ Memory cleanup complete: removed ${totalRemoved} old posts`);
+        }
+        
+        // Run cleanup periodically
+        setInterval(cleanupMemory, CLEANUP_INTERVAL);
+        
         function scheduleRender() {
             if (!renderScheduled) {
                 renderScheduled = true;
@@ -7465,6 +7524,39 @@
         let selectedMediaType = null; // Track if media is 'video' or 'image'
         let lastModerationRejectionTime = 0; // Track when moderation last rejected a file
         let lastRejectedFileName = null; // Track the filename that was rejected
+        
+        // ============================================================================
+        // MEMORY OPTIMIZATION: Limit postCache size to prevent crashes on mobile
+        // ============================================================================
+        const MAX_CACHE_SIZE = 500; // Keep only 500 most recent posts in memory
+        const POST_CACHE_CLEANUP_THRESHOLD = 600; // Trigger cleanup at 600 items
+        
+        function addToPostCache(post) {
+            if (!post || !post.id) return;
+            postCache[post.id] = post;
+            
+            // Aggressive cleanup: if cache exceeds threshold, remove oldest posts
+            const cacheKeys = Object.keys(postCache);
+            if (cacheKeys.length > POST_CACHE_CLEANUP_THRESHOLD) {
+                console.log(`⚠️ PostCache exceeds ${POST_CACHE_CLEANUP_THRESHOLD} items (${cacheKeys.length}), trimming...`);
+                
+                // Keep only the MAX_CACHE_SIZE most recently accessed posts
+                // Sort by timestamp and keep the newest ones
+                const sortedByTime = cacheKeys
+                    .map(key => ({ key, timestamp: postCache[key].timestamp || 0 }))
+                    .sort((a, b) => b.timestamp - a.timestamp)
+                    .slice(0, MAX_CACHE_SIZE);
+                
+                const keysToKeep = new Set(sortedByTime.map(o => o.key));
+                cacheKeys.forEach(key => {
+                    if (!keysToKeep.has(key)) {
+                        delete postCache[key];
+                    }
+                });
+                
+                console.log(`✅ PostCache trimmed to ${MAX_CACHE_SIZE} posts`);
+            }
+        }
         
         // ============================================================================
         // ML-BASED POST RETENTION SYSTEM - Adaptive Content Duration
@@ -14655,7 +14747,7 @@
                     // 💾 BACKUP CACHE: Also store all posts in postCache by ID for modal lookups
                     // This ensures posts are always findable even if gridContent is cleared
                     uniquePosts.forEach(post => {
-                        postCache[post.id] = post;
+                        addToPostCache(post);
                     });
 
                     // Extra verification: if the current user's own recently-created post exists,
