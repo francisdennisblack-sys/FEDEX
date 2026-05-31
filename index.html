@@ -20067,6 +20067,10 @@
                 });
             }
             
+            // Reset batch loading offset when a new render is triggered
+            postBatchOffset = 0;
+            allFirebasePosts = [];
+            
             // ⚡ ULTRA-FAST MODE: First render with just visible items
             const startTime = performance.now();
             const useUltraFastMode = startTime < 250;
@@ -20085,23 +20089,74 @@
 
         /**
          * 📥 Load more posts from database when scroll threshold reached
+         * Implements infinite scroll with Firebase pagination
          */
         let isLoadingMore = false;
+        let postBatchOffset = 0; // Track how many posts we've already loaded
+        const POST_BATCH_SIZE = 50; // Load 50 posts at a time
+        let allFirebasePosts = []; // Cache of all posts from Firebase
+        
         async function loadMorePostsFromDatabase() {
             if (isLoadingMore) return;
             isLoadingMore = true;
             
             try {
-                // This would connect to your Firebase or backend
-                // For now, just log that we're trying to load more
-                console.log(`📥 Loading more posts... (implement your backend call here)`);
-                // Example:
-                // const newPosts = await fetchNextBatchOfPosts(gridScroller.items.length);
-                // if (newPosts && newPosts.length > 0) {
-                //     gridScroller.addItems(newPosts);
-                // }
+                console.log(`📥 Loading batch: offset=${postBatchOffset}, batchSize=${POST_BATCH_SIZE}`);
+                
+                // Get current all posts from gridScroller or build from gridContent
+                if (allFirebasePosts.length === 0) {
+                    console.log(`   🔍 First batch load - building post list`);
+                    
+                    // Try to get from gridScroller's current items (best source)
+                    if (gridScroller && gridScroller.items && gridScroller.items.length > 0) {
+                        allFirebasePosts = [...gridScroller.items];
+                        console.log(`   ✅ Got ${allFirebasePosts.length} posts from gridScroller cache`);
+                    } else {
+                        // Fallback: rebuild from gridContent
+                        const seenPostIds = new Set();
+                        let allPosts = [];
+                        
+                        // Collect from all gridContent keys
+                        Object.keys(gridContent).forEach(key => {
+                            if (Array.isArray(gridContent[key])) {
+                                gridContent[key].forEach(post => {
+                                    if (post && post.id && !seenPostIds.has(post.id)) {
+                                        seenPostIds.add(post.id);
+                                        allPosts.push(post);
+                                    }
+                                });
+                            }
+                        });
+                        
+                        allFirebasePosts = allPosts;
+                        console.log(`   ✅ Rebuilt ${allFirebasePosts.length} posts from gridContent`);
+                    }
+                }
+                
+                // Extract next batch of posts
+                const nextBatch = allFirebasePosts.slice(postBatchOffset, postBatchOffset + POST_BATCH_SIZE);
+                
+                if (nextBatch.length === 0) {
+                    console.log(`   ⚠️ No more posts to load (total loaded: ${postBatchOffset}/${allFirebasePosts.length})`);
+                    isLoadingMore = false;
+                    return;
+                }
+                
+                console.log(`   📦 Got ${nextBatch.length} posts (${postBatchOffset} → ${postBatchOffset + nextBatch.length} of ${allFirebasePosts.length})`);
+                
+                // Add batch to grid scroller
+                if (gridScroller) {
+                    gridScroller.addItems(nextBatch);
+                    console.log(`   ✅ Added to VirtualGridScroller (total items now: ${gridScroller.items.length})`);
+                    
+                    // Update offset for next batch
+                    postBatchOffset += nextBatch.length;
+                } else {
+                    console.warn('   ⚠️ gridScroller not available');
+                }
+                
             } catch (e) {
-                console.error('Error loading more posts:', e);
+                console.error('❌ Error loading more posts:', e);
             } finally {
                 isLoadingMore = false;
             }
