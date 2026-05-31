@@ -14001,10 +14001,15 @@
             }
             
             // CRITICAL: Ensure all databases are loaded before searching
+            // Reuse preload promises if they exist (from early page load), or start new loads
+            console.log(`🔍 Refine locations search: "${query}" - ensuring databases loaded...`);
+            
             if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
                 try {
-                    await window.ensureGlobalPoiSearchIndex();
-                    console.log(`✅ POI search index loaded`);
+                    // Reuse preload promise if available, otherwise call function
+                    const poiPromise = window._poiIndexPreloadPromise || window.ensureGlobalPoiSearchIndex();
+                    await poiPromise;
+                    console.log(`✅ POI search index ready`);
                 } catch (e) {
                     console.warn(`⚠️ Failed to load POI index:`, e);
                 }
@@ -14012,22 +14017,22 @@
             
             if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
                 try {
-                    await window.lazyLoadEnhancedLocationDatabase();
-                    console.log(`✅ Enhanced location database loaded`);
+                    // Reuse preload promise if available, otherwise call function
+                    const locPromise = window._enhancedLocationsPreloadPromise || window.lazyLoadEnhancedLocationDatabase();
+                    await locPromise;
+                    console.log(`✅ Enhanced location database ready`);
                 } catch (e) {
                     console.warn(`⚠️ Failed to load enhanced locations:`, e);
                 }
             }
             
-            // Also ensure OSM places are loaded
+            // Also ensure OSM places are loaded - reuse preload promise if available
             if (!window.osmPlaces) {
                 try {
-                    const resp = await fetch('/pois/places.json');
-                    if (resp.ok) {
-                        const data = await resp.json();
-                        window.osmPlaces = data.places || [];
-                        console.log(`✅ OSM places loaded: ${window.osmPlaces.length} places`);
-                    }
+                    const osmPromise = window._osmPlacesPreloadPromise || fetch('/pois/places.json').then(r => r.json());
+                    const data = await osmPromise;
+                    window.osmPlaces = data.places || [];
+                    console.log(`✅ OSM places ready: ${window.osmPlaces.length} places`);
                 } catch (e) {
                     console.warn(`⚠️ Failed to load OSM places:`, e);
                 }
@@ -21832,18 +21837,21 @@
             
             // ⚡ CRITICAL: Preload databases IMMEDIATELY so refine locations dropdown works on first try
             console.log('📥 Preloading databases (POI index, locations, OSM places)...');
+            
+            // Store promises so filterRefineLocationSearch() can reuse them (avoiding duplicate loads)
             if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
-                window.ensureGlobalPoiSearchIndex().catch(e => console.warn('POI index preload failed:', e));
+                window._poiIndexPreloadPromise = window.ensureGlobalPoiSearchIndex().catch(e => console.warn('POI index preload failed:', e));
             }
             if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
-                window.lazyLoadEnhancedLocationDatabase().catch(e => console.warn('Location DB preload failed:', e));
+                window._enhancedLocationsPreloadPromise = window.lazyLoadEnhancedLocationDatabase().catch(e => console.warn('Location DB preload failed:', e));
             }
-            // Preload OSM places
-            fetch('/pois/places.json')
+            // Preload OSM places - store promise so it can be reused
+            window._osmPlacesPreloadPromise = fetch('/pois/places.json')
                 .then(r => r.json())
                 .then(d => {
                     window.osmPlaces = d.places || [];
                     console.log(`✅ OSM places preloaded: ${window.osmPlaces.length} places`);
+                    return d;
                 })
                 .catch(e => console.warn('OSM places preload failed:', e));
             
