@@ -180,6 +180,31 @@
             return nd && isFinite(nd.distance) && nd.distance <= thresholdMeters;
         }
     </script>
+    <!-- 🚀 MOBILE OPTIMIZATION: Auto-clear old caches on page load -->
+    <script>
+        // Clear old service worker caches to prevent serving outdated files to mobile devices
+        if ('caches' in window) {
+            caches.keys().then(cacheNames => {
+                cacheNames.forEach(cacheName => {
+                    // Delete old cache versions (everything except current ones)
+                    if (!cacheName.includes('v3-mobile-optimized') && !cacheName.includes('v2')) {
+                        caches.delete(cacheName).then(() => {
+                            console.log(`🧹 Cleared old cache: ${cacheName}`);
+                        });
+                    }
+                });
+            });
+        }
+        
+        // Force service worker to update
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(registrations => {
+                registrations.forEach(reg => {
+                    reg.update(); // Force check for updates
+                });
+            });
+        }
+    </script>
     <!-- ========================================================================== -->
     <!-- 🛡️ PROTECTED: Canvas 3D Globe Logo — DO NOT MODIFY — See PROTECTED_LOGO_CODE.md -->
     <!-- ========================================================================== -->
@@ -713,11 +738,16 @@
                 async function confirmPhoneCode(code) {
                     try {
                         if (!window.__confirmationResult) throw new Error('No confirmation pending');
+                        console.log('🔐 confirmPhoneCode: Confirming phone verification code...');
+                        
                         const cred = await window.__confirmationResult.confirm(code);
                         const firebaseUid = cred.user.uid;
                         const phoneNumber = cred.user.phoneNumber;
                         const permanentUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
                         const database = getDatabase();
+                        
+                        console.log(`✅ Phone auth successful! Firebase UID: ${firebaseUid}`);
+                        
                         if (database) {
                             try {
                                 // Only create profile/stats if they don't already exist — prevents duplicate accounts
@@ -748,6 +778,16 @@
                                 } catch (e) { console.warn('Failed writing permanent->firebase mapping', e); }
                             } catch (e) { console.warn('confirmPhoneCode DB handling failed', e); }
                         }
+                        
+                        // 🔥 CRITICAL: Set auth persistence IMMEDIATELY after phone auth
+                        try {
+                            console.log('🔄 Setting auth persistence after phone auth...');
+                            await setPersistence(auth, browserLocalPersistence);
+                            console.log('✅ Auth persistence set to browserLocalPersistence');
+                        } catch (e) {
+                            console.warn('⚠️ Could not set auth persistence:', e);
+                        }
+                        
                         // Use Firebase UID as the authenticated identity for server writes
                         window.currentUserId = firebaseUid;
                         window.currentUserPhone = phoneNumber;
@@ -767,7 +807,12 @@
                                     localStorage.setItem('lastSessionAuthId', permanentUid);
                                 } catch (e2) { console.warn('Could not persist permanentUserId markers', e2); }
                             }
+                            
+                            // 🔥 CRITICAL: Also set isSignedIn flag
+                            localStorage.setItem('isSignedIn', '1');
+                            console.log('💾 All sign-in markers persisted to localStorage');
                         } catch (e) { console.warn('Could not persist lastSignedIn markers to localStorage', e); }
+                        
                         updateAccountUI();
                         showNotification && showNotification('Signed in', phoneNumber);
                         
@@ -785,6 +830,8 @@
                         // clear pending
                         window.__confirmationResult = null;
                         window.__pendingUsername = null;
+                        
+                        console.log('✅ confirmPhoneCode complete - user should stay signed in on refresh');
                         return cred.user;
                     } catch (err) {
                         console.error('confirmPhoneCode failed', err);
@@ -1801,39 +1848,53 @@
                 const displayName = (function(){ try { return localStorage.getItem('displayName'); } catch(e){ return null; } })();
                 const gridId = (function(){ try { return localStorage.getItem('userGridId'); } catch(e){ return null; } })();
                 const postId = (function(){ try { return localStorage.getItem('userPostId'); } catch(e){ return null; } })();
+                const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
                 
                 console.log('🔍 Attempting session restore...');
+                console.log(`   Found markers: isSignedIn=${isSignedIn}, lastFirebaseUid=${lastFirebaseUid ? lastFirebaseUid.substring(0,8) : 'none'}`);
                 
-                // CRITICAL: Only restore if Firebase auth is active
-                if (!auth || !auth.currentUser) {
-                    console.log('❌ No active Firebase auth - cannot restore. User is signed out.');
-                    // Clear any orphaned localStorage data
-                    try {
-                        localStorage.removeItem('lastSignedInFirebaseUid');
-                        localStorage.removeItem('lastSignedInPhone');
-                        localStorage.removeItem('displayName');
-                        localStorage.removeItem('userGridId');
-                        localStorage.removeItem('userPostId');
-                        localStorage.removeItem('permanentUserId');
-                        localStorage.removeItem('userId');
-                    } catch(e) {}
-                    window.currentUserId = null;
+                // Check if we have a Firebase session
+                if (auth && auth.currentUser) {
+                    console.log('✅ Active Firebase auth session found:', auth.currentUser.uid);
+                    
+                    // Firebase has an active session
+                    const firebaseUid = auth.currentUser.uid;
+                    
+                    // Restore app-level identity
+                    window.currentUserId = firebaseUid;
+                    window.currentUserPhone = lastPhone || null;
+                    if (displayName) window.currentDisplayName = displayName;
+                    if (gridId) window.currentGridId = gridId;
+                    if (postId) window.currentPostId = postId;
+                    
+                    console.log('✅ Session restored for user:', firebaseUid);
                     updateAccountUI();
                     return;
                 }
                 
-                // Firebase has an active session
-                const firebaseUid = auth.currentUser.uid;
-                console.log('✅ Active Firebase session found:', firebaseUid);
+                // If no active Firebase session but we have markers, that's OK
+                // The onAuthStateChanged listener will handle the restoration
+                if (isSignedIn && lastFirebaseUid) {
+                    console.log('ℹ️ Sign-in markers found but Firebase auth not yet loaded');
+                    console.log('   Waiting for onAuthStateChanged to fire and restore session...');
+                    // Don't clear markers - onAuthStateChanged will restore them
+                    return;
+                }
                 
-                // Restore app-level identity
-                window.currentUserId = firebaseUid;
-                window.currentUserPhone = lastPhone || null;
-                if (displayName) window.currentDisplayName = displayName;
-                if (gridId) window.currentGridId = gridId;
-                if (postId) window.currentPostId = postId;
-                
-                console.log('✅ Session restored for user:', firebaseUid);
+                // No markers and no Firebase session - user is genuinely signed out
+                console.log('❌ No active Firebase auth and no sign-in markers - user is signed out.');
+                // Clear any orphaned localStorage data
+                try {
+                    localStorage.removeItem('lastSignedInFirebaseUid');
+                    localStorage.removeItem('lastSignedInPhone');
+                    localStorage.removeItem('displayName');
+                    localStorage.removeItem('userGridId');
+                    localStorage.removeItem('userPostId');
+                    localStorage.removeItem('permanentUserId');
+                    localStorage.removeItem('userId');
+                    localStorage.removeItem('isSignedIn');
+                } catch(e) {}
+                window.currentUserId = null;
                 updateAccountUI();
                 
             } catch (e) {
@@ -6946,36 +7007,47 @@
             // Calculate new vote counts
             let newLikes = originalLikes;
             let newDislikes = originalDislikes;
+            let newVoteType = null; // Will be 'like', 'dislike', or null (removed)
             
             if (voteType === 'like') {
                 if (originalVote === 'like') {
+                    // Toggle off like
                     newLikes = Math.max(0, originalLikes - 1);
-                    userVotes[userVoteKey] = null;
+                    newVoteType = null;
                 } else {
+                    // Add like or switch from dislike
                     newLikes = originalLikes + 1;
                     if (originalVote === 'dislike') {
                         newDislikes = Math.max(0, originalDislikes - 1);
                     }
-                    userVotes[userVoteKey] = 'like';
+                    newVoteType = 'like';
                 }
             } else if (voteType === 'dislike') {
                 if (originalVote === 'dislike') {
+                    // Toggle off dislike
                     newDislikes = Math.max(0, originalDislikes - 1);
-                    userVotes[userVoteKey] = null;
+                    newVoteType = null;
                 } else {
+                    // Add dislike or switch from like
                     newDislikes = originalDislikes + 1;
                     if (originalVote === 'like') {
                         newLikes = Math.max(0, originalLikes - 1);
                     }
-                    userVotes[userVoteKey] = 'dislike';
+                    newVoteType = 'dislike';
                 }
             }
             
             console.log(`   Votes: ${originalLikes}→${newLikes} likes, ${originalDislikes}→${newDislikes} dislikes`);
+            console.log(`   Vote state: "${originalVote}" → "${newVoteType}"`);
             
             // OPTIMISTIC UI: Update immediately
             post.likes = newLikes;
             post.dislikes = newDislikes;
+            if (newVoteType === null) {
+                userVotes[userVoteKey] = null;
+            } else {
+                userVotes[userVoteKey] = newVoteType;
+            }
             
             // Update all references to this post
             if (postCache[postId]) {
@@ -6994,33 +7066,17 @@
             // Update DOM immediately
             updateVoteDisplayInDOM(postId, newLikes, newDislikes);
             
-            // Persist to Firebase asynchronously
-            (async () => {
-                try {
-                    const userVoteRef = ref(database, `user-votes/${currentUserId}/${postId}`);
-                    const currentVote = userVotes[userVoteKey];
-                    
-                    if (currentVote) {
-                        await set(userVoteRef, { type: currentVote, timestamp: Date.now() });
-                    } else {
-                        await remove(userVoteRef);
-                    }
-                    
-                    // Update post vote counts in Firebase
-                    const postRef = ref(database, `posts/${postId}`);
-                    await update(postRef, { likes: newLikes, dislikes: newDislikes });
-                    
-                    console.log(`✅ Vote persisted to Firebase`);
-                } catch (err) {
-                    console.error('❌ Failed to persist vote:', err);
-                    // Rollback
-                    post.likes = originalLikes;
-                    post.dislikes = originalDislikes;
-                    userVotes[userVoteKey] = originalVote;
-                    updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
-                    showNotification && showNotification('Failed to save vote');
-                }
-            })();
+            // 🔥 CRITICAL: Save vote to Firebase with proper persistence
+            console.log(`🔄 Saving vote to Firebase and localStorage...`);
+            saveVoteToFirebase(currentUserId, postId, newVoteType).catch(err => {
+                console.error('❌ Vote save failed, rolling back UI:', err);
+                // Rollback on failure
+                post.likes = originalLikes;
+                post.dislikes = originalDislikes;
+                userVotes[userVoteKey] = originalVote;
+                updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
+                showNotification && showNotification('Failed to save vote');
+            });
         }
         
         /**
@@ -10095,6 +10151,17 @@
                         console.log('  ⚠️ Posts collection is empty');
                     }
                     
+                    // 💾 AGGRESSIVE PERSISTENCE: Save posts to localStorage immediately
+                    if (allPosts.length > 0) {
+                        try {
+                            localStorage.setItem('cachedAllPosts', JSON.stringify(allPosts));
+                            localStorage.setItem('postsLastSaved', new Date().toISOString());
+                            console.log(`✅ Saved ${allPosts.length} posts to localStorage`);
+                        } catch (e) {
+                            console.warn('⚠️ Could not save posts to localStorage:', e.message);
+                        }
+                    }
+                    
                     console.log(`  📞 About to call callback with ${allPosts.length} posts`);
                     callback(allPosts);
                     console.log('  ✅ callback completed');
@@ -10111,6 +10178,17 @@
                     console.error('  Error code:', error.code);
                     console.error('  Error message:', error.message);
                     console.error('  Full error:', error);
+                    
+                    // 💾 FALLBACK: Try to restore posts from localStorage if Firebase fails
+                    try {
+                        const cachedPosts = JSON.parse(localStorage.getItem('cachedAllPosts') || '[]');
+                        if (cachedPosts.length > 0) {
+                            console.log(`⚠️ Firebase error - using cached ${cachedPosts.length} posts from localStorage`);
+                            callback(cachedPosts);
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ Could not restore cached posts:', e.message);
+                    }
                 });
                 
                 console.log('✅ Firebase onValue listener setup complete on shared collection');
@@ -10185,19 +10263,23 @@
             const MAX_RETRIES = 3;
             const RETRY_DELAY = 1000 * Math.pow(2, retryCount); // Exponential backoff: 1s, 2s, 4s
             
+            console.log(`\n📌 saveVoteToFirebase START - userId: ${userId.substring(0,8)}, postId: ${postId.substring(0,8)}, voteType: ${voteType}, retry: ${retryCount}`);
+            
             try {
-                const voteKey = `${currentUserId}_${postId}`;
+                const voteKey = `${userId}_${postId}`;
                 
                 // IMMEDIATELY save to localStorage for persistence across refreshes
                 if (voteType === null) {
                     // Remove vote
                     delete userVotes[voteKey];
+                    console.log(`   🗑️ Removing vote from memory`);
                 } else {
                     userVotes[voteKey] = voteType;
+                    console.log(`   💾 Storing ${voteType} vote in memory`);
                 }
                 // Always persist to localStorage
                 localStorage.setItem(`userVotes_${userId}`, JSON.stringify(userVotes));
-                console.log(`💾 Vote saved to localStorage for post ${postId}`);
+                console.log(`   💾 Vote saved to localStorage for post ${postId}`);
                 
                 // THEN save to Firebase using per-post votes to ensure unique user counts
                 // Write user's vote under post-votes/{postId}/{userId}
@@ -10206,18 +10288,21 @@
 
                 if (voteType === null) {
                     // Remove vote entries
+                    console.log(`   🔄 Removing vote from Firebase...`);
                     await remove(postVoteRef);
                     try { await remove(userVoteRef); } catch (e) { /* ignore */ }
-                    console.log(`🗑️  Removed vote for post ${postId} from Firebase (per-post & per-user)`);
+                    console.log(`   ✅ Removed vote for post ${postId} from Firebase (per-post & per-user)`);
                 } else {
                     // Save vote (like or dislike) in both per-post and per-user locations
+                    console.log(`   🔄 Saving ${voteType} vote to Firebase...`);
                     await set(postVoteRef, voteType);
                     try { await set(userVoteRef, voteType); } catch (e) { /* ignore */ }
-                    console.log(`✅ Saved ${voteType} vote for post ${postId} to Firebase (per-post & per-user)`);
+                    console.log(`   ✅ Saved ${voteType} vote for post ${postId} to Firebase (per-post & per-user)`);
                 }
 
                 // Recompute aggregate likes/dislikes from post-votes to ensure unique-user totals
                 try {
+                    console.log(`   🔢 Recomputing vote counts...`);
                     const votesSnapshot = await get(ref(database, `post-votes/${postId}`));
                     let likeCount = 0, dislikeCount = 0;
                     if (votesSnapshot && votesSnapshot.exists()) {
@@ -10230,25 +10315,33 @@
                     }
 
                     // Persist aggregated totals on the post object
+                    console.log(`   📝 Updating post with aggregated counts: ${likeCount} likes, ${dislikeCount} dislikes`);
                     await update(ref(database, `posts/${postId}`), { likes: likeCount, dislikes: dislikeCount });
-                    console.log(`🔢 Aggregated post ${postId} votes: likes=${likeCount}, dislikes=${dislikeCount}`);
+                    console.log(`   ✅ Aggregated post ${postId} votes: likes=${likeCount}, dislikes=${dislikeCount}`);
                 } catch (e) {
-                    console.warn('⚠️ Failed to recompute aggregated post votes:', e);
+                    console.warn('   ⚠️ Failed to recompute aggregated post votes:', e);
                 }
+                
+                console.log(`✅ saveVoteToFirebase COMPLETE\n`);
             } catch (error) {
-                console.error(`❌ Error saving vote to Firebase (attempt ${retryCount + 1}):`, error);
+                console.error(`\n❌ Error saving vote to Firebase (attempt ${retryCount + 1}):`, error);
+                console.error(`   Error code: ${error.code}`);
+                console.error(`   Error message: ${error.message}`);
                 
                 // Retry logic for network errors
                 if (retryCount < MAX_RETRIES && (error.code === 'NETWORK_ERROR' || error.code === 'PERMISSION_DENIED' || !navigator.onLine)) {
                     console.log(`🔄 Retrying vote save in ${RETRY_DELAY}ms...`);
-                    setTimeout(() => {
-                        saveVoteToFirebase(userId, postId, voteType, retryCount + 1);
-                    }, RETRY_DELAY);
+                    return new Promise((resolve) => {
+                        setTimeout(() => {
+                            saveVoteToFirebase(userId, postId, voteType, retryCount + 1).then(resolve);
+                        }, RETRY_DELAY);
+                    });
                 } else if (retryCount >= MAX_RETRIES) {
                     console.error(`❌ Failed to save vote after ${MAX_RETRIES} attempts.`);
                     // Vote is already saved to localStorage so it won't be lost
                     // It will sync to Firebase when connection is restored
                     console.log('✅ Vote persisted to localStorage - will sync to Firebase when online');
+                    throw error; // Re-throw for caller to handle
                 }
             }
         }
@@ -13658,19 +13751,26 @@
                 return;
             }
             
-            // STEP 1: Close all dropdowns
+            // STEP 1: Close all dropdowns immediately
             const refineDropdown = document.getElementById('refineLocationDropdown');
             const autocompleteDropdown = document.getElementById('autocompleteDropdown');
             if (refineDropdown) refineDropdown.style.display = 'none';
             if (autocompleteDropdown) autocompleteDropdown.style.display = 'none';
             console.log(`   ✅ STEP 1: Dropdowns closed`);
             
-            // STEP 2: Update global currentZoneTag variable (used by post creation)
+            // STEP 2: DO NOT update the Refine Location input field - keep it as-is for user to type more
+            // User can continue typing to search for other areas if they want
+            const customTagInput = document.getElementById('customZoneTag');
+            if (customTagInput) {
+                console.log(`   ✅ STEP 2: Input field NOT updated (user can continue typing)`);
+            }
+            
+            // STEP 3: Update global currentZoneTag variable (used by post creation)
             const oldZoneTag = currentZoneTag;
             currentZoneTag = locationName;
-            console.log(`   ✅ STEP 2: Global currentZoneTag updated: "${oldZoneTag}" → "${currentZoneTag}"`);
+            console.log(`   ✅ STEP 3: Global currentZoneTag updated: "${oldZoneTag}" → "${currentZoneTag}"`);
             
-            // STEP 3: Update the visual zone predictor display
+            // STEP 4: Update the visual "SENDING TO:" field with selection
             const zonePredictor = document.getElementById('zonePredictor');
             if (zonePredictor) {
                 // Update display text
@@ -13682,10 +13782,10 @@
                 
                 // Flash green confirmation (0.8s)
                 zonePredictor.style.color = '#10b981';
-                console.log(`   ✅ STEP 3: Zone predictor updated with visual confirmation`);
+                console.log(`   ✅ STEP 4: SENDING TO field updated with visual confirmation`);
                 
                 setTimeout(() => {
-                    zonePredictor.style.color = '#fff';
+                    zonePredictor.style.color = '#4ade80';
                 }, 800);
                 
                 // Update clear button visibility
@@ -13706,8 +13806,8 @@
             // FINAL: Show comprehensive confirmation
             console.log(`\n✅ LOCATION/POI SELECTION COMPLETE`);
             console.log(`   📍 Selected: "${locationName}"`);
-            console.log(`   🏷️ Zone Tag Updated: "${currentZoneTag}"`);
-            console.log(`   📝 Custom Input: "${customTagInput ? customTagInput.value : 'N/A'}"`);
+            console.log(`   🏷️ SENDING TO field Updated: "${currentZoneTag}"`);
+            console.log(`   📝 Refine Location field NOT changed - you can continue typing`);
             console.log(`   📤 This location will be used for your next posts!\n`);
         }
 
@@ -13882,26 +13982,52 @@
                 }
             }
             
-            // Search POIs
+            // Search POIs (CRITICAL: Must include POIs in refine location dropdown)
+            // Ensure POI search index is loaded
+            if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                window.ensureGlobalPoiSearchIndex();
+            }
+            
             if (globalPOIDatabase && globalPOIDatabase.length > 0) {
-                for (let i = 0; i < Math.min(globalPOIDatabase.length, 50000); i++) {
+                console.log(`🔍 Searching ${globalPOIDatabase.length} POIs for query: "${queryLower}"`);
+                // Limit to first 100K POIs for performance
+                const searchLimit = Math.min(globalPOIDatabase.length, 100000);
+                let poiMatches = 0;
+                for (let i = 0; i < searchLimit; i++) {
                     const poi = globalPOIDatabase[i];
+                    if (!poi) continue;
+                    
                     const poiName = String(poi.name || '').toLowerCase().trim();
+                    const poiCategory = String(poi.category || poi.type || 'Place').toLowerCase().trim();
+                    const poiCity = String(poi.city || '').toLowerCase().trim();
                     
                     // Skip empty POI names
                     if (!poiName || poiName.length === 0) continue;
                     
-                    if (poiName.includes(queryLower)) {
+                    // Search across name, category, and city with priority for exact/prefix matches
+                    const searchStr = `${poiName} ${poiCategory} ${poiCity}`.toLowerCase();
+                    
+                    if (searchStr.includes(queryLower)) {
+                        poiMatches++;
                         const category = poi.category || poi.type || 'Place';
+                        // Prioritize exact name match > category match > contains
+                        let rankScore = 2; // Base: contains match
+                        if (poiName === queryLower) rankScore = -1; // Exact match - highest priority
+                        else if (poiName.startsWith(queryLower)) rankScore = 0.5; // Prefix match
+                        else if (poiCategory.includes(queryLower)) rankScore = 1; // Category match
+                        
                         results.push({
                             type: 'poi',
                             name: poi.name,
                             category: category,
                             emoji: poi.emoji || '🏢',
-                            rank: poiName === queryLower ? 0 : (poiName.startsWith(queryLower) ? 1 : 2)
+                            rank: rankScore
                         });
                     }
                 }
+                console.log(`✅ POI search complete - found ${poiMatches} POI matches for "${queryLower}"`);
+            } else {
+                console.warn('⚠️ POI database not loaded - POIs not available in search');
             }
             
             // Sort by rank only (no distance sorting)
@@ -18624,6 +18750,41 @@
                 console.log(`🎯 ML area recommendations ready`);
             }
             
+            // ========================================================================
+            // 🎯 AGGRESSIVE UPDATE: Sort self-posts to top (positions 1-20) with badge
+            // ========================================================================
+            const selfPosts = [];
+            const otherPosts = [];
+            
+            allPosts.forEach(post => {
+                // Check if post is user's own post
+                if (post.userId === currentUserId || post.author === currentUserId || userOwnPostsTracker[currentUserId]?.includes(post.id)) {
+                    selfPosts.push(post);
+                } else {
+                    otherPosts.push(post);
+                }
+            });
+            
+            // Add special badge to self-posts
+            selfPosts.forEach(post => {
+                post.isSelfPost = true;
+                post.selfPostBadge = '👤 My Post'; // Will show instead of rank badge
+            });
+            
+            // Recombine: self-posts first (positions 1-20), then others
+            allPosts = [...selfPosts, ...otherPosts];
+            console.log(`📍 AGGRESSIVE SORT: ${selfPosts.length} self-posts moved to top positions 1-${selfPosts.length}`);
+            
+            // Save to localStorage aggressively
+            if (allPosts.length > 0) {
+                try {
+                    localStorage.setItem('gridPosts', JSON.stringify(allPosts));
+                    console.log(`💾 Saved ${allPosts.length} posts to localStorage (refresh-safe)`);
+                } catch (e) {
+                    console.warn('⚠️ Could not save posts to localStorage:', e.message);
+                }
+            }
+            
             // CRITICAL: De-duplicate posts by ID to prevent ghost posts
             // This can happen if Firebase snapshot has duplicate entries
             const seenIds = new Set();
@@ -19566,33 +19727,42 @@
                         console.log(`🚀 Applied BOOST badge: badge-${post.boostBadge} to post ${post.id.substring(0, 8)}`);
                     }
                     
-                    // Apply badge classes. Combine calculated badges with any composer-selected badges (e.g., 'sell')
-                    try {
-                        const calculatedBadges = calculateBadges(post, sortedPosts) || [];
-                        const composerBadges = (post.badges && Array.isArray(post.badges)) ? post.badges : [];
-                        const combined = Array.from(new Set([...calculatedBadges, ...composerBadges]));
-                        combined.forEach(b => {
-                            box.classList.add(`badge-${b}`);
-                        });
-                    } catch (badgeError) {
-                        console.error(`❌ Badge calculation error for post ${post.id}:`, badgeError);
-                        // Continue rendering without badges if calculation fails
-                    }
-                    
-                    // Check if post is NEW (created less than 5 minutes ago)
-                    if (post.isNew || (post.createdAt && (Date.now() - post.createdAt < 300000))) {
-                        box.classList.add('badge-new');
-                        console.log(`✨ Applied NEW badge to post ${post.id.substring(0, 8)}`);
-                    }
+                    // 👤 SELF-POST BADGE OVERRIDE: If this is user's own post, override all badges
+                    if (post.isSelfPost === true) {
+                        // Remove all rank-based badges (crowned, runner-up, podium) and engagement badges
+                        box.classList.remove('badge-crowned', 'badge-runner-up', 'badge-podium', 'badge-hot', 'badge-trending', 'badge-rising');
+                        // Add self-post badge class that will display "👤 My Post"
+                        box.classList.add('badge-self-post');
+                        console.log(`👤 SELF-POST BADGE: Applied 👤 My Post badge to post ${post.id.substring(0, 8)}`);
+                    } else {
+                        // Apply badge classes. Combine calculated badges with any composer-selected badges (e.g., 'sell')
+                        try {
+                            const calculatedBadges = calculateBadges(post, sortedPosts) || [];
+                            const composerBadges = (post.badges && Array.isArray(post.badges)) ? post.badges : [];
+                            const combined = Array.from(new Set([...calculatedBadges, ...composerBadges]));
+                            combined.forEach(b => {
+                                box.classList.add(`badge-${b}`);
+                            });
+                        } catch (badgeError) {
+                            console.error(`❌ Badge calculation error for post ${post.id}:`, badgeError);
+                            // Continue rendering without badges if calculation fails
+                        }
+                        
+                        // Check if post is NEW (created less than 5 minutes ago)
+                        if (post.isNew || (post.createdAt && (Date.now() - post.createdAt < 300000))) {
+                            box.classList.add('badge-new');
+                            console.log(`✨ Applied NEW badge to post ${post.id.substring(0, 8)}`);
+                        }
 
-                    // Apply proximity badge (NEARBY, FEATURED, or COMMUNITY)
-                    if (post.proximityClass) {
-                        box.classList.add(`badge-${post.proximityClass}`);
-                    }
+                        // Apply proximity badge (NEARBY, FEATURED, or COMMUNITY)
+                        if (post.proximityClass) {
+                            box.classList.add(`badge-${post.proximityClass}`);
+                        }
 
-                    // Apply engagement tier badge (HOT, PODIUM, DISLIKED, NEW)
-                    if (post.engagementTier && post.engagementTier !== 'NORMAL' && post.engagementTier !== 'LIKED') {
-                        box.classList.add(`badge-${post.engagementTier.toLowerCase()}`);
+                        // Apply engagement tier badge (HOT, PODIUM, DISLIKED, NEW)
+                        if (post.engagementTier && post.engagementTier !== 'NORMAL' && post.engagementTier !== 'LIKED') {
+                            box.classList.add(`badge-${post.engagementTier.toLowerCase()}`);
+                        }
                     }
                     
                     // DISTRIBUTION TRACKING: Track when user's own posts are shown (for recirculation)
