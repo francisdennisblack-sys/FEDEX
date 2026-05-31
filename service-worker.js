@@ -1,8 +1,8 @@
 // 🔄 SERVICE WORKER: Offline-first, background sync, post caching
 // Keeps website running in background, never kills processes, enables offline access
 
-const CACHE_NAME = 'wifi-content-v2';
-const POSTS_CACHE = 'posts-cache-v1';
+const CACHE_NAME = 'wifi-content-v3-mobile-optimized'; // Updated cache version for mobile optimization
+const POSTS_CACHE = 'posts-cache-v2';
 const urlsToCache = [
   '/',
   '/index.html',
