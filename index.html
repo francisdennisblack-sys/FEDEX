@@ -8727,6 +8727,102 @@
         let lastRejectedFileName = null; // Track the filename that was rejected
         
         // ============================================================================
+        // 🌍 LOCATION PAGINATION SYSTEM - Load locations on-demand
+        // ============================================================================
+        let locationCache = {}; // Cache locations by state for quick access
+        let loadedStates = new Set(); // Track which states have been loaded
+        const LOCATION_CHUNK_SIZE = 500; // Load 500 locations per chunk
+        const LOCATION_CACHE_MAX = 2000; // Keep max 2000 locations in active cache
+        
+        /**
+         * Load locations for a specific state (or all if state is null)
+         * Only loads what's needed, avoids loading all 500K at once
+         */
+        async function loadLocationsByState(stateCode = null) {
+            if (!stateCode || loadedStates.has(stateCode)) {
+                return locationCache[stateCode] || [];
+            }
+            
+            try {
+                // Load this specific state from globalLocationDatabase
+                if (typeof globalLocationDatabase === 'undefined' || !Array.isArray(globalLocationDatabase)) {
+                    return [];
+                }
+                
+                const stateLocations = globalLocationDatabase.filter(loc => 
+                    loc && loc.stateCode === stateCode
+                );
+                
+                if (stateLocations.length > 0) {
+                    locationCache[stateCode] = stateLocations;
+                    loadedStates.add(stateCode);
+                    console.log(`📍 Loaded ${stateLocations.length} locations for ${stateCode}`);
+                }
+                
+                return stateLocations;
+            } catch (e) {
+                console.warn(`Error loading locations for ${stateCode}:`, e);
+                return [];
+            }
+        }
+        
+        /**
+         * Search locations efficiently with pagination
+         * Only searches through relevant chunks instead of all 500K
+         */
+        function searchLocationsEfficiently(query, maxResults = 100) {
+            if (!query || query.length < 1) return [];
+            
+            const q = query.toLowerCase().trim();
+            const results = [];
+            
+            // Strategy 1: Search through cached/loaded states first
+            for (const stateCode of loadedStates) {
+                const stateLocations = locationCache[stateCode] || [];
+                stateLocations.forEach(loc => {
+                    if (results.length >= maxResults) return;
+                    if (loc && loc.name && loc.name.toLowerCase().includes(q)) {
+                        results.push(loc);
+                    }
+                });
+                if (results.length >= maxResults) break;
+            }
+            
+            // Strategy 2: If not enough results, search globalLocationDatabase but limit scope
+            if (results.length < maxResults && globalLocationDatabase) {
+                const remaining = maxResults - results.length;
+                const additionalMatches = globalLocationDatabase
+                    .slice(0, 5000) // Only search first 5000 (not all 500K)
+                    .filter(loc => 
+                        loc && loc.name && 
+                        loc.name.toLowerCase().includes(q) &&
+                        !results.find(r => r.name === loc.name)
+                    )
+                    .slice(0, remaining);
+                results.push(...additionalMatches);
+            }
+            
+            return results;
+        }
+        
+        /**
+         * Cleanup old location cache when it gets too large
+         * Keeps only most recent states to prevent memory growth
+         */
+        function cleanupLocationCache() {
+            if (Object.keys(locationCache).length > 10) {
+                // Keep only 5 most recently used states
+                const statesToKeep = Array.from(loadedStates).slice(-5);
+                const newCache = {};
+                statesToKeep.forEach(state => {
+                    newCache[state] = locationCache[state];
+                });
+                locationCache = newCache;
+                console.log(`🧹 Location cache cleaned: keeping ${statesToKeep.length} states`);
+            }
+        }
+        
+        // ============================================================================
         // MEMORY OPTIMIZATION: Limit postCache size to prevent crashes on mobile
         // ============================================================================
         const MAX_CACHE_SIZE = 100; // AGGRESSIVE: Keep only 100 most recent posts (was 500)
