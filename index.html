@@ -429,6 +429,203 @@
 
         // Global web worker search instance
         window.webWorkerSearch = new WebWorkerSearch();
+
+        /**
+         * 🚀 PHASE 4: VIRTUAL GRID SCROLLER
+         * Renders posts in a scrollable grid with DOM recycling
+         * Only renders 20-30 visible items, recycles nodes as user scrolls
+         */
+        class VirtualGridScroller {
+            constructor(containerSelector, itemsArray, itemsPerRow = 1, itemHeight = 400) {
+                this.container = document.querySelector(containerSelector);
+                if (!this.container) {
+                    console.warn(`VirtualGridScroller: Container "${containerSelector}" not found`);
+                    return;
+                }
+                
+                this.items = itemsArray || [];
+                this.itemsPerRow = itemsPerRow;
+                this.itemHeight = itemHeight;
+                this.scrollPos = 0;
+                this.startIdx = 0;
+                this.nodePool = []; // DOM node reuse pool
+                
+                this.setup();
+            }
+            
+            setup() {
+                // Create grid container
+                this.gridContainer = document.createElement('div');
+                this.gridContainer.style.cssText = `
+                    display: grid;
+                    grid-template-columns: repeat(${this.itemsPerRow}, 1fr);
+                    gap: 12px;
+                    padding: 12px;
+                    background-color: #0a0a0a;
+                    overflow-y: auto;
+                    overflow-x: hidden;
+                `;
+                
+                // Create item nodes in pool (reuse them)
+                const visibleCount = this.itemsPerRow * Math.ceil(window.innerHeight / this.itemHeight) + this.itemsPerRow;
+                for (let i = 0; i < Math.min(visibleCount, 50); i++) {
+                    const node = document.createElement('div');
+                    node.style.cssText = `
+                        background-color: #1a1a1a;
+                        border: 1px solid #2a2a2a;
+                        border-radius: 8px;
+                        padding: 12px;
+                        min-height: ${this.itemHeight}px;
+                        transition: background-color 0.2s;
+                        cursor: pointer;
+                    `;
+                    node.onmouseover = () => node.style.backgroundColor = '#242424';
+                    node.onmouseout = () => node.style.backgroundColor = '#1a1a1a';
+                    this.nodePool.push(node);
+                    this.gridContainer.appendChild(node);
+                }
+                
+                this.container.appendChild(this.gridContainer);
+                this.gridContainer.addEventListener('scroll', () => this.onScroll());
+            }
+            
+            onScroll() {
+                this.scrollPos = this.gridContainer.scrollTop;
+                const visibleCount = this.itemsPerRow * Math.ceil(this.gridContainer.clientHeight / this.itemHeight);
+                this.startIdx = Math.floor(this.scrollPos / this.itemHeight) * this.itemsPerRow;
+                this.render(visibleCount);
+            }
+            
+            render(visibleCount = 30) {
+                const endIdx = Math.min(this.startIdx + visibleCount, this.items.length);
+                
+                // Update visible range in nodes
+                for (let i = 0; i < this.nodePool.length; i++) {
+                    const itemIdx = this.startIdx + i;
+                    const node = this.nodePool[i];
+                    
+                    if (itemIdx < endIdx && itemIdx < this.items.length) {
+                        const item = this.items[itemIdx];
+                        this.renderItem(node, item, itemIdx);
+                        node.style.display = '';
+                    } else {
+                        node.style.display = 'none';
+                        node.innerHTML = '';
+                    }
+                }
+            }
+            
+            renderItem(node, item, index) {
+                // Override to customize item rendering
+                node.innerHTML = `
+                    <h3 style="margin: 0 0 8px 0; color: #fff;">${item.title || item.name || ''}</h3>
+                    <p style="margin: 0; color: #aaa; font-size: 12px;">${item.description || item.content || ''}</p>
+                `;
+            }
+            
+            setItems(newItems) {
+                this.items = newItems || [];
+                this.startIdx = 0;
+                this.scrollPos = 0;
+                this.gridContainer.scrollTop = 0;
+                this.render();
+            }
+        }
+
+        /**
+         * 🚀 PHASE 5: INCREMENTAL DATA LOADER
+         * Loads locations/POIs progressively by state to reduce startup time
+         * Preloads nearby states first, then loads others in background
+         */
+        class IncrementalDataLoader {
+            constructor(dataSourcePath = '/data') {
+                this.dataSourcePath = dataSourcePath;
+                this.loadedStates = new Set();
+                this.currentState = null;
+                this.loadQueue = [];
+                this.isLoading = false;
+            }
+            
+            async loadNearbyStates(userLat, userLon, radiusMiles = 50) {
+                if (!userLat || !userLon) {
+                    console.warn('⚠️ IncrementalDataLoader: No user location');
+                    return [];
+                }
+                
+                // Find states within radius
+                const statesInRadius = await this.getStatesNearby(userLat, userLon, radiusMiles);
+                console.log(`📍 IncrementalDataLoader: Found ${statesInRadius.length} states within ${radiusMiles}mi`);
+                
+                // Load primary state first
+                if (statesInRadius.length > 0) {
+                    await this.loadState(statesInRadius[0]);
+                    
+                    // Queue others for background loading
+                    for (let i = 1; i < statesInRadius.length; i++) {
+                        this.queueStateLoad(statesInRadius[i]);
+                    }
+                    
+                    // Start background loader
+                    this.startBackgroundLoader();
+                }
+                
+                return statesInRadius;
+            }
+            
+            async loadState(stateName) {
+                if (this.loadedStates.has(stateName)) {
+                    console.log(`✅ State already loaded: ${stateName}`);
+                    return null;
+                }
+                
+                try {
+                    const response = await fetch(`${this.dataSourcePath}/locations-${stateName.toLowerCase()}.json`);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    
+                    const data = await response.json();
+                    this.loadedStates.add(stateName);
+                    console.log(`✅ Loaded ${data.length} locations for ${stateName}`);
+                    
+                    return data;
+                } catch (e) {
+                    console.warn(`⚠️ Failed to load ${stateName}:`, e);
+                    return null;
+                }
+            }
+            
+            queueStateLoad(stateName) {
+                if (!this.loadedStates.has(stateName) && !this.loadQueue.includes(stateName)) {
+                    this.loadQueue.push(stateName);
+                }
+            }
+            
+            async startBackgroundLoader() {
+                if (this.isLoading || this.loadQueue.length === 0) return;
+                
+                this.isLoading = true;
+                while (this.loadQueue.length > 0) {
+                    const state = this.loadQueue.shift();
+                    try {
+                        await this.loadState(state);
+                        // Delay between loads to avoid network saturation
+                        await new Promise(r => setTimeout(r, 500));
+                    } catch (e) {
+                        console.error('Background load error:', e);
+                    }
+                }
+                this.isLoading = false;
+                console.log('✅ All background state loads complete');
+            }
+            
+            async getStatesNearby(lat, lon, radiusMiles) {
+                // Stub: Replace with actual state proximity lookup
+                // For now, return common states
+                return ['California', 'Texas', 'New York'];
+            }
+        }
+
+        // Global incremental loader instance
+        window.incrementalLoader = new IncrementalDataLoader();
     </script>
     <!-- 🚀 MOBILE OPTIMIZATION: Auto-clear old caches on page load -->
     <script>
