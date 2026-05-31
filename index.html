@@ -13811,6 +13811,9 @@
             console.log(`   📤 This location will be used for your next posts!\n`);
         }
 
+        let refineLocationSearchTimeout;
+        let lastRefineLocationSearchQuery = '';
+
         function handleCustomZoneInput() {
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
@@ -13835,8 +13838,17 @@
                 dropdown.innerHTML = '<div id="refineLocationResultsContainer" style="padding: 10px; text-align: center; color: #888; font-size: 13px;"></div>';
             }
 
-            // Filter and show results
-            filterRefineLocationSearch(val);
+            // Skip search if query hasn't changed
+            if (val === lastRefineLocationSearchQuery) {
+                return;
+            }
+            lastRefineLocationSearchQuery = val;
+
+            // DEBOUNCE: Clear existing timeout and set new one
+            clearTimeout(refineLocationSearchTimeout);
+            refineLocationSearchTimeout = setTimeout(() => {
+                filterRefineLocationSearch(val);
+            }, 200); // Wait 200ms after user stops typing
         }
 
         /**
@@ -13983,51 +13995,56 @@
             }
             
             // Search POIs (CRITICAL: Must include POIs in refine location dropdown)
-            // Ensure POI search index is loaded
-            if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
-                window.ensureGlobalPoiSearchIndex();
-            }
-            
-            if (globalPOIDatabase && globalPOIDatabase.length > 0) {
-                console.log(`🔍 Searching ${globalPOIDatabase.length} POIs for query: "${queryLower}"`);
-                // Limit to first 100K POIs for performance
-                const searchLimit = Math.min(globalPOIDatabase.length, 100000);
-                let poiMatches = 0;
-                for (let i = 0; i < searchLimit; i++) {
-                    const poi = globalPOIDatabase[i];
-                    if (!poi) continue;
-                    
-                    const poiName = String(poi.name || '').toLowerCase().trim();
-                    const poiCategory = String(poi.category || poi.type || 'Place').toLowerCase().trim();
-                    const poiCity = String(poi.city || '').toLowerCase().trim();
-                    
-                    // Skip empty POI names
-                    if (!poiName || poiName.length === 0) continue;
-                    
-                    // Search across name, category, and city with priority for exact/prefix matches
-                    const searchStr = `${poiName} ${poiCategory} ${poiCity}`.toLowerCase();
-                    
-                    if (searchStr.includes(queryLower)) {
-                        poiMatches++;
-                        const category = poi.category || poi.type || 'Place';
-                        // Prioritize exact name match > category match > contains
-                        let rankScore = 2; // Base: contains match
-                        if (poiName === queryLower) rankScore = -1; // Exact match - highest priority
-                        else if (poiName.startsWith(queryLower)) rankScore = 0.5; // Prefix match
-                        else if (poiCategory.includes(queryLower)) rankScore = 1; // Category match
-                        
-                        results.push({
-                            type: 'poi',
-                            name: poi.name,
-                            category: category,
-                            emoji: poi.emoji || '🏢',
-                            rank: rankScore
-                        });
-                    }
+            // OPTIMIZATION: Only search POIs if query is at least 2 characters to avoid massive result sets
+            if (queryLower.length >= 2) {
+                // Ensure POI search index is loaded
+                if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                    window.ensureGlobalPoiSearchIndex();
                 }
-                console.log(`✅ POI search complete - found ${poiMatches} POI matches for "${queryLower}"`);
-            } else {
-                console.warn('⚠️ POI database not loaded - POIs not available in search');
+                
+                if (globalPOIDatabase && globalPOIDatabase.length > 0) {
+                    // OPTIMIZATION: Limit to first 50K POIs instead of 100K for better performance
+                    const searchLimit = Math.min(globalPOIDatabase.length, 50000);
+                    let poiMatches = 0;
+                    for (let i = 0; i < searchLimit; i++) {
+                        const poi = globalPOIDatabase[i];
+                        if (!poi) continue;
+                        
+                        const poiName = String(poi.name || '').toLowerCase().trim();
+                        const poiCategory = String(poi.category || poi.type || 'Place').toLowerCase().trim();
+                        const poiCity = String(poi.city || '').toLowerCase().trim();
+                        
+                        // Skip empty POI names
+                        if (!poiName || poiName.length === 0) continue;
+                        
+                        // Search across name, category, and city with priority for exact/prefix matches
+                        const searchStr = `${poiName} ${poiCategory} ${poiCity}`.toLowerCase();
+                        
+                        if (searchStr.includes(queryLower)) {
+                            poiMatches++;
+                            const category = poi.category || poi.type || 'Place';
+                            // Prioritize exact name match > category match > contains
+                            let rankScore = 2; // Base: contains match
+                            if (poiName === queryLower) rankScore = -1; // Exact match - highest priority
+                            else if (poiName.startsWith(queryLower)) rankScore = 0.5; // Prefix match
+                            else if (poiCategory.includes(queryLower)) rankScore = 1; // Category match
+                            
+                            results.push({
+                                type: 'poi',
+                                name: poi.name,
+                                category: category,
+                                emoji: poi.emoji || '🏢',
+                                rank: rankScore
+                            });
+                        }
+                        
+                        // OPTIMIZATION: Stop early if we already have 100 results
+                        if (poiMatches >= 100) break;
+                    }
+                    if (poiMatches > 0) console.log(`✅ POI search complete - found ${poiMatches} POI matches for "${queryLower}"`);
+                } else {
+                    console.log('⚠️ POI database not loaded - POIs not available in search');
+                }
             }
             
             // Sort by rank only (no distance sorting)
