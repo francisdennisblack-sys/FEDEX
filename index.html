@@ -8758,7 +8758,108 @@
         let lastRejectedFileName = null; // Track the filename that was rejected
         
         // ============================================================================
-        // 🌍 LOCATION PAGINATION SYSTEM - Load locations on-demand
+        // � CONTEXT-AWARE LOADING SYSTEM - Load areas based on user behavior
+        // ============================================================================
+        
+        // Page context modes
+        const PAGE_MODES = {
+            HOME_FEED: 'HOME_FEED',      // User viewing feed (50 post boxes)
+            POSTING: 'POSTING',           // User in post creation modal (10-15 form boxes)
+            PROFILE: 'PROFILE',           // User viewing profile (50 profile boxes)
+            LOCATION_SELECT: 'LOCATION_SELECT'  // User selecting location (20 location boxes)
+        };
+        
+        let currentPageMode = PAGE_MODES.HOME_FEED;  // Start in home feed mode
+        let currentAreasLoaded = new Set();           // Track which areas/zones we've loaded
+        let areaLoadLimits = {
+            [PAGE_MODES.HOME_FEED]: 5,            // Load up to 5 areas for home feed
+            [PAGE_MODES.POSTING]: 1,              // Only 1 area when posting
+            [PAGE_MODES.PROFILE]: 2,              // Up to 2 areas for profile
+            [PAGE_MODES.LOCATION_SELECT]: 3       // Up to 3 areas for location select
+        };
+        
+        let boxPoolByContext = {
+            [PAGE_MODES.HOME_FEED]: [],           // Will hold 50 post boxes
+            [PAGE_MODES.POSTING]: [],             // Will hold 10-15 form boxes
+            [PAGE_MODES.PROFILE]: [],             // Will hold 50 profile boxes
+            [PAGE_MODES.LOCATION_SELECT]: []      // Will hold 20 location boxes
+        };
+        
+        /**
+         * 🎯 Switch page context and manage area loading
+         * Called when user changes view (e.g., opens posting modal, navigates)
+         */
+        function switchPageContext(newMode) {
+            if (currentPageMode === newMode) return;  // Already in this mode
+            
+            const oldMode = currentPageMode;
+            currentPageMode = newMode;
+            
+            console.log(`🔄 Context switch: ${oldMode} → ${newMode}`);
+            
+            // Limit areas loaded based on new context
+            const areaLimit = areaLoadLimits[newMode] || 1;
+            console.log(`   📍 Area limit for ${newMode}: ${areaLimit} (currently loaded: ${currentAreasLoaded.size})`);
+            
+            // If we've loaded too many areas, clear excess
+            if (currentAreasLoaded.size > areaLimit) {
+                const areasArray = Array.from(currentAreasLoaded);
+                const areasToRemove = areasArray.slice(areaLimit);
+                
+                areasToRemove.forEach(area => {
+                    currentAreasLoaded.delete(area);
+                    // Don't load posts for this area
+                    if (gridContent[area]) {
+                        console.log(`   🗑️ Removed area ${area} (limit exceeded for ${newMode})`);
+                    }
+                });
+            }
+            
+            // Trigger re-render with limited data
+            renderGrid();
+        }
+        
+        /**
+         * 🎯 Load posts only for specific area based on current context
+         * Only loads area if we haven't exceeded the limit for current mode
+         */
+        function loadPostsForArea(areaTag) {
+            // Check if we can load more areas in current context
+            const areaLimit = areaLoadLimits[currentPageMode] || 1;
+            const alreadyLoaded = currentAreasLoaded.has(areaTag);
+            
+            if (!alreadyLoaded && currentAreasLoaded.size >= areaLimit) {
+                console.log(`⚠️ Area limit reached for ${currentPageMode} (${areaLimit}). Cannot load ${areaTag}`);
+                return false;  // Don't load this area
+            }
+            
+            if (!alreadyLoaded) {
+                currentAreasLoaded.add(areaTag);
+                console.log(`✅ Loaded area: ${areaTag} (${currentAreasLoaded.size}/${areaLimit} for ${currentPageMode})`);
+            }
+            
+            return true;  // OK to load/use this area
+        }
+        
+        /**
+         * 🎯 Get limited posts for current context
+         * Returns only posts from loaded areas
+         */
+        function getContextLimitedPosts() {
+            const posts = [];
+            
+            // Only get posts from loaded areas
+            for (const area of currentAreasLoaded) {
+                if (gridContent[area] && Array.isArray(gridContent[area])) {
+                    posts.push(...gridContent[area]);
+                }
+            }
+            
+            return posts;
+        }
+        
+        // ============================================================================
+        // �🌍 LOCATION PAGINATION SYSTEM - Load locations on-demand
         // ============================================================================
         let locationCache = {}; // Cache locations by state for quick access
         let loadedStates = new Set(); // Track which states have been loaded
@@ -13972,6 +14073,9 @@
         // Modal functions
         function openModal(boxIndex) {
             // allow posting even away from POIs (notification removed)
+            
+            // 🎯 CONTEXT SWITCH: User is now in posting mode
+            switchPageContext(PAGE_MODES.POSTING);
 
             // Prevent posting if user reached 5 posts
             if (userPostBoxes.length >= 5) {
@@ -15347,8 +15451,16 @@
             const oldZoneTag = currentZoneTag;
             currentZoneTag = locationName;
             userSelectedZone = true; // FLAG: User has explicitly selected a zone
+            
+            // 🎯 CONTEXT-AWARE: Track that user is accessing this area
+            const canLoadArea = loadPostsForArea(locationName);
+            if (!canLoadArea) {
+                console.warn(`   ⚠️ Cannot load posts for ${locationName} - area limit reached for ${currentPageMode}`);
+            }
+            
             console.log(`   ✅ STEP 3: Global currentZoneTag updated: "${oldZoneTag}" → "${currentZoneTag}"`);
             console.log(`   ✅ STEP 3b: User selection flag set - will not auto-detect over this`);
+            console.log(`   ✅ STEP 3c: Area tracking updated (${currentAreasLoaded.size} areas loaded for ${currentPageMode})`);
             
             // STEP 4: Update the visual "SENDING TO:" field with selection and call updateZonePredictor
             const zonePredictor = document.getElementById('zonePredictor');
@@ -16037,6 +16149,9 @@
             isPostingInProgress = false; // Reset posting flag when modal closes
             // 🚀 BOOST: clear any armed boost intent when composer is cancelled.
             if (typeof resetBoostButton === 'function') resetBoostButton();
+            
+            // 🎯 CONTEXT SWITCH: User closed posting modal, back to home feed
+            switchPageContext(PAGE_MODES.HOME_FEED);
             
             // Re-enable the submit button just in case
             const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
@@ -20241,11 +20356,22 @@
             if (!gridElement) return;
             
             // Get all posts (flat list, no reorganization)
+            // 🎯 CONTEXT-AWARE: Only get posts from loaded areas based on current mode
             const allPosts = [];
-            for (const key of Object.keys(gridContent)) {
-                if (Array.isArray(gridContent[key])) {
-                    allPosts.push(...gridContent[key]);
+            
+            // If in HOME_FEED mode, load posts only from areas user has accessed
+            if (currentPageMode === PAGE_MODES.HOME_FEED) {
+                const contextPosts = getContextLimitedPosts();
+                allPosts.push(...contextPosts);
+                console.log(`📊 renderGrid (${currentPageMode}): Using ${allPosts.length} posts from ${currentAreasLoaded.size} areas`);
+            } else {
+                // For other modes (POSTING, PROFILE, etc), get limited set
+                for (const key of Object.keys(gridContent)) {
+                    if (Array.isArray(gridContent[key])) {
+                        allPosts.push(...gridContent[key]);
+                    }
                 }
+                console.log(`📊 renderGrid (${currentPageMode}): Using ${allPosts.length} total posts`);
             }
             
             // Just take first 15, no sorting
