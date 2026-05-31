@@ -6991,10 +6991,13 @@
                 console.log(`🧹 Cleaned postCache: ${cacheKeys.length} → ${MAX_CACHE_SIZE}`);
             }
             
+            // CRITICAL: Also limit gridContent to prevent unbounded memory growth
+            limitGridContentMemory();
+            
             console.log(`✅ Memory cleanup complete: removed ${totalRemoved} old posts`);
         }
         
-        // Run cleanup periodically
+        // Run cleanup periodically (every 30 seconds to catch memory issues quickly)
         setInterval(cleanupMemory, CLEANUP_INTERVAL);
         
         function scheduleRender() {
@@ -7530,6 +7533,8 @@
         // ============================================================================
         const MAX_CACHE_SIZE = 500; // Keep only 500 most recent posts in memory
         const POST_CACHE_CLEANUP_THRESHOLD = 600; // Trigger cleanup at 600 items
+        const MAX_POSTS_PER_AREA = 200; // CRITICAL: Limit posts per area to prevent unbounded growth
+        const MAX_TOTAL_GRIDCONTENT = 2000; // Hard limit on total posts across all areas
         
         function addToPostCache(post) {
             if (!post || !post.id) return;
@@ -7555,6 +7560,66 @@
                 });
                 
                 console.log(`✅ PostCache trimmed to ${MAX_CACHE_SIZE} posts`);
+            }
+        }
+        
+        // ============================================================================
+        // GRIDCONTENT MEMORY LIMITER - Prevent unbounded growth
+        // ============================================================================
+        function limitGridContentMemory() {
+            try {
+                let totalPostsStored = 0;
+                const areasOverLimit = [];
+                
+                // First pass: count and identify over-limit areas
+                for (const area in gridContent) {
+                    if (Array.isArray(gridContent[area])) {
+                        const count = gridContent[area].length;
+                        totalPostsStored += count;
+                        
+                        if (count > MAX_POSTS_PER_AREA) {
+                            areasOverLimit.push({ area, count });
+                        }
+                    }
+                }
+                
+                // Second pass: trim areas that exceed per-area limit
+                for (const { area, count } of areasOverLimit) {
+                    // Keep newest posts, discard oldest
+                    gridContent[area].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                    const removed = gridContent[area].length - MAX_POSTS_PER_AREA;
+                    gridContent[area] = gridContent[area].slice(0, MAX_POSTS_PER_AREA);
+                    console.log(`🧹 Area "${area}": Trimmed ${removed} posts (${count} → ${MAX_POSTS_PER_AREA})`);
+                }
+                
+                // Third pass: If STILL over total limit, trim oldest posts globally
+                if (totalPostsStored > MAX_TOTAL_GRIDCONTENT) {
+                    console.log(`⚠️ GridContent ${totalPostsStored} posts exceeds ${MAX_TOTAL_GRIDCONTENT}, aggressive trimming...`);
+                    
+                    // Flatten all posts, sort by age
+                    let allPosts = [];
+                    for (const area in gridContent) {
+                        if (Array.isArray(gridContent[area])) {
+                            allPosts = allPosts.concat(gridContent[area].map(p => ({ post: p, area })));
+                        }
+                    }
+                    
+                    allPosts.sort((a, b) => (b.post.timestamp || 0) - (a.post.timestamp || 0));
+                    const keepPosts = allPosts.slice(0, MAX_TOTAL_GRIDCONTENT);
+                    const keepPostIds = new Set(keepPosts.map(x => x.post.id));
+                    
+                    // Rebuild gridContent with only kept posts
+                    const newGridContent = {};
+                    keepPosts.forEach(({ post, area }) => {
+                        if (!newGridContent[area]) newGridContent[area] = [];
+                        newGridContent[area].push(post);
+                    });
+                    gridContent = newGridContent;
+                    
+                    console.log(`✅ GridContent trimmed to ${MAX_TOTAL_GRIDCONTENT} posts (removed ${totalPostsStored - MAX_TOTAL_GRIDCONTENT})`);
+                }
+            } catch (error) {
+                console.warn('Error limiting gridContent memory:', error);
             }
         }
         
