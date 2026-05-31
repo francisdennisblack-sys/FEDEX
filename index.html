@@ -1479,6 +1479,12 @@
                         updateAccountUI();
                         showNotification && showNotification('Account created', `Welcome ${username || email}`);
                         
+                        // 📍 Track user location when they create account
+                        if (userLocation && userLocation.lat && userLocation.lon) {
+                            trackUserLocation(canonicalUid, userLocation.lat, userLocation.lon);
+                            console.log(`📍 User location tracked after account creation`);
+                        }
+                        
                         // RESTART GRID: Clear cached posts and reload fresh grid
                         console.log('🔄 Restarting grid after account creation...');
                         gridContent = {}; // Clear all cached posts
@@ -1530,6 +1536,13 @@
                             window.currentPostId = postId;
                         } catch (e) { console.warn('Could not persist displayName/grid/post ids for email sign-in', e); }
                         } catch (e) { console.warn('Could not persist sign-in markers for email sign-in', e); }
+                        
+                        // 📍 Track user location when they sign in
+                        if (userLocation && userLocation.lat && userLocation.lon) {
+                            trackUserLocation(canonicalUid, userLocation.lat, userLocation.lon);
+                            console.log(`📍 User location tracked after email sign-in`);
+                        }
+                        
                         updateAccountUI();
                         showNotification && showNotification('Signed in', `${user.email}`);
                         
@@ -3008,6 +3021,12 @@
                     if (gridId) window.currentGridId = gridId;
                     if (postId) window.currentPostId = postId;
                     
+                    // 📍 Track user location when they sign in (if we have it)
+                    if (userLocation && userLocation.lat && userLocation.lon) {
+                        trackUserLocation(firebaseUid, userLocation.lat, userLocation.lon);
+                        console.log(`📍 User location tracked: ${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
+                    }
+                    
                     console.log('✅ Session restored for user:', firebaseUid);
                     updateAccountUI();
                     return;
@@ -4057,6 +4076,11 @@
             console.log(`✅ Manual location set: ${lat}, ${lon}`);
             updateLocationStatus('✅ Manual', `${lat.substring(0,7)}, ${lon.substring(0,7)}`);
             updateAdminLocationDisplay();
+            
+            // 📍 Track location for proximity system
+            if (currentUserId) {
+                trackUserLocation(currentUserId, parseFloat(lat), parseFloat(lon));
+            }
         }
         
         // Get location display for admin
@@ -4691,6 +4715,11 @@
                         localStorage.setItem('lastLocationTimestamp', Date.now().toString());
                         // Update status display
                         updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
+                        
+                        // 📍 Track location for proximity system
+                        if (currentUserId) {
+                            trackUserLocation(currentUserId, userLocation.lat, userLocation.lon);
+                        }
                         resolve(userLocation);
                         
                         // NOW: Start continuous location watching for real-time updates
@@ -4732,6 +4761,12 @@
                                     console.log('💾 Location cached in localStorage');
                                     console.log('📍 User Location Acquired');
                                     updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
+                                    
+                                    // 📍 Track location for proximity system
+                                    if (currentUserId) {
+                                        trackUserLocation(currentUserId, userLocation.lat, userLocation.lon);
+                                    }
+                                    
                                     resolve(userLocation);
                                     
                                     // NOW: Start continuous location watching for real-time updates
@@ -8896,6 +8931,82 @@
                 console.warn(`Error loading locations for ${stateCode}:`, e);
                 return [];
             }
+        }
+        
+        // ============================================================================
+        // 🎯 PROXIMITY SYSTEM - Coffee shop MVP (150ft radius)
+        // ============================================================================
+        const PROXIMITY_RADIUS_KM = 0.046;  // 0.046 km = ~150 feet (covers small coffee shop)
+        let onlineUsers = new Map();  // Track online users: userId → {lat, lon, lastSeen}
+        
+        function trackUserLocation(userId, lat, lon) {
+            if (!userId || lat === undefined || lon === undefined) return;
+            
+            onlineUsers.set(userId, {
+                lat: lat,
+                lon: lon,
+                areaTag: currentZoneTag || areaTag || 'unknown',  // Store user's current area tag
+                lastSeen: Date.now()
+            });
+            
+            // Remove users offline for >5 minutes
+            const now = Date.now();
+            for (let [uid, data] of onlineUsers.entries()) {
+                if (now - data.lastSeen > 300000) {
+                    onlineUsers.delete(uid);
+                }
+            }
+        }
+        
+        function getNearbyUsers(lat, lon, radiusKm = PROXIMITY_RADIUS_KM) {
+            // PROXIMITY_RADIUS_KM = 0.3 km = ~984 feet (good for coffee shop MVP)
+            if (!lat || !lon) return [];
+            
+            const nearby = [];
+            
+            for (let [userId, userData] of onlineUsers.entries()) {
+                if (userId === currentUserId) continue;  // Don't include self
+                
+                const dist = calculateDistance(lat, lon, userData.lat, userData.lon);
+                
+                if (dist <= radiusKm) {
+                    nearby.push({ userId, distance: dist });
+                }
+            }
+            
+            return nearby.sort((a, b) => a.distance - b.distance);
+        }
+        
+        function savePostToNearbyUsers(postId, postData, lat, lon) {
+            // Save post to nearby users in same area tag
+            const nearby = getNearbyUsers(lat, lon, PROXIMITY_RADIUS_KM);
+            const posterAreaTag = postData.zoneTag || postData.area || areaTag || 'unknown';
+            
+            console.log(`📍 Post ${postId.substring(0, 12)} from ${lat.toFixed(4)},${lon.toFixed(4)}`);
+            console.log(`   📍 Area: ${posterAreaTag}`);
+            console.log(`   📡 Found ${nearby.length} nearby users within ${(PROXIMITY_RADIUS_KM * 3280).toFixed(0)} feet`);
+            
+            let sharedCount = 0;
+            
+            // Add to each nearby user's grid if they're in the same area tag
+            nearby.forEach(user => {
+                const userData = onlineUsers.get(user.userId);
+                const userAreaTag = userData ? userData.areaTag : 'unknown';
+                
+                // Only share if in same area tag + within proximity
+                if (userAreaTag === posterAreaTag) {
+                    if (!gridContent[user.userId]) {
+                        gridContent[user.userId] = [];
+                    }
+                    gridContent[user.userId].push(postData);
+                    console.log(`   ✅ Added post to ${user.userId} (area: ${userAreaTag})`);
+                    sharedCount++;
+                } else {
+                    console.log(`   ⏭️  Skipped ${user.userId} (different area: ${userAreaTag})`);
+                }
+            });
+            
+            console.log(`   📊 Post shared to ${sharedCount}/${nearby.length} nearby users in same area`);
         }
         
         /**
@@ -17826,7 +17937,7 @@
         /**
          * Track user location history (which POIs they visit)
          */
-        function trackUserLocation(userId, poiName, durationMs = 60000) {
+        function trackUserPOIVisit(userId, poiName, durationMs = 60000) {
             if (!geoSystem.userLocationHistory[userId]) {
                 geoSystem.userLocationHistory[userId] = [];
             }
@@ -23488,6 +23599,25 @@
                 
                 console.log(`📝 Saving post: ${postId.substring(0, 12)}... to ${areaTag || 'Local Zone'} by ${authUserId.substring(0, 12)}...`);
                 
+                // ✨ IMMEDIATELY ADD TO OWN GRID (before Firebase save)
+                // User must see their own post instantly
+                const contentKey = authUserId;
+                if (!gridContent[contentKey]) {
+                    gridContent[contentKey] = [];
+                }
+                gridContent[contentKey].push(postData);
+                postCache[postId] = postData;
+                
+                console.log(`✅ Added to own grid immediately - user will see post now`);
+                console.log(`   📝 Own grid has ${gridContent[contentKey].length} posts`);
+                
+                // 🎯 PROXIMITY ROUTING: Send to nearby users within 100ft
+                if (userLocation && userLocation.lat && userLocation.lon) {
+                    trackUserLocation(authUserId, userLocation.lat, userLocation.lon);
+                    savePostToNearbyUsers(postId, postData, userLocation.lat, userLocation.lon);
+                    console.log(`📡 Post routed to nearby users within 100ft`);
+                }
+                
                 // Save to SHARED posts collection (not per-user)
                 // Use a single retry on transient failure, keeping the same clientId so server dedupes.
                 try {
@@ -23517,23 +23647,17 @@
                 // This ensures the post appears on user's grid and tracks its growth
                 trackUserPost(authUserId, postId, postData);
 
-                // ✨ IMMEDIATELY ADD TO LOCAL CACHES
-                // Don't wait for Firebase listener - add post to gridContent + postCache NOW
+                // ✨ POST ALREADY IN LOCAL CACHES (added above)
+                // Render immediately so user sees their post
                 // This ensures instant feedback to user while Firebase updates propagate
                 
                 // Add to postCache (backup cache)
                 postCache[postId] = postData;
                 console.log(`  💾 Added to postCache: ${postId}`);
                 
-                // Add to gridContent under the current user's key
-                const contentKey = currentUserId;
-                console.log(`  🔑 Using contentKey: "${contentKey}"`);
-                if (!gridContent[contentKey]) {
-                    gridContent[contentKey] = [];
-                    console.log(`  ✨ Created new gridContent["${contentKey}"] array`);
-                }
-                gridContent[contentKey].push(postData);
-                console.log(`  📝 Added to gridContent["${contentKey}"]: ${gridContent[contentKey].length} posts now`);
+                // Add to gridContent under the current user's key (already done above)
+                console.log(`  🔑 User grid already updated`);
+                console.log(`  📝 gridContent["${authUserId}"]: ${gridContent[authUserId].length} posts now`);
                 console.log(`  🔍 gridContent keys after post: [${Object.keys(gridContent).join(', ')}]`);
 
                 // 🎯 TRACK USER POST FOR ML RECOMMENDATIONS
