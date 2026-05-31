@@ -6994,6 +6994,27 @@
             // CRITICAL: Also limit gridContent to prevent unbounded memory growth
             limitGridContentMemory();
             
+            // CRITICAL: Limit external post cache
+            limitExternalPostCache();
+            
+            // CRITICAL: Clean up old debounce entries (keep only recent 1000)
+            if (window.voteDebounceMap) {
+                const debounceKeys = Object.keys(window.voteDebounceMap);
+                if (debounceKeys.length > 1000) {
+                    const sortedByTime = debounceKeys
+                        .map(key => ({ key, time: window.voteDebounceMap[key] }))
+                        .sort((a, b) => b.time - a.time)
+                        .slice(0, 500); // Keep only 500
+                    
+                    const keysToKeep = new Set(sortedByTime.map(x => x.key));
+                    debounceKeys.forEach(key => {
+                        if (!keysToKeep.has(key)) {
+                            delete window.voteDebounceMap[key];
+                        }
+                    });
+                }
+            }
+            
             console.log(`✅ Memory cleanup complete: removed ${totalRemoved} old posts`);
         }
         
@@ -8442,6 +8463,26 @@
         let externalPostCache = {}; // Cache for rotation: {areaTag: [topPosts]}
         let lastExternalRotation = {}; // Track rotation time per area
         const EXTERNAL_ROTATION_INTERVAL = 60000; // Rotate external content every minute
+        const MAX_EXTERNAL_CACHE_AREAS = 100; // Limit external cache to 100 areas max
+        
+        // Limit external post cache to prevent unbounded growth
+        function limitExternalPostCache() {
+            const areas = Object.keys(externalPostCache);
+            if (areas.length > MAX_EXTERNAL_CACHE_AREAS) {
+                // Remove oldest rotation times
+                const oldestAreas = areas
+                    .map(area => ({ area, time: lastExternalRotation[area] || 0 }))
+                    .sort((a, b) => a.time - b.time)
+                    .slice(0, areas.length - MAX_EXTERNAL_CACHE_AREAS);
+                
+                oldestAreas.forEach(({ area }) => {
+                    delete externalPostCache[area];
+                    delete lastExternalRotation[area];
+                });
+                
+                console.log(`🧹 External cache trimmed: ${areas.length} → ${MAX_EXTERNAL_CACHE_AREAS} areas`);
+            }
+        }
         
         // ============================================================================
         // AREA HIERARCHY SYSTEM - Posts promote to bigger areas as they grow
