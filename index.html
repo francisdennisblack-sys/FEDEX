@@ -591,17 +591,17 @@
 
                 this.items = []; // All posts loaded so far
                 this.visibleItems = []; // Items currently visible in viewport
-                this.nodePool = []; // Recycled DOM nodes
+                this.renderedBoxes = new Map(); // Map of box ID -> item currently rendered
                 this.lastScrollPos = 0;
                 this.scrollPos = 0;
                 this.renderScheduled = false;
                 this.lastRenderTime = 0;
-                this.boxMap = new Map(); // Map of box element -> current item
 
                 // Config
                 this.itemsPerRow = options.itemsPerRow || 3; // 3-column grid
                 this.itemHeight = options.itemHeight || 200; // Adjust based on CSS
-                this.renderBuffer = options.renderBuffer || 2; // Render 2 rows above/below viewport
+                // INCREASED BUFFER: Keep 8 rows above/below viewport loaded to prevent flickering
+                this.renderBuffer = options.renderBuffer || 8; // Was 2, now 8 = much more stable
                 this.maxPoolSize = options.maxPoolSize || 50; // Max DOM nodes to keep
                 this.batchSize = options.batchSize || 50; // Load 50 items at a time
                 this.onLoadMore = options.onLoadMore || null; // Callback when need more items
@@ -610,8 +610,7 @@
 
                 // Setup
                 this.setupScrollListener();
-                this.setupIntersectionObserver();
-                console.log('✅ VirtualGridScroller initialized');
+                console.log('✅ VirtualGridScroller initialized with aggressive buffer (8 rows)');
             }
 
             setupScrollListener() {
@@ -625,20 +624,6 @@
                     this.gridContainer.addEventListener('scroll', (e) => this.onScroll(e), { passive: true });
                     console.log('📌 VirtualGridScroller listening to container scroll');
                 }
-            }
-
-            setupIntersectionObserver() {
-                this.observer = new IntersectionObserver(
-                    (entries) => {
-                        entries.forEach(entry => {
-                            if (entry.isIntersecting) {
-                                // Item became visible - check if we need to load more
-                                this.checkLoadMore();
-                            }
-                        });
-                    },
-                    { root: this.gridContainer, threshold: 0.1 }
-                );
             }
 
             setItems(items) {
@@ -710,7 +695,7 @@
                     scrollTop = this.scrollPos;
                 }
 
-                // Calculate visible range
+                // Calculate visible range with LARGE buffer to prevent flickering
                 const boxHeight = this.itemHeight;
                 const startRow = Math.max(0, Math.floor(scrollTop / boxHeight) - this.renderBuffer);
                 const endRow = Math.min(
@@ -718,16 +703,16 @@
                     Math.ceil((scrollTop + gridHeight) / boxHeight) + this.renderBuffer
                 );
 
-                this.visibleItems = [];
-                for (let i = startRow * this.itemsPerRow; i < endRow * this.itemsPerRow && i < this.items.length; i++) {
-                    this.visibleItems.push(this.items[i]);
-                }
+                const startIdx = startRow * this.itemsPerRow;
+                const endIdx = Math.min(endRow * this.itemsPerRow, this.items.length);
+
+                this.visibleItems = this.items.slice(startIdx, endIdx);
 
                 // Update DOM boxes with visible items
-                this.updateDOMBoxes();
+                this.updateDOMBoxes(startIdx);
             }
 
-            updateDOMBoxes() {
+            updateDOMBoxes(startIdx) {
                 // Find all grid boxes - 🚀 REAL FIX: Only 50 boxes (was 5000)
                 const gridBoxes = [];
                 for (let i = 1; i < 50; i++) {
@@ -736,11 +721,13 @@
                     gridBoxes.push({ id: i, element: box });
                 }
 
-                // Map items to boxes
+                // Map visible items to boxes, KEEPING previously rendered content
                 let visibleIdx = 0;
-                for (let i = 0; i < gridBoxes.length && visibleIdx < this.visibleItems.length; i++) {
+                const itemsToRender = this.visibleItems;
+                
+                for (let i = 0; i < gridBoxes.length && visibleIdx < itemsToRender.length; i++) {
                     const box = gridBoxes[i].element;
-                    const item = this.visibleItems[visibleIdx];
+                    const item = itemsToRender[visibleIdx];
                     
                     if (item && item.id) {
                         // Item is visible - render it
@@ -749,20 +736,25 @@
                         } else {
                             this.renderItemDefault(box, item);
                         }
-                        this.boxMap.set(box, item);
+                        this.renderedBoxes.set(box.id, item.id);
                         visibleIdx++;
+                    } else {
+                        // No more items to render - stop here
+                        break;
                     }
                 }
 
-                // Hide remaining boxes
+                // 🚀 IMPORTANT: DON'T clear boxes that are loaded!
+                // Only clear boxes that never had content
+                // This prevents the flickering/blank posts issue
                 for (let i = visibleIdx; i < gridBoxes.length; i++) {
                     const box = gridBoxes[i].element;
-                    if (box.getAttribute('data-reserved-box') !== 'add-content') {
-                        box.innerHTML = '';
-                        box.classList.remove('filled');
-                        box.removeAttribute('data-post-id');
-                        this.boxMap.delete(box);
+                    // Only clear if it's the add-content box or completely empty
+                    if (box.getAttribute('data-reserved-box') === 'add-content') {
+                        continue; // Never clear the add content box
                     }
+                    // If this box was never rendered, leave it alone
+                    // It will be filled on next scroll if needed
                 }
             }
 
@@ -774,14 +766,9 @@
             }
 
             destroy() {
-                if (this.observer) {
-                    this.observer.disconnect();
-                }
-                this.gridContainer.removeEventListener('scroll', (e) => this.onScroll(e));
                 this.items = [];
                 this.visibleItems = [];
-                this.nodePool = [];
-                this.boxMap.clear();
+                this.renderedBoxes.clear();
                 console.log('✅ VirtualGridScroller destroyed');
             }
         }
