@@ -20312,6 +20312,19 @@
 
         // 📊 ORIGINAL RENDER: Main rendering function now sends posts to scroller
         function renderGrid() {
+            // 🚫 THROTTLE: Don't refresh grid more than once every 30 seconds
+            // This prevents constant feed churning when there are no new posts
+            const now = Date.now();
+            const lastRenderTime = window.lastRenderGridTime || 0;
+            const RENDER_THROTTLE = 30 * 1000; // 30 seconds
+            
+            if (now - lastRenderTime < RENDER_THROTTLE) {
+                console.log(`⏳ renderGrid throttled (${Math.round((RENDER_THROTTLE - (now - lastRenderTime)) / 1000)}s remaining)`);
+                return;
+            }
+            
+            window.lastRenderGridTime = now;
+            
             console.log('\n' + '='.repeat(70));
             console.log('🎨 RENDERGRID CALLED');
             console.log('='.repeat(70));
@@ -20421,24 +20434,35 @@
                 }
                 
                 // Extract next batch of posts
-                const nextBatch = allFirebasePosts.slice(postBatchOffset, postBatchOffset + POST_BATCH_SIZE);
+                // 🎯 CAP AT 2000 POSTS MAX - don't load more than that
+                const MAX_POSTS = 2000;
+                const nextBatch = allFirebasePosts.slice(postBatchOffset, Math.min(postBatchOffset + POST_BATCH_SIZE, MAX_POSTS));
                 
                 if (nextBatch.length === 0) {
                     console.log(`   ⚠️ No more posts to load`);
                     console.log(`   Total in cache: ${allFirebasePosts.length}`);
                     console.log(`   Already loaded: ${postBatchOffset}`);
+                    console.log(`   (Max cap: ${MAX_POSTS})`);
                     isLoadingMore = false;
                     return;
                 }
                 
-                console.log(`   📦 Loaded ${nextBatch.length} posts`);
+                console.log(`   📦 Loaded ${nextBatch.length} posts (max ${MAX_POSTS})`);
                 console.log(`   Range: ${postBatchOffset} → ${postBatchOffset + nextBatch.length} of ${allFirebasePosts.length}`);
                 
                 // Add batch to grid scroller
                 if (gridScroller) {
+                    // 🚫 Check if already at max posts
+                    const currentCount = gridScroller.items.length;
+                    if (currentCount >= MAX_POSTS) {
+                        console.log(`   ⚠️ Already at max posts (${MAX_POSTS})`);
+                        isLoadingMore = false;
+                        return;
+                    }
+                    
                     gridScroller.addItems(nextBatch);
                     console.log(`   ✅ Added to VirtualGridScroller`);
-                    console.log(`   Total items in scroller now: ${gridScroller.items.length}`);
+                    console.log(`   Total items in scroller now: ${gridScroller.items.length}/${MAX_POSTS}`);
                     
                     // Update offset for next batch
                     postBatchOffset += nextBatch.length;
