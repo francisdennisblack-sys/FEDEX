@@ -1430,9 +1430,30 @@
                             localStorage.setItem('isSignedIn', '1');
                         // Persist displayName/grid/post ids for email sign-ins
                         try {
-                            const display = canonicalUid || (user && user.email ? user.email.split('@')[0] : '');
+                            let display = '';
+                            try {
+                                const db = getDatabase();
+                                if (db) {
+                                    const snapCanonical = await get(ref(db, `users/${canonicalUid}/profile`));
+                                    const canonicalProfile = snapCanonical && snapCanonical.val ? snapCanonical.val() : null;
+                                    if (canonicalProfile && canonicalProfile.username) {
+                                        display = String(canonicalProfile.username).trim();
+                                    }
+                                    if (!display && user && user.uid) {
+                                        const snapFirebase = await get(ref(db, `users/${user.uid}/profile`));
+                                        const firebaseProfile = snapFirebase && snapFirebase.val ? snapFirebase.val() : null;
+                                        if (firebaseProfile && firebaseProfile.username) {
+                                            display = String(firebaseProfile.username).trim();
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn('Could not resolve profile username during email sign-in', e);
+                            }
+                            if (!display) display = (user && user.email ? user.email.split('@')[0] : '');
                             if (display) {
                                 localStorage.setItem('displayName', display);
+                                localStorage.setItem('loggedInUser', display);
                                 window.currentDisplayName = display;
                             }
                             const gridId = canonicalUid || ('local-' + (Date.now()));
@@ -1556,12 +1577,10 @@
                         if (user) {
                             if (user.displayName && String(user.displayName).trim()) return String(user.displayName).trim();
                             if (user.email && String(user.email).includes('@')) return String(user.email).split('@')[0];
-                            if (user.uid) return String(user.uid).slice(0, 8);
                         }
                     } catch (_) {}
 
-                    if (window.currentUserId) return String(window.currentUserId).slice(0, 8);
-                    return 'Guest';
+                    return 'Profile';
                 }
 
                 // Update account UI in header/profile area
@@ -1598,7 +1617,14 @@
                         const avgLikes = posts ? (totalLikes / posts).toFixed(1) : '0';
 
                         // Update profile button to show username with profile styling
-                        const username = profile.username || getCurrentUsername();
+                        const username = (profile.username && String(profile.username).trim()) || getCurrentUsername();
+                        try {
+                            if (username && username !== 'Profile') {
+                                localStorage.setItem('displayName', username);
+                                localStorage.setItem('loggedInUser', username);
+                                window.currentDisplayName = username;
+                            }
+                        } catch (_) {}
                         signInBtn.textContent = username;
                         signInBtn.className = 'signed-in-mode';
                         signInBtn.title = `Click to view profile for ${username}`;
@@ -1900,6 +1926,25 @@
                             
                             // 🔥 CRITICAL: Also set isSignedIn flag
                             localStorage.setItem('isSignedIn', '1');
+
+                            // Persist a human-friendly display name (never UID)
+                            try {
+                                let profileUsername = '';
+                                if (database) {
+                                    const p = await get(ref(database, `users/${firebaseUid}/profile`));
+                                    const profile = p && p.val ? p.val() : null;
+                                    if (profile && profile.username) profileUsername = String(profile.username).trim();
+                                }
+                                const display = profileUsername || window.__pendingUsername || phoneNumber || '';
+                                if (display) {
+                                    localStorage.setItem('displayName', display);
+                                    localStorage.setItem('loggedInUser', display);
+                                    window.currentDisplayName = display;
+                                }
+                            } catch (e2) {
+                                console.warn('Could not persist phone-auth displayName', e2);
+                            }
+
                             console.log('💾 All sign-in markers persisted to localStorage');
                         } catch (e) { console.warn('Could not persist lastSignedIn markers to localStorage', e); }
                         
@@ -2017,9 +2062,18 @@
                     // Immediately set header label from localStorage if available so the user
                     // sees their name without opening the profile modal.
                     try {
+                        const looksLikeId = (v) => {
+                            const s = String(v || '').trim();
+                            if (!s) return false;
+                            if (/^local-[\w-]{6,}$/i.test(s)) return true;
+                            if (/^[A-Za-z0-9_-]{20,}$/.test(s)) return true;
+                            return false;
+                        };
                         const stored = (function(){ try { return localStorage.getItem('loggedInUser') || localStorage.getItem('displayName'); } catch(e){ return null; } })();
                         if (btn) {
-                            btn.textContent = stored || window.currentDisplayName || btn.textContent || 'Profile';
+                            const safeStored = looksLikeId(stored) ? '' : stored;
+                            const safeCurrent = looksLikeId(window.currentDisplayName) ? '' : window.currentDisplayName;
+                            btn.textContent = safeStored || safeCurrent || btn.textContent || 'Profile';
                         }
                     } catch (e) { /* ignore */ }
 
@@ -2041,8 +2095,17 @@
                         try {
                             const el = document.getElementById('signInBtn');
                             if (!el) return;
+                            const looksLikeId = (v) => {
+                                const s = String(v || '').trim();
+                                if (!s) return false;
+                                if (/^local-[\w-]{6,}$/i.test(s)) return true;
+                                if (/^[A-Za-z0-9_-]{20,}$/.test(s)) return true;
+                                return false;
+                            };
                             const stored = (function(){ try { return localStorage.getItem('loggedInUser') || localStorage.getItem('displayName'); } catch(e){ return null; } })();
-                            const name = window.currentDisplayName || stored || null;
+                            const current = looksLikeId(window.currentDisplayName) ? '' : window.currentDisplayName;
+                            const storedSafe = looksLikeId(stored) ? '' : stored;
+                            const name = current || storedSafe || null;
                             if (name) {
                                 el.textContent = name;
                                 return true;
@@ -20543,6 +20606,33 @@
             return `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${formatEarthAreaTag(areaName)}</div>`;
         }
 
+        function getGridTextFontSizePx() {
+            const w = window.innerWidth || 0;
+            if (w >= 1440) return 140;
+            if (w >= 1024) return 120;
+            if (w >= 768) return 42;
+            return 28;
+        }
+
+        function applyGridTextFontSizeToVisiblePosts() {
+            const sizePx = getGridTextFontSizePx();
+            document.querySelectorAll('.post-text-content').forEach(el => {
+                el.style.fontSize = `${sizePx}px`;
+            });
+        }
+
+        if (!window.gridTextFontResizeHookInstalled) {
+            window.addEventListener('resize', () => {
+                applyGridTextFontSizeToVisiblePosts();
+            });
+            window.gridTextFontResizeHookInstalled = true;
+        }
+
+        // Apply immediately so already-rendered posts get the larger size right away.
+        setTimeout(() => {
+            applyGridTextFontSizeToVisiblePosts();
+        }, 0);
+
         /**
          * Render a single grid item with full logic (called by Virtual Grid Scroller)
          * This is the core rendering function extracted from the main loop
@@ -20614,7 +20704,7 @@
                     const areaTagHTML = areaTagText
                         ? `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(areaTagText) : areaTagText}</div>`
                         : '';
-                    box.innerHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box;">${content}</div>${voteBadge}${areaTagHTML}`;
+                    box.innerHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${areaTagHTML}`;
                 }
                 
                 // Set attributes and classes
@@ -20725,9 +20815,11 @@
                     // Render only the changed slot (+1 because box-0 is reserved add-content box)
                     if (typeof gridScroller.renderItemsInRange === 'function') {
                         gridScroller.renderItemsInRange(diffIdx, diffIdx + 1);
+                        applyGridTextFontSizeToVisiblePosts();
                     } else if (typeof gridScroller.setItems === 'function') {
                         // Fallback if API changes
                         gridScroller.setItems(current);
+                        applyGridTextFontSizeToVisiblePosts();
                     }
 
                     const changeType = (diffIdx >= target.length) ? 'remove' : (diffIdx >= current.length ? 'add' : 'replace');
@@ -22061,10 +22153,12 @@
                 if (!gridAlreadyLoaded) {
                     // First paint: load immediately so user sees content quickly.
                     gridScroller.setItems(pendingSortedPosts);
+                    applyGridTextFontSizeToVisiblePosts();
                 } else if (window.voteTriggeredRerank && pendingSortedPosts.length > 0) {
                     // Vote re-rank: apply immediately so post moves + badges refresh without waiting 1/sec.
                     console.log(`🗳️ Vote re-rank: immediate setItems (${pendingSortedPosts.length} posts)`);
                     gridScroller.setItems(pendingSortedPosts);
+                    applyGridTextFontSizeToVisiblePosts();
                 }
                 // Otherwise: let the 1/sec reconciler apply changes gradually (avoids flash-to-black).
             } else {
