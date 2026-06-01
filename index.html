@@ -20261,14 +20261,17 @@
                 }
                 
                 // Calculate and apply badge classes from calculateBadges
-                // CRITICAL FIX: Pass only the visible grid items for position badge calculation
-                // This prevents badges from constantly changing as the entire feed gets re-sorted
-                // The grid scroller has all items loaded, use that instead of global latestSortedPosts
-                const postsForBadgeComparison = (window.gridScroller && window.gridScroller.items) 
-                    ? window.gridScroller.items.slice(0, 100)  // Compare only top 100 visible posts
-                    : (window.latestSortedPosts || []).slice(0, 100);  // Fallback to top 100 of global
+                // 🔒 USE CACHED BADGES: Badges were pre-calculated at feed load time
+                // This ensures they NEVER change during scroll, keeping them stable
+                let badgesArray = post.cachedBadges;
+                if (!badgesArray && window.gridScroller && window.gridScroller.items) {
+                    // Fallback: Calculate if not cached (shouldn't happen, but safety check)
+                    const postsForBadgeComparison = window.gridScroller.items.slice(0, 100);
+                    badgesArray = calculateBadges(post, postsForBadgeComparison);
+                } else if (!badgesArray) {
+                    badgesArray = [];
+                }
                 
-                const badgesArray = calculateBadges(post, postsForBadgeComparison);
                 if (badgesArray && Array.isArray(badgesArray)) {
                     badgesArray.forEach(badge => {
                         if (badge) {
@@ -21516,6 +21519,19 @@
 
             // Refresh latest snapshot after position-1 rotation
             window.latestSortedPosts = [...sortedPosts];
+            
+            // ⭐ PRE-CALCULATE BADGES AT FEED LOAD TIME
+            // This ensures badges are STABLE during scroll and don't change as items are added
+            // Badges are cached on each post object so renderGridItemFull can use the cached value
+            console.log(`⭐ PRE-CALCULATING BADGES for ${sortedPosts.length} posts...`);
+            sortedPosts.forEach((post, index) => {
+                // Calculate badges based on THIS snapshot (first 100 posts for position badges)
+                const postsForComparison = sortedPosts.slice(0, 100);
+                const badges = calculateBadges(post, postsForComparison);
+                // CACHE the badges on the post object
+                post.cachedBadges = badges || [];
+            });
+            console.log(`✅ Badges pre-calculated and cached on all posts`);
             
             // 🚀 FEED POSTS TO VIRTUAL GRID SCROLLER
             // This is where we enable virtual scrolling for the entire main feed
