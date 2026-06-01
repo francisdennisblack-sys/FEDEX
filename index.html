@@ -628,62 +628,64 @@
 
             setItems(items) {
                 this.items = items || [];
-                this.ensureEnoughBoxes();
-                this.renderAllItems();
+                // 🎯 LAZY: Only create boxes for first screen (20 posts)
+                this.ensureBoxesUpTo(20);
+                this.renderItemsInRange(0, 20);
             }
 
             addItems(items) {
                 if (!Array.isArray(items)) return;
+                const startIdx = this.items.length;
                 this.items.push(...items);
-                this.ensureEnoughBoxes();
-                this.renderAllItems();
+                // Don't create boxes yet - wait until user scrolls to them
+                console.log(`📥 Added ${items.length} items to queue (total: ${this.items.length}). Boxes created on-demand.`);
             }
             
-            // 🔧 CRITICAL FIX: Create enough DOM boxes for all items
-            // Previously only 50 boxes existed, causing content to recycle on scroll
-            // Now we create one box per item so content STAYS PUT
-            ensureEnoughBoxes() {
+            // 🎯 LAZY DOM BOX CREATION
+            // Only creates boxes when user actually needs them
+            // Each box created stays permanent (no recycling)
+            ensureBoxesUpTo(targetIndex) {
                 const gridElement = document.getElementById('grid');
                 if (!gridElement) return;
                 
-                const neededBoxes = Math.min(this.items.length + 1, 2001); // +1 for add-content box
+                const maxNeeded = Math.min(targetIndex + 1, 2001); // +1 because box-0 is add-content
                 
                 // Count existing boxes
                 let existingCount = 0;
                 for (let i = 0; i < 2001; i++) {
                     if (document.getElementById(`box-${i}`)) existingCount = i + 1;
+                    else break;
                 }
                 
-                // Create additional boxes if needed
-                if (existingCount < neededBoxes) {
-                    console.log(`📦 Creating ${neededBoxes - existingCount} additional boxes (existing: ${existingCount}, needed: ${neededBoxes})`);
+                if (existingCount >= maxNeeded) return; // Already have enough
+                
+                console.log(`📦 LAZY CREATE: Adding boxes ${existingCount} to ${maxNeeded - 1}`);
+                
+                for (let i = existingCount; i < maxNeeded; i++) {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'grid-item-wrapper';
+                    wrapper.style.display = 'flex';
+                    wrapper.style.flexDirection = 'column';
                     
-                    for (let i = existingCount; i < neededBoxes; i++) {
-                        const wrapper = document.createElement('div');
-                        wrapper.className = 'grid-item-wrapper';
-                        wrapper.style.display = 'flex';
-                        wrapper.style.flexDirection = 'column';
-                        
-                        const box = document.createElement('div');
-                        box.className = 'grid-box';
-                        box.id = `box-${i}`;
-                        box.style.flex = '1';
-                        
-                        wrapper.appendChild(box);
-                        gridElement.appendChild(wrapper);
-                    }
-                    console.log(`✅ Total boxes now: ${neededBoxes}`);
+                    const box = document.createElement('div');
+                    box.className = 'grid-box';
+                    box.id = `box-${i}`;
+                    box.style.flex = '1';
+                    
+                    wrapper.appendChild(box);
+                    gridElement.appendChild(wrapper);
                 }
+                console.log(`✅ Total boxes now: ${maxNeeded}`);
             }
             
-            // 🎯 NEW: Render all items into their PERMANENT boxes (no recycling)
-            // Each item gets its own box that never changes content during scroll
-            renderAllItems() {
+            // 🎨 Render items only in specific range (lazy rendering)
+            renderItemsInRange(startIdx, endIdx) {
                 if (!this.onRenderItem) return;
                 
-                console.log(`🎨 Rendering ${this.items.length} items into permanent boxes...`);
+                const actualEnd = Math.min(endIdx, this.items.length);
+                console.log(`🎨 Rendering items ${startIdx} to ${actualEnd}...`);
                 
-                for (let i = 0; i < this.items.length; i++) {
+                for (let i = startIdx; i < actualEnd; i++) {
                     const item = this.items[i];
                     if (!item || !item.id) continue;
                     
@@ -691,14 +693,11 @@
                     const box = document.getElementById(`box-${i + 1}`);
                     if (!box) continue;
                     
-                    // Check if this box already has THIS item rendered - skip if same
+                    // Skip if same item already rendered there
                     if (box.getAttribute('data-post-id') === item.id) continue;
                     
-                    // Render the item permanently to this box
                     this.onRenderItem(box, item);
                 }
-                
-                console.log(`✅ All items rendered to permanent positions`);
             }
 
             onScroll(e) {
@@ -708,16 +707,48 @@
                 this.lastRenderTime = now;
                 this.scrollPos = this.gridContainer.scrollTop;
 
-                // 🔧 FIX: Don't re-render boxes on scroll!
-                // Items are rendered permanently in their boxes by renderAllItems()
-                // Only check for infinite scroll to load more
                 if (!this.renderScheduled) {
                     this.renderScheduled = true;
                     requestAnimationFrame(() => {
-                        // 🚀 Check for infinite scroll only (no DOM updates needed)
+                        // 🎯 LAZY: Check if we need to create/render more boxes as user scrolls
+                        this.checkLazyRender();
                         this.checkLoadMore();
                         this.renderScheduled = false;
                     });
+                }
+            }
+            
+            // 🎯 LAZY RENDER: Create and render boxes as user scrolls to them
+            checkLazyRender() {
+                let scrollTop, gridHeight;
+                
+                if (this.gridContainer === document.body || this.gridContainer === document.documentElement) {
+                    scrollTop = window.scrollY || window.pageYOffset;
+                    gridHeight = window.innerHeight;
+                } else {
+                    scrollTop = this.gridContainer.scrollTop;
+                    gridHeight = this.gridContainer.clientHeight;
+                }
+                
+                // Calculate which item index is at the bottom of visible area
+                // Add 20 items buffer ahead so user never sees empty boxes
+                const visibleEndY = scrollTop + gridHeight + (this.itemHeight * 5); // 5 rows ahead
+                const visibleEndRow = Math.ceil(visibleEndY / this.itemHeight);
+                const visibleEndIdx = visibleEndRow * this.itemsPerRow;
+                
+                // Count current boxes (excluding box-0)
+                let currentBoxCount = 0;
+                for (let i = 1; i < 2001; i++) {
+                    if (document.getElementById(`box-${i}`)) currentBoxCount = i;
+                    else break;
+                }
+                
+                // If we need more boxes to fill what's about to be visible, create them
+                if (visibleEndIdx > currentBoxCount && currentBoxCount < this.items.length) {
+                    const newTarget = Math.min(visibleEndIdx + 30, this.items.length); // Create 30 more
+                    console.log(`📦 LAZY SCROLL: User approaching bottom, creating boxes up to ${newTarget}`);
+                    this.ensureBoxesUpTo(newTarget);
+                    this.renderItemsInRange(currentBoxCount, newTarget);
                 }
             }
 
