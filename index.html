@@ -2243,7 +2243,7 @@
                     -webkit-appearance: none;
                     transform: translateZ(0);
                     -webkit-transform: translateZ(0);
-                " oninput="checkContentModeration(); updateCharCount();" onfocus="this.style.boxShadow='0 8px 20px rgba(102, 126, 234, 0.25)';" onblur="this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.1)';"></textarea>
+                " oninput="checkContentModeration(); updateCharCount();" onfocus="applyPendingPurchaseToNextPost(); this.style.boxShadow='0 8px 20px rgba(102, 126, 234, 0.25)';" onblur="this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.1)';"></textarea>
                 <div id="charCountDisplay" style="position: absolute; bottom: 12px; right: 12px; font-size: 16px; color: #999; background: transparent; padding: 4px 8px; border-radius: 6px; pointer-events: none; font-weight: 700;">0/200</div>
                 <div id="charError" style="color: #ff6b6b; font-size: 13px; margin-top: 8px; font-weight: 600; display: none;">❌ Maximum 200 characters allowed</div>
             </div>
@@ -14106,6 +14106,7 @@
             populateNearbyLocations();
             
             // Reset form
+            applyPendingPurchaseToNextPost();
             document.getElementById('postText').value = '';
             const previewText = document.getElementById('uploadPreviewText');
             if (previewText) previewText.textContent = 'No media selected';
@@ -22868,6 +22869,66 @@
             return v === true || v === 'true' || v === 1 || v === '1';
         }
 
+        /**
+         * Check for pending purchases and auto-arm badge on next post
+         * Called when composer opens or user is about to create a post
+         */
+        function applyPendingPurchaseToNextPost() {
+            const lastPurchaseType = window.lastPurchaseType || (localStorage && localStorage.getItem('lastPurchaseType'));
+            const purchasePaidAt = window.purchasePaidAt || (localStorage && localStorage.getItem('purchasePaidAt'));
+            
+            if (!lastPurchaseType) return; // No pending purchase
+            
+            console.log(`💰 Applying pending ${lastPurchaseType} purchase to next post...`);
+            
+            if (lastPurchaseType === 'boost') {
+                // Auto-arm boost badge
+                window.pendingBoost.armed = true;
+                window.pendingBoost.armedAt = Date.now();
+                window.pendingBoost.paid = true;
+                
+                // Update boost button UI
+                const boostBtn = document.getElementById('boostBtn');
+                if (boostBtn) {
+                    boostBtn.setAttribute('aria-pressed', 'true');
+                    boostBtn.style.background = 'linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%)';
+                    boostBtn.style.color = '#111827';
+                    boostBtn.style.borderColor = '#f59e0b';
+                    boostBtn.style.boxShadow = '0 6px 20px rgba(251,191,36,0.55)';
+                }
+                const boostLabel = document.getElementById('boostBtnLabel');
+                if (boostLabel) boostLabel.textContent = 'boosted';
+                
+                console.log('  ✅ Boost badge auto-armed for next post');
+            } else if (lastPurchaseType === 'sell') {
+                // Auto-arm sell badge
+                window.pendingSell.armed = true;
+                window.pendingSell.armedAt = Date.now();
+                window.pendingSell.paid = true;
+                if (!window.selectedBadges) window.selectedBadges = [];
+                if (!window.selectedBadges.includes('sell')) window.selectedBadges.push('sell');
+                window.primaryBadge = 'sell';
+                
+                // Update sell button UI
+                const sellBtn = document.getElementById('sellBtn');
+                if (sellBtn) {
+                    sellBtn.setAttribute('aria-pressed', 'true');
+                    sellBtn.classList.add('badge-selected');
+                    sellBtn.style.background = 'linear-gradient(135deg, #3b82f6 0%, #1e40af 100%)';
+                    sellBtn.style.color = '#fff';
+                    sellBtn.style.borderColor = '#1e40af';
+                    sellBtn.style.boxShadow = '0 6px 20px rgba(59,130,246,0.35)';
+                }
+                
+                console.log('  ✅ Sell badge auto-armed for next post');
+            }
+            
+            // Clear the pending purchase after applying it
+            window.lastPurchaseType = null;
+            window.purchasePaidAt = null;
+            try { localStorage.removeItem('lastPurchaseType'); localStorage.removeItem('purchasePaidAt'); } catch(e){}
+        }
+
         async function uploadPost() {
             console.log('\n' + '='.repeat(70));
             console.log('🚀 UPLOADPOST() CALLED - POST BUTTON CLICKED');
@@ -24447,6 +24508,14 @@
             if (m) m.style.display = 'none';
             if (w) w.style.display = 'none';
             if (o) o.style.display = 'none';
+            
+            // Track boost purchase for next post(s)
+            window.pendingBoost.paid = true;
+            window.lastPurchaseType = 'boost';
+            window.purchasePaidAt = Date.now();
+            try { localStorage.setItem('lastPurchaseType', 'boost'); localStorage.setItem('purchasePaidAt', Date.now()); } catch(e){}
+            console.log('💰 Boost purchase tracked - will auto-arm on next post');
+            
             // Assign boost badge to the selected post (or currentPostId if none selected)
             try {
                 const pid = selectedPostId || window.currentPostId || null;
@@ -24632,6 +24701,14 @@
             if (m) m.style.display = 'none';
             if (w) w.style.display = 'none';
             if (o) o.style.display = 'none';
+            
+            // Track sell purchase for next post(s)
+            window.pendingSell.paid = true;
+            window.lastPurchaseType = 'sell';
+            window.purchasePaidAt = Date.now();
+            try { localStorage.setItem('lastPurchaseType', 'sell'); localStorage.setItem('purchasePaidAt', Date.now()); } catch(e){}
+            console.log('💰 Sell purchase tracked - will auto-arm on next post');
+            
             // mark composer selection and primary badge
             if (!window.selectedBadges) window.selectedBadges = [];
             if (!window.selectedBadges.includes('sell')) window.selectedBadges.push('sell');
