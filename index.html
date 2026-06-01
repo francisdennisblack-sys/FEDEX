@@ -8455,22 +8455,47 @@
                 }
             }
             
-            // Update DOM immediately
+            // Update DOM immediately so user sees the vote land first
             updateVoteDisplayInDOM(postId, newLikes, newDislikes);
-            
-            // 🏅 RECALCULATE BADGES: Vote changed, so position badges may change for this viewer's grid
-            // Pass the votedPostId to ONLY recalculate for this specific post, not entire grid
-            recalculateBadgesForCurrentGrid(postId);
+
+            // 🕒 DELAYED RE-RANK / BADGE UPDATE
+            // Requirement: user must see the like/dislike change first, then movement/badge change.
+            const VOTE_VISUAL_DELAY_MS = 700;
+            if (!window.voteVisualUpdateTimers) window.voteVisualUpdateTimers = {};
+            if (window.voteVisualUpdateTimers[postId]) {
+                clearTimeout(window.voteVisualUpdateTimers[postId]);
+            }
+            window.voteVisualUpdateTimers[postId] = setTimeout(() => {
+                try {
+                    // 1) Update per-post badges after vote
+                    recalculateBadgesForCurrentGrid(postId);
+                    // 2) Re-run ranking so post can move to new position
+                    window.lastRenderGridTime = 0; // bypass throttle for deliberate vote action
+                    renderGrid();
+                    console.log(`✅ Delayed vote refresh applied for ${postId.substring(0, 8)} after ${VOTE_VISUAL_DELAY_MS}ms`);
+                } catch (e) {
+                    console.warn('⚠️ Delayed vote refresh failed:', e);
+                } finally {
+                    delete window.voteVisualUpdateTimers[postId];
+                }
+            }, VOTE_VISUAL_DELAY_MS);
             
             // 🔥 CRITICAL: Save vote to Firebase with proper persistence
             console.log(`🔄 Saving vote to Firebase and localStorage...`);
             saveVoteToFirebase(currentUserId, postId, newVoteType).catch(err => {
                 console.error('❌ Vote save failed, rolling back UI:', err);
+                // Cancel delayed re-rank because this vote did not persist
+                if (window.voteVisualUpdateTimers && window.voteVisualUpdateTimers[postId]) {
+                    clearTimeout(window.voteVisualUpdateTimers[postId]);
+                    delete window.voteVisualUpdateTimers[postId];
+                }
                 // Rollback on failure
                 post.likes = originalLikes;
                 post.dislikes = originalDislikes;
                 userVotes[userVoteKey] = originalVote;
                 updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
+                window.lastRenderGridTime = 0;
+                renderGrid();
                 showNotification && showNotification('Failed to save vote');
             });
         }
