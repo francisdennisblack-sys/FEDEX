@@ -628,13 +628,77 @@
 
             setItems(items) {
                 this.items = items || [];
-                this.render();
+                this.ensureEnoughBoxes();
+                this.renderAllItems();
             }
 
             addItems(items) {
                 if (!Array.isArray(items)) return;
                 this.items.push(...items);
-                this.render();
+                this.ensureEnoughBoxes();
+                this.renderAllItems();
+            }
+            
+            // 🔧 CRITICAL FIX: Create enough DOM boxes for all items
+            // Previously only 50 boxes existed, causing content to recycle on scroll
+            // Now we create one box per item so content STAYS PUT
+            ensureEnoughBoxes() {
+                const gridElement = document.getElementById('grid');
+                if (!gridElement) return;
+                
+                const neededBoxes = Math.min(this.items.length + 1, 2001); // +1 for add-content box
+                
+                // Count existing boxes
+                let existingCount = 0;
+                for (let i = 0; i < 2001; i++) {
+                    if (document.getElementById(`box-${i}`)) existingCount = i + 1;
+                }
+                
+                // Create additional boxes if needed
+                if (existingCount < neededBoxes) {
+                    console.log(`📦 Creating ${neededBoxes - existingCount} additional boxes (existing: ${existingCount}, needed: ${neededBoxes})`);
+                    
+                    for (let i = existingCount; i < neededBoxes; i++) {
+                        const wrapper = document.createElement('div');
+                        wrapper.className = 'grid-item-wrapper';
+                        wrapper.style.display = 'flex';
+                        wrapper.style.flexDirection = 'column';
+                        
+                        const box = document.createElement('div');
+                        box.className = 'grid-box';
+                        box.id = `box-${i}`;
+                        box.style.flex = '1';
+                        
+                        wrapper.appendChild(box);
+                        gridElement.appendChild(wrapper);
+                    }
+                    console.log(`✅ Total boxes now: ${neededBoxes}`);
+                }
+            }
+            
+            // 🎯 NEW: Render all items into their PERMANENT boxes (no recycling)
+            // Each item gets its own box that never changes content during scroll
+            renderAllItems() {
+                if (!this.onRenderItem) return;
+                
+                console.log(`🎨 Rendering ${this.items.length} items into permanent boxes...`);
+                
+                for (let i = 0; i < this.items.length; i++) {
+                    const item = this.items[i];
+                    if (!item || !item.id) continue;
+                    
+                    // Box i+1 because box-0 is add-content
+                    const box = document.getElementById(`box-${i + 1}`);
+                    if (!box) continue;
+                    
+                    // Check if this box already has THIS item rendered - skip if same
+                    if (box.getAttribute('data-post-id') === item.id) continue;
+                    
+                    // Render the item permanently to this box
+                    this.onRenderItem(box, item);
+                }
+                
+                console.log(`✅ All items rendered to permanent positions`);
             }
 
             onScroll(e) {
@@ -644,11 +708,13 @@
                 this.lastRenderTime = now;
                 this.scrollPos = this.gridContainer.scrollTop;
 
+                // 🔧 FIX: Don't re-render boxes on scroll!
+                // Items are rendered permanently in their boxes by renderAllItems()
+                // Only check for infinite scroll to load more
                 if (!this.renderScheduled) {
                     this.renderScheduled = true;
                     requestAnimationFrame(() => {
-                        this.render();
-                        // 🚀 CHECK FOR INFINITE SCROLL - REAL IMPLEMENTATION
+                        // 🚀 Check for infinite scroll only (no DOM updates needed)
                         this.checkLoadMore();
                         this.renderScheduled = false;
                     });
