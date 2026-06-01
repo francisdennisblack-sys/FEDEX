@@ -4288,6 +4288,132 @@
         let geolocationRequested = false; // Flag to prevent multiple geolocation requests
 
         // ============================================
+        // 📍 REAL-TIME LOCATION & POI POLLING
+        // Refresh user location and nearby POIs every 1 second
+        // ============================================
+        let locationPollingInterval = null;
+        let poiPollingInterval = null;
+        let lastPollLocationLat = null;
+        let lastPollLocationLon = null;
+        let lastPollPOIName = null;
+
+        /**
+         * Start continuous location polling (every 1 second)
+         * Updates userLocation and triggers POI refresh when location changes
+         */
+        function startLocationPolling() {
+            if (locationPollingInterval) {
+                console.log('ℹ️ Location polling already running');
+                return;
+            }
+
+            locationPollingInterval = setInterval(() => {
+                if (!navigator.geolocation) return;
+
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const newLat = position.coords.latitude;
+                        const newLon = position.coords.longitude;
+
+                        // Check if location actually changed (avoid unnecessary updates)
+                        if (lastPollLocationLat !== newLat || lastPollLocationLon !== newLon) {
+                            userLocation = {
+                                lat: newLat,
+                                lon: newLon,
+                                latitude: newLat,
+                                longitude: newLon,
+                                accuracy: position.coords.accuracy,
+                                timestamp: Date.now()
+                            };
+
+                            lastPollLocationLat = newLat;
+                            lastPollLocationLon = newLon;
+
+                            console.log(`📍 Location updated: ${newLat.toFixed(6)}, ${newLon.toFixed(6)} (±${position.coords.accuracy.toFixed(0)}m)`);
+
+                            // Trigger POI update when location changes
+                            updateNearbyPOIsFromPolling();
+                        }
+                    },
+                    (error) => {
+                        console.warn('⚠️ Geolocation poll error:', error.message);
+                    },
+                    { enableHighAccuracy: true, timeout: 5000, maximumAge: 1000 }
+                );
+            }, 1000); // Poll every 1 second
+
+            console.log('✅ Location polling started (every 1s)');
+        }
+
+        /**
+         * Start continuous POI polling (every 1 second)
+         * Updates nearest POI and current area information
+         */
+        function startPOIPolling() {
+            if (poiPollingInterval) {
+                console.log('ℹ️ POI polling already running');
+                return;
+            }
+
+            poiPollingInterval = setInterval(() => {
+                updateNearbyPOIsFromPolling();
+            }, 1000); // Poll every 1 second
+
+            console.log('✅ POI polling started (every 1s)');
+        }
+
+        /**
+         * Update nearby POIs when polling (called from location/POI polling)
+         * This syncs nearest POI info without UI refreshes on every call
+         */
+        function updateNearbyPOIsFromPolling() {
+            try {
+                if (!userLocation || !userLocation.lat || !userLocation.lon) return;
+                if (!window.globalPOIDatabase || window.globalPOIDatabase.length === 0) return;
+
+                const nearest = getNearestPOIAndDistance();
+                if (nearest && nearest.poi && nearest.poi.name) {
+                    // Only update if POI changed
+                    if (lastPollPOIName !== nearest.poi.name) {
+                        lastPollPOIName = nearest.poi.name;
+                        currentAreaName = nearest.poi.name;
+                        currentZoneTag = nearest.poi.name;
+
+                        console.log(`🎯 POI updated: ${nearest.poi.name} (${formatDistanceMeters(nearest.distance)})`);
+
+                        // Trigger grid refresh to show posts from new area
+                        if (typeof renderGrid === 'function') {
+                            renderGrid();
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('updateNearbyPOIsFromPolling error:', e);
+            }
+        }
+
+        /**
+         * Stop location and POI polling
+         */
+        function stopLocationAndPOIPolling() {
+            if (locationPollingInterval) {
+                clearInterval(locationPollingInterval);
+                locationPollingInterval = null;
+                console.log('⏹️ Location polling stopped');
+            }
+            if (poiPollingInterval) {
+                clearInterval(poiPollingInterval);
+                poiPollingInterval = null;
+                console.log('⏹️ POI polling stopped');
+            }
+        }
+
+        // Expose polling controls to window for manual management
+        window.startLocationPolling = startLocationPolling;
+        window.startPOIPolling = startPOIPolling;
+        window.stopLocationAndPOIPolling = stopLocationAndPOIPolling;
+
+        // ============================================
         // AREA NAMES DATABASE - For Auto-Detection & ML
         // ============================================
         const areaNameDatabase = {
@@ -7235,6 +7361,12 @@
                 console.log(`║  User will post hyper-locally to: ${currentZoneTag}`);
                 console.log('║  (Users can override with "Move post to" field)            ║');
                 console.log('╚════════════════════════════════════════════════════════════╝\n');
+
+                // 🔄 START REAL-TIME LOCATION & POI POLLING
+                console.log('🔄 Starting real-time location and POI polling...');
+                startLocationPolling();
+                startPOIPolling();
+                console.log('✅ Real-time polling active (1 second refresh rate)');
                 
                 // 📊 START LOCATION TRACKING FOR DIAGNOSTICS
                 if (typeof startLocationTracking === 'function') {
@@ -24997,6 +25129,11 @@
         console.log('  - window.resetLocationPermission:', typeof window.resetLocationPermission === 'function' ? '✅' : '❌');
         console.log('  - window.getContinuousLocationStatus:', typeof window.getContinuousLocationStatus === 'function' ? '✅' : '❌');
         console.log('  - window.startContinuousLocationTracking:', typeof window.startContinuousLocationTracking === 'function' ? '✅' : '❌');
+
+        console.log('✅ REAL-TIME POLLING functions exposed:');
+        console.log('  - window.startLocationPolling:', typeof window.startLocationPolling === 'function' ? '✅' : '❌');
+        console.log('  - window.startPOIPolling:', typeof window.startPOIPolling === 'function' ? '✅' : '❌');
+        console.log('  - window.stopLocationAndPOIPolling:', typeof window.stopLocationAndPOIPolling === 'function' ? '✅' : '❌');
 
     </script>
 
