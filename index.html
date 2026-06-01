@@ -8328,6 +8328,9 @@
             // Update DOM immediately
             updateVoteDisplayInDOM(postId, newLikes, newDislikes);
             
+            // 🏅 RECALCULATE BADGES: Vote changed, so position badges may change for this viewer's grid
+            recalculateBadgesForCurrentGrid();
+            
             // 🔥 CRITICAL: Save vote to Firebase with proper persistence
             console.log(`🔄 Saving vote to Firebase and localStorage...`);
             saveVoteToFirebase(currentUserId, postId, newVoteType).catch(err => {
@@ -21674,6 +21677,50 @@
         function getPostBadgesForArea(post, areaTag) {
             if (!post || !post.areaBadges || !areaTag) return null;
             return post.areaBadges[areaTag] || null;
+        }
+
+        // 🔄 CRITICAL: Recalculate badges for current viewer's grid after vote/engagement change
+        // This ensures badges are ALWAYS per-grid (CROWNED = highest likes ON THIS GRID, not globally)
+        function recalculateBadgesForCurrentGrid() {
+            if (!window.gridScroller || !window.gridScroller.items) {
+                console.warn('⚠️ Grid scroller not available for badge recalculation');
+                return;
+            }
+
+            console.log(`🏅 Recalculating badges for current grid (${window.gridScroller.items.length} posts)...`);
+            
+            // Get all visible posts in current grid
+            const postsInGrid = window.gridScroller.items || [];
+            
+            // Recalculate badges for each post based on THIS grid's rankings
+            postsInGrid.forEach(post => {
+                if (!post || !post.id) return;
+                
+                // Calculate new badges relative to this grid
+                const newBadges = calculateBadges(post, postsInGrid);
+                
+                // Update cached badges
+                post.cachedBadges = newBadges || [];
+                
+                // Update DOM: Remove old badge classes, add new ones
+                const postElement = document.querySelector(`[data-post-id="${post.id}"]`);
+                if (postElement) {
+                    // Remove all badge classes
+                    postElement.classList.remove('badge-new', 'badge-crowned', 'badge-runner-up', 'badge-podium', 
+                                                   'badge-hot', 'badge-disliked', 'badge-balanced');
+                    
+                    // Add new badge classes
+                    newBadges.forEach(badge => {
+                        if (badge) {
+                            postElement.classList.add(`badge-${badge}`);
+                        }
+                    });
+                    
+                    console.log(`   ✅ Post ${post.id.substring(0, 8)}: badges updated to [${newBadges.join(', ')}]`);
+                }
+            });
+            
+            console.log(`✅ Badge recalculation complete for grid`);
         }
         window.getPostBadgesForArea = getPostBadgesForArea;
 
