@@ -8329,7 +8329,8 @@
             updateVoteDisplayInDOM(postId, newLikes, newDislikes);
             
             // 🏅 RECALCULATE BADGES: Vote changed, so position badges may change for this viewer's grid
-            recalculateBadgesForCurrentGrid();
+            // Pass the votedPostId to ONLY recalculate for this specific post, not entire grid
+            recalculateBadgesForCurrentGrid(postId);
             
             // 🔥 CRITICAL: Save vote to Firebase with proper persistence
             console.log(`🔄 Saving vote to Firebase and localStorage...`);
@@ -21679,48 +21680,86 @@
             return post.areaBadges[areaTag] || null;
         }
 
-        // 🔄 CRITICAL: Recalculate badges for current viewer's grid after vote/engagement change
-        // This ensures badges are ALWAYS per-grid (CROWNED = highest likes ON THIS GRID, not globally)
-        function recalculateBadgesForCurrentGrid() {
+        // 🔄 CRITICAL: Recalculate badges ONLY for the post that was voted on
+        // This PREVENTS cascading recalculations when new posts load during scroll
+        // Only the specific post and its position competitors update badges
+        function recalculateBadgesForCurrentGrid(votedPostId = null) {
             if (!window.gridScroller || !window.gridScroller.items) {
                 console.warn('⚠️ Grid scroller not available for badge recalculation');
                 return;
             }
 
-            console.log(`🏅 Recalculating badges for current grid (${window.gridScroller.items.length} posts)...`);
-            
-            // Get all visible posts in current grid
             const postsInGrid = window.gridScroller.items || [];
             
-            // Recalculate badges for each post based on THIS grid's rankings
-            postsInGrid.forEach(post => {
-                if (!post || !post.id) return;
+            if (votedPostId) {
+                // 🎯 SPECIFIC MODE: Only recalculate badge for the post that was voted on
+                console.log(`🏅 Recalculating badge for voted post: ${votedPostId.substring(0, 8)}`);
                 
-                // Calculate new badges relative to this grid
-                const newBadges = calculateBadges(post, postsInGrid);
+                const votedPost = postsInGrid.find(p => p.id === votedPostId);
+                if (!votedPost) {
+                    console.warn(`⚠️ Voted post not found in grid: ${votedPostId}`);
+                    return;
+                }
                 
-                // Update cached badges
-                post.cachedBadges = newBadges || [];
+                // Calculate new badges for this post
+                const newBadges = calculateBadges(votedPost, postsInGrid);
+                votedPost.cachedBadges = newBadges || [];
                 
-                // Update DOM: Remove old badge classes, add new ones
-                const postElement = document.querySelector(`[data-post-id="${post.id}"]`);
+                // Update DOM for this post only
+                const postElement = document.querySelector(`[data-post-id="${votedPostId}"]`);
                 if (postElement) {
-                    // Remove all badge classes
                     postElement.classList.remove('badge-new', 'badge-crowned', 'badge-runner-up', 'badge-podium', 
                                                    'badge-hot', 'badge-disliked', 'badge-balanced');
-                    
-                    // Add new badge classes
                     newBadges.forEach(badge => {
-                        if (badge) {
-                            postElement.classList.add(`badge-${badge}`);
-                        }
+                        if (badge) postElement.classList.add(`badge-${badge}`);
                     });
-                    
-                    console.log(`   ✅ Post ${post.id.substring(0, 8)}: badges updated to [${newBadges.join(', ')}]`);
+                    console.log(`   ✅ Updated badges for post: [${newBadges.join(', ')}]`);
                 }
+                
+                // ALSO recalculate top 3 position badges (CROWNED, RUNNER-UP, PODIUM)
+                // because vote might have changed rankings
+                console.log(`🏅 Recalculating top 3 position badges due to vote change...`);
+                updateTopPositionBadges(postsInGrid);
+            } else {
+                // 🔄 FULL MODE: Recalculate only top 3 (when page loads/refreshes)
+                console.log(`🏅 Recalculating top 3 position badges for grid (${postsInGrid.length} posts)`);
+                updateTopPositionBadges(postsInGrid);
+            }
+        }
+        
+        // 🥇 Helper: Update CROWNED, RUNNER-UP, PODIUM badges based on likes (position-based)
+        function updateTopPositionBadges(postsInGrid) {
+            if (!postsInGrid || postsInGrid.length === 0) return;
+            
+            // Sort by net likes to find top 3
+            const sorted = [...postsInGrid]
+                .map(p => ({ post: p, netLikes: (p.likes || 0) - (p.dislikes || 0) }))
+                .sort((a, b) => b.netLikes - a.netLikes);
+            
+            // Get unique net like values for top 3
+            const uniqueNetLikes = [];
+            for (let i = 0; i < sorted.length && uniqueNetLikes.length < 3; i++) {
+                if (!uniqueNetLikes.some(nl => nl === sorted[i].netLikes)) {
+                    uniqueNetLikes.push(sorted[i].netLikes);
+                }
+            }
+            
+            // Update position badges
+            ['crowned', 'runner-up', 'podium'].forEach((badge, idx) => {
+                const netLikeValue = uniqueNetLikes[idx];
+                postsInGrid.forEach(post => {
+                    const postNetLikes = (post.likes || 0) - (post.dislikes || 0);
+                    const postEl = document.querySelector(`[data-post-id="${post.id}"]`);
+                    
+                    if (postNetLikes === netLikeValue && netLikeValue > 0 && postEl) {
+                        // Only update this specific position badge
+                        postEl.classList.remove('badge-crowned', 'badge-runner-up', 'badge-podium');
+                        postEl.classList.add(`badge-${badge}`);
+                    }
+                });
             });
             
-            console.log(`✅ Badge recalculation complete for grid`);
+            console.log(`✅ Top 3 position badges updated`);
         }
         window.getPostBadgesForArea = getPostBadgesForArea;
 
