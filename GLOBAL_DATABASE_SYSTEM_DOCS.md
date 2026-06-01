@@ -22,7 +22,7 @@ GLOBAL CONTENT PLATFORM
 │  └─ Uses ultra_master_locations_global.json
 │
 ├─ NEARBY AREAS BUTTON (Proximity Search)
-│  ├─ Shows closest 10 POIs only
+│  ├─ Shows closest 30 POIs only
 │  ├─ Fast, focused results
 │  ├─ Stayed unchanged (still optimized)
 │  └─ Quick access to nearby content

@@ -1538,6 +1538,32 @@
                     });
                 }
 
+                // Resolve a stable username for UI (avoid generic "User" for signed-in users)
+                function getCurrentUsername() {
+                    try {
+                        const lsName = (localStorage.getItem('loggedInUser') || localStorage.getItem('displayName') || '').trim();
+                        if (lsName) return lsName;
+                    } catch (_) {}
+
+                    try {
+                        if (window.currentDisplayName && String(window.currentDisplayName).trim()) {
+                            return String(window.currentDisplayName).trim();
+                        }
+                    } catch (_) {}
+
+                    try {
+                        const user = (typeof auth !== 'undefined' && auth && auth.currentUser) ? auth.currentUser : null;
+                        if (user) {
+                            if (user.displayName && String(user.displayName).trim()) return String(user.displayName).trim();
+                            if (user.email && String(user.email).includes('@')) return String(user.email).split('@')[0];
+                            if (user.uid) return String(user.uid).slice(0, 8);
+                        }
+                    } catch (_) {}
+
+                    if (window.currentUserId) return String(window.currentUserId).slice(0, 8);
+                    return 'Guest';
+                }
+
                 // Update account UI in header/profile area
                 async function updateAccountUI() {
                     try {
@@ -1572,7 +1598,7 @@
                         const avgLikes = posts ? (totalLikes / posts).toFixed(1) : '0';
 
                         // Update profile button to show username with profile styling
-                        const username = window.currentDisplayName || profile.username || 'User';
+                        const username = profile.username || getCurrentUsername();
                         signInBtn.textContent = username;
                         signInBtn.className = 'signed-in-mode';
                         signInBtn.title = `Click to view profile for ${username}`;
@@ -1991,7 +2017,7 @@
                     // Immediately set header label from localStorage if available so the user
                     // sees their name without opening the profile modal.
                     try {
-                        const stored = (function(){ try { return localStorage.getItem('displayName'); } catch(e){ return null; } })();
+                        const stored = (function(){ try { return localStorage.getItem('loggedInUser') || localStorage.getItem('displayName'); } catch(e){ return null; } })();
                         if (btn) {
                             btn.textContent = stored || window.currentDisplayName || btn.textContent || 'Profile';
                         }
@@ -2001,7 +2027,7 @@
                     window.addEventListener('storage', (ev) => {
                         try {
                             if (!ev) return;
-                            if (ev.key === 'displayName') {
+                            if (ev.key === 'displayName' || ev.key === 'loggedInUser') {
                                 const val = ev.newValue || '';
                                 const b = document.getElementById('signInBtn');
                                 if (b) b.textContent = val || window.currentDisplayName || 'Profile';
@@ -2015,7 +2041,7 @@
                         try {
                             const el = document.getElementById('signInBtn');
                             if (!el) return;
-                            const stored = (function(){ try { return localStorage.getItem('displayName'); } catch(e){ return null; } })();
+                            const stored = (function(){ try { return localStorage.getItem('loggedInUser') || localStorage.getItem('displayName'); } catch(e){ return null; } })();
                             const name = window.currentDisplayName || stored || null;
                             if (name) {
                                 el.textContent = name;
@@ -8572,6 +8598,24 @@
                 const newUserId = permanentUserId;
                 currentUserId = newUserId;
                 localStorage.setItem('userId', currentUserId);
+
+                // Rehydrate username if local storage was cleared but auth session survived.
+                try {
+                    const recoveredName =
+                        (localStorage.getItem('loggedInUser') || localStorage.getItem('displayName') || '').trim() ||
+                        (user.displayName || '').trim() ||
+                        ((user.email && user.email.includes('@')) ? user.email.split('@')[0] : '') ||
+                        (user.uid ? String(user.uid).slice(0, 8) : '');
+                    if (recoveredName) {
+                        localStorage.setItem('loggedInUser', recoveredName);
+                        localStorage.setItem('displayName', recoveredName);
+                        window.currentDisplayName = recoveredName;
+                    }
+                    if (user.email) window.currentUserEmail = user.email;
+                } catch (e) {
+                    console.warn('Failed to rehydrate username from auth state', e);
+                }
+
                 isConnected = true;
                 try { updateAccountUI(); } catch (err) { console.warn('updateAccountUI failed', err); }
                 try { if (typeof reflectProfileInHeader === 'function') reflectProfileInHeader(); } catch(e){}
@@ -11560,12 +11604,25 @@
         // Update account/profile area
         function updateAccountUI() {
             try {
+                const username = (typeof getCurrentUsername === 'function') ? getCurrentUsername() : ((window.currentDisplayName || '').trim() || 'Guest');
                 const el = document.getElementById('signedInAs');
-                if (!el) return;
-                const email = (window.currentUserEmail) || (typeof auth !== 'undefined' && auth && auth.currentUser && auth.currentUser.email) || null;
-                if (email) el.textContent = `Signed in as: ${email}`;
-                else if (window.currentUserId) el.textContent = `Signed in as: ${window.currentUserId.slice ? window.currentUserId.slice(0,8) : window.currentUserId}`;
-                else el.textContent = 'Signed in as: -';
+                if (el) {
+                    if (window.currentUserId) el.textContent = `Signed in as: ${username}`;
+                    else el.textContent = 'Signed in as: -';
+                }
+
+                const signInBtn = document.getElementById('signInBtn');
+                if (signInBtn) {
+                    if (window.currentUserId) {
+                        signInBtn.textContent = username;
+                        signInBtn.className = 'signed-in-mode';
+                        signInBtn.title = `Click to view profile for ${username}`;
+                    } else {
+                        signInBtn.textContent = '👤 Profile';
+                        signInBtn.className = 'sign-in-mode';
+                        signInBtn.title = 'Profile - Click to sign in or sign out';
+                    }
+                }
             } catch (err) { console.warn('updateAccountUI error', err); }
         }
 
