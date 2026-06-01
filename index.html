@@ -17599,44 +17599,132 @@
          * Called during grid render for optimal display order
          */
         function applyUnifiedRanking(displayPosts) {
+            // 🎯 80/10/10 DISTRIBUTION SYSTEM
+            // - 80% hyper-local posts (matching user's current area tag)
+            // - 10% near-local well-reviewed posts (nearby areas with high engagement)
+            // - 10% website top posts (most-liked posts globally)
+            
+            const userArea = getCurrentUserArea();
+            console.log(`🎯 ML Ranking: User area = "${userArea}"`);
+            
             // Score all posts with unified ranking
             const rankedPosts = displayPosts.map(post => ({
                 ...post,
-                unifiedRank: generateUnifiedPostRank(post, currentUserId)
+                unifiedRank: generateUnifiedPostRank(post, currentUserId),
+                netLikes: (post.likes || 0) - (post.dislikes || 0)
             }));
             
-            // Separate by category while maintaining unified ranking
-            const userPosts = rankedPosts.filter(p => p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId);
-            const localPosts = rankedPosts.filter(p => p.county === getCurrentUserArea() && !userPosts.find(u => u.id === p.id));
-            const remoteRecommended = rankedPosts.filter(p => p.county !== getCurrentUserArea() && p.unifiedRank > 70 && !userPosts.find(u => u.id === p.id));
-            const otherPosts = rankedPosts.filter(p => !userPosts.find(u => u.id === p.id) && !localPosts.find(l => l.id === p.id) && !remoteRecommended.find(r => r.id === p.id));
+            // 1️⃣ USER'S OWN POSTS (always show first)
+            const userPosts = rankedPosts.filter(p => 
+                p.authId === currentUserId || 
+                p.userId === currentUserId || 
+                p.createdBy === currentUserId
+            );
+            const userPostIds = new Set(userPosts.map(p => p.id));
+            
+            // 2️⃣ HYPER-LOCAL POSTS (80%): Match user's exact area tag
+            const hyperLocal = rankedPosts.filter(p => 
+                !userPostIds.has(p.id) && 
+                p.county === userArea
+            );
+            
+            // 3️⃣ NEAR-LOCAL WELL-REVIEWED POSTS (10%): Different area but nearby with good engagement
+            const nearLocalWellReviewed = rankedPosts.filter(p => 
+                !userPostIds.has(p.id) && 
+                p.county !== userArea && 
+                p.netLikes >= 3 && // At least 3 net likes (well-reviewed)
+                (p.proximityClass === 'nearby' || p.proximityClass === 'community')
+            );
+            
+            // 4️⃣ WEBSITE TOP POSTS (10%): Most-liked posts globally (any area)
+            const websiteTopPosts = rankedPosts
+                .filter(p => 
+                    !userPostIds.has(p.id) && 
+                    p.county !== userArea &&
+                    !nearLocalWellReviewed.find(n => n.id === p.id) &&
+                    p.netLikes >= 5 // At least 5 net likes (globally popular)
+                )
+                .sort((a, b) => b.netLikes - a.netLikes); // Sort by most likes
+            
+            // 5️⃣ FALLBACK POSTS (if we don't have enough of categories above)
+            const usedIds = new Set([
+                ...userPostIds,
+                ...hyperLocal.map(p => p.id),
+                ...nearLocalWellReviewed.map(p => p.id),
+                ...websiteTopPosts.map(p => p.id)
+            ]);
+            const fallbackPosts = rankedPosts.filter(p => !usedIds.has(p.id));
             
             // Sort each category by unified rank
             userPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
-            localPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
-            remoteRecommended.sort((a, b) => b.unifiedRank - a.unifiedRank);
-            otherPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
+            hyperLocal.sort((a, b) => b.unifiedRank - a.unifiedRank);
+            nearLocalWellReviewed.sort((a, b) => b.netLikes - a.netLikes);
+            fallbackPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
             
-            // Interleave for variety: user posts, local, recommended, other
-            // This ensures a good mix instead of clustering
+            // 🎨 BUILD FEED WITH 80/10/10 DISTRIBUTION
+            // Calculate target counts (out of total)
+            const totalTarget = Math.min(2000, rankedPosts.length);
+            const hyperLocalTarget = Math.floor(totalTarget * 0.8);  // 80%
+            const nearLocalTarget = Math.floor(totalTarget * 0.1);   // 10%
+            const websiteTopTarget = Math.floor(totalTarget * 0.1);  // 10%
+            
+            console.log(`📊 80/10/10 Distribution Plan:`);
+            console.log(`   User own posts: ${userPosts.length}`);
+            console.log(`   Hyper-local (80%): need ${hyperLocalTarget}, have ${hyperLocal.length}`);
+            console.log(`   Near-local well-reviewed (10%): need ${nearLocalTarget}, have ${nearLocalWellReviewed.length}`);
+            console.log(`   Website top posts (10%): need ${websiteTopTarget}, have ${websiteTopPosts.length}`);
+            console.log(`   Fallback posts available: ${fallbackPosts.length}`);
+            
             const result = [];
-            const maxLen = Math.max(userPosts.length, localPosts.length, remoteRecommended.length, otherPosts.length);
             
-            for (let i = 0; i < maxLen; i++) {
-                // Round-robin: user posts first (always show), then alternate
-                if (userPosts[i]) result.push(userPosts[i]);
+            // Always show user's own posts FIRST
+            result.push(...userPosts);
+            
+            // Take target amounts from each category
+            const hyperLocalToAdd = hyperLocal.slice(0, hyperLocalTarget);
+            const nearLocalToAdd = nearLocalWellReviewed.slice(0, nearLocalTarget);
+            const websiteTopToAdd = websiteTopPosts.slice(0, websiteTopTarget);
+            
+            // 🎲 SCATTER well-reviewed and top posts THROUGHOUT positions 1-2000
+            // Not clustered at top - spread evenly across the feed
+            const allLocalPosts = [...hyperLocalToAdd];
+            const scatterPosts = [...nearLocalToAdd, ...websiteTopToAdd];
+            
+            // Calculate scatter positions (evenly distributed)
+            const totalContent = allLocalPosts.length + scatterPosts.length;
+            const scatterInterval = scatterPosts.length > 0 
+                ? Math.floor(totalContent / scatterPosts.length) 
+                : totalContent;
+            
+            // Interleave: insert a scatter post every N local posts
+            let scatterIdx = 0;
+            for (let i = 0; i < allLocalPosts.length; i++) {
+                result.push(allLocalPosts[i]);
                 
-                if (localPosts[i]) result.push(localPosts[i]);
-                if (remoteRecommended[i]) result.push(remoteRecommended[i]);
-                if (i % 2 === 0 && otherPosts[i]) result.push(otherPosts[i]);
-                else if (i % 2 === 1 && otherPosts[i]) result.push(otherPosts[i]);
+                // Insert scatter post at calculated intervals
+                if ((i + 1) % scatterInterval === 0 && scatterIdx < scatterPosts.length) {
+                    result.push(scatterPosts[scatterIdx]);
+                    scatterIdx++;
+                }
             }
             
-            // Add any remaining posts
-            result.push(...otherPosts.slice(result.filter(p => otherPosts.find(o => o.id === p.id)).length));
+            // Add any remaining scatter posts at the end
+            while (scatterIdx < scatterPosts.length) {
+                result.push(scatterPosts[scatterIdx]);
+                scatterIdx++;
+            }
             
-            console.log(`✨ Applied unified ranking to ${rankedPosts.length} posts`);
-            console.log(`   User posts: ${userPosts.length} | Local: ${localPosts.length} | Recommended: ${remoteRecommended.length} | Other: ${otherPosts.length}`);
+            // Fill remaining spots with fallback posts (up to 2000 max)
+            const remainingSlots = 2000 - result.length;
+            if (remainingSlots > 0 && fallbackPosts.length > 0) {
+                result.push(...fallbackPosts.slice(0, remainingSlots));
+            }
+            
+            console.log(`✨ Final feed built: ${result.length} posts`);
+            console.log(`   📍 Hyper-local: ${hyperLocalToAdd.length} (target: ${hyperLocalTarget})`);
+            console.log(`   🌐 Near-local well-reviewed: ${nearLocalToAdd.length} (target: ${nearLocalTarget})`);
+            console.log(`   🌟 Website top posts: ${websiteTopToAdd.length} (target: ${websiteTopTarget})`);
+            console.log(`   👤 User's own: ${userPosts.length}`);
             
             return result;
         }
