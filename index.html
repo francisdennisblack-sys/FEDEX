@@ -21601,59 +21601,37 @@
             const dislikes = post.dislikes || 0;
             
             // ========================================================================
-            // SIMPLIFIED BADGE SYSTEM - Only 6 badge types
+            // BADGE SYSTEM - POSITION-BASED (not likes-based)
             // ========================================================================
             
-            // 1. NEW BADGE: Posts less than 1 hour old
+            // 1. NEW BADGE: Posts less than 1 hour old (highest priority)
             const newBadgeDuration = getNewBadgeDurationMs();
             if (postAge < newBadgeDuration) {
                 badges.push('new');
-                return badges; // NEW takes precedence, return early
+                return badges; // NEW takes precedence
             }
             
-            // 2. POSITION BADGES: Top 3 by net likes (crowne,d runner-up, podium)
+            // 2. POSITION BADGES: Top 3 by position in THIS grid (CROWNED = #1, RUNNER-UP = #2, PODIUM = #3)
+            // Position is determined by grid order, not by like count
             if (allPosts.length > 0) {
-                // Calculate net likes for all posts
-                const postsWithNetLikes = allPosts.map(p => ({
-                    id: p.id,
-                    netLikes: (p.likes || 0) - (p.dislikes || 0)
-                }));
+                // Find this post's position in the grid
+                const postIndex = allPosts.findIndex(p => p.id === post.id);
                 
-                // Sort by net likes descending
-                const sorted = [...postsWithNetLikes].sort((a, b) => b.netLikes - a.netLikes);
-                
-                // Get unique net like values for top 3
-                const uniqueNetLikes = [];
-                for (let i = 0; i < sorted.length && uniqueNetLikes.length < 3; i++) {
-                    if (!uniqueNetLikes.some(nl => nl === sorted[i].netLikes)) {
-                        uniqueNetLikes.push(sorted[i].netLikes);
-                    }
-                }
-                
-                const postNetLikes = likes - dislikes;
-                
-                // Position 1: CROWNED badge (highest net likes, must be > 0)
-                if (uniqueNetLikes[0] !== undefined && postNetLikes === uniqueNetLikes[0] && postNetLikes > 0) {
+                if (postIndex === 0) {
                     badges.push('crowned');
                     return badges; // Position badge takes precedence
-                }
-                
-                // Position 2: RUNNER-UP badge (2nd highest net likes, must be > 0)
-                if (uniqueNetLikes[1] !== undefined && postNetLikes === uniqueNetLikes[1] && postNetLikes > 0) {
+                } else if (postIndex === 1) {
                     badges.push('runner-up');
                     return badges; // Position badge takes precedence
-                }
-                
-                // Position 3: PODIUM badge (3rd highest net likes, must be > 0)
-                if (uniqueNetLikes[2] !== undefined && postNetLikes === uniqueNetLikes[2] && postNetLikes > 0) {
+                } else if (postIndex === 2) {
                     badges.push('podium');
                     return badges; // Position badge takes precedence
                 }
             }
             
-            // 3. HOT BADGE: Posts with 5+ likes AND older than 10 minutes
+            // 3. HOT BADGE: Posts with 5+ likes AND older than 10 minutes AND more likes than dislikes
             const tenMinutesMs = 10 * 60 * 1000;
-            if (likes >= 5 && postAge > tenMinutesMs && dislikes < likes) {
+            if (likes >= 5 && postAge > tenMinutesMs && likes > dislikes) {
                 badges.push('hot');
                 return badges; // HOT takes precedence
             }
@@ -21727,39 +21705,36 @@
             }
         }
         
-        // 🥇 Helper: Update CROWNED, RUNNER-UP, PODIUM badges based on likes (position-based)
+        // 🥇 Helper: Update CROWNED, RUNNER-UP, PODIUM badges based on POSITION (index in grid)
         function updateTopPositionBadges(postsInGrid) {
             if (!postsInGrid || postsInGrid.length === 0) return;
             
-            // Sort by net likes to find top 3
-            const sorted = [...postsInGrid]
-                .map(p => ({ post: p, netLikes: (p.likes || 0) - (p.dislikes || 0) }))
-                .sort((a, b) => b.netLikes - a.netLikes);
+            // Assign position badges by index (not by likes)
+            const positionBadges = ['crowned', 'runner-up', 'podium'];
             
-            // Get unique net like values for top 3
-            const uniqueNetLikes = [];
-            for (let i = 0; i < sorted.length && uniqueNetLikes.length < 3; i++) {
-                if (!uniqueNetLikes.some(nl => nl === sorted[i].netLikes)) {
-                    uniqueNetLikes.push(sorted[i].netLikes);
+            postsInGrid.slice(0, 3).forEach((post, idx) => {
+                if (!post || !post.id) return;
+                
+                const postEl = document.querySelector(`[data-post-id="${post.id}"]`);
+                if (postEl) {
+                    // Remove all position badges
+                    postEl.classList.remove('badge-crowned', 'badge-runner-up', 'badge-podium');
+                    // Add position badge for this index
+                    postEl.classList.add(`badge-${positionBadges[idx]}`);
+                    console.log(`   ✅ Post ${post.id.substring(0, 8)}: position ${idx + 1} → badge-${positionBadges[idx]}`);
                 }
-            }
-            
-            // Update position badges
-            ['crowned', 'runner-up', 'podium'].forEach((badge, idx) => {
-                const netLikeValue = uniqueNetLikes[idx];
-                postsInGrid.forEach(post => {
-                    const postNetLikes = (post.likes || 0) - (post.dislikes || 0);
-                    const postEl = document.querySelector(`[data-post-id="${post.id}"]`);
-                    
-                    if (postNetLikes === netLikeValue && netLikeValue > 0 && postEl) {
-                        // Only update this specific position badge
-                        postEl.classList.remove('badge-crowned', 'badge-runner-up', 'badge-podium');
-                        postEl.classList.add(`badge-${badge}`);
-                    }
-                });
             });
             
-            console.log(`✅ Top 3 position badges updated`);
+            // Remove position badges from posts below top 3
+            postsInGrid.slice(3).forEach(post => {
+                if (!post || !post.id) return;
+                const postEl = document.querySelector(`[data-post-id="${post.id}"]`);
+                if (postEl) {
+                    postEl.classList.remove('badge-crowned', 'badge-runner-up', 'badge-podium');
+                }
+            });
+            
+            console.log(`✅ Top 3 position badges updated (position-based, not likes-based)`);
         }
         window.getPostBadgesForArea = getPostBadgesForArea;
 
