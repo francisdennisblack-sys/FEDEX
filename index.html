@@ -21230,6 +21230,44 @@
             displayPosts = displayPosts.map(post => addProximityBadge(post, currentGrid));
             
             // ========================================================================
+            // 🔒 CRITICAL AREA-TAG FILTER (PRODUCTION REQUIREMENT)
+            // ========================================================================
+            // Posts should ONLY be visible to users near their area tag
+            // Exception: Globally viral posts (5+ net likes) can show to anyone
+            // ========================================================================
+            const beforeFilterCount = displayPosts.length;
+            displayPosts = displayPosts.filter(post => {
+                // Always show user's own posts
+                const isOwnPost = post.authId === currentUserId || 
+                                 post.userId === currentUserId || 
+                                 post.createdBy === currentUserId;
+                if (isOwnPost) return true;
+                
+                // KEEP: Post's area tag matches user's area exactly
+                if (post.county === userAreaTag) return true;
+                
+                // KEEP: Post is in nearby/community proximity (within distance)
+                if (post.proximityClass === 'nearby' || 
+                    post.proximityClass === 'featured' || 
+                    post.proximityClass === 'community') {
+                    return true;
+                }
+                
+                // KEEP: Post is globally viral (5+ net likes - can show anywhere)
+                const netLikes = (post.likes || 0) - (post.dislikes || 0);
+                if (netLikes >= 5) return true;
+                
+                // KEEP: Boost-paid posts (creator paid to extend reach)
+                if (post.boostPaidAt || post.boostStatus === 'active') return true;
+                
+                // FILTER OUT: Far-away posts with no special status
+                return false;
+            });
+            
+            const filteredOut = beforeFilterCount - displayPosts.length;
+            console.log(`🔒 AREA FILTER: Kept ${displayPosts.length}, removed ${filteredOut} far-away posts not relevant to "${userAreaTag}"`);
+            
+            // ========================================================================
             // 🎯 APPLY UNIFIED RANKING SYSTEM
             // ========================================================================
             // Blend: Area Hierarchy, Badge System, POI Detection, ML, Zone Tags
