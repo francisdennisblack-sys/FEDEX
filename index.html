@@ -21563,208 +21563,87 @@
         function calculateBadges(post, allPosts) {
             const badges = [];
             
-            // Safety check: ensure post exists
-            if (!post || !post.id) {
-                return badges;
-            }
-            
-            // Safety check: ensure allPosts is an array
-            if (!Array.isArray(allPosts)) {
-                allPosts = [];
-            }
+            // Safety checks
+            if (!post || !post.id) return badges;
+            if (!Array.isArray(allPosts)) allPosts = [];
             
             const now = new Date().getTime();
             const postAge = now - (post.timestamp || 0);
             const ONE_HOUR = 60 * 60 * 1000;
-            const SIX_HOURS = 6 * ONE_HOUR;
             const likes = post.likes || 0;
             const dislikes = post.dislikes || 0;
-            const totalVotes = likes + dislikes;
             
-            // Check for MEDIA-CONTENT badge
-            const hasMedia = post.photoURL || post.imageData;
-            const hasContent = post.content && post.content.trim().length > 0;
-            const hasMixedContent = hasMedia && hasContent;
+            // ========================================================================
+            // SIMPLIFIED BADGE SYSTEM - Only 6 badge types
+            // ========================================================================
             
-            // Get post's grid position (find its index in sorted order)
-            let gridPosition = null;
-            if (allPosts && allPosts.length > 0) {
-                const sortedPosts = [...allPosts].sort((a, b) => {
-                    const aNetLikes = (a.likes || 0) - (a.dislikes || 0);
-                    const bNetLikes = (b.likes || 0) - (b.dislikes || 0);
-                    return bNetLikes - aNetLikes;
-                });
-                gridPosition = sortedPosts.findIndex(p => p.id === post.id) + 1;
-            }
-            
-            const applicableBadges = [];
-            
-            // NEW badge (dynamic duration based on online user count)
+            // 1. NEW BADGE: Posts less than 1 hour old
             const newBadgeDuration = getNewBadgeDurationMs();
             if (postAge < newBadgeDuration) {
-                applicableBadges.push('new');
+                badges.push('new');
+                return badges; // NEW takes precedence, return early
             }
             
-            // HOT badge: posts that moved up 3 times in a row (track via post.movedUpCount)
-            // For now, use high engagement as proxy: likes > 8 and older than 30 min
-            // (so it's been on grid long enough to accumulate engagement)
-            const thirtyMinutesMs = 30 * 60 * 1000;
-            if (likes > 8 && postAge > thirtyMinutesMs) {
-                // Only allowed for non-podium positions (not 1, 2, or 3)
-                if (!gridPosition || gridPosition > 3) {
-                    applicableBadges.push('hot');
-                }
-            }
-            
-            // TRENDING badge: posts with likes but no votes cast yet (OR low vote counts)
-            // More accurately: posts with likes but without dislikes yet
-            if (likes > 0 && dislikes === 0 && !applicableBadges.includes('hot')) {
-                // Only allowed for non-podium positions
-                if (!gridPosition || gridPosition > 3) {
-                    applicableBadges.push('trending');
-                }
-            }
-            
-            // RISING badge: recent post (< 6 hours) with good engagement (likes > 3)
-            if (postAge < SIX_HOURS && likes > 3) {
-                applicableBadges.push('rising');
-            }
-            
-            // PODIUM badges: positions 1-3 only
-            const netLikes = likes - dislikes;
-            if (allPosts && allPosts.length > 0) {
-                const netLikesArray = [...allPosts.map(p => (p.likes || 0) - (p.dislikes || 0))].sort((a, b) => b - a);
-                const topNetLikes = [...new Set(netLikesArray)].slice(0, 3);
+            // 2. POSITION BADGES: Top 3 by net likes (crowne,d runner-up, podium)
+            if (allPosts.length > 0) {
+                // Calculate net likes for all posts
+                const postsWithNetLikes = allPosts.map(p => ({
+                    id: p.id,
+                    netLikes: (p.likes || 0) - (p.dislikes || 0)
+                }));
                 
-                // Position 1: CROWNED badge (most liked)
-                if (topNetLikes[0] && netLikes === topNetLikes[0] && netLikes > 0) {
-                    applicableBadges.push('crowned');
-                }
+                // Sort by net likes descending
+                const sorted = [...postsWithNetLikes].sort((a, b) => b.netLikes - a.netLikes);
                 
-                // Position 2: RUNNER-UP badge (2nd most liked)
-                if (topNetLikes[1] && netLikes === topNetLikes[1] && netLikes > 0) {
-                    applicableBadges.push('runner-up');
-                }
-                
-                // Position 3: PODIUM badge (3rd most liked)
-                if (topNetLikes[2] && netLikes === topNetLikes[2] && netLikes > 0) {
-                    applicableBadges.push('podium');
-                }
-            }
-            
-            // LIKED badge: more likes than dislikes
-            if (likes > dislikes && 
-                likes > 0 &&
-                !applicableBadges.includes('crowned') && 
-                !applicableBadges.includes('runner-up') && 
-                !applicableBadges.includes('podium')) {
-                applicableBadges.push('liked');
-            }
-            
-            // REDEMPTION badge: disliked posts that get likes (NEW BADGE)
-            // Posts where dislikes > likes initially, but now has gained likes
-            // Rarer in early days, more common as user base grows
-            if (dislikes > 0 && likes > 0) {
-                // Scale probability by online user count
-                // At 1 user: 0.1% chance, At 100m users: 10% chance
-                const redemptionChance = Math.min(0.1, (onlineUserCount / 100000000) * 0.1);
-                if (Math.random() < redemptionChance) {
-                    applicableBadges.push('redemption');
-                }
-            }
-            
-            // CONTROVERSIAL badge: likes and dislikes are similar (within 20%)
-            if (totalVotes > 5 && Math.abs(likes - dislikes) / Math.max(likes, dislikes, 1) < 0.3) {
-                applicableBadges.push('controversial');
-            }
-            
-            // DISLIKED badge: more dislikes than likes
-            if (dislikes > likes) {
-                applicableBadges.push('disliked');
-            }
-            
-            // BALANCED badge: equal likes and dislikes (requires at least 1 vote each)
-            if (likes === dislikes && likes > 0) {
-                applicableBadges.push('balanced');
-            }
-            
-            // VERIFIED badge: Admin post
-            if (post.createdBy === 'admin-uid-here') {
-                applicableBadges.push('verified');
-            }
-            
-            // SPOTLIGHT badge
-            if (post.id === spotlightPostId) {
-                applicableBadges.push('spotlight');
-            }
-
-            // 🚀 BOOST badges — live status during the paid window, permanent tier after.
-            // While active: 'boost' lights up the amber edge AND we track peak rank so
-            // the final badge reflects what the buyer actually achieved. On expiry the
-            // engine stamps boost-crowned / boost-podium / boost-spotlight into
-            // areaBadges so §7b keeps surfacing the post organically afterward.
-            try {
-                if (post.boost) {
-                    const bs = window.boostEngine.status(post);
-                    if (bs.active) {
-                        applicableBadges.push('boost');
-                        window.boostEngine.notePosition(post, gridPosition);
-                    } else if (bs.justExpired) {
-                        const fb = window.boostEngine.expire(post);
-                        if (fb) applicableBadges.push(fb);
-                        applicableBadges.push('boost');
-                    } else if (bs.expired && post.boost.finalBadge) {
-                        applicableBadges.push(post.boost.finalBadge);
-                        applicableBadges.push('boost');
+                // Get unique net like values for top 3
+                const uniqueNetLikes = [];
+                for (let i = 0; i < sorted.length && uniqueNetLikes.length < 3; i++) {
+                    if (!uniqueNetLikes.some(nl => nl === sorted[i].netLikes)) {
+                        uniqueNetLikes.push(sorted[i].netLikes);
                     }
                 }
-            } catch (e) { /* never break badge calc */ }
-            
-            // Build final badges array with ordering rules for grid positions 1-2000
-            // Order: PODIUM → GOOD BADGES → LIKE BADGES → RISING BADGES → DISLIKED BADGES
-            const podiumBadges = ['crowned', 'runner-up', 'podium'];
-            const goodBadges = ['spotlight', 'verified'];
-            const likeBadges = ['liked'];
-            const risingBadges = ['trending', 'rising', 'hot', 'new'];
-            const dislikedBadges = ['disliked', 'redemption'];
-            
-            // Add in priority order
-            badges.push(...applicableBadges.filter(b => podiumBadges.includes(b)));
-            badges.push(...applicableBadges.filter(b => goodBadges.includes(b)));
-            badges.push(...applicableBadges.filter(b => likeBadges.includes(b)));
-            badges.push(...applicableBadges.filter(b => risingBadges.includes(b)));
-            badges.push(...applicableBadges.filter(b => dislikedBadges.includes(b)));
-            
-            // Add remaining badges (controversial, balanced, media-content)
-            badges.push(...applicableBadges.filter(b => !podiumBadges.concat(goodBadges, likeBadges, risingBadges, dislikedBadges).includes(b)));
-
-            // 🏅 PER-AREA BADGE LEDGER — tracks WHERE each badge was earned.
-            // This is the "area-tag flipping" tracker: a post's chosen tag never auto-rewrites,
-            // but its badges are stamped per-area so the ML can boost it heavily when shown to
-            // viewers in areas where it has already proven itself.
-            try {
-                const area = post.areaTag || post.county || post.originalAreaTag;
-                if (area && badges.length) {
-                    if (!post.areaBadges || typeof post.areaBadges !== 'object') post.areaBadges = {};
-                    const prev = post.areaBadges[area] || {
-                        badges: [], firstEarnedAt: now, lastUpdatedAt: now, peakLikes: 0, peakRank: null
-                    };
-                    // Union new + previous badges (never lose history — that IS the flip record)
-                    const merged = Array.from(new Set([...(prev.badges || []), ...badges]));
-                    post.areaBadges[area] = {
-                        badges: merged,
-                        firstEarnedAt: prev.firstEarnedAt || now,
-                        lastUpdatedAt: now,
-                        peakLikes: Math.max(prev.peakLikes || 0, likes),
-                        peakRank: (prev.peakRank == null) ? gridPosition
-                                  : (gridPosition && gridPosition < prev.peakRank) ? gridPosition : prev.peakRank
-                    };
-                    // Multi-area champion counter (used by ML boost #2b)
-                    post.badgedAreaCount = Object.keys(post.areaBadges).length;
-                    post.lastBadgeAt = now;
+                
+                const postNetLikes = likes - dislikes;
+                
+                // Position 1: CROWNED badge (highest net likes, must be > 0)
+                if (uniqueNetLikes[0] !== undefined && postNetLikes === uniqueNetLikes[0] && postNetLikes > 0) {
+                    badges.push('crowned');
+                    return badges; // Position badge takes precedence
                 }
-            } catch (e) { /* never break badge calc */ }
-
+                
+                // Position 2: RUNNER-UP badge (2nd highest net likes, must be > 0)
+                if (uniqueNetLikes[1] !== undefined && postNetLikes === uniqueNetLikes[1] && postNetLikes > 0) {
+                    badges.push('runner-up');
+                    return badges; // Position badge takes precedence
+                }
+                
+                // Position 3: PODIUM badge (3rd highest net likes, must be > 0)
+                if (uniqueNetLikes[2] !== undefined && postNetLikes === uniqueNetLikes[2] && postNetLikes > 0) {
+                    badges.push('podium');
+                    return badges; // Position badge takes precedence
+                }
+            }
+            
+            // 3. HOT BADGE: Posts with 5+ likes AND older than 10 minutes
+            const tenMinutesMs = 10 * 60 * 1000;
+            if (likes >= 5 && postAge > tenMinutesMs && dislikes < likes) {
+                badges.push('hot');
+                return badges; // HOT takes precedence
+            }
+            
+            // 4. DISLIKED BADGE: More dislikes than likes
+            if (dislikes > likes) {
+                badges.push('disliked');
+                return badges; // DISLIKED takes precedence
+            }
+            
+            // 5. BALANCED BADGE: Equal likes and dislikes (requires at least 1 vote each)
+            if (likes === dislikes && likes > 0) {
+                badges.push('balanced');
+                return badges; // BALANCED takes precedence
+            }
+            
+            // 6. NO BADGE: Normal posts fall through (badges array remains empty)
             return badges;
         }
 
