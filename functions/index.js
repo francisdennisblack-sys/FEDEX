@@ -27,7 +27,10 @@ exports.postMetricsAggregator = functions.database.ref('/posts/{postId}').onCrea
 
 exports.createCheckoutSession = functions.https.onRequest(async (req,res)=>{
   setDefaultCors(res); if(req.method==='OPTIONS'){res.status(204).send('');return;} if(!stripe) return res.status(500).json({error:'Stripe not configured'});
-  try{ const {postId,kind,amount,currency,success_url,cancel_url} = req.body||{}; if(!postId||!kind||!amount) return res.status(400).json({error:'postId,kind,amount required'});
+  try{ const {postId,kind,amount,currency,success_url,cancel_url,metadata} = req.body||{}; if(!postId||!kind||!amount) return res.status(400).json({error:'postId,kind,amount required'});
+    // Extract userId from metadata
+    const userId = (metadata && metadata.clientUserId) || 'anonymous';
+    
     // Normalize and validate amount: accept cents (integer) or dollars (decimal string)
     let unit_amount;
     const rawAmount = amount;
@@ -45,6 +48,7 @@ exports.createCheckoutSession = functions.https.onRequest(async (req,res)=>{
     // Sanitize metadata values to avoid remote API pattern rejections
     const metaPostId = String(postId).replace(/[^a-zA-Z0-9_\-\.]/g,'_');
     const metaKind = String(kind).replace(/[^a-zA-Z0-9_\-]/g,'_');
+    const metaUserId = String(userId).replace(/[^a-zA-Z0-9_\-\.]/g,'_');
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types:['card'],
@@ -59,7 +63,7 @@ exports.createCheckoutSession = functions.https.onRequest(async (req,res)=>{
       }],
       success_url: okSuccess,
       cancel_url: okCancel,
-      metadata:{postId:metaPostId,kind:metaKind}
+      metadata:{postId:metaPostId,kind:metaKind,userId:metaUserId}
     });
     return res.json({id:session.id,url:session.url});
   }catch(e){ console.error(e); return res.status(500).json({error:e&&e.message}); }
@@ -68,5 +72,86 @@ exports.createCheckoutSession = functions.https.onRequest(async (req,res)=>{
 exports.handleStripeWebhook = functions.https.onRequest(async (req,res)=>{
   setDefaultCors(res); if(!stripe) return res.status(500).send('Stripe not configured'); const sig = req.headers['stripe-signature']||req.headers['Stripe-Signature']; let event;
   try{ event = stripe.webhooks.constructEvent(req.rawBody,sig,STRIPE_WEBHOOK_SECRET); }catch(err){ console.error('sig',err&&err.message); return res.status(400).send(`Webhook Error: ${err&&err.message}`); }
-  const obj = event.data&&event.data.object?event.data.object:{}; const meta = obj.metadata||{}; const postId = meta.postId||null; const kind=(meta.kind||'').toLowerCase(); const paymentId = obj.id||`evt_${Date.now()}`;
-  try{ const pRef=db.ref(`payments/${paymentId}`); const exists=await pRef.once('value'); if(!exists.exists()) await pRef.set({paymentId,type:event.type,kind,postId,receivedAt:admin.database.ServerValue.TIMESTAMP,raw:obj}); if(postId){ const updates={}; if(kind==='boost') updates[`posts/${postId}/boostPaidAt`]=admin.database.ServerValue.TIMESTAMP; if(kind==='sell'){ updates[`posts/${postId}/sellPaidAt`]=admin.database.ServerValue.TIMESTAMP; updates[`posts/${postId}/primaryBadge`]='sell'; } if(Object.keys(updates).length) await db.ref().update(updates); } }catch(e){console.error('webhook',e);} return res.json({received:true}); });
+  
+  // 🔥 CRITICAL: Only process successful checkout sessions
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const meta = session.metadata || {};
+    const postId = meta.postId || null;
+    const kind = (meta.kind || '').toLowerCase();
+    const userId = meta.userId || null;
+    const paymentId = session.id;
+    
+    console.log(`✅ Payment completed: postId=${postId}, kind=${kind}, userId=${userId}`);
+    
+    try {
+      // 💾 Store payment record
+      const pRef = db.ref(`payments/${paymentId}`);
+      const exists = await pRef.once('value');
+      if (!exists.exists()) {
+        await pRef.set({
+          paymentId,
+          type: 'checkout.session.completed',
+          kind,
+          postId,
+          userId,
+          amount: session.amount_total,
+          currency: session.currency,
+          status: 'completed',
+          completedAt: admin.database.ServerValue.TIMESTAMP,
+          raw: session
+        });
+        console.log(`💾 Stored payment: ${paymentId}`);
+      }
+      
+      // 🏅 Apply badge to post
+      if (postId) {
+        const updates = {};
+        
+        if (kind === 'boost') {
+          // Apply BOOST badge to post + set expiration (30 days from now)
+          updates[`posts/${postId}/boostPaidAt`] = admin.database.ServerValue.TIMESTAMP;
+          updates[`posts/${postId}/boostExpiresAt`] = Date.now() + (30 * 24 * 60 * 60 * 1000); // 30 days
+          updates[`posts/${postId}/boostStatus`] = 'active';
+          console.log(`🚀 Applied BOOST badge to post ${postId}`);
+        } else if (kind === 'sell') {
+          // Apply SELL badge to post
+          updates[`posts/${postId}/sellPaidAt`] = admin.database.ServerValue.TIMESTAMP;
+          updates[`posts/${postId}/primaryBadge`] = 'sell';
+          console.log(`💰 Applied SELL badge to post ${postId}`);
+        }
+        
+        if (Object.keys(updates).length > 0) {
+          await db.ref().update(updates);
+          console.log(`✅ Updated post with badge updates`);
+        }
+      }
+      
+      // 👤 Credit user account if userId provided
+      if (userId) {
+        const userRef = db.ref(`users/${userId}/account`);
+        const userSnapshot = await userRef.once('value');
+        const account = userSnapshot.val() || { balance: 0, purchases: {} };
+        
+        // Add purchase record
+        if (!account.purchases) account.purchases = {};
+        account.purchases[paymentId] = {
+          kind,
+          postId,
+          amount: session.amount_total,
+          currency: session.currency,
+          purchasedAt: Date.now()
+        };
+        
+        // Update user account
+        await userRef.set(account);
+        console.log(`👤 Credited user account: ${userId}, kind=${kind}`);
+      }
+      
+    } catch (e) {
+      console.error('webhook processing error:', e);
+    }
+  }
+  
+  return res.json({received: true});
+});
