@@ -8467,14 +8467,17 @@
             }
             window.voteVisualUpdateTimers[postId] = setTimeout(() => {
                 try {
-                    // 1) Update per-post badges after vote
+                    // 1) Update per-post badges after vote (updates cachedBadges + DOM classes)
                     recalculateBadgesForCurrentGrid(postId);
                     // 2) Re-run ranking so post can move to new position
                     window.lastRenderGridTime = 0; // bypass throttle for deliberate vote action
+                    window.voteTriggeredRerank = true; // signal immediate apply to scroller
                     renderGrid();
+                    window.voteTriggeredRerank = false;
                     console.log(`✅ Delayed vote refresh applied for ${postId.substring(0, 8)} after ${VOTE_VISUAL_DELAY_MS}ms`);
                 } catch (e) {
                     console.warn('⚠️ Delayed vote refresh failed:', e);
+                    window.voteTriggeredRerank = false;
                 } finally {
                     delete window.voteVisualUpdateTimers[postId];
                 }
@@ -22053,10 +22056,17 @@
                 pendingSortedPosts = Array.isArray(sortedPosts) ? [...sortedPosts] : [];
                 scheduleGridReconcile();
 
-                // First paint still loads immediately so user sees content quickly.
-                if (!Array.isArray(gridScroller.items) || gridScroller.items.length === 0) {
+                const gridAlreadyLoaded = Array.isArray(gridScroller.items) && gridScroller.items.length > 0;
+
+                if (!gridAlreadyLoaded) {
+                    // First paint: load immediately so user sees content quickly.
+                    gridScroller.setItems(pendingSortedPosts);
+                } else if (window.voteTriggeredRerank && pendingSortedPosts.length > 0) {
+                    // Vote re-rank: apply immediately so post moves + badges refresh without waiting 1/sec.
+                    console.log(`🗳️ Vote re-rank: immediate setItems (${pendingSortedPosts.length} posts)`);
                     gridScroller.setItems(pendingSortedPosts);
                 }
+                // Otherwise: let the 1/sec reconciler apply changes gradually (avoids flash-to-black).
             } else {
                 console.warn('⚠️ gridScroller not initialized yet');
             }
