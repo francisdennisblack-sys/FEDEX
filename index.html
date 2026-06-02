@@ -12244,6 +12244,43 @@
             }
         }
 
+        // Background deletion with retry - does not block UI
+        async function backgroundDeletePostWithRetry(postId, maxAttempts = 5) {
+            const attemptDelay = (n) => Math.min(2000 * Math.pow(2, n), 30000); // exponential backoff cap 30s
+            let attempt = 0;
+            while (attempt < maxAttempts) {
+                try {
+                    console.log(`🛠️ backgroundDelete attempt ${attempt+1} for post ${postId}`);
+                    await deletePostFromFirebase(postId);
+                    // success - remove from pendingDeletedPosts and record
+                    try {
+                        let pending = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
+                        pending = pending.filter(id => id !== postId);
+                        localStorage.setItem('pendingDeletedPosts', JSON.stringify(pending));
+                    } catch (e) { /* ignore */ }
+                    let deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
+                    if (!deletedOwnPosts.includes(postId)) {
+                        deletedOwnPosts.push(postId);
+                        localStorage.setItem('deletedOwnPosts', JSON.stringify(deletedOwnPosts));
+                    }
+                    console.log(`✅ backgroundDelete succeeded for ${postId}`);
+                    return true;
+                } catch (err) {
+                    console.warn(`⚠️ backgroundDelete failed attempt ${attempt+1} for ${postId}:`, err && err.message ? err.message : err);
+                    attempt++;
+                    if (attempt >= maxAttempts) break;
+                    await new Promise(res => setTimeout(res, attemptDelay(attempt)));
+                }
+            }
+            // Final failure - leave in pendingDeletedPosts so renderGrid will keep it hidden locally
+            console.error(`❌ backgroundDelete failed after ${maxAttempts} attempts for ${postId}`);
+            // Optionally show a non-blocking toast to user
+            try {
+                showToast && showToast(`Delete queued — will retry in background`);
+            } catch(e){}
+            return false;
+        }
+
         // Load user votes from Firebase
         async function loadUserVotesFromFirebase(userId) {
             try {
@@ -14179,39 +14216,35 @@
             console.log('  currentUserId:', currentUserId);
             console.log('  currentUserId:', currentUserId);
             
-            // Delete immediately without confirmation
-            // Delete from Firebase permanently (removes for everyone)
-            deletePostFromFirebase(selectedPostId).then(() => {
-                console.log('✅ Post permanently deleted from Firebase');
-                
-                // Track deletion in localStorage for record keeping
-                let deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
-                if (!deletedOwnPosts.includes(selectedPostId)) {
-                    deletedOwnPosts.push(selectedPostId);
-                    localStorage.setItem('deletedOwnPosts', JSON.stringify(deletedOwnPosts));
-                    console.log(`✅ Own post deletion recorded. Total deleted: ${deletedOwnPosts.length}`);
+            // Optimistic UI: hide immediately for the user
+            try {
+                // Add to pendingDeletedPosts so it remains hidden until final deletion
+                let pending = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
+                if (!pending.includes(selectedPostId)) {
+                    pending.push(selectedPostId);
+                    localStorage.setItem('pendingDeletedPosts', JSON.stringify(pending));
                 }
-                
-                // Also hide from memory for immediate UI update
-                if (!hiddenPosts[currentUserId]) {
-                    hiddenPosts[currentUserId] = [];
+            } catch(e) { console.warn('pendingDeletedPosts write failed', e); }
+
+            // Also hide from memory for immediate UI update
+            if (!hiddenPosts[currentUserId]) hiddenPosts[currentUserId] = [];
+            if (!hiddenPosts[currentUserId].includes(selectedPostId)) hiddenPosts[currentUserId].push(selectedPostId);
+
+            // Remove from userPostBoxes immediately
+            const deleteIndex = userPostBoxes.indexOf(selectedBoxIndex);
+            if (deleteIndex > -1) userPostBoxes.splice(deleteIndex, 1);
+
+            // Render and close view now so user sees immediate effect
+            try { closeViewModal(); } catch(e){}
+            try { renderGrid(); } catch(e){}
+
+            // Perform deletion in background with retries (non-blocking)
+            backgroundDeletePostWithRetry(selectedPostId).then(success => {
+                if (success) {
+                    console.log('✅ Background deletion completed for', selectedPostId);
+                } else {
+                    console.warn('⚠️ Background deletion could not confirm removal for', selectedPostId);
                 }
-                if (!hiddenPosts[currentUserId].includes(selectedPostId)) {
-                    hiddenPosts[currentUserId].push(selectedPostId);
-                }
-                
-                // Remove deleted post from user's posts
-                const deleteIndex = userPostBoxes.indexOf(selectedBoxIndex);
-                if (deleteIndex > -1) {
-                    userPostBoxes.splice(deleteIndex, 1);
-                }
-                
-                closeViewModal();
-                renderGrid();
-                // Removed: alert('Your post has been deleted permanently');
-            }).catch(error => {
-                console.error('Failed to delete from Firebase:', error);
-                // Removed: alert('Failed to delete post');
             });
         }
         
@@ -21279,6 +21312,9 @@
             
             // Get posts deleted by this user (own posts deleted permanently)
             const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
+
+            // Get pending deletions (optimistic deletes queued for background removal)
+            const pendingDeleted = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
             
             // Get all posts for the network
             // Prefer the user's own key only when it already has posts; otherwise
@@ -21349,8 +21385,13 @@
                     gridContent[key].forEach(post => {
                         if (!post || !post.id) return;
                         if (!seenPostIds.has(post.id)) {
-                            seenPostIds.add(post.id);
-                            allPosts.push(post);
+                            // Filter out posts pending deletion or explicitly hidden/deleted
+                            if (pendingDeleted.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) {
+                                // skip
+                            } else {
+                                seenPostIds.add(post.id);
+                                allPosts.push(post);
+                            }
                         }
                     });
                 }
