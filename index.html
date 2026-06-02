@@ -138,6 +138,49 @@
         // Guarded logger: use cLog(...) instead of console.log for verbose output.
         window.cLog = function(...args){ if (window.CLEANUP_FLAGS.ENABLE_DEBUG_LOGS) console.log(...args); };
 
+        // Media lazy-load helpers: assign `src` from `data-src` when a node becomes visible
+        function loadMediaForNode(node) {
+            if (!node || !(node instanceof Element)) return;
+            try {
+                const imgs = node.querySelectorAll('img[data-src]');
+                imgs.forEach(img => {
+                    try {
+                        if (!img.getAttribute('src')) {
+                            const src = img.getAttribute('data-src');
+                            if (src) {
+                                img.setAttribute('src', src);
+                                img.removeAttribute('data-src');
+                            }
+                        }
+                    } catch (e) {}
+                });
+
+                const vids = node.querySelectorAll('video[data-src]');
+                vids.forEach(v => {
+                    try {
+                        if (!v.getAttribute('src')) {
+                            const src = v.getAttribute('data-src');
+                            if (src) {
+                                v.setAttribute('src', src);
+                                v.removeAttribute('data-src');
+                                try { v.load(); } catch(e) {}
+                            }
+                        }
+                    } catch (e) {}
+                });
+            } catch (e) { console.warn('loadMediaForNode error', e); }
+        }
+
+        function unloadMediaForNode(node) {
+            if (!node || !(node instanceof Element)) return;
+            try {
+                const vids = node.querySelectorAll('video');
+                vids.forEach(v => {
+                    try { if (!v.paused) v.pause(); } catch(e) {}
+                });
+            } catch (e) { console.warn('unloadMediaForNode error', e); }
+        }
+
         // POI proximity helpers - treat 'WiFi' as distance to nearest POI
         function haversineMeters(lat1, lon1, lat2, lon2) {
             if (!lat1 || !lon1 || !lat2 || !lon2) return Infinity;
@@ -304,14 +347,19 @@
                     rootMargin: `${this.bufferStrategy.renderBuffer * this.itemHeight}px`,
                     threshold: 0
                 };
-                
                 this.observer = new IntersectionObserver((entries) => {
                     entries.forEach(entry => {
-                        if (entry.isIntersecting) {
-                            this.observedElements.add(entry.target);
-                        } else {
-                            this.observedElements.delete(entry.target);
-                        }
+                        try {
+                            if (entry.isIntersecting) {
+                                this.observedElements.add(entry.target);
+                                // Load any media for this node when it becomes visible
+                                try { loadMediaForNode(entry.target); } catch(e) { console.warn('loadMediaForNode failed', e); }
+                            } else {
+                                this.observedElements.delete(entry.target);
+                                // Optionally pause/unload heavy media when leaving viewport
+                                try { unloadMediaForNode(entry.target); } catch(e) { /* noop */ }
+                            }
+                        } catch (e) { console.warn('IntersectionObserver entry handling error', e); }
                     });
                 }, options);
             }
@@ -9425,10 +9473,10 @@
         // ============================================================================
         // MEMORY OPTIMIZATION: Limit postCache size to prevent crashes on mobile
         // ============================================================================
-        const MAX_CACHE_SIZE = 100; // AGGRESSIVE: Keep only 100 most recent posts (was 500)
-        const POST_CACHE_CLEANUP_THRESHOLD = 120; // AGGRESSIVE: Trigger cleanup at 120 items (was 600)
-        const MAX_POSTS_PER_AREA = 50; // AGGRESSIVE: Limit posts per area (was 200)
-        const MAX_TOTAL_GRIDCONTENT = 300; // AGGRESSIVE: Hard limit on total posts (was 2000)
+        const MAX_CACHE_SIZE = 500; // Increase cache to keep more posts for smoother backfill
+        const POST_CACHE_CLEANUP_THRESHOLD = 600; // Trigger cleanup at higher threshold
+        const MAX_POSTS_PER_AREA = 200; // Allow more posts per area to avoid premature trimming
+        const MAX_TOTAL_GRIDCONTENT = 2000; // Target grid fullness: allow up to 2000 posts
         
         function addToPostCache(post) {
             if (!post || !post.id) return;
@@ -12232,6 +12280,13 @@
                 console.log('  🎧 Setting up onValue listener on shared posts...');
                 logConnectionStatus('online', 'Firebase listener ready');
                 const unsubscribe = onValue(postsRef, (snapshot) => {
+                    // Telemetry: count how many onValue snapshots we've processed globally
+                    window._firebaseOnValueSnapshotCount = (window._firebaseOnValueSnapshotCount || 0) + 1;
+                    window._firebaseOnValueSnapshotTimestamps = window._firebaseOnValueSnapshotTimestamps || [];
+                    window._firebaseOnValueSnapshotTimestamps.push(Date.now());
+                    // Keep only last 20 entries
+                    if (window._firebaseOnValueSnapshotTimestamps.length > 20) window._firebaseOnValueSnapshotTimestamps.shift();
+                    console.log(`  🔔 onValue snapshot #${window._firebaseOnValueSnapshotCount} received (recent: ${window._firebaseOnValueSnapshotTimestamps.length})`);
                     callCount++;
                     logConnectionStatus('online', `Posts synced (${callCount} updates)`);
                     console.log(`\n🔥🔥🔥 FIREBASE onValue LISTENER FIRED (call #${callCount}) 🔥🔥🔥`);
@@ -16687,63 +16742,112 @@
          * Populate nearby locations (1-5 miles from user) for quick selection
          * Helps users discover areas close to them
          */
-        function populateNearbyLocations() {
-            if (!userLocation || !globalLocationDatabase) {
-                console.log('⚠️  Nearby locations: missing location or database');
-                return;
+        async function populateNearbyLocations() {
+            if (!userLocation || (!globalLocationDatabase && !window.globalPOIDatabase && !window.osmPlaces && !window._osmPlacesPreloadPromise)) {
+                console.log('⚠️  Nearby locations: missing location or any local database — attempting lightweight fetch fallback');
             }
-            
+
             try {
-                // Find all locations within 1-5 miles of user
-                const NEARBY_RADIUS_MIN = 1.60934 / 0.621371; // 1 mile in km
-                const NEARBY_RADIUS_MAX = 5 * 1.60934 / 0.621371; // 5 miles in km
-                
-                const nearbyLocations = [];
-                
-                for (const location of globalLocationDatabase) {
-                    if (!location.lat || !location.lon) continue;
-                    
-                    const distance = calculateDistance(
-                        userLocation.latitude,
-                        userLocation.longitude,
-                        location.lat,
-                        location.lon
-                    );
-                    
-                    if (distance >= NEARBY_RADIUS_MIN && distance <= NEARBY_RADIUS_MAX) {
-                        nearbyLocations.push({
-                            name: location.name,
-                            state: location.state,
-                            distance: distance,
-                            type: location.type
-                        });
-                    }
+                // Radius: 1 - 5 miles converted to km for calculateDistance (which returns km)
+                const NEARBY_RADIUS_MIN_KM = 1 * 1.60934;
+                const NEARBY_RADIUS_MAX_KM = 5 * 1.60934;
+
+                // Ensure we have a source array to compute from. Prefer full location DB, then POI DB, then OSM places, then a fetch fallback, then areaNameDatabase.
+                let source = [];
+
+                if (Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
+                    source = globalLocationDatabase;
+                } else if (Array.isArray(window.globalPOIDatabase) && window.globalPOIDatabase.length > 0) {
+                    source = window.globalPOIDatabase;
+                } else if (Array.isArray(window.osmPlaces) && window.osmPlaces.length > 0) {
+                    source = window.osmPlaces;
+                } else if (window._osmPlacesPreloadPromise) {
+                    try {
+                        const places = await window._osmPlacesPreloadPromise;
+                        if (Array.isArray(places)) source = places;
+                        else if (places && places.places) source = places.places;
+                    } catch (e) { /* ignore */ }
                 }
-                
-                // Sort by distance (closest first)
-                nearbyLocations.sort((a, b) => a.distance - b.distance);
-                
-                // Take top 8 nearest
-                const topNearby = nearbyLocations.slice(0, 8);
-                
+
+                // On-demand fetch fallback for very small places file (fast on mobile)
+                if (source.length === 0) {
+                    try {
+                        const resp = await fetch('/pois/places.json');
+                        if (resp.ok) {
+                            const payload = await resp.json();
+                            if (payload && Array.isArray(payload.places)) source = payload.places;
+                        }
+                    } catch (e) { /* no-op */ }
+                }
+
+                // Final fallback: areaNameDatabase map -> array
+                if (source.length === 0 && areaNameDatabase && typeof areaNameDatabase.initialize === 'function') {
+                    try {
+                        const areas = [];
+                        // areaNameDatabase.areas may be Map; convert
+                        if (areaNameDatabase.areas && typeof areaNameDatabase.areas.forEach === 'function') {
+                            areaNameDatabase.areas.forEach(v => areas.push(v));
+                        } else if (Array.isArray(areaNameDatabase.areas)) {
+                            areas.push(...areaNameDatabase.areas);
+                        }
+                        source = areas;
+                    } catch (e) { /* ignore */ }
+                }
+
+                // If still empty, nothing to show
                 const container = document.getElementById('nearbyLocationsContainer');
                 const list = document.getElementById('nearbyLocationsList');
-                
                 if (!container || !list) {
                     console.warn('⚠️  Nearby locations: container not found');
                     return;
                 }
-                
-                if (topNearby.length === 0) {
+
+                if (!userLocation || !userLocation.lat && !userLocation.latitude) {
+                    console.log('⚠️  populateNearbyLocations: no userLocation available');
                     container.style.display = 'none';
+                    return;
+                }
+
+                // Mark as loading if we may fetch
+                list.innerHTML = '<div style="padding:8px;color:#999">Loading nearby areas…</div>';
+                container.style.display = 'block';
+
+                const candidates = [];
+
+                for (const location of source) {
+                    if (!location) continue;
+                    const lat = location.lat || location.latitude || location.lat_deg || location.lat_deg_final;
+                    const lon = location.lon || location.lon || location.longitude || location.lng || location.lon_deg;
+                    if (!lat || !lon) continue;
+
+                    const userLat = userLocation.lat || userLocation.latitude || userLocation.lat_deg;
+                    const userLon = userLocation.lon || userLocation.longitude || userLocation.lon_deg;
+
+                    const distanceKm = calculateDistance(userLat, userLon, lat, lon);
+                    if (!isFinite(distanceKm)) continue;
+                    if (distanceKm >= NEARBY_RADIUS_MIN_KM && distanceKm <= NEARBY_RADIUS_MAX_KM) {
+                        candidates.push({
+                            name: location.name || location.place || location.display_name || 'Unknown',
+                            state: location.state || location.region || '',
+                            distance: distanceKm,
+                            type: location.type || location.kind || 'place'
+                        });
+                    }
+                }
+
+                // Sort & take top 8
+                candidates.sort((a, b) => a.distance - b.distance);
+                const topNearby = candidates.slice(0, 8);
+
+                if (topNearby.length === 0) {
+                    list.innerHTML = '<div style="padding:8px;color:#999">No nearby areas found</div>';
                     console.log('📍 No nearby locations found');
                     return;
                 }
-                
+
                 // Clear previous list
                 list.innerHTML = '';
-                
-                // Add location buttons
+
                 topNearby.forEach(loc => {
                     const btn = document.createElement('button');
                     btn.style.cssText = `
@@ -16757,36 +16861,25 @@
                         cursor: pointer;
                         white-space: nowrap;
                         transition: all 0.2s;
+                        margin:4px 4px 4px 0;
                     `;
                     btn.textContent = `📍 ${loc.name} (${(loc.distance * 0.621371).toFixed(1)}mi)`;
-                    
-                    btn.onmouseover = () => {
-                        btn.style.backgroundColor = '#667eea';
-                        btn.style.color = '#000';
-                    };
-                    btn.onmouseout = () => {
-                        btn.style.backgroundColor = '#2a2a2a';
-                        btn.style.color = '#fff';
-                    };
-                    
+                    btn.onmouseover = () => { btn.style.backgroundColor = '#667eea'; btn.style.color = '#000'; };
+                    btn.onmouseout = () => { btn.style.backgroundColor = '#2a2a2a'; btn.style.color = '#fff'; };
                     btn.onclick = (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        // Set the custom zone tag to this nearby location
+                        e.preventDefault(); e.stopPropagation();
                         const customTagInput = document.getElementById('customZoneTag');
                         if (customTagInput) {
-                            customTagInput.value = `${loc.name}, ${loc.state}`;
-                            // Trigger the input handler
+                            customTagInput.value = `${loc.name}${loc.state ? ', ' + loc.state : ''}`;
                             handleCustomZoneInput();
                         }
                     };
-                    
                     list.appendChild(btn);
                 });
-                
+
                 container.style.display = 'block';
-                console.log(`✅ Showing ${topNearby.length} nearby locations`);
-                
+                console.log(`✅ Showing ${topNearby.length} nearby locations (fallback-enabled)`);
+
             } catch (error) {
                 console.error('❌ Error populating nearby locations:', error);
             }
@@ -16933,6 +17026,11 @@
 
         function subscribeToFirebasePostsWithReconnect() {
             try {
+                // Prevent creating multiple listeners — if one exists, skip creating another
+                if (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function') {
+                    console.log('⚠️ subscribeToFirebasePostsWithReconnect: listener already active - skipping new subscribe');
+                    return;
+                }
                 console.log('\n🔗🔗🔗 subscribeToFirebasePostsWithReconnect CALLED 🔗🔗🔗');
                 console.log('  currentUserId:', currentUserId);
                 console.log('  currentGridId:', currentGridId);
@@ -20937,12 +21035,9 @@
                         zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${formatted}</div>`;
                     }
                     
-                    // Generate badges
+                    // Generate badges (self-post text badge intentionally disabled)
                     let badgeClasses = '';
                     let badgeHTML = '';
-                    if (post.isSelfPost) {
-                        badgeHTML = `<div style="position: absolute; top: 4px; left: 4px; background: rgba(59, 130, 246, 0.8); color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;">👤 My Post</div>`;
-                    }
                     
                     // Render media post
                     box.innerHTML = `${mediaHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
@@ -21159,7 +21254,7 @@
          */
         let isLoadingMore = false;
         let postBatchOffset = 0; // Track how many posts we've already loaded
-        const POST_BATCH_SIZE = 50; // Load 50 posts at a time
+        const POST_BATCH_SIZE = 200; // Load 200 posts at a time to prefetch aggressively
         let allFirebasePosts = []; // Cache of all posts from Firebase
         
         async function loadMorePostsFromDatabase() {
@@ -21230,19 +21325,20 @@
                 // Add batch to grid scroller
                 if (gridScroller) {
                     // 🚫 Check if already at max posts
-                    const currentCount = gridScroller.items.length;
+                    const currentCount = (gridScroller.items || []).length;
                     if (currentCount >= MAX_POSTS) {
                         console.log(`   ⚠️ Already at max posts (${MAX_POSTS})`);
                         isLoadingMore = false;
                         return;
                     }
-                    
-                    gridScroller.addItems(nextBatch);
-                    console.log(`   ✅ Added to VirtualGridScroller`);
-                    console.log(`   Total items in scroller now: ${gridScroller.items.length}/${MAX_POSTS}`);
-                    
-                    // Update offset for next batch
-                    postBatchOffset += nextBatch.length;
+
+                    // Safe-add: avoid inserting posts already present in the scroller
+                    const addedCount = safeAddItemsToGridScroller(nextBatch);
+                    console.log(`   ✅ Added ${addedCount} new items to VirtualGridScroller (requested ${nextBatch.length})`);
+                    console.log(`   Total items in scroller now: ${ (gridScroller.items || []).length }/${MAX_POSTS}`);
+
+                    // Update offset by how many we actually added
+                    postBatchOffset += Math.min(nextBatch.length, addedCount);
                     console.log(`   Next offset: ${postBatchOffset}`);
                 } else {
                     console.error(`   ❌ gridScroller not available!`);
@@ -21281,6 +21377,21 @@
         // 📝 FULL RENDER: All posts with algorithms, badges, etc (deferred)
         function renderGridFull() {
             renderGrid_Original(); // Call the original full renderGrid below
+        }
+        // Helper: Safely add items to VirtualGridScroller avoiding duplicates by post id
+        function safeAddItemsToGridScroller(items) {
+            if (!gridScroller || !Array.isArray(items) || items.length === 0) return 0;
+            try {
+                const existingIds = new Set((gridScroller.items || []).map(i => i && i.id).filter(Boolean));
+                const filtered = items.filter(i => i && i.id && !existingIds.has(i.id));
+                if (filtered.length === 0) return 0;
+                if (typeof gridScroller.addItems === 'function') gridScroller.addItems(filtered);
+                else if (typeof gridScroller.setItems === 'function') gridScroller.setItems([...(gridScroller.items||[]), ...filtered]);
+                return filtered.length;
+            } catch (e) {
+                console.warn('safeAddItemsToGridScroller failed:', e);
+                return 0;
+            }
         }
         
         // ORIGINAL renderGrid function (renamed)
@@ -21619,10 +21730,9 @@
                 }
             });
             
-            // Add special badge to self-posts
+            // Add special handling to self-posts: move to top without adding a textual badge
             selfPosts.forEach(post => {
-                post.isSelfPost = true;
-                post.selfPostBadge = '👤 My Post'; // Will show instead of rank badge
+                // intentionally do not set `isSelfPost` or a textual badge — UI shows ownership by placement only
             });
             
             // Recombine: self-posts first (positions 1-20), then others

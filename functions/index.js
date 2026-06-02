@@ -15,10 +15,81 @@ try { if (STRIPE_SECRET) stripe = require('stripe')(STRIPE_SECRET); } catch (e) 
 function setDefaultCors(res){ res.set('Access-Control-Allow-Origin','*'); res.set('Access-Control-Allow-Methods','GET,POST,OPTIONS'); res.set('Access-Control-Allow-Headers','Content-Type,Stripe-Signature'); }
 async function incrementCounter(path, delta=1){ const ref=db.ref(path); try{ await ref.transaction(cur => (Number(cur)||0)+delta); }catch(e){console.error('inc',path,e);} }
 
+function normalizeCheckoutInput(input) {
+  const body = input || {};
+  const postId = body.postId || body.clientPostId || null;
+  const kind = (body.kind || body.type || '').toLowerCase();
+  const currency = (body.currency || 'usd').toLowerCase();
+  const metadata = body.metadata || {};
+  const userId = metadata.clientUserId || body.userId || 'anonymous';
+
+  let unit_amount;
+  const rawAmount = body.amount;
+  if (typeof rawAmount === 'string' && rawAmount.indexOf('.') !== -1) {
+    const v = parseFloat(rawAmount.replace(/[^0-9.\-]/g, ''));
+    unit_amount = Number.isFinite(v) ? Math.round(v * 100) : NaN;
+  } else {
+    unit_amount = Math.round(Number(String(rawAmount).replace(/[^0-9\-]/g, '')));
+  }
+
+  let okSuccess = body.success_url || body.successUrl || 'https://example.com/success';
+  let okCancel = body.cancel_url || body.cancelUrl || 'https://example.com/cancel';
+  try { new URL(okSuccess); new URL(okCancel); } catch (e) { throw new Error('invalid success_url or cancel_url'); }
+
+  const url = new URL(okSuccess);
+  url.searchParams.set('fedex_checkout', 'success');
+  url.searchParams.set('kind', kind || 'unknown');
+  // Stripe template var is replaced at redirect-time.
+  url.searchParams.set('session_id', '{CHECKOUT_SESSION_ID}');
+  okSuccess = url.toString();
+
+  const metaPostId = String(postId || 'new_post').replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  const metaKind = String(kind || 'unknown').replace(/[^a-zA-Z0-9_\-]/g, '_');
+  const metaUserId = String(userId || 'anonymous').replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+
+  return { postId, kind, unit_amount, currency, okSuccess, okCancel, metaPostId, metaKind, metaUserId };
+}
+
+async function createStripeCheckoutSession(payload) {
+  if (!stripe) throw new Error('Stripe not configured');
+  const normalized = normalizeCheckoutInput(payload);
+  const { postId, kind, unit_amount, currency, okSuccess, okCancel, metaPostId, metaKind, metaUserId } = normalized;
+
+  if (!postId || !kind || !unit_amount) throw new Error('postId,kind,amount required');
+  if (!Number.isInteger(unit_amount) || unit_amount <= 0) throw new Error('invalid amount; provide integer cents or decimal dollars');
+
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types:['card'],
+    mode:'payment',
+    line_items:[{
+      price_data:{
+        currency,
+        product_data:{name:`${kind} for post ${postId}`},
+        unit_amount
+      },
+      quantity:1
+    }],
+    success_url: okSuccess,
+    cancel_url: okCancel,
+    metadata:{postId:metaPostId,kind:metaKind,userId:metaUserId}
+  });
+
+  return { id: session.id, url: session.url };
+}
+
 exports.enforceUserPostLimit = functions.database.ref('/posts/{postId}').onCreate(async (snap, ctx)=>{
   const post = snap.val()||{}; const postId = ctx.params.postId; const userId = post.authId||post.userId||post.createdBy; if(!userId) return null;
   const ref = db.ref(`user-posts/${userId}`); const s = await ref.once('value'); const existing = s.exists()?s.val():{}; const count = Object.keys(existing).length;
-  if(count>=MAX_POSTS_PER_USER){ await snap.ref.remove(); await db.ref(`post-deletions/${postId}`).set({postId,userId,reason:'post_limit_exceeded',ts:admin.database.ServerValue.TIMESTAMP}); return null; }
+  if(count>=MAX_POSTS_PER_USER){
+    // Do NOT auto-delete the new post. Instead mark it as blocked/hidden and notify the user
+    try {
+      await snap.ref.update({ limitBlocked: true, visible: false, limitBlockedAt: admin.database.ServerValue.TIMESTAMP });
+      await db.ref(`post-limit-notices/${userId}/${postId}`).set({ postId, userId, reason: 'post_limit_exceeded', ts: admin.database.ServerValue.TIMESTAMP });
+      // Add a lightweight user notification so the client can surface guidance
+      await db.ref(`users/${userId}/notifications/${postId}`).set({ type: 'post_limit', message: 'You have reached the per-user post limit. Delete older posts to publish this one.', postId, ts: admin.database.ServerValue.TIMESTAMP, read: false });
+    } catch (e) { console.error('Failed to mark post as limit-blocked', e); }
+    return null;
+  }
   await ref.child(postId).set({postId,authId:userId,timestamp:post.timestamp||admin.database.ServerValue.TIMESTAMP,createdAt:admin.database.ServerValue.TIMESTAMP});
   return null;
 });
@@ -27,46 +98,52 @@ exports.postMetricsAggregator = functions.database.ref('/posts/{postId}').onCrea
 
 exports.createCheckoutSession = functions.https.onRequest(async (req,res)=>{
   setDefaultCors(res); if(req.method==='OPTIONS'){res.status(204).send('');return;} if(!stripe) return res.status(500).json({error:'Stripe not configured'});
-  try{ const {postId,kind,amount,currency,success_url,cancel_url,metadata} = req.body||{}; if(!postId||!kind||!amount) return res.status(400).json({error:'postId,kind,amount required'});
-    // Extract userId from metadata
-    const userId = (metadata && metadata.clientUserId) || 'anonymous';
-    
-    // Normalize and validate amount: accept cents (integer) or dollars (decimal string)
-    let unit_amount;
-    const rawAmount = amount;
-    if(typeof rawAmount === 'string' && rawAmount.indexOf('.')!==-1){
-      const v = parseFloat(rawAmount.replace(/[^0-9.\-]/g,''));
-      unit_amount = Number.isFinite(v) ? Math.round(v*100) : NaN;
-    } else {
-      unit_amount = Math.round(Number(String(rawAmount).replace(/[^0-9\-]/g,'')));
-    }
-    if(!Number.isInteger(unit_amount) || unit_amount <= 0) return res.status(400).json({error:'invalid amount; provide integer cents or decimal dollars'});
-    // Validate URLs
-    let okSuccess = success_url || 'https://example.com/success';
-    let okCancel = cancel_url || 'https://example.com/cancel';
-    try{ new URL(okSuccess); new URL(okCancel); }catch(e){ return res.status(400).json({error:'invalid success_url or cancel_url'}); }
-    // Sanitize metadata values to avoid remote API pattern rejections
-    const metaPostId = String(postId).replace(/[^a-zA-Z0-9_\-\.]/g,'_');
-    const metaKind = String(kind).replace(/[^a-zA-Z0-9_\-]/g,'_');
-    const metaUserId = String(userId).replace(/[^a-zA-Z0-9_\-\.]/g,'_');
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types:['card'],
-      mode:'payment',
-      line_items:[{
-        price_data:{
-          currency:(currency||'usd').toLowerCase(),
-          product_data:{name:`${kind} for post ${postId}`},
-          unit_amount:unit_amount
-        },
-        quantity:1
-      }],
-      success_url: okSuccess,
-      cancel_url: okCancel,
-      metadata:{postId:metaPostId,kind:metaKind,userId:metaUserId}
-    });
-    return res.json({id:session.id,url:session.url});
+  try{
+    const session = await createStripeCheckoutSession(req.body || {});
+    return res.json(session);
   }catch(e){ console.error(e); return res.status(500).json({error:e&&e.message}); }
+});
+
+exports.createCheckoutSessionCallable = functions.https.onCall(async (data, context) => {
+  if (!stripe) throw new functions.https.HttpsError('failed-precondition', 'Stripe not configured');
+  try {
+    const session = await createStripeCheckoutSession(data || {});
+    return session;
+  } catch (e) {
+    throw new functions.https.HttpsError('invalid-argument', e && e.message ? e.message : 'Failed to create checkout session');
+  }
+});
+
+exports.getCheckoutSessionResult = functions.https.onCall(async (data, context) => {
+  if (!stripe) throw new functions.https.HttpsError('failed-precondition', 'Stripe not configured');
+  const sessionId = data && data.sessionId ? String(data.sessionId) : '';
+  if (!sessionId) throw new functions.https.HttpsError('invalid-argument', 'sessionId required');
+
+  // First: check canonical processed payment record from webhook.
+  const paymentSnap = await db.ref(`payments/${sessionId}`).once('value');
+  if (paymentSnap.exists()) {
+    const p = paymentSnap.val() || {};
+    return {
+      paid: true,
+      kind: p.kind || null,
+      sessionId,
+      amount: p.amount || null,
+      currency: p.currency || null,
+      source: 'payments-db'
+    };
+  }
+
+  // Fallback: query Stripe directly (covers webhook lag).
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+  const isPaid = session && (session.payment_status === 'paid' || session.status === 'complete');
+  return {
+    paid: !!isPaid,
+    kind: session && session.metadata ? (session.metadata.kind || null) : null,
+    sessionId,
+    amount: session ? session.amount_total : null,
+    currency: session ? session.currency : null,
+    source: 'stripe-session'
+  };
 });
 
 exports.handleStripeWebhook = functions.https.onRequest(async (req,res)=>{
@@ -108,13 +185,14 @@ exports.handleStripeWebhook = functions.https.onRequest(async (req,res)=>{
       if (postId) {
         const updates = {};
         
-        if (kind === 'boost') {
+        if (kind === 'boost' || kind === 'boost_sell') {
           // Apply BOOST badge to post + set expiration (30 days from now)
           updates[`posts/${postId}/boostPaidAt`] = admin.database.ServerValue.TIMESTAMP;
           updates[`posts/${postId}/boostExpiresAt`] = Date.now() + (30 * 24 * 60 * 60 * 1000); // 30 days
           updates[`posts/${postId}/boostStatus`] = 'active';
           console.log(`🚀 Applied BOOST badge to post ${postId}`);
-        } else if (kind === 'sell') {
+        }
+        if (kind === 'sell' || kind === 'boost_sell') {
           // Apply SELL badge to post
           updates[`posts/${postId}/sellPaidAt`] = admin.database.ServerValue.TIMESTAMP;
           updates[`posts/${postId}/primaryBadge`] = 'sell';
@@ -142,6 +220,23 @@ exports.handleStripeWebhook = functions.https.onRequest(async (req,res)=>{
           currency: session.currency,
           purchasedAt: Date.now()
         };
+
+        // Materialize current entitlements so clients can safely apply paid flags after verified checkout.
+        if (!account.entitlements) account.entitlements = {};
+        if (kind === 'boost' || kind === 'boost_sell') {
+          account.entitlements.boost = {
+            paid: true,
+            paymentId,
+            purchasedAt: Date.now()
+          };
+        }
+        if (kind === 'sell' || kind === 'boost_sell') {
+          account.entitlements.sell = {
+            paid: true,
+            paymentId,
+            purchasedAt: Date.now()
+          };
+        }
         
         // Update user account
         await userRef.set(account);
