@@ -13651,27 +13651,40 @@
                     console.log('🌙 Tab hidden: SWITCHING TO AGGRESSIVE HEARTBEAT (5s)');
                     backgroundHeartbeatActive = true;
                     lastHiddenTime = Date.now();
-                    setHeartbeatInterval(5 * 1000); // 5s when backgrounded
+                    setHeartbeatInterval(5 * 1000);
                 } else {
                     console.log('🌞 Tab visible: SWITCHING TO NORMAL HEARTBEAT (60s)');
                     backgroundHeartbeatActive = false;
-                    setHeartbeatInterval(60 * 1000); // 60s when visible
+                    setHeartbeatInterval(60 * 1000);
 
-                    // If tab was hidden for more than 30 seconds, force Firebase reconnect + grid refresh
-                    // This handles iOS/Android OS background tab suspension killing the WebSocket
                     const hiddenDuration = Date.now() - lastHiddenTime;
                     if (hiddenDuration > 30 * 1000) {
-                        console.log(`🔄 Tab was hidden for ${Math.round(hiddenDuration/1000)}s — forcing Firebase reconnect + grid refresh`);
-                        try {
-                            if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
-                                subscribeToFirebasePostsWithReconnect();
-                            }
-                        } catch(e) { console.warn('reconnect on resume error:', e); }
-                        // Force grid to re-render immediately so posts feel instant on return
+                        console.log(`🔄 Tab resumed after ${Math.round(hiddenDuration/1000)}s — instant cache render + background Firebase reconnect`);
+
+                        // ⚡ STEP 1: Show cached posts IMMEDIATELY (<100ms) so user sees content right away
+                        // Don't wait for Firebase — render whatever we already have locally
                         window.lastRenderGridTime = 0;
                         try {
+                            // Restore from postCacheSystem if gridContent is empty
+                            const cachedPosts = window.postCacheSystem && window.postCacheSystem.getCachedPostsForUser
+                                ? window.postCacheSystem.getCachedPostsForUser(currentUserId || 'shared')
+                                : null;
+                            if (cachedPosts && cachedPosts.length > 0 && (!gridContent['shared-posts'] || gridContent['shared-posts'].length === 0)) {
+                                gridContent['shared-posts'] = cachedPosts;
+                                console.log(`  ✅ Restored ${cachedPosts.length} posts from cache for instant render`);
+                            }
                             if (typeof renderGrid === 'function') renderGrid();
-                        } catch(e) {}
+                        } catch(e) { console.warn('cache render on resume error:', e); }
+
+                        // 🔄 STEP 2: Reconnect Firebase in background — grid will update again when data arrives
+                        // Small delay so the instant cache render paints first
+                        setTimeout(() => {
+                            try {
+                                if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                                    subscribeToFirebasePostsWithReconnect();
+                                }
+                            } catch(e) { console.warn('reconnect on resume error:', e); }
+                        }, 150);
                     }
                 }
             });
