@@ -21603,21 +21603,68 @@
             }
             
             // 📍 ENSURE ALL USER'S ACTIVE POSTS ARE ON GRID
-            // This guarantees every post appears on the user's grid regardless of area
+            // This guarantees every post appears on the user's grid regardless of area.
+            // Try to insert the full post object (from postCache, gridContent, or postCacheSystem) to avoid blank/partial posts.
             const userActivePosts = getUserActivePostsWithAreaTags(currentUserId);
             userActivePosts.forEach(userPost => {
+                if (!userPost || !userPost.id) return;
                 // Check if post already in allPosts (use seenPostIds Set for O(1) lookup)
                 if (!seenPostIds.has(userPost.id)) {
-                    console.log(`📍 ADDING USER POST: "${userPost.id.substring(0,8)}" (${userPost.areaTag}) - was missing from grid`);
-                    seenPostIds.add(userPost.id); // Mark as seen
-                    // Add with preserved area tag and hierarchy
-                    allPosts.unshift({
-                        id: userPost.id,
-                        county: userPost.areaTag,
-                        areaHierarchyLevel: userPost.areaHierarchyLevel,
-                        areaHistory: userPost.areaHistory,
-                        isUserActivePost: true // Flag so we handle specially
-                    });
+                    console.log(`📍 ENSURING USER POST ON GRID: ${userPost.id.substring(0,8)} (${userPost.areaTag})`);
+                    // Try to resolve a full post object from multiple sources
+                    let resolved = null;
+                    try {
+                        if (window.postCache && window.postCache[userPost.id]) resolved = window.postCache[userPost.id];
+                    } catch (e) {}
+                    if (!resolved) {
+                        // Search existing gridContent for the post
+                        try {
+                            for (const k of Object.keys(gridContent)) {
+                                const arr = gridContent[k] || [];
+                                const found = arr.find(p => p && p.id === userPost.id);
+                                if (found) { resolved = found; break; }
+                            }
+                        } catch (e) {}
+                    }
+                    if (!resolved && window.postCacheSystem && window.postCacheSystem.cache && window.postCacheSystem.cache[userPost.id]) {
+                        resolved = window.postCacheSystem.cache[userPost.id];
+                    }
+
+                    if (resolved) {
+                        seenPostIds.add(resolved.id);
+                        allPosts.unshift(resolved);
+                    } else {
+                        // Insert a minimal stub (so user sees a placeholder) but kick off background fetch
+                        seenPostIds.add(userPost.id);
+                        allPosts.unshift({
+                            id: userPost.id,
+                            county: userPost.areaTag,
+                            areaHierarchyLevel: userPost.areaHierarchyLevel,
+                            areaHistory: userPost.areaHistory,
+                            isUserActivePost: true,
+                            _placeholder: true
+                        });
+
+                        // Background fetch to replace placeholder with full post when available
+                        (async function fetchAndCacheFullPost(pid){
+                            try {
+                                if (!database) return;
+                                const snap = await get(ref(database, `posts/${pid}`));
+                                if (snap && snap.exists()) {
+                                    const full = Object.assign({ id: pid }, snap.val());
+                                    try {
+                                        if (window.postCacheSystem && typeof window.postCacheSystem.updateCache === 'function') {
+                                            window.postCacheSystem.updateCache([full], 'user-fetch');
+                                        } else {
+                                            postCache[pid] = full;
+                                        }
+                                    } catch (e) { /* ignore */ }
+                                    // Trigger a re-render so the full post replaces the placeholder
+                                    try { renderGrid(); } catch (e) { /* ignore */ }
+                                }
+                            } catch (e) { console.warn('fetchAndCacheFullPost failed', e); }
+                        })(userPost.id);
+                    }
                 } else {
                     // Update existing post with area hierarchy if missing
                     const existingPost = allPosts.find(p => p.id === userPost.id);
