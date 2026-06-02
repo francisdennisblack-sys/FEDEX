@@ -2883,23 +2883,27 @@
                     window.httpsCallable = httpsCallable;
                 }
 
-                const createCheckoutSession = window.httpsCallable(window.functions, 'createCheckoutSession');
+                const createCheckoutSession = window.httpsCallable(window.functions, 'createCheckoutSessionCallable');
 
                 // 2. Prepare the data payload for the backend.
                 // The backend will validate this information.
                 const data = {
                     postId: postId,
                     amount: amount, // The backend expects an integer in cents.
-                    type: type,     // 'boost' or 'sell'
+                    kind: type,     // 'boost' | 'sell' | 'boost_sell'
                     metadata: {
                         ...metadata,
                         clientPostId: postId,
                         clientUserId: window.currentUserId || 'anonymous'
                     },
                     // URLs for Stripe to redirect to after payment
-                    successUrl: window.location.href,
-                    cancelUrl: window.location.href,
+                    success_url: window.location.href,
+                    cancel_url: window.location.href,
                 };
+
+                try {
+                    localStorage.setItem('pendingCheckoutType', String(type || ''));
+                } catch (_) {}
 
                 console.log('[Checkout] Calling backend with data:', data);
 
@@ -2909,8 +2913,9 @@
                 console.log('[Checkout] Backend response:', result);
 
                 // 4. Redirect the user to the Stripe Checkout page.
-                if (result && result.data && result.data.url) {
-                    window.location.href = result.data.url;
+                const checkoutUrl = (result && result.data && result.data.url) || (result && result.url) || null;
+                if (checkoutUrl) {
+                    window.location.href = checkoutUrl;
                 } else {
                     throw new Error('Invalid response from server; missing checkout URL.');
                 }
@@ -2939,6 +2944,85 @@
             }
         }
         window.initiateCheckout = initiateCheckout; // Expose for button clicks
+
+        async function handleCheckoutReturn() {
+            try {
+                const url = new URL(window.location.href);
+                const checkoutStatus = url.searchParams.get('fedex_checkout');
+                const sessionId = url.searchParams.get('session_id');
+                const kindFromUrl = url.searchParams.get('kind');
+                if (checkoutStatus !== 'success' || !sessionId) return;
+
+                if (!window.functions) {
+                    const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
+                    window.functions = getFunctions(window.app, 'us-central1');
+                    window.httpsCallable = httpsCallable;
+                }
+
+                const getCheckoutSessionResult = window.httpsCallable(window.functions, 'getCheckoutSessionResult');
+
+                let verified = null;
+                for (let attempt = 0; attempt < 8; attempt++) {
+                    try {
+                        const res = await getCheckoutSessionResult({ sessionId });
+                        const data = (res && res.data) || null;
+                        if (data && data.paid) {
+                            verified = data;
+                            break;
+                        }
+                    } catch (e) {
+                        console.warn('[Checkout Return] verify attempt failed:', e);
+                    }
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+
+                if (verified && verified.paid) {
+                    const finalKind = verified.kind || kindFromUrl || localStorage.getItem('pendingCheckoutType') || '';
+                    const now = Date.now();
+
+                    if (finalKind === 'boost' || finalKind === 'boost_sell') {
+                        window.pendingBoost = window.pendingBoost || { armed:false, armedAt:0, tier:'standard', paid:false, paymentMethodId:null, paymentIntentId:null, clientSecret:null };
+                        window.pendingBoost.armed = true;
+                        window.pendingBoost.armedAt = now;
+                        window.pendingBoost.paid = true;
+                        window.pendingBoost.paymentIntentId = sessionId;
+                    }
+                    if (finalKind === 'sell' || finalKind === 'boost_sell') {
+                        window.pendingSell = window.pendingSell || { armed:false, armedAt:0, paid:false, paymentMethodId:null, paymentIntentId:null, clientSecret:null };
+                        window.pendingSell.armed = true;
+                        window.pendingSell.armedAt = now;
+                        window.pendingSell.paid = true;
+                        window.pendingSell.paymentIntentId = sessionId;
+                        try { localStorage.setItem('pendingSellPaymentIntentId', sessionId); } catch (_) {}
+                    }
+
+                    window.lastPurchaseType = finalKind;
+                    window.purchasePaidAt = now;
+                    try {
+                        localStorage.setItem('lastPurchaseType', finalKind);
+                        localStorage.setItem('purchasePaidAt', String(now));
+                        localStorage.removeItem('pendingCheckoutType');
+                    } catch (_) {}
+
+                    try { applyPendingPurchaseToNextPost(); } catch (_) {}
+                    if (window.showNotification) {
+                        window.showNotification('Payment Confirmed', `✅ ${finalKind.replace('_', ' + ')} ready`);
+                    }
+                } else if (window.showNotification) {
+                    window.showNotification('Payment Pending', 'Payment is processing. If it does not appear in a moment, refresh once.');
+                }
+
+                // Clean checkout query params to prevent reprocessing on reload.
+                url.searchParams.delete('fedex_checkout');
+                url.searchParams.delete('session_id');
+                url.searchParams.delete('kind');
+                window.history.replaceState({}, document.title, url.toString());
+            } catch (e) {
+                console.warn('[Checkout Return] handler failed:', e);
+            }
+        }
+        window.handleCheckoutReturn = handleCheckoutReturn;
+        setTimeout(() => { handleCheckoutReturn(); }, 0);
 
         // DEV: disable app verification when running on localhost to allow testing
         try {
@@ -13561,15 +13645,34 @@
             setHeartbeatInterval(60 * 1000);
             
             // Listen for visibility changes - aggressive when hidden (5s), normal when visible (60s)
+            let lastHiddenTime = 0;
             document.addEventListener('visibilitychange', () => {
                 if (document.hidden) {
                     console.log('🌙 Tab hidden: SWITCHING TO AGGRESSIVE HEARTBEAT (5s)');
                     backgroundHeartbeatActive = true;
+                    lastHiddenTime = Date.now();
                     setHeartbeatInterval(5 * 1000); // 5s when backgrounded
                 } else {
                     console.log('🌞 Tab visible: SWITCHING TO NORMAL HEARTBEAT (60s)');
                     backgroundHeartbeatActive = false;
                     setHeartbeatInterval(60 * 1000); // 60s when visible
+
+                    // If tab was hidden for more than 30 seconds, force Firebase reconnect + grid refresh
+                    // This handles iOS/Android OS background tab suspension killing the WebSocket
+                    const hiddenDuration = Date.now() - lastHiddenTime;
+                    if (hiddenDuration > 30 * 1000) {
+                        console.log(`🔄 Tab was hidden for ${Math.round(hiddenDuration/1000)}s — forcing Firebase reconnect + grid refresh`);
+                        try {
+                            if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                                subscribeToFirebasePostsWithReconnect();
+                            }
+                        } catch(e) { console.warn('reconnect on resume error:', e); }
+                        // Force grid to re-render immediately so posts feel instant on return
+                        window.lastRenderGridTime = 0;
+                        try {
+                            if (typeof renderGrid === 'function') renderGrid();
+                        } catch(e) {}
+                    }
                 }
             });
             
@@ -23139,7 +23242,7 @@
             
             console.log(`💰 Applying pending ${lastPurchaseType} purchase to next post...`);
             
-            if (lastPurchaseType === 'boost') {
+            if (lastPurchaseType === 'boost' || lastPurchaseType === 'boost_sell') {
                 // Auto-arm boost badge
                 window.pendingBoost.armed = true;
                 window.pendingBoost.armedAt = Date.now();
@@ -23158,7 +23261,9 @@
                 if (boostLabel) boostLabel.textContent = 'boosted';
                 
                 console.log('  ✅ Boost badge auto-armed for next post');
-            } else if (lastPurchaseType === 'sell') {
+            }
+
+            if (lastPurchaseType === 'sell' || lastPurchaseType === 'boost_sell') {
                 // Auto-arm sell badge
                 window.pendingSell.armed = true;
                 window.pendingSell.armedAt = Date.now();
@@ -23394,13 +23499,22 @@
                 const customTagInput = document.getElementById('customZoneTag');
                 const customTag = customTagInput ? customTagInput.value.trim() : '';
                 
-                // CRITICAL: If user selected a custom location/POI, USE IT as the area tag
+                // CRITICAL: User-selected dropdown location must win over auto-detect
+                const hasExplicitDropdownSelection = !!(
+                    userSelectedZone &&
+                    currentZoneTag &&
+                    currentZoneTag !== 'Loading...' &&
+                    currentZoneTag !== '🔍 Detecting...'
+                );
+
                 let areaTag = customTag || currentZoneTag;
-                let areaTagSource = customTag ? 'custom_selected' : 'zone'; // Mark it as user-selected if custom
+                let areaTagSource = customTag
+                    ? 'custom_selected'
+                    : (hasExplicitDropdownSelection ? 'dropdown_selected' : 'zone');
                 const tagStart = performance.now(); // Track area tag detection timing
                 
-                // Only do auto-detection if NO custom tag was selected
-                if (!customTag && userLocation && userLocation.lat && userLocation.lon) {
+                // Only do auto-detection if user did NOT explicitly select from dropdown and no custom tag was entered
+                if (!customTag && !hasExplicitDropdownSelection && userLocation && userLocation.lat && userLocation.lon) {
                     console.log(`   📍 User: ${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
                     
                     // STEP 1: Check if user is near a POI (with influence zone)
@@ -23443,6 +23557,8 @@
                             console.warn('   ⚠️  Location database empty');
                         }
                     }
+                } else if (hasExplicitDropdownSelection) {
+                    console.log(`   🎯 Using explicit dropdown-selected area tag: "${currentZoneTag}"`);
                 } else {
                     console.warn('⚠️ Cannot auto-detect area tag - location data missing');
                 }
@@ -23451,6 +23567,9 @@
                 console.log(`\n📝 FINAL AREA TAG DECISION:`);
                 if (customTag) {
                     console.log(`   🎯 USER-SELECTED: "${customTag}" (from Nearby dropdown or search)`);
+                    console.log(`   ✅ Posts will be tagged with: "${areaTag}"`);
+                } else if (hasExplicitDropdownSelection) {
+                    console.log(`   🎯 USER-SELECTED (dropdown): "${currentZoneTag}"`);
                     console.log(`   ✅ Posts will be tagged with: "${areaTag}"`);
                 } else {
                     console.log(`   🤖 AUTO-DETECTED: "${areaTag}"`);
@@ -23481,6 +23600,7 @@
                     county: areaTag,  // Area tag from 724K location database
                     neighborhood: areaTag,  // Same as county for compatibility
                     customTag: customTag || null,
+                    selectedAreaTag: hasExplicitDropdownSelection ? currentZoneTag : null,
                     geolocation: userLocation ? {lat: userLocation.lat, lon: userLocation.lon} : null,
                     timestamp: new Date().getTime(),
                     likes: 0,
@@ -24707,22 +24827,14 @@
             }
             _stripePR.on('paymentmethod', async (ev) => {
                 try {
-                    // Mock payment processing - no backend required
-                    // Simulate successful payment with fake intent ID
-                    const fakeIntentId = 'pi_' + Math.random().toString(36).substr(2, 9);
-                    
+                    const combined = !!(window.pendingSell && window.pendingSell.armed && window.pendingBoost && window.pendingBoost.armed);
+                    const kind = combined ? 'boost_sell' : 'boost';
+                    const amount = _currentCombinedPrice();
                     ev.complete('success');
-                    window.pendingBoost.paid = true;
-                    window.pendingBoost.paymentMethodId = ev.paymentMethod.id;
-                    window.pendingBoost.paymentIntentId = fakeIntentId;
-                    
-                    if (window.pendingSell && window.pendingSell.armed && window.pendingBoost && window.pendingBoost.armed) {
-                        window.pendingSell.paid = true;
-                        window.pendingSell.paymentIntentId = fakeIntentId;
-                        try { localStorage.setItem('pendingSellPaymentIntentId', fakeIntentId); } catch (e) {}
-                        _showSellPaid();
-                    }
-                    _showBoostPaid();
+                    await initiateCheckout('new_post_boost', amount, kind, {
+                        source: 'boost_payment_request',
+                        paymentMethodId: ev && ev.paymentMethod ? ev.paymentMethod.id : null
+                    });
                 } catch (e) {
                     ev.complete('fail');
                     _showBoostError(e.message || 'payment failed');
@@ -24751,20 +24863,10 @@
             const errEl = document.getElementById('boostCardError');
             if (errEl) errEl.style.display = 'none';
             try {
-                // Mock payment processing - no backend required
-                // Simulate successful payment with fake intent ID
-                const fakeIntentId = 'pi_' + Math.random().toString(36).substr(2, 9);
-                
-                window.pendingBoost.paid = true;
-                window.pendingBoost.paymentIntentId = fakeIntentId;
-                
-                if (window.pendingSell && window.pendingSell.armed && window.pendingBoost && window.pendingBoost.armed) {
-                    window.pendingSell.paid = true;
-                    window.pendingSell.paymentIntentId = fakeIntentId;
-                    try { localStorage.setItem('pendingSellPaymentIntentId', fakeIntentId); } catch (e) {}
-                    _showSellPaid();
-                }
-                _showBoostPaid();
+                const combined = !!(window.pendingSell && window.pendingSell.armed && window.pendingBoost && window.pendingBoost.armed);
+                const kind = combined ? 'boost_sell' : 'boost';
+                const amount = _currentCombinedPrice();
+                await initiateCheckout('new_post_boost', amount, kind, { source: 'boost_card_fallback' });
             } catch (e) {
                 _showBoostError(e.message || 'card payment failed');
             }
@@ -24910,18 +25012,14 @@
             }
             _stripeSellPR.on('paymentmethod', async (ev) => {
                 try {
-                    const fakeIntentId = 'pi_' + Math.random().toString(36).substr(2, 9);
+                    const combined = !!(window.pendingBoost && window.pendingBoost.armed && window.pendingSell && window.pendingSell.armed);
+                    const kind = combined ? 'boost_sell' : 'sell';
+                    const amount = combined ? _currentCombinedPrice() : 200;
                     ev.complete('success');
-                    window.pendingSell.paid = true;
-                    window.pendingSell.paymentMethodId = ev.paymentMethod.id;
-                    window.pendingSell.paymentIntentId = fakeIntentId;
-                    try { localStorage.setItem('pendingSellPaymentIntentId', fakeIntentId); } catch(e){}
-                    if (window.pendingBoost && window.pendingBoost.armed) {
-                        window.pendingBoost.paid = true;
-                        window.pendingBoost.paymentIntentId = fakeIntentId;
-                        _showBoostPaid();
-                    }
-                    _showSellPaid();
+                    await initiateCheckout('new_post_sell', amount, kind, {
+                        source: 'sell_payment_request',
+                        paymentMethodId: ev && ev.paymentMethod ? ev.paymentMethod.id : null
+                    });
                 } catch (e) {
                     ev.complete('fail');
                     _showSellError(e.message || 'payment failed');
@@ -24948,16 +25046,10 @@
             const errEl = document.getElementById('sellCardError');
             if (errEl) errEl.style.display = 'none';
             try {
-                const fakeIntentId = 'pi_' + Math.random().toString(36).substr(2, 9);
-                window.pendingSell.paid = true;
-                window.pendingSell.paymentIntentId = fakeIntentId;
-                try { localStorage.setItem('pendingSellPaymentIntentId', fakeIntentId); } catch(e){}
-                if (window.pendingBoost && window.pendingBoost.armed) {
-                    window.pendingBoost.paid = true;
-                    window.pendingBoost.paymentIntentId = fakeIntentId;
-                    _showBoostPaid();
-                }
-                _showSellPaid();
+                const combined = !!(window.pendingBoost && window.pendingBoost.armed && window.pendingSell && window.pendingSell.armed);
+                const kind = combined ? 'boost_sell' : 'sell';
+                const amount = combined ? _currentCombinedPrice() : 200;
+                await initiateCheckout('new_post_sell', amount, kind, { source: 'sell_card_fallback' });
             } catch (e) {
                 _showSellError(e.message || 'card payment failed');
             }
