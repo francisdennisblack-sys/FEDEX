@@ -2,6 +2,21 @@
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
 
+// Optional Express API mounting for lightweight POI endpoint
+let expressAppMounted = false;
+try {
+  const express = require('express');
+  const poisRouter = require('./pois');
+  const app = express();
+  app.use(express.json());
+  app.use('/api', poisRouter);
+  // Export a combined express app as `api`
+  exports.api = functions.https.onRequest(app);
+  expressAppMounted = true;
+} catch (e) {
+  console.warn('Express API not mounted (optional). Ensure `express` and `pg` are installed and POIS_DB_URL is set.');
+}
+
 try { admin.initializeApp(); } catch (e) { }
 
 const db = admin.database();

@@ -5380,6 +5380,35 @@
                     // 🚀 MOBILE OPTIMIZATION: Load ONLY nearby state POIs on startup (lightweight)
                     cLog('📥 MOBILE OPTIMIZED: Loading minimal POI data for current location...');
                 
+                    // First try the merged search index (fast, comprehensive)
+                    try {
+                        const siResp = await fetch('/pois/search-index.json');
+                        if (siResp && siResp.ok) {
+                            const si = await siResp.json();
+                            if (si && Array.isArray(si.rows)) {
+                                const stateCodes = Array.isArray(si.stateCodes) ? si.stateCodes : [];
+                                const idxRows = si.rows;
+                                const converted = idxRows.map(r => ({
+                                    name: r[0],
+                                    lat: Number(r[1]),
+                                    lon: Number(r[2]),
+                                    type: r[4] || 'o',
+                                    state: (typeof r[3] === 'number' && stateCodes[r[3]] ? stateCodes[r[3]] : null),
+                                    source: 'search-index'
+                                }));
+                                window.globalPOIDatabase = converted;
+                                console.log(`✅ Loaded POIs from pois/search-index.json (${converted.length} rows)`);
+                                // Defer background per-state loading still
+                                if (typeof requestIdleCallback !== 'undefined') {
+                                    requestIdleCallback(() => { loadPOIDataInBackground(); }, { timeout: 8000 });
+                                } else {
+                                    setTimeout(() => { loadPOIDataInBackground(); }, 3000);
+                                }
+                                return;
+                            }
+                        }
+                    } catch (eSI) { console.warn('⚠️ search-index.json fetch failed or invalid:', eSI && eSI.message); }
+
                     // Get user's state to load only that state's POIs
                     const userState = getUserStateFromLocation();
                     if (userState) {
@@ -5410,6 +5439,21 @@
                     } else {
                         globalPOIDatabase = [];
                     }
+
+                    // If no per-state POIs found, try loading a prebuilt master POI database as fallback
+                    try {
+                        if ((!globalPOIDatabase || globalPOIDatabase.length === 0) && typeof fetch === 'function') {
+                            const masterResp = await fetch('/master_pois_database.json');
+                            if (masterResp && masterResp.ok) {
+                                const masterData = await masterResp.json();
+                                const masterPois = masterData && masterData.pois ? masterData.pois : (Array.isArray(masterData) ? masterData : []);
+                                if (Array.isArray(masterPois) && masterPois.length > 0) {
+                                    globalPOIDatabase = masterPois;
+                                    console.log(`✅ Loaded ${masterPois.length} POIs from master_pois_database.json fallback`);
+                                }
+                            }
+                        }
+                    } catch (e) { console.warn('⚠️ master_pois_database.json fetch failed:', e && e.message); }
                     
                     // DEFER: Load additional states and comprehensive data in background
                     if (typeof requestIdleCallback !== 'undefined') {
@@ -5471,15 +5515,35 @@
         async function loadUSLocationDatabase() {
             try {
                 console.log('🔄 Step 2 PRIMARY: Attempting to load US locations database...');
-                // Load the US locations database
-                let response = await fetch('/us_locations_database_small.json');
-                if (!response.ok) {
-                    console.warn('⚠️ US locations database not found at /us_locations_database_small.json');
+                // Try the optimized small DB first, then fall back to the generated master file
+                let data = null;
+                try {
+                    const resp = await fetch('/us_locations_database_small.json');
+                    if (resp && resp.ok) data = await resp.json();
+                    else console.warn('⚠️ us_locations_database_small.json not available (status: ' + (resp && resp.status) + ')');
+                } catch (e) {
+                    console.warn('⚠️ us_locations_database_small.json fetch failed:', e && e.message);
+                }
+
+                if (!data) {
+                    try {
+                        const resp2 = await fetch('/master_locations_database.json');
+                        if (resp2 && resp2.ok) {
+                            data = await resp2.json();
+                            console.log('✅ Loaded master_locations_database.json as fallback');
+                        } else {
+                            console.warn('⚠️ master_locations_database.json not available (status: ' + (resp2 && resp2.status) + ')');
+                        }
+                    } catch (e2) {
+                        console.warn('⚠️ master_locations_database.json fetch failed:', e2 && e2.message);
+                    }
+                }
+
+                if (!data) {
+                    console.warn('❌ No locations database available');
                     throw new Error('Failed to load US locations database');
                 }
-                if (!response.ok) throw new Error('Failed to load US locations database');
-                
-                const data = await response.json();
+
                 const version = data.v || data.version;
                 const total = data.n || data.totalLocations;
                 console.log(`📊 US Database version: ${version}, Total locations: ${total?.toLocaleString?.() || total}`);
@@ -5854,29 +5918,59 @@
 
             try {
                 console.log('📦 Lazy-loading enhanced master locations database (1.7M+ locations)...');
-                const response = await fetch('/data/master_locations_database.json');
-                
-                if (!response.ok) {
-                    console.warn('⚠️ Master locations database not found');
+                // Try multiple known locations for the master DB to be robust
+                const candidatePaths = ['/data/master_locations_database.json', '/master_locations_database.json', '/master_locations_database.json'];
+                let response = null;
+                let data = null;
+                for (const p of candidatePaths) {
+                    try {
+                        response = await fetch(p);
+                        if (response && response.ok) {
+                            try { data = await response.json(); } catch(e) { data = null; }
+                            if (data) {
+                                console.log(`📥 Downloaded master database from ${p}`);
+                                break;
+                            }
+                        }
+                    } catch (e) { /* try next */ }
+                }
+
+                if (!data) {
+                    console.warn('⚠️ Master locations database not found at known paths');
                     window.isLoadingEnhancedLocations = false;
                     return;
                 }
 
-                const data = await response.json();
-                console.log(`📥 Downloaded master database (${data.length} states/regions)`);
-
-                // Parse hierarchical format
+                // Parse flexible formats: could be hierarchical { locations: [...] } or flat array
                 let enhancedLocations = [];
-                let stateCount = 0;
-
-                data.forEach(state => {
-                    stateCount++;
-                    if (state.locations && Array.isArray(state.locations)) {
-                        state.locations.forEach(loc => {
-                            if (loc.name && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
+                if (Array.isArray(data)) {
+                    // Assume array of state groups or flat locations
+                    // Detect if array of state groups (objects with locations array)
+                    if (data.length > 0 && data[0] && Array.isArray(data[0].locations)) {
+                        data.forEach(state => {
+                            if (Array.isArray(state.locations)) {
+                                state.locations.forEach(loc => {
+                                    if (loc && loc.name && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
+                                        enhancedLocations.push({
+                                            name: loc.name,
+                                            state: loc.state || state.stateCode || state.state || 'Unknown',
+                                            lat: loc.lat,
+                                            lon: loc.lon,
+                                            type: loc.type || 'location',
+                                            population: loc.population || 0,
+                                            source: 'master_database'
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                    } else {
+                        // Flat array of locations
+                        data.forEach(loc => {
+                            if (loc && loc.name && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
                                 enhancedLocations.push({
                                     name: loc.name,
-                                    state: loc.state || state.stateCode || state.state || 'Unknown',
+                                    state: loc.state || loc.stateCode || 'Unknown',
                                     lat: loc.lat,
                                     lon: loc.lon,
                                     type: loc.type || 'location',
@@ -5886,7 +5980,22 @@
                             }
                         });
                     }
-                });
+                } else if (data && Array.isArray(data.locations)) {
+                    // Object with locations array
+                    data.locations.forEach(loc => {
+                        if (loc && loc.name && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
+                            enhancedLocations.push({
+                                name: loc.name,
+                                state: loc.state || loc.stateCode || 'Unknown',
+                                lat: loc.lat,
+                                lon: loc.lon,
+                                type: loc.type || 'location',
+                                population: loc.population || 0,
+                                source: 'master_database'
+                            });
+                        }
+                    });
+                }
 
                 // Merge with existing
                 const beforeCount = globalLocationDatabase.length;
@@ -8082,54 +8191,48 @@
         let isPhase0Complete = false; // Flag to track when location/zone is ready — MUST be before initializePhase0()
         // Reverted: Using currentUserId directly for post storage
 
-        // ============================================================
-        // 📊 UNIFIED DIAGNOSTIC DASHBOARD
-        // Single source of truth for all debugging info
-        // ============================================================
-        let diagnosticState = {
-            totalPostsLive: 0,
-            authIdSaved: false,
-            authIdValue: null,
-            gridIdAssigned: false,
-            gridIdValue: null,
-            postIdAssigned: false,
-            postIdValue: null,
-            idsSurvivedRefresh: false,
-            locationTrackingActive: false,
-            lastLocationUpdate: null,
-            lastLocation: { lat: 0, lon: 0 },
-            userHasMoved: false,
-            locationHistory: [],
-            totalDistanceMoved: 0
-        };
+            // ============================================
+            // STEP 3: Limit results — return up to 10 nearest locations and 30 nearest POIs
+            // ============================================
+            const locations = items.filter(i => i.type === 'location').sort((a, b) => a.mi - b.mi).slice(0, 10);
+            const pois = items.filter(i => i.type === 'poi').sort((a, b) => a.mi - b.mi).slice(0, 30);
 
-        function updateDiagnosticDashboard() {
-            // Compile all status information
-            const posts = diagnosticState.totalPostsLive;
-            const authOk = diagnosticState.authIdSaved;
-            const gridOk = diagnosticState.gridIdAssigned;
-            const postOk = diagnosticState.postIdAssigned;
-            const refreshOk = diagnosticState.idsSurvivedRefresh;
-            const locActive = diagnosticState.locationTrackingActive;
-            
-            // Build color-coded status indicators
-            const authStatus = authOk ? `✓ ${diagnosticState.authIdValue?.substring(0, 16)}...` : '✗ MISSING';
-            const gridStatus = gridOk ? `✓ ${diagnosticState.gridIdValue}` : '✗ NOT ASSIGNED';
-            const postStatus = postOk ? `✓ CREATED` : '✗ NOT CREATED';
-            const refreshStatus = refreshOk ? '✓ PERSISTENT' : '⏳ PENDING TEST';
-            const locStatus = locActive ? 
-                (diagnosticState.userHasMoved ? 
-                    `✓ TRACKING (${diagnosticState.totalDistanceMoved.toFixed(0)}m moved)` : 
-                    `✓ ACTIVE (stationary)`) : 
-                '✗ INACTIVE';
+            const finalItems = [];
+            // Prefer locations first (up to 10), then POIs (up to 30)
+            finalItems.push(...locations);
+            finalItems.push(...pois);
 
-            // Color styling
-            const green = 'color: #10b981; font-weight: bold; font-size: 13px;';
-            const red = 'color: #ef4444; font-weight: bold; font-size: 13px;';
-            const yellow = 'color: #f59e0b; font-weight: bold; font-size: 13px;';
-            const blue = 'color: #3b82f6; font-weight: bold; font-size: 13px;';
-            const header = 'color: #6366f1; font-weight: bold; font-size: 14px;';
+            if (finalItems.length > 0) {
+                html += `<div style="padding: 6px 12px; background-color: #0f1419; color: #888; font-size: 10px; text-transform: uppercase; font-weight: 600; margin-top:4px;">📊 Found ${finalItems.length} Nearby Items</div>`;
 
+                const displayCount = finalItems.length;
+                for (let i = 0; i < displayCount; i++) {
+                    const item = finalItems[i];
+                    const safeName = String(item.display).replace(/'/g, "&#39;");
+                    const miLabel = (typeof item.mi === 'number') ? `${item.mi.toFixed(1)}mi` : '';
+
+                    html += `
+                        <div style="
+                            padding: 10px 12px;
+                            border-bottom: 1px solid #2a2a2a;
+                            cursor: pointer;
+                            transition: background-color 0.1s;
+                            background-color: #0a0a0a;
+                            user-select: none;
+                            font-size: 13px;
+                            color: #ddd;
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                        " onmouseover="this.style.backgroundColor='#2a2a2a'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='#0a0a0a'; this.style.color='#ddd'" onclick="selectLocationFromSpecifyField('${safeName}', event)" title="Select: ${safeName}">
+                            <span style="font-weight: 500;">${item.display}</span>
+                            <span style="color: #777; font-size: 11px; white-space: nowrap; margin-left: 8px;">${miLabel}</span>
+                        </div>
+                    `;
+                }
+            } else {
+                html += '<div style="padding: 12px; color: #999; text-align: center; font-size: 13px;'>No locations or POIs found nearby. Try searching manually.</div>';
+            }
             // Display comprehensive dashboard
             console.clear();
             console.log('%c╔═══════════════════════════════════════════════════════════╗', header);
@@ -10173,6 +10276,23 @@
                                 const data = await r.json();
                                 window.globalPoiSearchIndex = data;
                                 console.log(`   ✅ Global POI search index ready: ${data.rows.length.toLocaleString()} POIs across ${data.stateCodes.length} states`);
+                                // Spawn a WebWorker to handle nearest-N queries off the main thread
+                                try {
+                                    if (typeof window.POI_WORKER === 'undefined' && typeof Worker !== 'undefined') {
+                                        window.POI_WORKER = new Worker('/poi_worker.js');
+                                        window._poiWorkerDeferred = new Promise((resolve) => {
+                                            const to = setTimeout(() => resolve(false), 5000);
+                                            window.POI_WORKER.onmessage = (m) => {
+                                                if (m && m.data && m.data.type === 'inited') {
+                                                    clearTimeout(to);
+                                                    resolve(true);
+                                                }
+                                            };
+                                        });
+                                        // Send rows to worker
+                                        window.POI_WORKER.postMessage({ type: 'init', rows: data.rows });
+                                    }
+                                } catch (e) { console.warn('⚠️ POI worker spawn failed:', e.message); }
                                 return data;
                             } catch (e) { console.warn('   ⚠️ Global POI search index failed:', e.message); return null; }
                         })();
@@ -16814,6 +16934,9 @@
 
                 const candidates = [];
 
+                const userLat = userLocation.lat || userLocation.latitude || userLocation.lat_deg;
+                const userLon = userLocation.lon || userLocation.longitude || userLocation.lon_deg;
+
                 for (const location of source) {
                     if (!location) continue;
                     const lat = location.lat || location.latitude || location.lat_deg || location.lat_deg_final;
@@ -16835,9 +16958,38 @@
                     }
                 }
 
+                // Try server-side POI endpoint to augment the list (non-blocking): request a larger set
+                // The server returns ranked POIs across a broader radius (e.g. 100 miles). We merge and dedupe.
+                try {
+                    const serverUrl = `/api/pois/nearby?lat=${encodeURIComponent(userLat)}&lon=${encodeURIComponent(userLon)}&radius_mi=100&limit=500`;
+                    const r = await fetch(serverUrl, { method: 'GET', credentials: 'same-origin' });
+                    if (r.ok) {
+                        const payload = await r.json();
+                        if (Array.isArray(payload)) {
+                            for (const p of payload) {
+                                try {
+                                    if (!p) continue;
+                                    // p expected: { id, name, lat, lon, category, score }
+                                    const lat = p.lat || p.latitude;
+                                    const lon = p.lon || p.longitude;
+                                    if (!lat || !lon) continue;
+                                    const distanceKm = calculateDistance(userLat, userLon, lat, lon);
+                                    // Convert to same structure and allow farther distances
+                                    candidates.push({ name: p.name || p.display_name || 'Unknown', state: p.state||'', distance: distanceKm, type: p.category || p.type || 'poi', _sourcePOI: true, _id: p.id });
+                                } catch (e) { /* ignore single row */ }
+                            }
+                        }
+                    } else {
+                        console.log('⚠️  POI server responded', r.status);
+                    }
+                } catch (e) {
+                    console.warn('⚠️  POI server fetch failed', e && e.message);
+                }
+
                 // Sort & take top 8
                 candidates.sort((a, b) => a.distance - b.distance);
-                const topNearby = candidates.slice(0, 8);
+                // Expand dropdown: show up to 30 top locations/POIs (merged from local sources and server POIs)
+                const topNearby = candidates.slice(0, 30);
 
                 if (topNearby.length === 0) {
                     list.innerHTML = '<div style="padding:8px;color:#999">No nearby areas found</div>';
@@ -16878,7 +17030,7 @@
                 });
 
                 container.style.display = 'block';
-                console.log(`✅ Showing ${topNearby.length} nearby locations (fallback-enabled)`);
+                console.log(`✅ Showing ${topNearby.length} nearby locations/POIs (merged, fallback-enabled)`);
 
             } catch (error) {
                 console.error('❌ Error populating nearby locations:', error);
@@ -20379,7 +20531,7 @@
         /**
          * Show dropdown with ONLY nearby POIs
          */
-        function showNearbyPOIsDropdown() {
+        async function showNearbyPOIsDropdown() {
             const dropdown = document.getElementById('autocompleteDropdown');
             const refineDropdown = document.getElementById('refineLocationDropdown');
             if (!dropdown) return;
@@ -20482,29 +20634,43 @@
             // STEP 2: Search POI database (businesses/landmarks)
             // ============================================
             if (globalPOIDatabase && globalPOIDatabase.length > 0) {
-                console.log(`🏢 Searching ${globalPOIDatabase.length} POIs...`);
-                const arr = globalPOIDatabase.slice(0, Math.min(globalPOIDatabase.length, 50000));
-                
-                for (let i = 0; i < arr.length; i++) {
-                    const p = arr[i];
-                    if (!p || !p.lat || !p.lon) continue;
-                    const km = calculateDistance(uLat, uLon, p.lat, p.lon);
-                    const mi = (km || 0) * 0.621371;
-                    
-                    // Only include POIs within 25 miles
-                    if (mi <= 25) {
-                        items.push({
-                            type: 'poi',
-                            name: p.name,
-                            display: p.name,
-                            emoji: p.emoji || '🏢',
-                            category: p.category || p.type || 'Venue',
-                            mi,
-                            priority: mi < 2 ? 0.5 : (mi < 10 ? 2.5 : 4) // POIs slightly lower priority than nearby locations
+                // Use POI worker if available for nearest-N queries
+                if (window.POI_WORKER) {
+                    try {
+                        const reqId = 'req_' + Date.now();
+                        // We'll synchronously block rendering until worker returns (fast)
+                        const results = await new Promise((resolve) => {
+                            const to = setTimeout(() => resolve([]), 3000);
+                            window.POI_WORKER.onmessage = (m) => {
+                                if (m && m.data && m.data.type === 'result') {
+                                    clearTimeout(to);
+                                    resolve(m.data.results || []);
+                                }
+                            };
+                            window.POI_WORKER.postMessage({ type: 'query', id: reqId, lat: uLat, lon: uLon, n: 200, maxMiles: 25 });
                         });
+                        if (results && results.length) {
+                            results.forEach(r => {
+                                items.push({ type: 'poi', name: r.name, display: r.name, emoji: '🏢', category: r.type || '', mi: (r.distanceMeters/1609.34) });
+                            });
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ POI worker query failed:', e.message);
+                    }
+                } else {
+                    console.log(`🏢 Searching ${globalPOIDatabase.length} POIs (fallback linear scan)...`);
+                    const arr = globalPOIDatabase.slice(0, Math.min(globalPOIDatabase.length, 50000));
+                    for (let i = 0; i < arr.length; i++) {
+                        const p = arr[i];
+                        if (!p || !p.lat || !p.lon) continue;
+                        const km = calculateDistance(uLat, uLon, p.lat, p.lon);
+                        const mi = (km || 0) * 0.621371;
+                        if (mi <= 25) {
+                            items.push({ type: 'poi', name: p.name, display: p.name, emoji: p.emoji || '🏢', category: p.category || p.type || 'Venue', mi, priority: mi < 2 ? 0.5 : (mi < 10 ? 2.5 : 4) });
+                        }
                     }
                 }
-                console.log(`✅ Found ${globalPOIDatabase.length} POIs total`);
+                console.log(`✅ Found POI candidates: ${items.filter(i=>i.type==='poi').length}`);
             } else {
                 console.warn('⚠️ POI database not loaded yet');
             }
