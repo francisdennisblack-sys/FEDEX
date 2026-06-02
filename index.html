@@ -2866,45 +2866,12 @@
         window.signInWithPhoneNumber = signInWithPhoneNumber;
         window.signOut = signOut;
 
-            // ========================================================================
-            // 🎯 APPLY UNIFIED RANKING SYSTEM (with badge refresh)
-            // ========================================================================
-            console.log(`⚡ Preparing badges and applying unified ranking to ${displayPosts.length} posts...`);
-            try {
-                computePostMetricsForBadges(displayPosts);
-                assignEngagementTiers(displayPosts, displayPosts.length);
-            } catch (e) { console.warn('Badge compute error:', e); }
-
-            displayPosts = applyUnifiedRanking(displayPosts);
-            console.log(`✅ Unified ranking applied - posts reordered by relevance`);
-
-            // Deterministic top-3 assignment: select top 3 non-self posts using a stable tie-breaker
-            try {
-                const nonSelf = displayPosts.filter(p => p && !p.isSelfPost).slice();
-                nonSelf.sort((a, b) => {
-                    const na = a.netLikes || (a.likes || 0) - (a.dislikes || 0);
-                    const nb = b.netLikes || (b.likes || 0) - (b.dislikes || 0);
-                    if (nb !== na) return nb - na;
-                    const lpa = a.likesPerMinute || 0;
-                    const lpb = b.likesPerMinute || 0;
-                    if (lpb !== lpa) return lpb - lpa;
-                    const ba = a.boostScore || 0;
-                    const bb = b.boostScore || 0;
-                    if (bb !== ba) return bb - ba;
-                    return (b.timestamp || 0) - (a.timestamp || 0);
-                });
-
-                const top3Ids = new Set(nonSelf.slice(0, 3).map(p => p.id));
-                for (const p of displayPosts) {
-                    if (p && top3Ids.has(p.id)) p.rankBadge = 'top3';
-                }
-
-                // Spotlight: mark posts in top 100 of the ranked list
-                for (let j = 0; j < Math.min(100, displayPosts.length); j++) {
-                    const p = displayPosts[j];
-                    if (p) p.spotlight = true;
-                }
-            } catch (e) { console.warn('Post-ranking badge assignment failed:', e); }
+        // ==========================================================================
+        // 💳 STRIPE PAYMENT FLOW
+        // ==========================================================================
+        // This function is the entry point for all purchases (boost, sell, etc.).
+        // It calls our secure backend endpoint, which then creates a Stripe Checkout session.
+        async function initiateCheckout(postId, amount, type, metadata = {}) {
             try {
                 console.log(`[Checkout] Initiating for postId: ${postId}, amount: ${amount}, type: ${type}`);
                 
@@ -6495,6 +6462,97 @@
             return displayPosts;
         }
 
+        // Recompute badge assignments for visible posts and apply DOM updates
+        function recomputeAndApplyBadges() {
+            try {
+                // Build top-100 ranking by engagement (likes - dislikes)
+                const allPostsList = [];
+                for (const k in gridContent) {
+                    if (!Array.isArray(gridContent[k])) continue;
+                    gridContent[k].forEach(p => { if (p && p.id) allPostsList.push(p); });
+                }
+
+                // Sort by score desc
+                allPostsList.sort((a,b) => ((b.likes||0)-(b.dislikes||0)) - ((a.likes||0)-(a.dislikes||0)));
+
+                // Top 3 (exclude viewer's own posts from podium if they are the author)
+                const podium = [];
+                for (let i=0;i<allPostsList.length && podium.length<3;i++) {
+                    const p = allPostsList[i];
+                    if (p && (p.authId !== currentUserId) && p.id) podium.push(p.id);
+                }
+
+                // Determine visible boxes from gridScroller if available, otherwise query DOM
+                let visibleBoxes = [];
+                if (window.gridScroller && typeof gridScroller.getVisibleItems === 'function') {
+                    const vis = gridScroller.getVisibleItems();
+                    visibleBoxes = vis.map(v => ({ boxIndex: v.index, post: v.item, dom: document.querySelector(`.grid-box[data-post-id="${v.item.id}"]`) }));
+                } else {
+                    const nodes = Array.from(document.querySelectorAll('.grid-box[data-post-id]'));
+                    visibleBoxes = nodes.map(n => ({ dom: n, postId: n.getAttribute('data-post-id') }));
+                }
+
+                visibleBoxes.forEach(entry => {
+                    try {
+                        const box = entry.dom;
+                        const post = entry.post || (entry.postId ? findPostById(entry.postId) : null);
+                        if (!box || !post) return;
+
+                        // compute tier
+                        const tierInfo = getPostEngagementTier(post) || {};
+
+                        // Compose badges
+                        const badges = [];
+
+                        // podium overrides other badges
+                        if (podium.includes(post.id)) {
+                            badges.push({ kind: 'podium', label: '🏆 Top' });
+                        } else if (tierInfo.tier === 'PODIUM') {
+                            badges.push({ kind: 'podium', label: '🏆' });
+                        }
+
+                        // Boost / Buy badges (persisted flags)
+                        if (post.boosted || post.isBoosted || post.boostStatus === 'active') badges.push({ kind: 'boost', label: '🚀 Boost' });
+                        if (post.sellBadge || post.forSale || post.buyBadge) badges.push({ kind: 'sell', label: '💠 Sell' });
+
+                        // Tier badges
+                        if (!podium.includes(post.id)) {
+                            if (tierInfo.tier === 'HOT') badges.push({ kind: 'hot', label: '🔥 Hot' });
+                            if (tierInfo.tier === 'NEW') {
+                                // Age cutoff for 'new' is adaptive elsewhere; use 20m default
+                                badges.push({ kind: 'new', label: '✨ New' });
+                            }
+                            if (tierInfo.tier === 'LIKED') badges.push({ kind: 'liked', label: '👍' });
+                            if (tierInfo.tier === 'DISLIKED') badges.push({ kind: 'review', label: '👎' });
+                        }
+
+                        // Compose badge container
+                        let badgeContainer = box.querySelector('.post-badges');
+                        if (!badgeContainer) {
+                            badgeContainer = document.createElement('div');
+                            badgeContainer.className = 'post-badges';
+                            badgeContainer.style.cssText = 'position: absolute; top: 8px; left: 8px; display:flex; gap:6px; z-index:20;';
+                            box.appendChild(badgeContainer);
+                        }
+
+                        // Render badges
+                        badgeContainer.innerHTML = badges.slice(0,3).map(b => `<div class="badge ${b.kind}" style="background:rgba(0,0,0,0.5); padding:4px 8px; border-radius:6px; font-size:12px; font-weight:700; color:#fff;">${b.label}</div>`).join('');
+                    } catch(e){ console.warn('applyBadge error', e); }
+                });
+
+                function findPostById(id) {
+                    for (const k in gridContent) {
+                        if (!Array.isArray(gridContent[k])) continue;
+                        const found = gridContent[k].find(p=>p && p.id === id);
+                        if (found) return found;
+                    }
+                    return null;
+                }
+            } catch (e) {
+                console.warn('recomputeAndApplyBadges failed', e);
+            }
+        }
+
         // ============================================
         // DYNAMIC ZONE TAG CONVERSION SYSTEM
         // ============================================
@@ -8782,15 +8840,6 @@
         
         // STEP 1b: Get or create PERMANENT userId (survives everything)
         const permanentUserId = getPermanentUserId();
-
-        // Ensure we have a stable `currentUserId` on bootstrap. If `userId` wasn't
-        // persisted (e.g. first load), fall back to the permanent id so votes remain
-        // tied to the same browser across refreshes. Persist back to localStorage.
-        if (!currentUserId) {
-            currentUserId = permanentUserId;
-            try { localStorage.setItem('userId', permanentUserId); } catch(e){}
-            console.log('🔐 Using permanentUserId as currentUserId:', currentUserId);
-        }
         
         // STEP 1c: Check if IDs survived refresh (for diagnostics)
         const previousSessionAuthId = localStorage.getItem('lastSessionAuthId');
@@ -12487,10 +12536,6 @@
          */
         async function submitVoteTransaction(userId, postId, voteType) {
             try {
-                if (!userId) {
-                    console.warn('submitVoteTransaction called without userId - aborting');
-                    throw new Error('missing-user-id');
-                }
                 const postVotesRef = ref(database, `post-votes/${postId}`);
                 const result = await runTransaction(postVotesRef, (current) => {
                     current = current || {};
@@ -13895,17 +13940,7 @@
             }
             if (!post) return;
 
-            const voterId = currentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
-            if (!voterId) return console.warn('No voter id available');
-
-            // Debounce rapid repeat likes (prevents quick refresh->like exploit)
-            try {
-                const last = parseInt(localStorage.getItem(`lastVote_${voterId}_${selectedPostId}`) || '0', 10);
-                if (Date.now() - last < 1500) return; // ignore repeated actions within 1.5s
-                localStorage.setItem(`lastVote_${voterId}_${selectedPostId}`, String(Date.now()));
-            } catch (e) {}
-
-            const voteKey = `${voterId}_${selectedPostId}`;
+            const voteKey = `${currentUserId}_${selectedPostId}`;
             const currentVote = userVotes[voteKey];
             let newLikes = post.likes || 0;
             let newDislikes = post.dislikes || 0;
@@ -13930,7 +13965,7 @@
             if (desiredVote === null) delete userVotes[voteKey]; else userVotes[voteKey] = desiredVote;
             updateVoteDisplay();
             // Submit transaction to Firebase to update per-post votes atomically
-            submitVoteTransaction(voterId, selectedPostId, desiredVote).catch(err => {
+            submitVoteTransaction(currentUserId, selectedPostId, desiredVote).catch(err => {
                 console.warn('submitVoteTransaction failed, will retry saving vote:', err);
                 // Fallback: persist to localStorage for later sync
                 try { localStorage.setItem(`userVotes_${currentUserId}`, JSON.stringify(userVotes)); } catch(e){}
@@ -13955,17 +13990,7 @@
             }
             if (!post) return;
 
-            const voterId = currentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
-            if (!voterId) return console.warn('No voter id available');
-
-            // Debounce rapid repeat dislikes
-            try {
-                const last = parseInt(localStorage.getItem(`lastVote_${voterId}_${selectedPostId}`) || '0', 10);
-                if (Date.now() - last < 1500) return; // ignore repeated actions within 1.5s
-                localStorage.setItem(`lastVote_${voterId}_${selectedPostId}`, String(Date.now()));
-            } catch (e) {}
-
-            const voteKey = `${voterId}_${selectedPostId}`;
+            const voteKey = `${currentUserId}_${selectedPostId}`;
             const currentVote = userVotes[voteKey];
             let newLikes = post.likes || 0;
             let newDislikes = post.dislikes || 0;
@@ -13988,7 +14013,7 @@
             const desiredVote = (currentVote === 'dislike') ? null : 'dislike';
             if (desiredVote === null) delete userVotes[voteKey]; else userVotes[voteKey] = desiredVote;
             updateVoteDisplay();
-            submitVoteTransaction(voterId, selectedPostId, desiredVote).catch(err => {
+            submitVoteTransaction(currentUserId, selectedPostId, desiredVote).catch(err => {
                 console.warn('submitVoteTransaction failed, will retry saving vote:', err);
                 try { localStorage.setItem(`userVotes_${currentUserId}`, JSON.stringify(userVotes)); } catch(e){}
             });
@@ -18285,77 +18310,6 @@
         window.generateUnifiedPostRank = generateUnifiedPostRank;
         window.applyUnifiedRanking = applyUnifiedRanking;
 
-        /**
-         * Compute lightweight metrics used for badge assignment
-         */
-        function computePostMetricsForBadges(posts) {
-            const now = Date.now();
-            posts.forEach(post => {
-                post.netLikes = (post.likes || 0) - (post.dislikes || 0);
-                post.ageMs = post.timestamp ? Math.max(0, now - post.timestamp) : 0;
-                post.ageMinutes = Math.floor(post.ageMs / 60000);
-                post.likesPerMinute = post.ageMinutes > 0 ? (post.likes || 0) / post.ageMinutes : (post.likes || 0);
-                // Preserve previous likes snapshot if available
-                post._prevLikes = post._prevLikes || (post.prevLikesSnapshot || 0);
-                // delta since last known snapshot (fallback)
-                post._likeDelta = (post.likes || 0) - (post._prevLikes || 0);
-            });
-        }
-
-        /**
-         * Assign engagement tiers/badges heuristically
-         */
-        function assignEngagementTiers(posts, gridSizeEstimate = 300) {
-            const now = Date.now();
-            const totalPosts = posts.length || gridSizeEstimate;
-            // Compute simple percentiles to make thresholds adaptive to area scale
-            const likesList = posts.map(p => Math.max(0, p.likes || 0)).sort((a,b) => a-b);
-            const p90 = likesList.length ? likesList[Math.floor(likesList.length * 0.9)] : 0;
-            const p75 = likesList.length ? likesList[Math.floor(likesList.length * 0.75)] : 0;
-            const adaptiveHotThreshold = Math.max(15, p90, Math.ceil(totalPosts * 0.01));
-            const adaptiveTrendingDelta = Math.max(5, Math.ceil(p75 * 0.3));
-            posts.forEach(post => {
-                const likes = post.likes || 0;
-                const dislikes = post.dislikes || 0;
-                const net = post.netLikes || (likes - dislikes);
-                const lpm = post.likesPerMinute || 0;
-                post.engagementTier = 'none';
-
-                // Spotlight: top 100 by net likes will be assigned later after sorting
-
-                // Hot: adaptive absolute threshold (area-aware) OR sustained rate
-                if (likes >= adaptiveHotThreshold || lpm >= Math.max(1.5, Math.ceil(totalPosts / 1000))) {
-                    post.engagementTier = 'hot';
-                }
-
-                // Trending: sudden positive delta relative to recent baseline
-                if (post._likeDelta >= adaptiveTrendingDelta && post._likeDelta / Math.max(1, (post._prevLikes || 1)) > 0.25) {
-                    post.engagementTier = 'trending';
-                }
-
-                // Controversial: more dislikes than likes
-                if (dislikes > likes && dislikes >= 3) {
-                    post.engagementTier = 'controversial';
-                }
-
-                // New badge: duration depends on feed density
-                let newWindowMs = 20 * 60 * 1000; // default 20 minutes
-                if (totalPosts > 1000) newWindowMs = 30 * 1000; // very busy grid -> 30s
-                else if (totalPosts > 500) newWindowMs = 60 * 1000; // busy grid -> 1m
-
-                if (post.ageMs > 0 && post.ageMs <= newWindowMs) {
-                    post.isNew = true;
-                } else {
-                    post.isNew = false;
-                }
-
-                // Balanced: low votes (neutral)
-                if (likes + dislikes <= 2 && net >= 0) {
-                    post.engagementTier = post.engagementTier === 'none' ? 'balanced' : post.engagementTier;
-                }
-            });
-        }
-
         // ============================================================================
         // ADAPTIVE CONTENT DELIVERY SYSTEM - Optimize first-time & sparse grids
         // ============================================================================
@@ -21116,6 +21070,7 @@
                     if (typeof gridScroller.renderItemsInRange === 'function') {
                         gridScroller.renderItemsInRange(diffIdx, diffIdx + 1);
                         applyGridTextFontSizeToVisiblePosts();
+                        try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
                     } else if (typeof gridScroller.setItems === 'function') {
                         // Fallback if API changes
                         gridScroller.setItems(current);
@@ -21194,6 +21149,8 @@
             
             // Use full rendering - no MVP mode
             renderGridFull();
+            // Ensure badges are recomputed immediately after a full render
+            try { recomputeAndApplyBadges(); } catch (e) { console.warn('recompute badges failed after renderGrid', e); }
         }
 
         /**
@@ -25570,40 +25527,6 @@
         console.log('  - window.startPOIPolling:', typeof window.startPOIPolling === 'function' ? '✅' : '❌');
         console.log('  - window.stopLocationAndPOIPolling:', typeof window.stopLocationAndPOIPolling === 'function' ? '✅' : '❌');
 
-    </script>
-
-    <!-- Emergency fallback: if Firebase fails to initialize, show cached posts so UI is not blank -->
-    <script>
-        (function emergencyGridFallback(){
-            try {
-                document.addEventListener('DOMContentLoaded', () => {
-                    try {
-                        const gridEl = document.getElementById('grid');
-                        if (gridEl) gridEl.style.display = 'grid';
-
-                        // If Firebase isn't ready within a short window, restore cached posts
-                        setTimeout(() => {
-                            if (window.database) return; // Firebase is ready, no fallback needed
-                            try {
-                                const raw = localStorage.getItem('cachedAllPosts') || localStorage.getItem('cachedPosts') || null;
-                                if (!raw) return;
-                                const posts = JSON.parse(raw || '[]');
-                                if (!posts || !posts.length) return;
-                                window.gridContent = window.gridContent || {};
-                                // Place cached posts into shared-posts for immediate rendering
-                                if (!window.gridContent['shared-posts'] || window.gridContent['shared-posts'].length === 0) {
-                                    window.gridContent['shared-posts'] = posts.map(p => (p && p.id) ? p : Object.assign({ id: 'cached-' + Math.random().toString(36).slice(2,8) }, p));
-                                    console.log('⚠️ Emergency fallback: restored', window.gridContent['shared-posts'].length, 'cached posts to gridContent["shared-posts"]');
-                                }
-                                // Ensure grid initialization and render
-                                if (typeof initializeGrid === 'function') initializeGrid();
-                                if (typeof renderGrid === 'function') renderGrid();
-                            } catch (e) { console.warn('Emergency fallback restore failed:', e); }
-                        }, 800);
-                    } catch(e) { console.warn('Emergency fallback DOMContentLoaded handler failed', e); }
-                });
-            } catch (err) { console.warn('Emergency fallback failed to install', err); }
-        })();
     </script>
 
     <!-- Global debug functions (after module script completes) -->
