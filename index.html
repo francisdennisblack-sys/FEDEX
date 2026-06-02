@@ -2918,6 +2918,36 @@
         // CRITICAL: Expose Firebase objects to global scope so they're accessible outside module
         window.database = database;
         window.storage = storage;
+
+        // Helper: robust post loader - tries multiple plausible Firebase paths
+        window.getPostByIdFromDB = async function(postId) {
+            if (!postId) return null;
+            if (!window.database) return null;
+            const pathsToTry = [];
+            // Primary legacy path
+            pathsToTry.push(`posts/${postId}`);
+            // Network-scoped path if network id is known
+            const nw = window.currentWiFiNetwork || window.currentNetworkId || window.networkId || 'shared-network-1';
+            pathsToTry.push(`networks/${nw}/posts/${postId}`);
+            // Per-user index path (owner unknown) - try currentUserId
+            if (window.currentUserId) pathsToTry.push(`user-posts/${window.currentUserId}/${nw}/${postId}`);
+            // Generic user-posts (older layouts)
+            pathsToTry.push(`user-posts/${postId}`);
+
+            for (const p of pathsToTry) {
+                try {
+                    const snap = await get(ref(database, p));
+                    if (snap && snap.exists()) {
+                        const val = snap.val();
+                        // Normalize shape: ensure id present
+                        return Object.assign({ id: postId, _fetchedFrom: p }, val);
+                    }
+                } catch (e) {
+                    console.warn('getPostByIdFromDB: failed to read', p, e && e.message);
+                }
+            }
+            return null;
+        };
         window.auth = auth;
         window.ref = ref;
         window.set = set;
@@ -21804,10 +21834,8 @@
                         // Background fetch to replace placeholder with full post when available
                         (async function fetchAndCacheFullPost(pid){
                             try {
-                                if (!database) return;
-                                const snap = await get(ref(database, `posts/${pid}`));
-                                if (snap && snap.exists()) {
-                                    const full = Object.assign({ id: pid }, snap.val());
+                                const full = (typeof window.getPostByIdFromDB === 'function') ? await window.getPostByIdFromDB(pid) : null;
+                                if (full) {
                                     try {
                                         if (window.postCacheSystem && typeof window.postCacheSystem.updateCache === 'function') {
                                             window.postCacheSystem.updateCache([full], 'user-fetch');
@@ -21817,6 +21845,8 @@
                                     } catch (e) { /* ignore */ }
                                     // Trigger a re-render so the full post replaces the placeholder
                                     try { renderGrid(); } catch (e) { /* ignore */ }
+                                } else {
+                                    console.warn('fetchAndCacheFullPost: post not found in any known DB path', pid);
                                 }
                             } catch (e) { console.warn('fetchAndCacheFullPost failed', e); }
                         })(userPost.id);
@@ -22690,10 +22720,8 @@
                                 // Background fetch to replace placeholder with full post when available
                                 (async function fetchAndCacheFullPost(pid){
                                     try {
-                                        if (!database) return;
-                                        const snap = await get(ref(database, `posts/${pid}`));
-                                        if (snap && snap.exists()) {
-                                            const full = Object.assign({ id: pid }, snap.val());
+                                        const full = (typeof window.getPostByIdFromDB === 'function') ? await window.getPostByIdFromDB(pid) : null;
+                                        if (full) {
                                             try {
                                                 if (window.postCacheSystem && typeof window.postCacheSystem.updateCache === 'function') {
                                                     window.postCacheSystem.updateCache([full], 'position1-fetch');
@@ -22703,6 +22731,8 @@
                                             } catch (e) { /* ignore */ }
                                             // Trigger a re-render so the full post replaces the placeholder
                                             try { renderGrid(); } catch (e) { /* ignore */ }
+                                        } else {
+                                            console.warn('position1 fetchAndCacheFullPost: post not found in DB', pid);
                                         }
                                     } catch (e) { console.warn('position1 fetchAndCacheFullPost failed', e); }
                                 })(selectedRaw.id);
