@@ -22645,8 +22645,53 @@
                 const positionOnePool = nearbyBadgePool.length > 0 ? nearbyBadgePool : badgePool;
                 if (positionOnePool.length > 0) {
                     const bucket = Math.floor(Date.now() / 15000); // rotate every 15s
-                    const selected = positionOnePool[bucket % positionOnePool.length];
-                    sortedPosts = [selected, ...sortedPosts.filter(p => p.id !== selected.id)];
+                    const selectedRaw = positionOnePool[bucket % positionOnePool.length];
+                    // Resolve a full post object for the selected item. If content is missing,
+                    // mark it as a placeholder and kick off a background fetch so the slot
+                    // never renders completely empty when promoted to position 1.
+                    let selected = selectedRaw;
+                    try {
+                        if (selected && selected.id) {
+                            // Prefer cached full post if available
+                            if (window.postCache && window.postCache[selected.id]) {
+                                selected = window.postCache[selected.id];
+                            } else if (window.postCacheSystem && window.postCacheSystem.cache && window.postCacheSystem.cache[selected.id]) {
+                                selected = window.postCacheSystem.cache[selected.id];
+                            }
+
+                            // If still lacking visible content, mark placeholder and fetch full post
+                            const hasVisibleContent = (selected && (selected.content && selected.content.trim().length > 0)) || (selected && (selected.photoURL || selected.imageData));
+                            if (!hasVisibleContent) {
+                                console.log('⚠️ Promoted post missing content — marking placeholder and fetching full post:', selectedRaw.id);
+                                selected = Object.assign({}, selectedRaw, { _placeholder: true });
+
+                                // Background fetch to replace placeholder with full post when available
+                                (async function fetchAndCacheFullPost(pid){
+                                    try {
+                                        if (!database) return;
+                                        const snap = await get(ref(database, `posts/${pid}`));
+                                        if (snap && snap.exists()) {
+                                            const full = Object.assign({ id: pid }, snap.val());
+                                            try {
+                                                if (window.postCacheSystem && typeof window.postCacheSystem.updateCache === 'function') {
+                                                    window.postCacheSystem.updateCache([full], 'position1-fetch');
+                                                } else {
+                                                    postCache[pid] = full;
+                                                }
+                                            } catch (e) { /* ignore */ }
+                                            // Trigger a re-render so the full post replaces the placeholder
+                                            try { renderGrid(); } catch (e) { /* ignore */ }
+                                        }
+                                    } catch (e) { console.warn('position1 fetchAndCacheFullPost failed', e); }
+                                })(selectedRaw.id);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Failed to resolve selected promoted post, using raw selection', e);
+                        selected = selectedRaw;
+                    }
+
+                    sortedPosts = [selected, ...sortedPosts.filter(p => p.id !== selectedRaw.id)];
                 }
             }
 
