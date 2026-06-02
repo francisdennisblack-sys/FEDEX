@@ -118,56 +118,6 @@
 
 <body>
     <script>
-        // Startup guard: ensure critical UI elements exist after large edits
-        (function ensureCriticalUI(){
-            try {
-                // Logo placeholder
-                if (!document.getElementById('logo')) {
-                    const logo = document.createElement('div');
-                    logo.id = 'logo';
-                    logo.className = 'site-logo';
-                    logo.style.cssText = 'height:56px; display:flex; align-items:center; gap:12px; padding:12px 16px;';
-                    logo.innerHTML = `<div style="width:40px;height:40px;background:linear-gradient(135deg,#10b981,#06b6d4);border-radius:8px"></div><div style="color:#fff;font-weight:800;font-size:18px">Local Grid</div>`;
-                    const first = document.body.firstChild;
-                    if (first) document.body.insertBefore(logo, first); else document.body.appendChild(logo);
-                    console.log('🛡️ Ensured #logo placeholder');
-                }
-
-                // Grid container placeholder
-                if (!document.getElementById('grid')) {
-                    const grid = document.createElement('div');
-                    grid.id = 'grid';
-                    grid.className = 'grid';
-                    grid.style.cssText = 'min-height:240px; display:flex; gap:12px; padding:16px; flex-wrap:wrap;';
-                    grid.innerHTML = `<div style="color:#94a3b8; font-size:14px;">No grid content yet — restoring cached content if available...</div>`;
-                    // Insert after logo if present
-                    const logoEl = document.getElementById('logo');
-                    if (logoEl && logoEl.nextSibling) logoEl.parentNode.insertBefore(grid, logoEl.nextSibling);
-                    else document.body.appendChild(grid);
-                    console.log('🛡️ Ensured #grid placeholder');
-                }
-
-                // If cached posts exist, attempt a safe restore via renderGrid
-                try {
-                    const cached = localStorage.getItem('cachedAllPosts');
-                    if (cached && typeof window.renderGrid === 'function') {
-                        try {
-                            // restore postCache minimally and trigger render
-                            const posts = JSON.parse(cached || '[]');
-                            if (posts && posts.length) {
-                                window._restoredFromCache = true;
-                                // lightweight restore to postCache to allow renderGrid to pick them up
-                                window.postCache = window.postCache || {};
-                                posts.forEach(p => { if (p && p.id) window.postCache[p.id] = p; });
-                                setTimeout(() => { try { renderGrid(); console.log('🛠️ renderGrid triggered from cache restore'); } catch(e){} }, 120);
-                            }
-                        } catch (e) { console.warn('Cache restore failed', e); }
-                    }
-                } catch (e) { /* ignore localStorage failures */ }
-            } catch (err) {
-                console.warn('ensureCriticalUI failed', err);
-            }
-        })();
         // Cleanup/runtime flags: toggle to disable heavy workloads and verbose logs during normal runs.
         window.CLEANUP_FLAGS = {
             ENABLE_DEBUG_LOGS: true,       // set true to re-enable console.debug/logs for troubleshooting
@@ -25620,6 +25570,40 @@
         console.log('  - window.startPOIPolling:', typeof window.startPOIPolling === 'function' ? '✅' : '❌');
         console.log('  - window.stopLocationAndPOIPolling:', typeof window.stopLocationAndPOIPolling === 'function' ? '✅' : '❌');
 
+    </script>
+
+    <!-- Emergency fallback: if Firebase fails to initialize, show cached posts so UI is not blank -->
+    <script>
+        (function emergencyGridFallback(){
+            try {
+                document.addEventListener('DOMContentLoaded', () => {
+                    try {
+                        const gridEl = document.getElementById('grid');
+                        if (gridEl) gridEl.style.display = 'grid';
+
+                        // If Firebase isn't ready within a short window, restore cached posts
+                        setTimeout(() => {
+                            if (window.database) return; // Firebase is ready, no fallback needed
+                            try {
+                                const raw = localStorage.getItem('cachedAllPosts') || localStorage.getItem('cachedPosts') || null;
+                                if (!raw) return;
+                                const posts = JSON.parse(raw || '[]');
+                                if (!posts || !posts.length) return;
+                                window.gridContent = window.gridContent || {};
+                                // Place cached posts into shared-posts for immediate rendering
+                                if (!window.gridContent['shared-posts'] || window.gridContent['shared-posts'].length === 0) {
+                                    window.gridContent['shared-posts'] = posts.map(p => (p && p.id) ? p : Object.assign({ id: 'cached-' + Math.random().toString(36).slice(2,8) }, p));
+                                    console.log('⚠️ Emergency fallback: restored', window.gridContent['shared-posts'].length, 'cached posts to gridContent["shared-posts"]');
+                                }
+                                // Ensure grid initialization and render
+                                if (typeof initializeGrid === 'function') initializeGrid();
+                                if (typeof renderGrid === 'function') renderGrid();
+                            } catch (e) { console.warn('Emergency fallback restore failed:', e); }
+                        }, 800);
+                    } catch(e) { console.warn('Emergency fallback DOMContentLoaded handler failed', e); }
+                });
+            } catch (err) { console.warn('Emergency fallback failed to install', err); }
+        })();
     </script>
 
     <!-- Global debug functions (after module script completes) -->
