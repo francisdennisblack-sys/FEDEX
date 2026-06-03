@@ -7542,7 +7542,15 @@
         // ============================================
         function detectUserGrid() {
             console.log('\n🚀 ZONE DETECTION STARTING...');
-            console.log(`📍 User location: ${userLocation?.lat.toFixed(4)}, ${userLocation?.lon.toFixed(4)}`);
+            console.log(`📍 Raw user location: ${userLocation?.lat.toFixed(6)}, ${userLocation?.lon.toFixed(6)}`);
+            // Normalize coordinates to reduce jitter between devices (deterministic snapping)
+            function normalizeCoordinates(lat, lon, precision = 4) {
+                const factor = Math.pow(10, precision);
+                return { lat: Math.round(lat * factor) / factor, lon: Math.round(lon * factor) / factor };
+            }
+
+            const normalized = userLocation ? normalizeCoordinates(userLocation.lat, userLocation.lon, 4) : null;
+            if (normalized) console.log(`📍 Normalized user location: ${normalized.lat.toFixed(4)}, ${normalized.lon.toFixed(4)}`);
             
             if (!userLocation) {
                 console.error('❌ No geolocation - will use nearest location when available');
@@ -7555,7 +7563,10 @@
             try {
                 // STEP 1: FIND CLOSEST LOCATION FROM DATABASE (PRIMARY)
                 console.log('🔍 Step 1: Searching for CLOSEST location from 5,478+ location database...');
-                const closestLocationData = findClosestLocation(userLocation.lat, userLocation.lon);
+                // Use normalized coords for lookup to ensure determinism across devices
+                const lookupLat = normalized ? normalized.lat : userLocation.lat;
+                const lookupLon = normalized ? normalized.lon : userLocation.lon;
+                const closestLocationData = findClosestLocation(lookupLat, lookupLon);
                 
                 if (closestLocationData && closestLocationData.location) {
                     const distanceToLocKm = closestLocationData.distance;
@@ -7571,7 +7582,8 @@
                         console.log(`   ✅ USING LOCATION: ${closestLocationData.location.name} is closest match`);
                         currentZoneTag = `${closestLocationData.location.name}`;
                         currentAreaName = closestLocationData.location.name;
-                        currentGridId = closestLocationData.location.name; // Set zone ID for posts
+                        // Use normalized grid id to ensure same area across devices in same location
+                        currentGridId = `${closestLocationData.location.name}::${normalized ? (normalized.lat.toFixed(4) + '_' + normalized.lon.toFixed(4)) : (closestLocationData.location.lat + '_' + closestLocationData.location.lon)}`;
                         currentGridRadius = getLocationRadius(closestLocationData.location.type);
                         currentContentScope = closestLocationData.location.type;
                         currentGeographicLocation = closestLocationData.location.name;
@@ -7592,7 +7604,7 @@
                         console.log(`   ✅ USING LOCATION (even though ${distanceToLocKm.toFixed(1)} km away): ${closestLocationData.location.name} is best available`);
                         currentZoneTag = `${closestLocationData.location.name}`;
                         currentAreaName = closestLocationData.location.name;
-                        currentGridId = closestLocationData.location.name; // Set zone ID for posts
+                        currentGridId = `${closestLocationData.location.name}::${normalized ? (normalized.lat.toFixed(4) + '_' + normalized.lon.toFixed(4)) : (closestLocationData.location.lat + '_' + closestLocationData.location.lon)}`;
                         currentGridRadius = getLocationRadius(closestLocationData.location.type);
                         currentContentScope = closestLocationData.location.type;
                         currentGeographicLocation = closestLocationData.location.name;
@@ -7665,12 +7677,26 @@
                 for (let i = 0; i < globalLocationDatabase.length; i++) {
                     const loc = globalLocationDatabase[i];
                     const distance = calculateDistance(userLat, userLon, loc.lat, loc.lon);
-                    
+
                     // Only consider locations within this radius
-                    if (distance <= maxRadius && distance < minDistance) {
-                        minDistance = distance;
-                        closestLoc = loc;
-                        
+                    if (distance <= maxRadius) {
+                        // If strictly closer, pick it
+                        if (distance < minDistance - 1e-9) {
+                            minDistance = distance;
+                            closestLoc = loc;
+                        } else if (Math.abs(distance - minDistance) <= 1e-9) {
+                            // Tie: deterministic tie-breaker by canonical key (name|state|lat|lon)
+                            try {
+                                const ka = (closestLoc.name || '') + '|' + (closestLoc.state || '') + '|' + String(closestLoc.lat) + '|' + String(closestLoc.lon);
+                                const kb = (loc.name || '') + '|' + (loc.state || '') + '|' + String(loc.lat) + '|' + String(loc.lon);
+                                if (kb < ka) {
+                                    closestLoc = loc;
+                                }
+                            } catch (e) {
+                                // ignore and keep existing
+                            }
+                        }
+
                         // Early exit if VERY close (within 50m)
                         if (minDistance < 0.05) break;
                     }
