@@ -19124,13 +19124,63 @@
             const isBoost = (p) => p._isBoosted || p.boostPaidAt || p.boostStatus === 'active';
             const isSell  = (p) => p._isSell || p.sellBadge || p.forSale || p.buyBadge;
             const boostSellPosts = rankedPosts
-                .filter(p => !userPostIds.has(p.id) && (isBoost(p) || isSell(p)))
-                .sort((a, b) => {
-                    // Boost outranks sell; within each, higher unifiedRank wins.
-                    const ab = isBoost(a) ? 1 : 0, bb = isBoost(b) ? 1 : 0;
-                    if (ab !== bb) return bb - ab;
-                    return (b.unifiedRank || 0) - (a.unifiedRank || 0);
+                .filter(p => !userPostIds.has(p.id) && (isBoost(p) || isSell(p)));
+
+            // 🎯 BOOST PERFORMANCE TARGETING (per-viewer)
+            // -----------------------------------------------------------------
+            // Every boosted post has a per-viewer goal: earn 10× the average
+            // likes of a normal local post in THIS viewer's area. We compute
+            // an "urgency" score from how far below that goal the post is,
+            // then use urgency to drive *position*:
+            //   urgency ≥ 0.7  → front-load (inserted above local top posts)
+            //   urgency ≥ 0.3  → boost rides at the top of scatter bucket
+            //   urgency  < 0.3 → boost has already hit its goal here — normal scatter
+            //
+            // Dislikes do NOT punish a boost (the creator paid for reach):
+            // they add a small urgency bonus so we keep promoting until the
+            // post finds the right audience and earns real likes.
+            // -----------------------------------------------------------------
+            (function scoreBoostUrgency() {
+                // Baseline: average likes of a normal local post (exclude boosts/sells).
+                const baseline = rankedPosts.filter(p =>
+                    p.county === userArea &&
+                    !isBoost(p) && !isSell(p) &&
+                    !userPostIds.has(p.id)
+                );
+                const sumLikes = baseline.reduce((s, p) => s + (Number(p.likes) || 0), 0);
+                const avgLocalLikes = baseline.length > 0 ? (sumLikes / baseline.length) : 1;
+                // Target = 10× local average, with a floor of 10 likes so new
+                // areas without much activity still set a meaningful goal.
+                const targetLikes = Math.max(10, avgLocalLikes * 10);
+
+                boostSellPosts.forEach(p => {
+                    if (!isBoost(p)) { p._boostUrgency = 0; return; }
+                    const likes = Number(p.likes) || 0;
+                    const dislikes = Number(p.dislikes) || 0;
+                    const progress = likes / targetLikes;                  // 0 → 1+
+                    let urgency = Math.max(0, 1 - progress);                // 1 = nothing, 0 = hit
+                    // Dislike bonus: tells us we haven't found the audience yet.
+                    // Capped so dislikes can't fully dominate the score.
+                    if (dislikes > likes) {
+                        urgency += Math.min(0.5, (dislikes - likes) / Math.max(targetLikes, 1));
+                    }
+                    p._boostUrgency = urgency;
+                    p._boostTargetLikes = targetLikes;
+                    p._boostProgress = progress;
                 });
+                console.log(`🎯 Boost targeting: avgLocalLikes=${avgLocalLikes.toFixed(2)}, targetLikes=${targetLikes.toFixed(1)}, boostPosts=${boostSellPosts.filter(isBoost).length}`);
+            })();
+
+            // Sort: boost first (by urgency desc, then rank), then sell (by rank).
+            boostSellPosts.sort((a, b) => {
+                const ab = isBoost(a) ? 1 : 0, bb = isBoost(b) ? 1 : 0;
+                if (ab !== bb) return bb - ab;
+                if (ab === 1) {
+                    const ua = a._boostUrgency || 0, ub = b._boostUrgency || 0;
+                    if (ua !== ub) return ub - ua;
+                }
+                return (b.unifiedRank || 0) - (a.unifiedRank || 0);
+            });
             const boostSellIds = new Set(boostSellPosts.map(p => p.id));
 
             // 2️⃣ HYPER-LOCAL POSTS: Match user's exact area tag
@@ -19291,8 +19341,21 @@
             // 🎲 SCATTER non-local content across the feed (not clustered at top).
             // Boost + Sell scatter alongside other scatter content so they appear
             // throughout, not all at once.
+            //
+            // 🚀 BOOST FRONT-LOAD: any boost with urgency ≥ 0.7 (i.e. <30% of
+            // its 10× target reached) is inserted ABOVE the local top posts for
+            // this viewer. This is the mechanism that "moves a boosted post up
+            // on other areas' grids" when it hasn't hit its like target yet.
+            const FRONT_LOAD_URGENCY = 0.7;
+            const urgentBoosts   = boostSellToAdd.filter(p => isBoost(p) && (p._boostUrgency || 0) >= FRONT_LOAD_URGENCY);
+            const normalBoosts   = boostSellToAdd.filter(p => !urgentBoosts.includes(p));
+            if (urgentBoosts.length > 0) {
+                console.log(`🚀 Front-loading ${urgentBoosts.length} urgent boost(s) above local top (urgency ≥ ${FRONT_LOAD_URGENCY})`);
+                // Place urgent boosts immediately after user's own posts, before any local content.
+                result.push(...urgentBoosts);
+            }
             const allLocalPosts = [...hyperLocalToAdd];
-            const scatterPosts = [...boostSellToAdd, ...nearLocalToAdd, ...websiteTopToAdd, ...distantToAdd];
+            const scatterPosts = [...normalBoosts, ...nearLocalToAdd, ...websiteTopToAdd, ...distantToAdd];
             
             // Calculate scatter positions (evenly distributed)
             const totalContent = allLocalPosts.length + scatterPosts.length;
@@ -19337,7 +19400,11 @@
             try {
                 // Consider a post "disliked" when its net likes < 0. Fall back to likes-dislikes
                 // if `netLikes` is not present on the object.
+                // 🚀 BOOST EXEMPTION: paid boosts are NEVER pushed to the tail by
+                // the disliked-rule — dislikes are the signal that we haven't
+                // found the right audience yet, so we keep their position.
                 const isDisliked = (p) => {
+                    if (isBoost(p)) return false;
                     const net = (typeof p.netLikes === 'number')
                         ? Number(p.netLikes)
                         : (Number(p.likes) || 0) - (Number(p.dislikes) || 0);
