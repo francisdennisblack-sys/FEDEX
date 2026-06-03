@@ -15160,12 +15160,25 @@
                         else if (/\.webm(\?|$)/i.test(src)) videoType = 'video/webm';
                         else if (/\.(mov|m4v)(\?|$)/i.test(src)) videoType = 'video/quicktime';
                         const typeAttr = videoType ? ` type="${videoType}"` : '';
-                        return `<video controls playsinline preload="metadata" crossorigin="anonymous" style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"><source src="${src}"${typeAttr}>Your browser does not support this video.</video>`;
+                        // autoplay + muted is required for browsers to allow auto-start
+                        // without a user gesture. User can unmute via controls.
+                        return `<video id="viewMediaVideo" controls autoplay muted playsinline preload="auto" crossorigin="anonymous" style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"><source src="${src}"${typeAttr}>Your browser does not support this video.</video>`;
                     } else {
                         return `<img src="${src}" style="max-width:100%; max-height:60vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
                     }
                 })();
                 viewMediaEl.innerHTML = mediaHTML;
+                // Best-effort: kick off playback as soon as the element is in the DOM.
+                try {
+                    const vidEl = viewMediaEl.querySelector('video');
+                    if (vidEl) {
+                        vidEl.muted = true;
+                        const p = vidEl.play();
+                        if (p && typeof p.catch === 'function') {
+                            p.catch(err => console.log('Autoplay blocked, user must tap play:', err && err.message));
+                        }
+                    }
+                } catch (e) { /* ignore autoplay errors */ }
                 // Show written content below media in the description area
                 viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
             } else {
@@ -24053,139 +24066,59 @@
             });
         }
 
-        // Smart video processing: trim to 20s max and compress intelligently
+        // Video processing: validate size/duration and upload the original file
+        // as-is. The previous canvas+MediaRecorder re-encoder produced silent,
+        // black, webm-only output (no Safari support) — so we now keep the
+        // user's original codec (typically H.264/AAC mp4) which plays everywhere.
         async function processVideo(file) {
             return new Promise((resolve) => {
-                const MAX_VIDEO_DURATION = 20; // seconds
-                const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB
-                const QUALITY_LEVELS = [
-                    { name: 'High', videoBitrate: 2500, audioBitrate: 128 },
-                    { name: 'Medium', videoBitrate: 1500, audioBitrate: 96 },
-                    { name: 'Low', videoBitrate: 800, audioBitrate: 64 },
-                    { name: 'Very Low', videoBitrate: 400, audioBitrate: 32 }
-                ];
-                
-                const video = document.createElement('video');
-                video.src = URL.createObjectURL(file);
-                
-                video.onloadedmetadata = () => {
-                    const videoDuration = Math.min(video.duration, MAX_VIDEO_DURATION);
-                    console.log(`Video loaded: ${Math.ceil(video.duration)}s duration, will trim to ${Math.ceil(videoDuration)}s`);
-                    
-                    // Try compression at each quality level
-                    let qualityIndex = 0;
-                    
-                    const tryCompress = () => {
-                        if (qualityIndex >= QUALITY_LEVELS.length) {
-                            alert('Unable to compress video enough. Please choose a shorter or smaller video.');
-                            resolve(null);
-                            return;
-                        }
-                        
-                        const quality = QUALITY_LEVELS[qualityIndex];
-                        console.log(`Attempting compression at ${quality.name} quality...`);
-                        
-                        compressVideoAtQuality(video, videoDuration, quality, (processedBlob) => {
-                            if (processedBlob && processedBlob.size <= MAX_VIDEO_SIZE) {
-                                console.log(`✓ Compression successful at ${quality.name} quality: ${(processedBlob.size / 1024 / 1024).toFixed(1)}MB`);
-                                resolve(processedBlob);
-                            } else if (processedBlob) {
-                                console.log(`✗ ${quality.name} quality too large: ${(processedBlob.size / 1024 / 1024).toFixed(1)}MB, trying lower quality...`);
-                                qualityIndex++;
-                                tryCompress();
-                            } else {
-                                qualityIndex++;
-                                tryCompress();
-                            }
-                        });
-                    };
-                    
-                    tryCompress();
-                };
-                
-                video.onerror = () => {
-                    alert('Could not process video. Make sure it\'s a valid video file.');
-                    resolve(null);
-                };
-            });
-        }
-        
-        // Compress video at specific quality level
-        function compressVideoAtQuality(videoElement, duration, quality, callback) {
-            const canvas = document.createElement('canvas');
-            const video = videoElement;
-            const ctx = canvas.getContext('2d');
-            
-            // Use lower resolution for lower quality
-            const qualityMultiplier = {
-                'High': 1.0,
-                'Medium': 0.8,
-                'Low': 0.6,
-                'Very Low': 0.4
-            }[quality.name] || 0.6;
-            
-            canvas.width = video.videoWidth * qualityMultiplier;
-            canvas.height = video.videoHeight * qualityMultiplier;
-            
-            const chunks = [];
-            let startTime = null;
-            let frameCount = 0;
-            
-            // MediaRecorder for re-encoding
-            const stream = canvas.captureStream(30); // 30 fps
-            
-            // Try to get audio track if available
-            if (video.currentTime === 0) {
-                video.currentTime = 0;
-            }
-            
-            const mimeType = 'video/webm;codecs=vp8,opus';
-            const options = {
-                mimeType: mimeType,
-                videoBitsPerSecond: quality.videoBitrate * 1000
-            };
-            
-            try {
-                const mediaRecorder = new MediaRecorder(stream, options);
-                
-                mediaRecorder.ondataavailable = (e) => {
-                    chunks.push(e.data);
-                };
-                
-                mediaRecorder.onerror = (e) => {
-                    console.error('MediaRecorder error:', e.error);
-                    callback(null);
-                };
-                
-                mediaRecorder.onstop = () => {
-                    const blob = new Blob(chunks, { type: 'video/webm' });
-                    callback(blob);
-                };
-                
-                mediaRecorder.start();
-                startTime = performance.now();
-                
-                // Draw frames from video
-                const drawFrame = () => {
-                    const currentTime = (performance.now() - startTime) / 1000;
-                    
-                    if (currentTime >= duration) {
-                        mediaRecorder.stop();
+                const MAX_VIDEO_DURATION = 60; // seconds (soft cap, logged only)
+                const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB hard cap
+
+                try {
+                    if (!file) { resolve(null); return; }
+                    if (file.size > MAX_VIDEO_SIZE) {
+                        alert(`Video is too large (${(file.size/1024/1024).toFixed(1)}MB). Max is 100MB.`);
+                        resolve(null);
                         return;
                     }
-                    
-                    video.currentTime = currentTime;
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    frameCount++;
-                    
-                    requestAnimationFrame(drawFrame);
-                };
-                
-                drawFrame();
-            } catch (e) {
-                console.error('MediaRecorder not supported:', e);
-                callback(null);
-            }
+
+                    // Probe duration for logging; do NOT block on failure.
+                    try {
+                        const probe = document.createElement('video');
+                        probe.preload = 'metadata';
+                        probe.src = URL.createObjectURL(file);
+                        probe.onloadedmetadata = () => {
+                            try {
+                                console.log(`📹 Video accepted: ${file.type || 'unknown'}, ${(file.size/1024/1024).toFixed(1)}MB, ~${Math.round(probe.duration)}s`);
+                                if (probe.duration > MAX_VIDEO_DURATION) {
+                                    console.warn(`   ⚠️ Duration ${Math.round(probe.duration)}s exceeds soft cap ${MAX_VIDEO_DURATION}s — uploading anyway.`);
+                                }
+                            } catch (e) { /* ignore */ }
+                            try { URL.revokeObjectURL(probe.src); } catch(e){}
+                            resolve(file);
+                        };
+                        probe.onerror = () => {
+                            console.warn('📹 Could not probe video metadata — uploading file as-is.');
+                            try { URL.revokeObjectURL(probe.src); } catch(e){}
+                            resolve(file);
+                        };
+                    } catch (e) {
+                        resolve(file);
+                    }
+                } catch (e) {
+                    console.error('processVideo error:', e);
+                    resolve(null);
+                }
+            });
+        }
+
+        // Legacy in-browser re-encoder (kept for reference, no longer used).
+        // It produced black/silent webm output and broke playback in Safari.
+        function compressVideoAtQuality_LEGACY_DISABLED() {
+            // Intentionally a no-op. See processVideo() above for the current
+            // upload-as-is path.
+            return null;
         }
 
         // Content moderation for images using Sightengine API
