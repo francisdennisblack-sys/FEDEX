@@ -2918,6 +2918,72 @@
         // CRITICAL: Expose Firebase objects to global scope so they're accessible outside module
         window.database = database;
         window.storage = storage;
+        // Persist and restore the user's selected area tag so selections survive navigation
+        window.persistZoneTagForUser = function(tag) {
+            try {
+                const uid = window.currentUserId || 'anon';
+                const key = `currentZoneTag_${uid}`;
+                if (tag && tag.trim()) {
+                    localStorage.setItem(key, String(tag));
+                    console.log(`✅ Persisted zone tag for ${uid}:`, tag);
+                } else {
+                    localStorage.removeItem(key);
+                    console.log(`✅ Cleared persisted zone tag for ${uid}`);
+                }
+            } catch (e) { console.warn('persistZoneTagForUser failed', e); }
+        };
+
+        window.restoreZoneTagForUser = function() {
+            try {
+                const uid = window.currentUserId || 'anon';
+                const key = `currentZoneTag_${uid}`;
+                const v = localStorage.getItem(key);
+                if (v && v.trim()) {
+                    currentZoneTag = v;
+                    const zp = document.getElementById('zonePredictor');
+                    if (zp) {
+                        zp.textContent = v;
+                        zp.classList.remove('zone-predictor-loading');
+                        zp.style.color = '#fff';
+                        zp.style.background = '#1a1a1a';
+                    }
+                    const clearZoneBtn = document.getElementById('clearZoneBtn');
+                    if (clearZoneBtn) clearZoneBtn.style.display = 'inline-block';
+                    console.log(`✅ Restored persisted zone tag for ${uid}:`, v);
+                    return true;
+                }
+            } catch (e) { console.warn('restoreZoneTagForUser failed', e); }
+            return false;
+        };
+
+        // Try to restore persisted zone tag shortly after init (non-blocking)
+        setTimeout(() => {
+            try { window.restoreZoneTagForUser && window.restoreZoneTagForUser(); } catch(e){}
+        }, 300);
+
+        // Attach a global click handler to clear persisted zone tag when user clicks the clear button
+        document.addEventListener('click', (ev) => {
+            try {
+                const t = ev && ev.target;
+                if (!t) return;
+                if (t.id === 'clearZoneBtn' || (t.closest && t.closest && t.closest('#clearZoneBtn'))) {
+                    // Clear current selection and persisted value
+                    currentZoneTag = '';
+                    userSelectedZone = false;
+                    const zp = document.getElementById('zonePredictor');
+                    if (zp) {
+                        zp.textContent = '';
+                        zp.classList.add('zone-predictor-loading');
+                        zp.style.color = '';
+                        zp.style.background = '';
+                    }
+                    const btn = document.getElementById('clearZoneBtn');
+                    if (btn) btn.style.display = 'none';
+                    try { window.persistZoneTagForUser && window.persistZoneTagForUser(null); } catch(e){}
+                    console.log('✅ Cleared persisted zone tag via clearZoneBtn');
+                }
+            } catch (e) { /* swallow */ }
+        });
 
         // Helper: robust post loader - tries multiple plausible Firebase paths
         window.getPostByIdFromDB = async function(postId) {
@@ -8125,6 +8191,7 @@
             
             console.log(`🔀 MANUAL ZONE SWITCH: ${zone}`);
             console.log(`📊 Filtering posts to show only zone: ${currentZoneTag}`);
+            try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag); } catch(e) {}
             
             // Re-render grid with new zone
             renderGrid();
@@ -8851,10 +8918,22 @@
                 }
             }, VOTE_VISUAL_DELAY_MS);
             
-            // 🔥 CRITICAL: Save vote to Firebase with proper persistence
-            console.log(`🔄 Saving vote to Firebase and localStorage...`);
-            saveVoteToFirebase(currentUserId, postId, newVoteType).catch(err => {
-                console.error('❌ Vote save failed, rolling back UI:', err);
+            // 🔥 CRITICAL: Save vote using an atomic transaction to prevent race conditions
+            // Use submitVoteTransaction so aggregated counts are computed server-side and written
+            console.log(`🔄 Submitting atomic vote transaction to Firebase...`);
+            submitVoteTransaction(currentUserId, postId, newVoteType).then(({likes, dislikes}) => {
+                // Ensure local cache/UI reflect authoritative counts from transaction
+                try {
+                    post.likes = likes;
+                    post.dislikes = dislikes;
+                    if (postCache && postCache[postId]) {
+                        postCache[postId].likes = likes;
+                        postCache[postId].dislikes = dislikes;
+                    }
+                    updateVoteDisplayInDOM(postId, likes, dislikes);
+                } catch (e) { /* defensive */ }
+            }).catch(err => {
+                console.error('❌ Transaction failed, rolling back UI:', err);
                 // Cancel delayed re-rank because this vote did not persist
                 if (window.voteVisualUpdateTimers && window.voteVisualUpdateTimers[postId]) {
                     clearTimeout(window.voteVisualUpdateTimers[postId]);
@@ -14879,6 +14958,8 @@
             if (dropdown) dropdown.style.display = 'none';
             
             // Update zone predictor with best available location
+            // Restore user's previously persisted zone tag (if any) so composer shows their last selection
+            try { window.restoreZoneTagForUser && window.restoreZoneTagForUser(); } catch(e) {}
             updateZonePredictor();
             
             // Show nearby locations for quick selection
@@ -16227,6 +16308,7 @@
             }
             
             console.log(`   ✅ STEP 3: Global currentZoneTag updated: "${oldZoneTag}" → "${currentZoneTag}"`);
+            try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag); } catch(e) {}
             console.log(`   ✅ STEP 3b: User selection flag set - will not auto-detect over this`);
             console.log(`   ✅ STEP 3c: Area tracking updated (${currentAreasLoaded.size} areas loaded for ${currentPageMode})`);
             
@@ -16825,6 +16907,7 @@
                 console.log(`   🔄 UPDATING currentZoneTag from "${currentZoneTag}" to "${displayText}"`);
                 currentZoneTag = displayText;
                 console.log(`   ✅ currentZoneTag updated: "${currentZoneTag}"`);
+                try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag); } catch (e) {}
                 
                 if (clearZoneBtn) {
                     clearZoneBtn.style.display = 'inline-block';
