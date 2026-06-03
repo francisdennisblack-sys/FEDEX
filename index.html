@@ -12909,12 +12909,36 @@
 
         // Load user votes from Firebase
         async function loadUserVotesFromFirebase(userId) {
+            // Helper: normalize any incoming votes map to the composed-key format
+            // the rest of the app uses: `${userId}_${postId}` → 'like' | 'dislike'.
+            // We accept BOTH legacy shapes:
+            //   1) { postId: 'like' }  (what Firebase stores under user-votes/{userId})
+            //   2) { '<userId>_<postId>': 'like' }  (what localStorage has stored historically)
+            function normalizeVotesMap(rawMap, uid) {
+                const out = {};
+                if (!rawMap || typeof rawMap !== 'object') return out;
+                const prefix = `${uid}_`;
+                for (const k in rawMap) {
+                    if (!Object.prototype.hasOwnProperty.call(rawMap, k)) continue;
+                    const v = rawMap[k];
+                    if (v !== 'like' && v !== 'dislike') continue;
+                    if (k.startsWith(prefix)) {
+                        out[k] = v;
+                    } else {
+                        // Treat as raw postId
+                        out[`${prefix}${k}`] = v;
+                    }
+                }
+                return out;
+            }
+
             try {
                 // FIRST: Try to load from localStorage (instant, no network latency)
                 const cachedVotes = localStorage.getItem(`userVotes_${userId}`);
                 if (cachedVotes) {
                     try {
-                        userVotes = JSON.parse(cachedVotes);
+                        const parsed = JSON.parse(cachedVotes);
+                        userVotes = normalizeVotesMap(parsed, userId);
                         console.log(`✅ Loaded ${Object.keys(userVotes).length} user votes from localStorage cache`);
                     } catch (e) {
                         console.error('Failed to parse cached votes:', e);
@@ -12928,10 +12952,14 @@
                 
                 if (snapshot.exists()) {
                     const votes = snapshot.val();
-                    userVotes = votes;
-                    // Update localStorage with fresh Firebase data
-                    localStorage.setItem(`userVotes_${userId}`, JSON.stringify(votes));
-                    console.log(`✅ Loaded ${Object.keys(votes).length} user votes from Firebase and cached to localStorage`);
+                    const normalized = normalizeVotesMap(votes, userId);
+                    // Merge: prefer Firebase (server is source of truth) but keep any
+                    // local-only votes that haven't synced yet.
+                    userVotes = Object.assign({}, userVotes, normalized);
+                    window.userVotes = userVotes;
+                    // Update localStorage with merged data (already in composed-key format)
+                    try { localStorage.setItem(`userVotes_${userId}`, JSON.stringify(userVotes)); } catch (e) {}
+                    console.log(`✅ Loaded ${Object.keys(normalized).length} user votes from Firebase and cached to localStorage`);
                 } else if (!cachedVotes) {
                     userVotes = {};
                     console.log('📝 No previous votes found - starting fresh');
