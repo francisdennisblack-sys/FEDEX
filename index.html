@@ -19119,12 +19119,12 @@
             );
             const userPostIds = new Set(userPosts.map(p => p.id));
 
-            // 🟢 BOOST + SELL BUCKET (highest priority for non-owner posts)
-            // These are scattered across the feed first so they're always visible.
+            // � BOOST-ONLY PRIORITY BUCKET (highest priority for non-owner posts)
+            // Sell posts are NOT included — they're not paid promotion and flow
+            // through the normal local / near-local / top / fallback path.
             const isBoost = (p) => p._isBoosted || p.boostPaidAt || p.boostStatus === 'active';
-            const isSell  = (p) => p._isSell || p.sellBadge || p.forSale || p.buyBadge;
-            const boostSellPosts = rankedPosts
-                .filter(p => !userPostIds.has(p.id) && (isBoost(p) || isSell(p)));
+            const boostPosts = rankedPosts
+                .filter(p => !userPostIds.has(p.id) && isBoost(p));
 
             // 🎯 BOOST PERFORMANCE TARGETING (per-viewer)
             // -----------------------------------------------------------------
@@ -19141,10 +19141,10 @@
             // post finds the right audience and earns real likes.
             // -----------------------------------------------------------------
             (function scoreBoostUrgency() {
-                // Baseline: average likes of a normal local post (exclude boosts/sells).
+                // Baseline: average likes of a normal local post (exclude boosts).
                 const baseline = rankedPosts.filter(p =>
                     p.county === userArea &&
-                    !isBoost(p) && !isSell(p) &&
+                    !isBoost(p) &&
                     !userPostIds.has(p.id)
                 );
                 const sumLikes = baseline.reduce((s, p) => s + (Number(p.likes) || 0), 0);
@@ -19153,8 +19153,7 @@
                 // areas without much activity still set a meaningful goal.
                 const targetLikes = Math.max(10, avgLocalLikes * 10);
 
-                boostSellPosts.forEach(p => {
-                    if (!isBoost(p)) { p._boostUrgency = 0; return; }
+                boostPosts.forEach(p => {
                     const likes = Number(p.likes) || 0;
                     const dislikes = Number(p.dislikes) || 0;
                     const progress = likes / targetLikes;                  // 0 → 1+
@@ -19168,30 +19167,26 @@
                     p._boostTargetLikes = targetLikes;
                     p._boostProgress = progress;
                 });
-                console.log(`🎯 Boost targeting: avgLocalLikes=${avgLocalLikes.toFixed(2)}, targetLikes=${targetLikes.toFixed(1)}, boostPosts=${boostSellPosts.filter(isBoost).length}`);
+                console.log(`🎯 Boost targeting: avgLocalLikes=${avgLocalLikes.toFixed(2)}, targetLikes=${targetLikes.toFixed(1)}, boostPosts=${boostPosts.length}`);
             })();
 
-            // Sort: boost first (by urgency desc, then rank), then sell (by rank).
-            boostSellPosts.sort((a, b) => {
-                const ab = isBoost(a) ? 1 : 0, bb = isBoost(b) ? 1 : 0;
-                if (ab !== bb) return bb - ab;
-                if (ab === 1) {
-                    const ua = a._boostUrgency || 0, ub = b._boostUrgency || 0;
-                    if (ua !== ub) return ub - ua;
-                }
+            // Sort boosts by urgency desc, then unifiedRank.
+            boostPosts.sort((a, b) => {
+                const ua = a._boostUrgency || 0, ub = b._boostUrgency || 0;
+                if (ua !== ub) return ub - ua;
                 return (b.unifiedRank || 0) - (a.unifiedRank || 0);
             });
-            const boostSellIds = new Set(boostSellPosts.map(p => p.id));
+            const boostIds = new Set(boostPosts.map(p => p.id));
 
             // 2️⃣ HYPER-LOCAL POSTS: Match user's exact area tag
             const hyperLocal = rankedPosts.filter(p =>
-                !userPostIds.has(p.id) && !boostSellIds.has(p.id) &&
+                !userPostIds.has(p.id) && !boostIds.has(p.id) &&
                 p.county === userArea
             );
 
             // 3️⃣ NEAR-LOCAL WELL-REVIEWED POSTS
             const nearLocalWellReviewed = rankedPosts.filter(p =>
-                !userPostIds.has(p.id) && !boostSellIds.has(p.id) &&
+                !userPostIds.has(p.id) && !boostIds.has(p.id) &&
                 p.county !== userArea &&
                 p.netLikes >= 3 &&
                 (p.proximityClass === 'nearby' || p.proximityClass === 'community')
@@ -19200,7 +19195,7 @@
             // 4️⃣ WEBSITE TOP POSTS
             const websiteTopPosts = rankedPosts
                 .filter(p =>
-                    !userPostIds.has(p.id) && !boostSellIds.has(p.id) &&
+                    !userPostIds.has(p.id) && !boostIds.has(p.id) &&
                     p.county !== userArea &&
                     !nearLocalWellReviewed.find(n => n.id === p.id) &&
                     p.netLikes >= 5
@@ -19220,7 +19215,7 @@
             };
             const distantFiller = rankedPosts
                 .filter(p =>
-                    !userPostIds.has(p.id) && !boostSellIds.has(p.id) &&
+                    !userPostIds.has(p.id) && !boostIds.has(p.id) &&
                     p._distantFiller === true
                 )
                 .sort((a, b) => {
@@ -19232,7 +19227,7 @@
             // 6️⃣ FALLBACK (everything else)
             const usedIds = new Set([
                 ...userPostIds,
-                ...boostSellIds,
+                ...boostIds,
                 ...hyperLocal.map(p => p.id),
                 ...nearLocalWellReviewed.map(p => p.id),
                 ...websiteTopPosts.map(p => p.id),
@@ -19289,23 +19284,23 @@
             ));
 
             // Anchor weights at t=0 (seed) and t=1 (full 80/10/10).
-            // Boost+sell stays a fixed 10% at every scale.
-            const seed = { local: 0.20, near: 0.25, top: 0.25, distant: 0.20, boostSell: 0.10 };
-            const full = { local: 0.80, near: 0.05, top: 0.05, distant: 0.00, boostSell: 0.10 };
+            // Boost stays a fixed 10% at every scale.
+            const seed = { local: 0.20, near: 0.25, top: 0.25, distant: 0.20, boost: 0.10 };
+            const full = { local: 0.80, near: 0.05, top: 0.05, distant: 0.00, boost: 0.10 };
             const lerp = (a, b) => a + (b - a) * t;
             const weights = {
-                local:     lerp(seed.local,     full.local),
-                near:      lerp(seed.near,      full.near),
-                top:       lerp(seed.top,       full.top),
-                distant:   lerp(seed.distant,   full.distant),
-                boostSell: lerp(seed.boostSell, full.boostSell),
+                local:   lerp(seed.local,   full.local),
+                near:    lerp(seed.near,    full.near),
+                top:     lerp(seed.top,     full.top),
+                distant: lerp(seed.distant, full.distant),
+                boost:   lerp(seed.boost,   full.boost),
             };
 
             let hyperLocalTarget    = Math.floor(totalTarget * weights.local);
             let nearLocalTarget     = Math.floor(totalTarget * weights.near);
             let websiteTopTarget    = Math.floor(totalTarget * weights.top);
             let distantFillerTarget = Math.floor(totalTarget * weights.distant);
-            const boostSellTarget   = Math.min(boostSellPosts.length, Math.floor(totalTarget * weights.boostSell));
+            const boostTarget       = Math.min(boostPosts.length, Math.floor(totalTarget * weights.boost));
 
             // 🔁 PER-USER REALITY CHECK: if THIS user's local supply can't fill
             // its quota (their area is quiet relative to the website-scale rule),
@@ -19319,7 +19314,7 @@
             console.log(`🌐 Website scale: onlineUsers=${liveOnline}, totalPosts=${liveTotalPosts}, networkSignal=${networkSignal}, t=${t.toFixed(3)}`);
             console.log(`📊 Scale-adaptive Distribution Plan (local shortfall=${localShortfall}):`);
             console.log(`   User own posts:       ${userPosts.length}`);
-            console.log(`   Boost + Sell:         need ${boostSellTarget}, have ${boostSellPosts.length}`);
+            console.log(`   Boost (urgent first): need ${boostTarget}, have ${boostPosts.length}`);
             console.log(`   Hyper-local:          need ${hyperLocalTarget}, have ${hyperLocal.length}`);
             console.log(`   Near-local reviewed:  need ${nearLocalTarget}, have ${nearLocalWellReviewed.length}`);
             console.log(`   Website top:          need ${websiteTopTarget}, have ${websiteTopPosts.length}`);
@@ -19332,14 +19327,14 @@
             result.push(...userPosts);
 
             // Take target amounts from each category
-            const boostSellToAdd  = boostSellPosts.slice(0, boostSellTarget);
+            const boostToAdd      = boostPosts.slice(0, boostTarget);
             const hyperLocalToAdd = hyperLocal.slice(0, hyperLocalTarget);
             const nearLocalToAdd  = nearLocalWellReviewed.slice(0, nearLocalTarget);
             const websiteTopToAdd = websiteTopPosts.slice(0, websiteTopTarget);
             const distantToAdd    = distantFiller.slice(0, distantFillerTarget);
 
             // 🎲 SCATTER non-local content across the feed (not clustered at top).
-            // Boost + Sell scatter alongside other scatter content so they appear
+            // Boost posts scatter alongside other scatter content so they appear
             // throughout, not all at once.
             //
             // 🚀 BOOST FRONT-LOAD: any boost with urgency ≥ 0.7 (i.e. <30% of
@@ -19347,8 +19342,8 @@
             // this viewer. This is the mechanism that "moves a boosted post up
             // on other areas' grids" when it hasn't hit its like target yet.
             const FRONT_LOAD_URGENCY = 0.7;
-            const urgentBoosts   = boostSellToAdd.filter(p => isBoost(p) && (p._boostUrgency || 0) >= FRONT_LOAD_URGENCY);
-            const normalBoosts   = boostSellToAdd.filter(p => !urgentBoosts.includes(p));
+            const urgentBoosts = boostToAdd.filter(p => (p._boostUrgency || 0) >= FRONT_LOAD_URGENCY);
+            const normalBoosts = boostToAdd.filter(p => !urgentBoosts.includes(p));
             if (urgentBoosts.length > 0) {
                 console.log(`🚀 Front-loading ${urgentBoosts.length} urgent boost(s) above local top (urgency ≥ ${FRONT_LOAD_URGENCY})`);
                 // Place urgent boosts immediately after user's own posts, before any local content.
@@ -19388,8 +19383,8 @@
             }
             
             console.log(`✨ Final feed built: ${result.length} posts`);
-            console.log(`   � User's own:               ${userPosts.length}`);
-            console.log(`   💎 Boost + Sell scattered:   ${boostSellToAdd.length} (target: ${boostSellTarget})`);
+            console.log(`   👤 User's own:               ${userPosts.length}`);
+            console.log(`   🚀 Boost scattered:          ${boostToAdd.length} (target: ${boostTarget})`);
             console.log(`   📍 Hyper-local:              ${hyperLocalToAdd.length} (target: ${hyperLocalTarget})`);
             console.log(`   🌐 Near-local well-reviewed: ${nearLocalToAdd.length} (target: ${nearLocalTarget})`);
             console.log(`   🌟 Website top:              ${websiteTopToAdd.length} (target: ${websiteTopTarget})`);
@@ -23397,12 +23392,9 @@
                     return true;
                 }
 
-                // KEEP ALWAYS: Sell / marketplace posts (active commerce)
-                if (post.sellBadge || post.forSale || post.buyBadge) {
-                    post._distantFiller = false;
-                    post._isSell = true;
-                    return true;
-                }
+                // Sell / marketplace posts are NOT boosted — they get no
+                // special area-filter pass. They flow through the normal
+                // local / near-local / top / distant rules like any other post.
 
                 // KEEP: Post is globally viral (5+ net likes - can show anywhere)
                 const netLikes = (post.likes || 0) - (post.dislikes || 0);
