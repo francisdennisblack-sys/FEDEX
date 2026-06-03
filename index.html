@@ -12658,6 +12658,12 @@
                             if (seenPostIds.has(postId)) {
                                 return; // Skip this duplicate
                             }
+                            // Respect global delete tombstones (post was deleted by its
+                            // owner; another client may still have it cached server-side
+                            // momentarily, but we must not resurrect it).
+                            if (window.globallyDeletedPostIds && window.globallyDeletedPostIds.has(postId)) {
+                                return;
+                            }
                             
                             seenPostIds.add(postId);
                             // Defensive merge: if incoming post has missing/empty content, preserve cached content
@@ -12672,6 +12678,41 @@
                                 ...incoming
                             });
                         });
+
+                        // ✅ ACTIVE PRUNE: any post the client has cached locally that
+                        // is no longer in the server snapshot has been deleted server-side.
+                        // Remove it from in-memory caches + DOM + virtual scroller so the
+                        // delete propagates to ALL viewers, not just the post owner.
+                        try {
+                            const serverIds = new Set(Object.keys(postsObj));
+                            const cachedIds = Object.keys(postCache || {});
+                            const removedIds = cachedIds.filter(id => !serverIds.has(id));
+                            if (removedIds.length > 0) {
+                                console.log(`🧽 Snapshot prune: removing ${removedIds.length} posts no longer on server`);
+                                window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
+                                removedIds.forEach(id => {
+                                    window.globallyDeletedPostIds.add(id);
+                                    try { delete postCache[id]; } catch(e){}
+                                    try {
+                                        Object.keys(gridContent || {}).forEach(k => {
+                                            if (Array.isArray(gridContent[k])) {
+                                                gridContent[k] = gridContent[k].filter(p => !(p && p.id === id));
+                                            }
+                                        });
+                                    } catch(e){}
+                                    try {
+                                        const el = document.querySelector(`.grid-box[data-post-id="${id}"]`);
+                                        if (el && el.parentNode) el.parentNode.removeChild(el);
+                                    } catch(e){}
+                                });
+                                try {
+                                    if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                                        window.gridScroller.items = window.gridScroller.items.filter(i => !(i && removedIds.includes(i.id)));
+                                        if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh();
+                                    }
+                                } catch(e){}
+                            }
+                        } catch (e) { console.warn('Snapshot prune failed', e); }
                         
                         console.log(`  📊 Total posts after processing: ${allPosts.length}`);
                     } else {
@@ -12812,17 +12853,39 @@
                     try {
                         const postId = snap.key;
                         if (!postId) return;
-                        console.log('📣 Received post_removed tombstone for', postId);
-                        // Track pending removed posts and show soft-refresh prompt
+                        console.log('📣 Received post_removed tombstone for', postId, '→ purging immediately');
+                        // Track + immediately purge so the deletion is visible
+                        // to ALL clients without requiring a manual refresh.
                         window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
                         window.pendingRemovedPosts.add(postId);
-                        window.softRefreshNeeded = true;
-                        // Visually mark boxes as pending removal (subtle)
+                        window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
+                        window.globallyDeletedPostIds.add(postId);
+                        // Drop from in-memory caches
+                        try { if (window.postCache) delete window.postCache[postId]; } catch(e){}
+                        try {
+                            if (typeof gridContent === 'object' && gridContent) {
+                                Object.keys(gridContent).forEach(k => {
+                                    if (Array.isArray(gridContent[k])) {
+                                        gridContent[k] = gridContent[k].filter(p => !(p && p.id === postId));
+                                    }
+                                });
+                            }
+                        } catch(e){}
+                        // Remove rendered DOM node instantly
                         try {
                             const el = document.querySelector(`.grid-box[data-post-id="${postId}"]`);
-                            if (el) el.classList.add('pending-removed');
+                            if (el && el.parentNode) el.parentNode.removeChild(el);
                         } catch(e){}
-                        showSoftRefreshBanner();
+                        // Drop from virtual scroller and refresh
+                        try {
+                            if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                                window.gridScroller.items = window.gridScroller.items.filter(i => !(i && i.id === postId));
+                                if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh();
+                            }
+                        } catch(e){}
+                        // Force a render so any empty slot reflows
+                        try { window.lastRenderGridTime = 0; } catch(e){}
+                        try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
                     } catch (e) { console.warn('post_removed handler failed', e); }
                 });
             } catch (e) {
