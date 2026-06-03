@@ -17868,7 +17868,84 @@
                         window.postCacheSystem.updateCache(uniquePosts, contentKey);
                         window.postCacheSystem.pruneOldCache();
                     }
-                    
+
+                    // 🟢 LIVE BADGE SYNC — runs every snapshot, independent of the
+                    // 30s renderGrid() throttle. When any user (anywhere) likes or
+                    // dislikes a post, this propagates the new counts into EVERY
+                    // local mirror (postCache, every gridContent area bucket, and
+                    // gridScroller.items), updates the on-screen vote numbers,
+                    // and re-applies badges in place. Without this, other users'
+                    // votes would not visibly move badges for up to 30 seconds.
+                    try {
+                        let changedCount = 0;
+                        const changedIds = [];
+                        for (const fresh of uniquePosts) {
+                            if (!fresh || !fresh.id) continue;
+                            const freshLikes = Number(fresh.likes) || 0;
+                            const freshDislikes = Number(fresh.dislikes) || 0;
+
+                            // 1) postCache mirror
+                            const cached = postCache && postCache[fresh.id];
+                            if (cached) {
+                                if ((Number(cached.likes)||0) !== freshLikes || (Number(cached.dislikes)||0) !== freshDislikes) {
+                                    cached.likes = freshLikes;
+                                    cached.dislikes = freshDislikes;
+                                    changedCount++;
+                                }
+                            }
+
+                            // 2) every area / user bucket in gridContent
+                            for (const k of Object.keys(gridContent || {})) {
+                                const arr = gridContent[k];
+                                if (!Array.isArray(arr)) continue;
+                                for (const p of arr) {
+                                    if (p && p.id === fresh.id) {
+                                        if ((Number(p.likes)||0) !== freshLikes || (Number(p.dislikes)||0) !== freshDislikes) {
+                                            p.likes = freshLikes;
+                                            p.dislikes = freshDislikes;
+                                            changedCount++;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 3) live virtual scroller list
+                            if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                                for (const it of window.gridScroller.items) {
+                                    if (it && it.id === fresh.id) {
+                                        if ((Number(it.likes)||0) !== freshLikes || (Number(it.dislikes)||0) !== freshDislikes) {
+                                            it.likes = freshLikes;
+                                            it.dislikes = freshDislikes;
+                                            // Force badge recompute on next paint by
+                                            // dropping the stale cached badges.
+                                            it.cachedBadges = null;
+                                            changedIds.push(fresh.id);
+                                            changedCount++;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 4) on-screen vote number badge (no re-render needed)
+                            try {
+                                if (typeof updateVoteDisplayInDOM === 'function') {
+                                    updateVoteDisplayInDOM(fresh.id, freshLikes, freshDislikes);
+                                }
+                            } catch (_) {}
+                        }
+
+                        if (changedCount > 0) {
+                            console.log(`🟢 LIVE BADGE SYNC: propagated ${changedCount} vote updates from snapshot`);
+                            // Re-apply badges on visible tiles right now — bypasses
+                            // the 30s render throttle so users see badges flip in
+                            // near real-time as votes come in from other users.
+                            try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch (e) { console.warn('live recomputeAndApplyBadges failed', e); }
+                            try { if (typeof recalculateBadgesForCurrentGrid === 'function') recalculateBadgesForCurrentGrid(); } catch (e) { console.warn('live recalculateBadgesForCurrentGrid failed', e); }
+                        }
+                    } catch (e) {
+                        console.warn('Live badge sync failed:', e);
+                    }
+
                     renderGrid();
                 });
                 
