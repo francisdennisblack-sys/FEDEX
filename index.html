@@ -6473,7 +6473,6 @@
         // POST ENGAGEMENT TIER SYSTEM
         // ============================================
         function getPostEngagementTier(post) {
-            // Coerce to numeric values to avoid string/NaN comparison bugs
             const likes = Number(post.likes) || 0;
             const dislikes = Number(post.dislikes) || 0;
             const likeRatio = likes - dislikes;
@@ -6797,16 +6796,7 @@
                                 badges.push({ kind: 'new', label: '✨ New' });
                             }
                             if (tierInfo.tier === 'LIKED') badges.push({ kind: 'liked', label: '👍' });
-                            // Harden disliked badge: only when numeric dislikes > likes
-                            try {
-                                const likesNum = Number(post.likes) || 0;
-                                const dislikesNum = Number(post.dislikes) || 0;
-                                if (tierInfo.tier === 'DISLIKED' && dislikesNum > likesNum) {
-                                    badges.push({ kind: 'review', label: '👎' });
-                                }
-                            } catch (e) {
-                                if (tierInfo.tier === 'DISLIKED') badges.push({ kind: 'review', label: '👎' });
-                            }
+                            if (tierInfo.tier === 'DISLIKED') badges.push({ kind: 'review', label: '👎' });
                         }
 
                         // Compose badge container
@@ -6947,8 +6937,8 @@
                 };
             }
 
-            const likes = post.likes || 0;
-            const dislikes = post.dislikes || 0;
+            const likes = Number(post.likes) || 0;
+            const dislikes = Number(post.dislikes) || 0;
             const engagement = likes - dislikes;
             
             // Get adaptive thresholds
@@ -7542,15 +7532,7 @@
         // ============================================
         function detectUserGrid() {
             console.log('\n🚀 ZONE DETECTION STARTING...');
-            console.log(`📍 Raw user location: ${userLocation?.lat.toFixed(6)}, ${userLocation?.lon.toFixed(6)}`);
-            // Normalize coordinates to reduce jitter between devices (deterministic snapping)
-            function normalizeCoordinates(lat, lon, precision = 4) {
-                const factor = Math.pow(10, precision);
-                return { lat: Math.round(lat * factor) / factor, lon: Math.round(lon * factor) / factor };
-            }
-
-            const normalized = userLocation ? normalizeCoordinates(userLocation.lat, userLocation.lon, 4) : null;
-            if (normalized) console.log(`📍 Normalized user location: ${normalized.lat.toFixed(4)}, ${normalized.lon.toFixed(4)}`);
+            console.log(`📍 User location: ${userLocation?.lat.toFixed(4)}, ${userLocation?.lon.toFixed(4)}`);
             
             if (!userLocation) {
                 console.error('❌ No geolocation - will use nearest location when available');
@@ -7563,10 +7545,7 @@
             try {
                 // STEP 1: FIND CLOSEST LOCATION FROM DATABASE (PRIMARY)
                 console.log('🔍 Step 1: Searching for CLOSEST location from 5,478+ location database...');
-                // Use normalized coords for lookup to ensure determinism across devices
-                const lookupLat = normalized ? normalized.lat : userLocation.lat;
-                const lookupLon = normalized ? normalized.lon : userLocation.lon;
-                const closestLocationData = findClosestLocation(lookupLat, lookupLon);
+                const closestLocationData = findClosestLocation(userLocation.lat, userLocation.lon);
                 
                 if (closestLocationData && closestLocationData.location) {
                     const distanceToLocKm = closestLocationData.distance;
@@ -7582,8 +7561,7 @@
                         console.log(`   ✅ USING LOCATION: ${closestLocationData.location.name} is closest match`);
                         currentZoneTag = `${closestLocationData.location.name}`;
                         currentAreaName = closestLocationData.location.name;
-                        // Use normalized grid id to ensure same area across devices in same location
-                        currentGridId = `${closestLocationData.location.name}::${normalized ? (normalized.lat.toFixed(4) + '_' + normalized.lon.toFixed(4)) : (closestLocationData.location.lat + '_' + closestLocationData.location.lon)}`;
+                        currentGridId = closestLocationData.location.name; // Set zone ID for posts
                         currentGridRadius = getLocationRadius(closestLocationData.location.type);
                         currentContentScope = closestLocationData.location.type;
                         currentGeographicLocation = closestLocationData.location.name;
@@ -7604,7 +7582,7 @@
                         console.log(`   ✅ USING LOCATION (even though ${distanceToLocKm.toFixed(1)} km away): ${closestLocationData.location.name} is best available`);
                         currentZoneTag = `${closestLocationData.location.name}`;
                         currentAreaName = closestLocationData.location.name;
-                        currentGridId = `${closestLocationData.location.name}::${normalized ? (normalized.lat.toFixed(4) + '_' + normalized.lon.toFixed(4)) : (closestLocationData.location.lat + '_' + closestLocationData.location.lon)}`;
+                        currentGridId = closestLocationData.location.name; // Set zone ID for posts
                         currentGridRadius = getLocationRadius(closestLocationData.location.type);
                         currentContentScope = closestLocationData.location.type;
                         currentGeographicLocation = closestLocationData.location.name;
@@ -7677,26 +7655,12 @@
                 for (let i = 0; i < globalLocationDatabase.length; i++) {
                     const loc = globalLocationDatabase[i];
                     const distance = calculateDistance(userLat, userLon, loc.lat, loc.lon);
-
+                    
                     // Only consider locations within this radius
-                    if (distance <= maxRadius) {
-                        // If strictly closer, pick it
-                        if (distance < minDistance - 1e-9) {
-                            minDistance = distance;
-                            closestLoc = loc;
-                        } else if (Math.abs(distance - minDistance) <= 1e-9) {
-                            // Tie: deterministic tie-breaker by canonical key (name|state|lat|lon)
-                            try {
-                                const ka = (closestLoc.name || '') + '|' + (closestLoc.state || '') + '|' + String(closestLoc.lat) + '|' + String(closestLoc.lon);
-                                const kb = (loc.name || '') + '|' + (loc.state || '') + '|' + String(loc.lat) + '|' + String(loc.lon);
-                                if (kb < ka) {
-                                    closestLoc = loc;
-                                }
-                            } catch (e) {
-                                // ignore and keep existing
-                            }
-                        }
-
+                    if (distance <= maxRadius && distance < minDistance) {
+                        minDistance = distance;
+                        closestLoc = loc;
+                        
                         // Early exit if VERY close (within 50m)
                         if (minDistance < 0.05) break;
                     }
@@ -21320,15 +21284,6 @@
                     // Generate badges (self-post text badge intentionally disabled)
                     let badgeClasses = '';
                     let badgeHTML = '';
-                    // Show a small "MY" badge for posts the current user can delete (owner)
-                    try {
-                        const isOwnPost = !!(post && (post.authId === currentUserId || post.userId === currentUserId || post.createdBy === currentUserId || post.ownerId === currentUserId));
-                        if (isOwnPost) {
-                            const myBadge = `<div style="position: absolute; top: 8px; right: 8px; background: rgba(255,255,255,0.06); color: #fff; border: 1px solid rgba(255,255,255,0.08); padding: 4px 6px; border-radius: 6px; font-size: 12px; font-weight: 800; line-height: 1; box-shadow: 0 2px 6px rgba(0,0,0,0.4);">MY</div>`;
-                            badgeHTML += myBadge;
-                            badgeClasses += ' badge-my';
-                        }
-                    } catch (e) { /* noop if diagnostics fail */ }
                     
                     // Render media post
                     box.innerHTML = `${mediaHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
@@ -21344,7 +21299,7 @@
                     const voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↑ <span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
                     // Area tag pinned to the very bottom, BELOW the like/dislike buttons
                     const areaTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(areaTagText) : areaTagText}</div>`;
-                    box.innerHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${badgeHTML}${areaTagHTML}`;
+                    box.innerHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${areaTagHTML}`;
                 }
                 
                 // Set attributes and classes
@@ -21380,40 +21335,11 @@
                 }
                 
                 if (badgesArray && Array.isArray(badgesArray)) {
-                    // Add classes for legacy hooks
                     badgesArray.forEach(badge => {
                         if (badge) {
                             box.classList.add(`badge-${badge}`);
                         }
                     });
-
-                    // Also render visible badge chips immediately so they appear
-                    try {
-                        let badgeContainer = box.querySelector('.post-badges');
-                        if (!badgeContainer) {
-                            badgeContainer = document.createElement('div');
-                            badgeContainer.className = 'post-badges';
-                            badgeContainer.style.cssText = 'position: absolute; top: 8px; left: 8px; display:flex; gap:6px; z-index:20;';
-                            box.appendChild(badgeContainer);
-                        }
-                        const labelMap = {
-                            'new': '✨ New',
-                            'crowned': '👑',
-                            'runner-up': '🥈',
-                            'podium': '🏆',
-                            'hot': '🔥 Hot',
-                            'disliked': '👎',
-                            'balanced': '⚖️',
-                            'untouched': '🕊️',
-                            'liked': '👍',
-                            'media-content': '🖼️'
-                        };
-                        // Render up to 3 visible chips
-                        badgeContainer.innerHTML = badgesArray.slice(0,3).map(b => {
-                            const lbl = labelMap[b] || (typeof b === 'string' ? b : '');
-                            return `<div class="badge ${b}" style="background:rgba(0,0,0,0.5); padding:4px 8px; border-radius:6px; font-size:12px; font-weight:700; color:#fff;">${lbl}</div>`;
-                        }).join('');
-                    } catch (e) { /* swallow render errors */ }
                 }
                 
             } catch (e) {
