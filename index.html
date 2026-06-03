@@ -15223,23 +15223,59 @@
                         else if (/\.webm(\?|$)/i.test(src)) videoType = 'video/webm';
                         else if (/\.(mov|m4v)(\?|$)/i.test(src)) videoType = 'video/quicktime';
                         const typeAttr = videoType ? ` type="${videoType}"` : '';
-                        // autoplay + muted is required for browsers to allow auto-start
-                        // without a user gesture. User can unmute via controls.
-                        return `<video id="viewMediaVideo" controls autoplay muted playsinline preload="auto" crossorigin="anonymous" style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"><source src="${src}"${typeAttr}>Your browser does not support this video.</video>`;
+                        // NOTE: No `crossorigin` attribute — Firebase Storage on the
+                        // *.firebasestorage.app host often lacks CORS headers, and
+                        // crossorigin="anonymous" turns the request into a CORS
+                        // request which fails and leaves the player black. Plain
+                        // <video> playback does NOT need CORS.
+                        // autoplay + muted + playsinline is required for browsers
+                        // (especially iOS Safari) to allow auto-start without a
+                        // user gesture. User can unmute via controls.
+                        return `<video id="viewMediaVideo" controls autoplay muted playsinline webkit-playsinline preload="auto" style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"><source src="${src}"${typeAttr}>Your browser does not support this video.</video>`;
                     } else {
                         return `<img src="${src}" style="max-width:100%; max-height:60vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
                     }
                 })();
                 viewMediaEl.innerHTML = mediaHTML;
-                // Best-effort: kick off playback as soon as the element is in the DOM.
+                // Best-effort: kick off playback as soon as the element is in the DOM,
+                // and again on canplay (iOS Safari sometimes ignores the first play()).
                 try {
                     const vidEl = viewMediaEl.querySelector('video');
                     if (vidEl) {
+                        // Set as PROPERTIES (not just attributes) — Safari respects
+                        // these more reliably for autoplay-without-gesture rules.
                         vidEl.muted = true;
-                        const p = vidEl.play();
-                        if (p && typeof p.catch === 'function') {
-                            p.catch(err => console.log('Autoplay blocked, user must tap play:', err && err.message));
-                        }
+                        vidEl.defaultMuted = true;
+                        vidEl.playsInline = true;
+                        vidEl.autoplay = true;
+                        vidEl.preload = 'auto';
+                        const tryPlay = (label) => {
+                            try {
+                                const p = vidEl.play();
+                                if (p && typeof p.then === 'function') {
+                                    p.then(() => console.log(`▶️ video autoplay started (${label})`))
+                                     .catch(err => console.log(`⏸️ autoplay attempt failed (${label}):`, err && err.message));
+                                }
+                            } catch (e) {}
+                        };
+                        // 1) Force the network fetch to begin immediately.
+                        try { vidEl.load(); } catch (e) {}
+                        // 2) Try right now.
+                        tryPlay('immediate');
+                        // 3) Retry once metadata/data is available.
+                        vidEl.addEventListener('loadedmetadata', () => tryPlay('loadedmetadata'), { once: true });
+                        vidEl.addEventListener('canplay', () => tryPlay('canplay'), { once: true });
+                        // 4) Log load errors so we can see CORS/404 issues in console.
+                        vidEl.addEventListener('error', (ev) => {
+                            const err = vidEl.error;
+                            console.error('🎥 VIDEO ELEMENT ERROR', {
+                                code: err && err.code,
+                                message: err && err.message,
+                                networkState: vidEl.networkState,
+                                readyState: vidEl.readyState,
+                                src: vidEl.currentSrc || (vidEl.querySelector('source') && vidEl.querySelector('source').src)
+                            });
+                        });
                     }
                 } catch (e) { /* ignore autoplay errors */ }
                 // Show written content below media in the description area
