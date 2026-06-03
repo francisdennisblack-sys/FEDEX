@@ -21675,13 +21675,16 @@
                     const imageSource = post.photoURL || post.imageData;
                     const isVideo = post.mediaType === 'video' || 
                                    (typeof imageSource === 'string' && (imageSource.includes('.mp4') || imageSource.includes('.webm') || imageSource.includes('.mov')));
-                    
-                    let mediaHTML = isVideo 
-                        ? `<video data-src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;" muted loop playsinline></video>`
-                        : `<img data-src="${imageSource}" style="max-width: 100%; max-height: 100%; object-fit: contain;" loading="lazy">`;
-                    
-                    const voteBadge = `<div style="position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(0,0,0,0.9); border-radius: 6px; padding: 8px; display: flex; justify-content: space-around; gap: 8px; font-size: 13px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px 8px; background-color: ${likes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer;">↑ <span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px 8px; background-color: ${dislikes > 0 ? '#fff' : '#333'}; color: #000; border: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
-                    
+
+                    // 📷 / 🎥 INDICATOR: Show the post's text on the tile with an emoji
+                    // marker that signals media is attached. The actual photo/video lives
+                    // in the pop-out modal so the grid stays clean.
+                    const mediaEmoji = isVideo ? '🎥' : '📷';
+                    const mediaText = (post.description || post.content || '').substring(0, 200);
+                    const mediaIndicatorHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;"><div style="font-size: 1.4em; margin-bottom: 8px;" title="Tap to view ${isVideo ? 'video' : 'photo'}">${mediaEmoji}</div>${mediaText}</div>`;
+
+                    const voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↑ <span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
+
                     const enrichedPost = enrichPostWithLocationData(post);
                     
                     // Generate zone/area tag display (always show immediately, even on first load)
@@ -21701,62 +21704,16 @@
                     // Generate badges (self-post text badge intentionally disabled)
                     let badgeClasses = '';
                     let badgeHTML = '';
-                    
-                    // Render media post into a dedicated container so it appears on the main tile.
-                    // Priority order:
-                    // 1) .grid-media (preferred explicit container)
-                    // 2) .post-text-content (developer-added text box)
-                    // 3) replace whole tile (fallback)
+
+                    // 📷/🎥 mode: render the post text + media emoji on the tile.
+                    // The actual photo/video is shown only inside the pop-out modal.
                     try {
-                        let mediaPlaced = false;
-
-                        // 1) Ensure a dedicated grid-media container exists at the top of the box
-                        let gridMedia = box.querySelector('.grid-media');
-                        if (!gridMedia) {
-                            gridMedia = document.createElement('div');
-                            gridMedia.className = 'grid-media';
-                            gridMedia.style.cssText = 'display:block;width:100%;max-height:100%;text-align:center;box-sizing:border-box;overflow:hidden;';
-                            // Insert at the top so media is the primary visual element
-                            box.insertBefore(gridMedia, box.firstChild);
-                        }
-
-                        try {
-                            gridMedia.innerHTML = mediaHTML;
-                            gridMedia.style.padding = '0';
-                            gridMedia.style.height = '100%';
-                            gridMedia.style.display = 'flex';
-                            gridMedia.style.alignItems = 'center';
-                            gridMedia.style.justifyContent = 'center';
-                            mediaPlaced = true;
-                        } catch (e) { /* ignore individual container failures */ }
-
-                        // 2) Fallback to developer's text container if grid-media couldn't be used
-                        if (!mediaPlaced) {
-                            const existingTextContainer = box.querySelector('.post-text-content');
-                            if (existingTextContainer) {
-                                try {
-                                    existingTextContainer.innerHTML = mediaHTML;
-                                    existingTextContainer.style.padding = '0';
-                                    existingTextContainer.style.height = '100%';
-                                    existingTextContainer.style.display = 'flex';
-                                    existingTextContainer.style.alignItems = 'center';
-                                    existingTextContainer.style.justifyContent = 'center';
-                                    mediaPlaced = true;
-                                } catch (e) { /* ignore */ }
-                            }
-                        }
-
-                        // 3) Final fallback: replace whole tile
-                        if (!mediaPlaced) {
-                            box.innerHTML = `${mediaHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
-                        } else {
-                            // Ensure vote badge and zone tag exist (append if missing)
-                            try { if (!box.querySelector('.vote-badge')) box.insertAdjacentHTML('beforeend', voteBadge); } catch(e){}
-                            try { if (!box.querySelector('.zone-tag')) box.insertAdjacentHTML('beforeend', zoneTagHTML); } catch(e){}
-                        }
+                        // Remove any stale grid-media container left over from prior renders
+                        const staleMedia = box.querySelector('.grid-media');
+                        if (staleMedia) staleMedia.remove();
+                        box.innerHTML = `${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
                     } catch (e) {
-                        // If anything goes wrong, fallback to original replacement
-                        box.innerHTML = `${mediaHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
+                        box.innerHTML = `${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
                     }
                 } else {
                     // Text-only post
