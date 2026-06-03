@@ -8972,6 +8972,11 @@
                     p.dislikes = newDislikes;
                 }
             }
+
+            // Defensive: ensure no duplicate entries exist in any gridContent array
+            try {
+                if (typeof dedupeGridContent === 'function') dedupeGridContent();
+            } catch (e) { /* ignore dedupe errors */ }
             
             // Update DOM immediately so user sees the vote land first
             updateVoteDisplayInDOM(postId, newLikes, newDislikes);
@@ -8988,6 +8993,8 @@
                     // 1) Update per-post badges after vote (updates cachedBadges + DOM classes)
                     recalculateBadgesForCurrentGrid(postId);
                     // 2) Re-run ranking so post can move to new position
+                        // Defensive dedupe before re-render to avoid duplicate artifacts
+                        try { if (typeof dedupeGridContent === 'function') dedupeGridContent(); } catch (e) {}
                     window.lastRenderGridTime = 0; // bypass throttle for deliberate vote action
                     window.voteTriggeredRerank = true; // signal immediate apply to scroller
                     renderGrid();
@@ -9114,6 +9121,28 @@
 
         // Set up anonymous authentication
         console.log('🔐 Initializing Firebase Authentication...');
+
+        // Helper: remove duplicate posts in each gridContent array (by id)
+        function dedupeGridContent() {
+            try {
+                for (const key of Object.keys(gridContent)) {
+                    const arr = gridContent[key];
+                    if (!Array.isArray(arr)) continue;
+                    const seen = new Set();
+                    const out = [];
+                    for (const p of arr) {
+                        if (!p || !p.id) continue;
+                        if (!seen.has(p.id)) {
+                            seen.add(p.id);
+                            out.push(p);
+                        } else {
+                            console.log(`🧹 dedupeGridContent: removed duplicate post ${p.id.substring(0,8)} from key "${key}"`);
+                        }
+                    }
+                    gridContent[key] = out;
+                }
+            } catch (e) { console.warn('dedupeGridContent failed', e); }
+        }
         
         // ============================================================================
         // 🚀 BOOTSTRAP SEQUENCE: Auth → Grid → Posts (in correct order)
