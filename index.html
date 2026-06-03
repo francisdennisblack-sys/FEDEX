@@ -22002,6 +22002,23 @@
 
                     if (diffIdx === -1) return; // already aligned
 
+                    // 🛡️ DUPLICATE PREVENTION: When we insert/replace with
+                    // target[diffIdx], remove any existing copy of that same post
+                    // from `current` first. Without this, a post that moved UP in
+                    // rank (e.g. after a like) gets placed at its new high slot
+                    // while ALSO remaining at its old slot — visible duplicate
+                    // until the reconciler eventually cleans it up.
+                    let removedDuplicate = false;
+                    const incoming = (diffIdx < target.length) ? target[diffIdx] : null;
+                    if (incoming && incoming.id) {
+                        for (let j = current.length - 1; j >= 0; j--) {
+                            if (current[j] && current[j].id === incoming.id && j !== diffIdx) {
+                                current.splice(j, 1);
+                                removedDuplicate = true;
+                            }
+                        }
+                    }
+
                     if (diffIdx >= target.length) {
                         // Target shorter: remove one tail item
                         current.pop();
@@ -22013,7 +22030,37 @@
                         current[diffIdx] = target[diffIdx];
                     }
 
+                    // 🛡️ FINAL DEDUPE PASS on the live scroller list.
+                    try {
+                        const _seen = new Set();
+                        const _clean = [];
+                        for (const _it of current) {
+                            if (!_it || !_it.id) { _clean.push(_it); continue; }
+                            if (_seen.has(_it.id)) continue;
+                            _seen.add(_it.id);
+                            _clean.push(_it);
+                        }
+                        if (_clean.length !== current.length) {
+                            console.log(`🧹 Reconciler dedupe: removed ${current.length - _clean.length} duplicate post(s)`);
+                            removedDuplicate = true;
+                        }
+                        current.length = 0;
+                        for (const _it of _clean) current.push(_it);
+                    } catch (e) { /* defensive */ }
+
                     gridScroller.items = current;
+
+                    // If we collapsed a duplicate, slot positions after diffIdx
+                    // have shifted, so we MUST do a full repaint — partial
+                    // renderItemsInRange would leave stale tiles behind.
+                    if (removedDuplicate && typeof gridScroller.setItems === 'function') {
+                        gridScroller.setItems(current);
+                        applyGridTextFontSizeToVisiblePosts();
+                        try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
+                        const changeType = (diffIdx >= target.length) ? 'remove' : (diffIdx >= current.length ? 'add' : 'replace');
+                        console.log(`🔁 Grid reconcile (${changeType} +dedupe) @ index ${diffIdx}`);
+                        return;
+                    }
 
                     // Render only the changed slot (+1 because box-0 is reserved add-content box)
                     if (typeof gridScroller.renderItemsInRange === 'function') {
