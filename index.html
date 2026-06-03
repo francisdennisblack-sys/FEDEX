@@ -12597,7 +12597,15 @@
                 console.log('🗑️ DELETING FROM SHARED COLLECTION:');
                 console.log('  postId:', postId);
                 console.log('  Firebase path: posts/' + postId);
-                
+                // Broadcast a lightweight tombstone event so other clients can react
+                try {
+                    const evRef = ref(database, `post_events/removed/${postId}`);
+                    await set(evRef, { removedBy: currentUserId || null, timestamp: Date.now() });
+                    console.log('📣 Emitted post_removed event for', postId);
+                } catch (evErr) {
+                    console.warn('⚠️ Could not write post_removed event for', postId, evErr);
+                }
+
                 const postRef = ref(database, `posts/${postId}`);
                 await remove(postRef);
                 console.log('✅ Post successfully deleted from shared collection:', postId);
@@ -12643,6 +12651,131 @@
             } catch(e){}
             return false;
         }
+
+        /*
+         * Post-removed event subscription + soft-refresh UX
+         * When another user deletes a post we emit a lightweight tombstone to
+         * `post_events/removed/{postId}`. Clients will not immediately reflow
+         * the grid (to avoid disrupting users who are viewing content). Instead
+         * they will show a small banner prompting the viewer to pull-to-refresh
+         * (or click the banner) to perform a controlled grid refresh.
+         */
+        function subscribeToPostRemovedEvents() {
+            try {
+                if (!database) return;
+                if (window._postRemovedListenerAttached) return;
+                window._postRemovedListenerAttached = true;
+
+                const evRoot = ref(database, 'post_events/removed');
+                console.log('🎧 Subscribing to post_events/removed for tombstone broadcasts');
+                onChildAdded(evRoot, (snap) => {
+                    try {
+                        const postId = snap.key;
+                        if (!postId) return;
+                        console.log('📣 Received post_removed tombstone for', postId);
+                        // Track pending removed posts and show soft-refresh prompt
+                        window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
+                        window.pendingRemovedPosts.add(postId);
+                        window.softRefreshNeeded = true;
+                        // Visually mark boxes as pending removal (subtle)
+                        try {
+                            const el = document.querySelector(`.grid-box[data-post-id="${postId}"]`);
+                            if (el) el.classList.add('pending-removed');
+                        } catch(e){}
+                        showSoftRefreshBanner();
+                    } catch (e) { console.warn('post_removed handler failed', e); }
+                });
+            } catch (e) {
+                console.warn('subscribeToPostRemovedEvents failed', e);
+            }
+        }
+
+        function showSoftRefreshBanner() {
+            try {
+                if (document.getElementById('softRefreshBanner')) return;
+                const banner = document.createElement('div');
+                banner.id = 'softRefreshBanner';
+                banner.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;box-shadow:0 2px 6px rgba(0,0,0,0.6);cursor:pointer;opacity:0.95;font-size:13px;';
+                banner.textContent = 'Content changed — swipe down or click to refresh';
+                banner.addEventListener('click', () => { performSoftRefresh(); });
+                document.body.appendChild(banner);
+                // Auto-hide after 15s if not acted upon
+                setTimeout(() => { try { const b = document.getElementById('softRefreshBanner'); if (b) b.remove(); } catch(e){} }, 15000);
+            } catch(e) { console.warn('showSoftRefreshBanner failed', e); }
+        }
+
+        function performSoftRefresh() {
+            try {
+                // Remove pendingRemovedPosts from gridContent and scroller, then re-render
+                const pending = Array.from(window.pendingRemovedPosts || []);
+                if (pending.length === 0) {
+                    // Nothing to do; ensure banner removed
+                    const b = document.getElementById('softRefreshBanner'); if (b) b.remove();
+                    window.softRefreshNeeded = false;
+                    return;
+                }
+
+                console.log('↻ Performing soft refresh — removing', pending.length, 'posts');
+
+                // Remove from gridScroller items
+                try {
+                    if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                        window.gridScroller.items = (window.gridScroller.items || []).filter(i => !(i && pending.includes(i.id)));
+                        if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh();
+                    }
+                } catch(e) { console.warn('softRefresh: gridScroller purge failed', e); }
+
+                // Remove from gridContent buckets
+                try {
+                    Object.keys(gridContent || {}).forEach(k => {
+                        gridContent[k] = (gridContent[k] || []).filter(p => !(p && pending.includes(p.id)));
+                    });
+                } catch(e) { console.warn('softRefresh: gridContent purge failed', e); }
+
+                // Reset flags and re-render
+                window.pendingRemovedPosts = new Set();
+                window.softRefreshNeeded = false;
+                const b = document.getElementById('softRefreshBanner'); if (b) b.remove();
+                try { window.lastRenderGridTime = 0; } catch(e){}
+                try { renderGrid(); } catch(e){ console.warn('softRefresh renderGrid failed', e); }
+            } catch(e) { console.warn('performSoftRefresh failed', e); }
+        }
+
+        // Minimal pull-to-refresh: detects downward pull at top of page and triggers soft refresh
+        (function setupPullToRefresh() {
+            try {
+                let startY = 0;
+                let tracking = false;
+                const THRESHOLD = 120;
+                window.addEventListener('touchstart', (ev) => {
+                    if (document.scrollingElement && document.scrollingElement.scrollTop === 0) {
+                        startY = ev.touches && ev.touches[0] ? ev.touches[0].clientY : 0;
+                        tracking = true;
+                    } else {
+                        tracking = false;
+                    }
+                }, { passive: true });
+
+                window.addEventListener('touchmove', (ev) => {
+                    if (!tracking) return;
+                    const y = ev.touches && ev.touches[0] ? ev.touches[0].clientY : 0;
+                    const dy = y - startY;
+                    if (dy > 60) {
+                        showSoftRefreshBanner();
+                    }
+                }, { passive: true });
+
+                window.addEventListener('touchend', (ev) => {
+                    if (!tracking) return;
+                    const y = ev.changedTouches && ev.changedTouches[0] ? ev.changedTouches[0].clientY : 0;
+                    const dy = y - startY;
+                    tracking = false;
+                    if (dy > THRESHOLD) {
+                        performSoftRefresh();
+                    }
+                }, { passive: true });
+            } catch(e) { console.warn('setupPullToRefresh failed', e); }
+        })();
 
         // Load user votes from Firebase
         async function loadUserVotesFromFirebase(userId) {
@@ -17377,6 +17510,11 @@
                             console.log('  Duplicate post filtered:', post.id);
                         }
                     });
+
+                    // Ensure we are subscribed to removal events so we can surface a soft-refresh
+                    try {
+                        if (typeof subscribeToPostRemovedEvents === 'function') subscribeToPostRemovedEvents();
+                    } catch (e) { console.warn('subscribeToPostRemovedEvents wiring failed', e); }
 
                     console.log('  uniquePosts length after dedupe:', uniquePosts.length, 'missingOwnerCount:', missingOwnerCount);
                     
