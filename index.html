@@ -12940,6 +12940,8 @@
                 window.softRefreshNeeded = false;
                 const b = document.getElementById('softRefreshBanner'); if (b) b.remove();
                 try { window.lastRenderGridTime = 0; } catch(e){}
+                // 🔄 Track refresh in the session ML policy.
+                try { if (typeof recordRefreshTick === 'function') recordRefreshTick(); } catch(e) { /* never break refresh */ }
                 try { renderGrid(); } catch(e){ console.warn('softRefresh renderGrid failed', e); }
             } catch(e) { console.warn('performSoftRefresh failed', e); }
         }
@@ -19090,6 +19092,70 @@
         }
         
         /**
+         * 🔄 REFRESH-DRIVEN FEED POLICY (session state)
+         * ----------------------------------------------------------
+         * Tracks how the user is interacting with the feed across one
+         * session so the ML can learn the difference between:
+         *   (a) "I'm just refreshing" → keep giving local content
+         *   (b) "I keep refreshing because I want something new"
+         *        → start blending in non-local content, throttled
+         *
+         * Modes by refresh count:
+         *   0..1   testing            → local-first, no cross-area
+         *   2      asking for content → local-first, top up with older local
+         *   3+     cross-area mode    → up to 50% non-local, but throttled
+         *                                to 1 new non-local post per second,
+         *                                capped at 100 posts OR 3 minutes,
+         *                                then auto-exits back to local-first.
+         *
+         * Targets a local feed of 175–590 posts before ever leaning cross-area.
+         */
+        const LOCAL_FEED_TARGET_MIN = 175;
+        const LOCAL_FEED_TARGET_MAX = 590;
+        const CROSS_AREA_MAX_POSTS  = 100;
+        const CROSS_AREA_MAX_MS     = 3 * 60 * 1000;
+        const CROSS_AREA_RATE_MS    = 1000;          // 1 post/sec throttle
+
+        window.refreshSession = window.refreshSession || {
+            count: 0,
+            crossAreaStartedAt: 0,
+            crossAreaServed: 0,
+            servedNonLocalIds: new Set(),
+            sessionStartedAt: Date.now(),
+        };
+
+        /**
+         * Called by performSoftRefresh() each time the user pulls to refresh.
+         * Bumps the counter and, if we're in cross-area mode, decides whether
+         * to exit (timer expired or 100-post cap hit).
+         */
+        function recordRefreshTick() {
+            const rs = window.refreshSession;
+            rs.count = (rs.count || 0) + 1;
+            const now = Date.now();
+            // Auto-exit cross-area mode if cap or timer hit.
+            if (rs.crossAreaStartedAt > 0) {
+                const elapsed = now - rs.crossAreaStartedAt;
+                if (rs.crossAreaServed >= CROSS_AREA_MAX_POSTS || elapsed >= CROSS_AREA_MAX_MS) {
+                    console.log(`🔁 Cross-area mode exiting (served=${rs.crossAreaServed}, elapsed=${(elapsed/1000).toFixed(0)}s) — back to local-first`);
+                    rs.crossAreaStartedAt = 0;
+                    rs.crossAreaServed = 0;
+                    rs.servedNonLocalIds = new Set();
+                    rs.count = 1; // Reset to "still asking" so next refresh re-enters cross-area cleanly.
+                }
+            }
+            // Enter cross-area mode on refresh #3.
+            if (rs.count >= 3 && rs.crossAreaStartedAt === 0) {
+                rs.crossAreaStartedAt = now;
+                rs.crossAreaServed = 0;
+                rs.servedNonLocalIds = new Set();
+                console.log(`🌍 Cross-area mode ENTERED at refresh #${rs.count}`);
+            }
+            console.log(`🔄 Refresh #${rs.count} (crossAreaMode=${rs.crossAreaStartedAt > 0 ? 'ON' : 'OFF'})`);
+        }
+        window.recordRefreshTick = recordRefreshTick;
+
+        /**
          * Apply unified ranking to all posts
          * Called during grid render for optimal display order
          */
@@ -19302,6 +19368,69 @@
             let distantFillerTarget = Math.floor(totalTarget * weights.distant);
             const boostTarget       = Math.min(boostPosts.length, Math.floor(totalTarget * weights.boost));
 
+            // ========================================================================
+            // 🔄 REFRESH-DRIVEN POLICY OVERRIDE
+            // ========================================================================
+            // The base distribution above is what we'd serve a fresh, calm session.
+            // We now ADJUST those numbers based on how the user is refreshing:
+            //
+            //   Refresh 0..1  → maximize hyper-local (use up to 590 local posts
+            //                   before allowing any cross-area content). One
+            //                   refresh = "testing"; ignore it.
+            //   Refresh 2     → still local-first, but burn more of the local
+            //                   reserve before going cross-area. Local up to
+            //                   min(hyperLocal.length, 590), cross-area kept to
+            //                   ~15% so user feels new content arriving.
+            //   Refresh 3+    → CROSS-AREA MODE: up to 50% of the feed becomes
+            //                   non-local content, but throttled to 1 NEW
+            //                   non-local post per second since cross-area mode
+            //                   started, and the mode auto-exits after 100 posts
+            //                   served or 3 minutes elapsed.
+            // ========================================================================
+            const rs = window.refreshSession;
+            const refreshCount = rs.count || 0;
+            const crossAreaOn  = rs.crossAreaStartedAt > 0;
+            // The per-tick rate budget. With CROSS_AREA_RATE_MS=1000ms, this is
+            // the seconds since cross-area mode started — meaning we may show at
+            // most that many NEW (never-shown-before) non-local posts.
+            let crossAreaRateBudget = 0;
+            if (crossAreaOn) {
+                const elapsed = Date.now() - rs.crossAreaStartedAt;
+                const allowed = Math.min(CROSS_AREA_MAX_POSTS, Math.floor(elapsed / CROSS_AREA_RATE_MS));
+                crossAreaRateBudget = Math.max(0, allowed - rs.crossAreaServed);
+            }
+
+            if (refreshCount <= 1) {
+                // Testing / first refresh: pin to local. Allow up to LOCAL_FEED_TARGET_MAX
+                // local posts, suppress cross-area entirely (boost still flows).
+                const desiredLocal = Math.min(LOCAL_FEED_TARGET_MAX, hyperLocal.length);
+                if (desiredLocal >= LOCAL_FEED_TARGET_MIN || hyperLocal.length >= LOCAL_FEED_TARGET_MIN) {
+                    hyperLocalTarget    = desiredLocal;
+                    nearLocalTarget     = 0;
+                    websiteTopTarget    = 0;
+                    distantFillerTarget = 0;
+                }
+            } else if (refreshCount === 2) {
+                // Asking for new content: max out local, sprinkle 15% cross-area.
+                const desiredLocal = Math.min(LOCAL_FEED_TARGET_MAX, hyperLocal.length);
+                hyperLocalTarget = Math.max(hyperLocalTarget, desiredLocal);
+                const xSlots = Math.floor(totalTarget * 0.15);
+                nearLocalTarget     = Math.min(xSlots, Math.max(nearLocalTarget,    Math.floor(xSlots * 0.5)));
+                websiteTopTarget    = Math.min(xSlots, Math.max(websiteTopTarget,   Math.floor(xSlots * 0.3)));
+                distantFillerTarget = Math.min(xSlots, Math.max(distantFillerTarget, Math.floor(xSlots * 0.2)));
+            } else if (crossAreaOn) {
+                // Cross-area mode: 50% non-local, but throttled to crossAreaRateBudget
+                // NEW non-local posts this render.
+                const halfFeed = Math.floor(totalTarget * 0.5);
+                hyperLocalTarget    = Math.min(hyperLocalTarget, totalTarget - halfFeed);
+                const split = Math.floor(halfFeed / 3);
+                nearLocalTarget     = split;
+                websiteTopTarget    = split;
+                distantFillerTarget = halfFeed - 2 * split;
+            }
+
+            console.log(`🔄 Refresh policy: count=${refreshCount}, crossAreaOn=${crossAreaOn}, rateBudget=${crossAreaRateBudget}`);
+
             // 🔁 PER-USER REALITY CHECK: if THIS user's local supply can't fill
             // its quota (their area is quiet relative to the website-scale rule),
             // redirect the shortfall into distant filler so the feed stays full.
@@ -19329,9 +19458,47 @@
             // Take target amounts from each category
             const boostToAdd      = boostPosts.slice(0, boostTarget);
             const hyperLocalToAdd = hyperLocal.slice(0, hyperLocalTarget);
-            const nearLocalToAdd  = nearLocalWellReviewed.slice(0, nearLocalTarget);
-            const websiteTopToAdd = websiteTopPosts.slice(0, websiteTopTarget);
-            const distantToAdd    = distantFiller.slice(0, distantFillerTarget);
+            let   nearLocalToAdd  = nearLocalWellReviewed.slice(0, nearLocalTarget);
+            let   websiteTopToAdd = websiteTopPosts.slice(0, websiteTopTarget);
+            let   distantToAdd    = distantFiller.slice(0, distantFillerTarget);
+
+            // 🔄 CROSS-AREA RATE THROTTLE
+            // When cross-area mode is on, we may only show `crossAreaRateBudget`
+            // NEW non-local posts this render (already-served IDs flow freely so
+            // the feed keeps the prior cross-area picks visible — we just cap
+            // the rate at which BRAND NEW ones surface). 1 new post per second
+            // since cross-area mode started.
+            if (crossAreaOn) {
+                const served = rs.servedNonLocalIds;
+                const splitByServed = (arr) => {
+                    const seen = [], fresh = [];
+                    for (const p of arr) (served.has(p.id) ? seen : fresh).push(p);
+                    return { seen, fresh };
+                };
+                const apply = (arr, budgetRef) => {
+                    const { seen, fresh } = splitByServed(arr);
+                    const take = Math.min(fresh.length, budgetRef.budget);
+                    budgetRef.budget -= take;
+                    return [...seen, ...fresh.slice(0, take)];
+                };
+                const budgetRef = { budget: crossAreaRateBudget };
+                nearLocalToAdd  = apply(nearLocalToAdd,  budgetRef);
+                websiteTopToAdd = apply(websiteTopToAdd, budgetRef);
+                distantToAdd    = apply(distantToAdd,    budgetRef);
+                // Mark newly-served IDs and count them toward the 100-post cap.
+                const tagAndCount = (arr) => {
+                    for (const p of arr) {
+                        if (!served.has(p.id)) {
+                            served.add(p.id);
+                            rs.crossAreaServed++;
+                        }
+                    }
+                };
+                tagAndCount(nearLocalToAdd);
+                tagAndCount(websiteTopToAdd);
+                tagAndCount(distantToAdd);
+                console.log(`🌍 Cross-area served=${rs.crossAreaServed}/${CROSS_AREA_MAX_POSTS}, new this render=${crossAreaRateBudget - budgetRef.budget}`);
+            }
 
             // 🎲 SCATTER non-local content across the feed (not clustered at top).
             // Boost posts scatter alongside other scatter content so they appear
