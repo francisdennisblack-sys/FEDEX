@@ -12480,7 +12480,24 @@
                 const photoRef = storageRef(storage, photoPath);
                 console.log('  Storage reference created');
                 
-                const snapshot = await uploadBytes(photoRef, file);
+                // Ensure Storage stores a correct Content-Type so the browser will
+                // play videos served from the resulting download URL. Raw Blobs
+                // sometimes upload as application/octet-stream which prevents
+                // <video> playback.
+                let contentType = (file && file.type) ? file.type : '';
+                if (!contentType) {
+                    const name = (file && file.name) ? file.name.toLowerCase() : '';
+                    if (name.endsWith('.mp4')) contentType = 'video/mp4';
+                    else if (name.endsWith('.webm')) contentType = 'video/webm';
+                    else if (name.endsWith('.mov')) contentType = 'video/quicktime';
+                    else if (name.endsWith('.png')) contentType = 'image/png';
+                    else if (name.endsWith('.jpg') || name.endsWith('.jpeg')) contentType = 'image/jpeg';
+                    else contentType = 'application/octet-stream';
+                }
+                const metadata = { contentType };
+                console.log('  Upload metadata:', metadata);
+
+                const snapshot = await uploadBytes(photoRef, file, metadata);
                 console.log('✅ File uploaded to Storage');
                 
                 const downloadURL = await getDownloadURL(snapshot.ref);
@@ -15093,9 +15110,19 @@
                 if (hasMedia && viewMediaEl) {
                 const mediaHTML = (function() {
                     const src = imageSource;
-                    const isVideo = targetPost.mediaType === 'video' || (typeof src === 'string' && (src.includes('.mp4') || src.includes('.webm') || src.includes('.mov')));
+                    const mt = (targetPost.mediaType || '').toString().toLowerCase();
+                    const ct = (targetPost.contentType || '').toString().toLowerCase();
+                    const looksVideoUrl = typeof src === 'string' && /\.(mp4|webm|mov|m4v|ogv)(\?|$)/i.test(src);
+                    const isVideo = mt === 'video' || ct.startsWith('video/') || looksVideoUrl;
                     if (isVideo) {
-                        return `<video src="${src}" controls style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"></video>`;
+                        // Guess a sensible source type so the browser knows the codec.
+                        let videoType = '';
+                        if (ct.startsWith('video/')) videoType = ct;
+                        else if (/\.mp4(\?|$)/i.test(src)) videoType = 'video/mp4';
+                        else if (/\.webm(\?|$)/i.test(src)) videoType = 'video/webm';
+                        else if (/\.(mov|m4v)(\?|$)/i.test(src)) videoType = 'video/quicktime';
+                        const typeAttr = videoType ? ` type="${videoType}"` : '';
+                        return `<video controls playsinline preload="metadata" crossorigin="anonymous" style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"><source src="${src}"${typeAttr}>Your browser does not support this video.</video>`;
                     } else {
                         return `<img src="${src}" style="max-width:100%; max-height:60vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
                     }
