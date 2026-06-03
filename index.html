@@ -23515,6 +23515,22 @@
             if (gridScroller) {
                 console.log(`🚀 VIRTUAL GRID SCROLLER: Received ${sortedPosts.length} posts`);
 
+                // FINAL DEDUPE GUARD: ensure no duplicate post ids reach the scroller
+                try {
+                    const _seen = new Set();
+                    const _deduped = [];
+                    for (const _p of (Array.isArray(sortedPosts) ? sortedPosts : [])) {
+                        if (!_p || !_p.id) continue;
+                        if (_seen.has(_p.id)) continue;
+                        _seen.add(_p.id);
+                        _deduped.push(_p);
+                    }
+                    if (_deduped.length !== (sortedPosts || []).length) {
+                        console.log(`🧹 Final scroller dedupe: ${ (sortedPosts||[]).length } → ${_deduped.length}`);
+                    }
+                    sortedPosts = _deduped;
+                } catch (e) { console.warn('Final dedupe before scroller failed', e); }
+
                 // Save latest target snapshot and reconcile gradually (1 post per second)
                 pendingSortedPosts = Array.isArray(sortedPosts) ? [...sortedPosts] : [];
                 scheduleGridReconcile();
@@ -25086,7 +25102,11 @@
                     postCache[postId] = postData;
                     const contentKey = currentUserId || 'pending-local';
                     if (!gridContent[contentKey]) gridContent[contentKey] = [];
-                    gridContent[contentKey].push(postData);
+                    if (!gridContent[contentKey].some(p => p && p.id === postData.id)) {
+                        gridContent[contentKey].push(postData);
+                    } else {
+                        console.log(`  ↩️ Skipping duplicate pending push for id ${postData.id}`);
+                    }
 
                     try {
                         if (typeof enqueuePostToIDB === 'function') {
@@ -25177,7 +25197,13 @@
                     console.log(`  ✅ Created new gridContent array`);
                 }
                 
-                gridContent[contentKey].push(postData);
+                // Idempotent push: only insert if the post id isn't already in this array
+                const _alreadyPresent = gridContent[contentKey].some(p => p && p.id === postData.id);
+                if (_alreadyPresent) {
+                    console.log(`  ↩️ Skipping duplicate push to gridContent[${contentKey}] - id already present: ${postData.id}`);
+                } else {
+                    gridContent[contentKey].push(postData);
+                }
                 // Ensure grid rendering always detects media: copy photoURL into imageData
                 // for legacy or inconsistent consumers that check imageData.
                 try {
