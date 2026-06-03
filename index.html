@@ -17799,6 +17799,19 @@
                                     post.content = '';
                                 }
                             } catch (e) { /* ignore normalization errors */ }
+                            // 🟢 LEGACY BACKFILL: posts created before `displayAreaTag` existed
+                            // still have `county`/`customTag`/`selectedAreaTag`. Derive the
+                            // frozen display string in-memory so the fast render path works
+                            // for them too. We don't write it back to Firebase here — saves
+                            // bandwidth; the next time the author edits or re-posts it'll
+                            // be persisted.
+                            if (!post.displayAreaTag) {
+                                post.displayAreaTag = (post.customTag && String(post.customTag).trim()) ||
+                                                      post.selectedAreaTag ||
+                                                      post.county ||
+                                                      post.neighborhood ||
+                                                      null;
+                            }
                         } catch (e) {
                             console.error('  Error normalizing post at index', idx, 'id=', post.id, e);
                         }
@@ -21945,13 +21958,19 @@
                     const enrichedPost = enrichPostWithLocationData(post);
                     
                     // Generate zone/area tag display (always show immediately, even on first load)
-                    const resolvedAreaTag = post.county || post.zoneTag || post.area || post.customTag ||
+                    // 🟢 FAST PATH: prefer the author's frozen `displayAreaTag` (saved to
+                    // Firebase at post-creation time). When present, skip all enrichment
+                    // and zone-context work — the badge paints in one read.
+                    const resolvedAreaTag = post.displayAreaTag || post.county || post.zoneTag || post.area || post.customTag ||
                                             post.neighborhood || post.city || post.district ||
                                             post.poiName || post.state || post.region ||
                                             post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
                                             'Nearby Area';
                     let zoneTagHTML = '';
-                    if (enrichedPost && enrichedPost.zoneContext) {
+                    if (post.displayAreaTag) {
+                        // Author's frozen area tag — render directly, no formatter pass.
+                        zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${post.displayAreaTag}</div>`;
+                    } else if (enrichedPost && enrichedPost.zoneContext) {
                         zoneTagHTML = generateZoneTagHTML(post, enrichedPost.zoneContext);
                     } else {
                         const formatted = typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(resolvedAreaTag) : resolvedAreaTag;
@@ -21975,15 +21994,20 @@
                 } else {
                     // Text-only post
                     const content = (post.content || '').substring(0, 200);
-                    const areaTagText = post.county || post.zoneTag || post.area || post.customTag ||
+                    // 🟢 FAST PATH: author's frozen displayAreaTag (Firebase-backed).
+                    const areaTagText = post.displayAreaTag || post.county || post.zoneTag || post.area || post.customTag ||
                                        post.neighborhood || post.city || post.district ||
                                        post.poiName || post.state || post.region ||
                                        post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
                                        'Nearby Area';
                     // Vote buttons sit just above the area tag (28px tall) at the bottom
                     const voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↑ <span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
-                    // Area tag pinned to the very bottom, BELOW the like/dislike buttons
-                    const areaTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(areaTagText) : areaTagText}</div>`;
+                    // Area tag pinned to the very bottom, BELOW the like/dislike buttons.
+                    // When `post.displayAreaTag` is set we use it verbatim (one read, zero formatter cost).
+                    const renderedAreaTag = post.displayAreaTag
+                        ? post.displayAreaTag
+                        : (typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(areaTagText) : areaTagText);
+                    const areaTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${renderedAreaTag}</div>`;
                     box.innerHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${areaTagHTML}`;
                 }
                 
@@ -25099,6 +25123,15 @@
                     neighborhood: areaTag,  // Same as county for compatibility
                     customTag: customTag || null,
                     selectedAreaTag: hasExplicitDropdownSelection ? currentZoneTag : null,
+                    // 🟢 FROZEN AUTHOR AREA TAG — saved to Firebase as part of the post.
+                    // This is the single canonical string the post author intended to
+                    // display, captured at creation time. Every other client reads it
+                    // directly from the snapshot, so the area badge paints instantly
+                    // with the AUTHOR's real area (not the viewer's location).
+                    displayAreaTag: (customTag && customTag.trim()) ||
+                                    (hasExplicitDropdownSelection ? currentZoneTag : null) ||
+                                    areaTag || null,
+                    areaTagSource: areaTagSource,
                     geolocation: userLocation ? {lat: userLocation.lat, lon: userLocation.lon} : null,
                     timestamp: new Date().getTime(),
                     likes: 0,
