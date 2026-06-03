@@ -19094,96 +19094,155 @@
          * Called during grid render for optimal display order
          */
         function applyUnifiedRanking(displayPosts) {
-            // 🎯 80/10/10 DISTRIBUTION SYSTEM
-            // - 80% hyper-local posts (matching user's current area tag)
-            // - 10% near-local well-reviewed posts (nearby areas with high engagement)
-            // - 10% website top posts (most-liked posts globally)
-            
+            // 🎯 ADAPTIVE DISTRIBUTION SYSTEM
+            // Dense area  → 75% hyper-local, 8% near-local, 7% top, 10% boost+sell
+            // Quiet area  → 25% hyper-local, 20% near-local, 30% distant-filler,
+            //               15% top, 10% boost+sell  (keep the user engaged)
+            // Boost + Sell posts are ALWAYS scattered through the feed regardless
+            // of geography — creators paid / are actively transacting.
+
             const userArea = getCurrentUserArea();
             console.log(`🎯 ML Ranking: User area = "${userArea}"`);
-            
+
             // Score all posts with unified ranking
             const rankedPosts = displayPosts.map(post => ({
                 ...post,
                 unifiedRank: generateUnifiedPostRank(post, currentUserId),
                 netLikes: (post.likes || 0) - (post.dislikes || 0)
             }));
-            
+
             // 1️⃣ USER'S OWN POSTS (always show first)
-            const userPosts = rankedPosts.filter(p => 
-                p.authId === currentUserId || 
-                p.userId === currentUserId || 
+            const userPosts = rankedPosts.filter(p =>
+                p.authId === currentUserId ||
+                p.userId === currentUserId ||
                 p.createdBy === currentUserId
             );
             const userPostIds = new Set(userPosts.map(p => p.id));
-            
-            // 2️⃣ HYPER-LOCAL POSTS (80%): Match user's exact area tag
-            const hyperLocal = rankedPosts.filter(p => 
-                !userPostIds.has(p.id) && 
+
+            // 🟢 BOOST + SELL BUCKET (highest priority for non-owner posts)
+            // These are scattered across the feed first so they're always visible.
+            const isBoost = (p) => p._isBoosted || p.boostPaidAt || p.boostStatus === 'active';
+            const isSell  = (p) => p._isSell || p.sellBadge || p.forSale || p.buyBadge;
+            const boostSellPosts = rankedPosts
+                .filter(p => !userPostIds.has(p.id) && (isBoost(p) || isSell(p)))
+                .sort((a, b) => {
+                    // Boost outranks sell; within each, higher unifiedRank wins.
+                    const ab = isBoost(a) ? 1 : 0, bb = isBoost(b) ? 1 : 0;
+                    if (ab !== bb) return bb - ab;
+                    return (b.unifiedRank || 0) - (a.unifiedRank || 0);
+                });
+            const boostSellIds = new Set(boostSellPosts.map(p => p.id));
+
+            // 2️⃣ HYPER-LOCAL POSTS: Match user's exact area tag
+            const hyperLocal = rankedPosts.filter(p =>
+                !userPostIds.has(p.id) && !boostSellIds.has(p.id) &&
                 p.county === userArea
             );
-            
-            // 3️⃣ NEAR-LOCAL WELL-REVIEWED POSTS (10%): Different area but nearby with good engagement
-            const nearLocalWellReviewed = rankedPosts.filter(p => 
-                !userPostIds.has(p.id) && 
-                p.county !== userArea && 
-                p.netLikes >= 3 && // At least 3 net likes (well-reviewed)
+
+            // 3️⃣ NEAR-LOCAL WELL-REVIEWED POSTS
+            const nearLocalWellReviewed = rankedPosts.filter(p =>
+                !userPostIds.has(p.id) && !boostSellIds.has(p.id) &&
+                p.county !== userArea &&
+                p.netLikes >= 3 &&
                 (p.proximityClass === 'nearby' || p.proximityClass === 'community')
             );
-            
-            // 4️⃣ WEBSITE TOP POSTS (10%): Most-liked posts globally (any area)
+
+            // 4️⃣ WEBSITE TOP POSTS
             const websiteTopPosts = rankedPosts
-                .filter(p => 
-                    !userPostIds.has(p.id) && 
+                .filter(p =>
+                    !userPostIds.has(p.id) && !boostSellIds.has(p.id) &&
                     p.county !== userArea &&
                     !nearLocalWellReviewed.find(n => n.id === p.id) &&
-                    p.netLikes >= 5 // At least 5 net likes (globally popular)
+                    p.netLikes >= 5
                 )
-                .sort((a, b) => b.netLikes - a.netLikes); // Sort by most likes
-            
-            // 5️⃣ FALLBACK POSTS (if we don't have enough of categories above)
+                .sort((a, b) => b.netLikes - a.netLikes);
+
+            // 5️⃣ DISTANT-FILLER POSTS (quiet-area only): fresh, far-away activity
+            // marked upstream by the area filter when localMatchCount is low.
+            // Sort by a freshness × ranking blend so the feed feels alive.
+            const now = Date.now();
+            const freshnessScore = (p) => {
+                const ts = Number(p.timestamp || p.createdAt || 0);
+                if (!ts) return 0;
+                const hoursOld = Math.max(0, (now - ts) / 3_600_000);
+                // Decays from 1.0 (just posted) → ~0 at 72h.
+                return Math.max(0, 1 - hoursOld / 72);
+            };
+            const distantFiller = rankedPosts
+                .filter(p =>
+                    !userPostIds.has(p.id) && !boostSellIds.has(p.id) &&
+                    p._distantFiller === true
+                )
+                .sort((a, b) => {
+                    const sa = (a.unifiedRank || 0) * 0.6 + freshnessScore(a) * 100;
+                    const sb = (b.unifiedRank || 0) * 0.6 + freshnessScore(b) * 100;
+                    return sb - sa;
+                });
+
+            // 6️⃣ FALLBACK (everything else)
             const usedIds = new Set([
                 ...userPostIds,
+                ...boostSellIds,
                 ...hyperLocal.map(p => p.id),
                 ...nearLocalWellReviewed.map(p => p.id),
-                ...websiteTopPosts.map(p => p.id)
+                ...websiteTopPosts.map(p => p.id),
+                ...distantFiller.map(p => p.id)
             ]);
             const fallbackPosts = rankedPosts.filter(p => !usedIds.has(p.id));
-            
+
             // Sort each category by unified rank
             userPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
             hyperLocal.sort((a, b) => b.unifiedRank - a.unifiedRank);
             nearLocalWellReviewed.sort((a, b) => b.netLikes - a.netLikes);
             fallbackPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
-            
-            // 🎨 BUILD FEED WITH 80/10/10 DISTRIBUTION
-            // Calculate target counts (out of total)
+
+            // 🎨 ADAPTIVE TARGETS — quiet area pulls more distant content forward.
             const totalTarget = Math.min(2000, rankedPosts.length);
-            const hyperLocalTarget = Math.floor(totalTarget * 0.8);  // 80%
-            const nearLocalTarget = Math.floor(totalTarget * 0.1);   // 10%
-            const websiteTopTarget = Math.floor(totalTarget * 0.1);  // 10%
+            // "Quiet" = hyper-local supply can't fill 30% of the feed.
+            const isQuietArea = hyperLocal.length < Math.floor(totalTarget * 0.3);
+            console.log(`🌀 Area density: hyperLocal=${hyperLocal.length}, totalTarget=${totalTarget}, quietArea=${isQuietArea}`);
+
+            const boostSellTarget = Math.min(boostSellPosts.length, Math.floor(totalTarget * 0.10));
+            let hyperLocalTarget, nearLocalTarget, websiteTopTarget, distantFillerTarget;
+            if (isQuietArea) {
+                hyperLocalTarget   = hyperLocal.length;                      // take everything local
+                nearLocalTarget    = Math.floor(totalTarget * 0.20);
+                websiteTopTarget   = Math.floor(totalTarget * 0.15);
+                distantFillerTarget = Math.floor(totalTarget * 0.45) - boostSellTarget;
+                if (distantFillerTarget < 0) distantFillerTarget = 0;
+            } else {
+                hyperLocalTarget   = Math.floor(totalTarget * 0.75);
+                nearLocalTarget    = Math.floor(totalTarget * 0.08);
+                websiteTopTarget   = Math.floor(totalTarget * 0.07);
+                distantFillerTarget = 0;
+            }
             
-            console.log(`📊 80/10/10 Distribution Plan:`);
-            console.log(`   User own posts: ${userPosts.length}`);
-            console.log(`   Hyper-local (80%): need ${hyperLocalTarget}, have ${hyperLocal.length}`);
-            console.log(`   Near-local well-reviewed (10%): need ${nearLocalTarget}, have ${nearLocalWellReviewed.length}`);
-            console.log(`   Website top posts (10%): need ${websiteTopTarget}, have ${websiteTopPosts.length}`);
-            console.log(`   Fallback posts available: ${fallbackPosts.length}`);
-            
+            console.log(`📊 Adaptive Distribution Plan (${isQuietArea ? 'QUIET' : 'DENSE'} area):`);
+            console.log(`   User own posts:       ${userPosts.length}`);
+            console.log(`   Boost + Sell:         need ${boostSellTarget}, have ${boostSellPosts.length}`);
+            console.log(`   Hyper-local:          need ${hyperLocalTarget}, have ${hyperLocal.length}`);
+            console.log(`   Near-local reviewed:  need ${nearLocalTarget}, have ${nearLocalWellReviewed.length}`);
+            console.log(`   Website top:          need ${websiteTopTarget}, have ${websiteTopPosts.length}`);
+            console.log(`   Distant filler:       need ${distantFillerTarget}, have ${distantFiller.length}`);
+            console.log(`   Fallback available:   ${fallbackPosts.length}`);
+
             const result = [];
-            
+
             // Always show user's own posts FIRST
             result.push(...userPosts);
-            
+
             // Take target amounts from each category
+            const boostSellToAdd  = boostSellPosts.slice(0, boostSellTarget);
             const hyperLocalToAdd = hyperLocal.slice(0, hyperLocalTarget);
-            const nearLocalToAdd = nearLocalWellReviewed.slice(0, nearLocalTarget);
+            const nearLocalToAdd  = nearLocalWellReviewed.slice(0, nearLocalTarget);
             const websiteTopToAdd = websiteTopPosts.slice(0, websiteTopTarget);
-            
-            // 🎲 SCATTER well-reviewed and top posts THROUGHOUT positions 1-2000
-            // Not clustered at top - spread evenly across the feed
+            const distantToAdd    = distantFiller.slice(0, distantFillerTarget);
+
+            // 🎲 SCATTER non-local content across the feed (not clustered at top).
+            // Boost + Sell scatter alongside other scatter content so they appear
+            // throughout, not all at once.
             const allLocalPosts = [...hyperLocalToAdd];
-            const scatterPosts = [...nearLocalToAdd, ...websiteTopToAdd];
+            const scatterPosts = [...boostSellToAdd, ...nearLocalToAdd, ...websiteTopToAdd, ...distantToAdd];
             
             // Calculate scatter positions (evenly distributed)
             const totalContent = allLocalPosts.length + scatterPosts.length;
@@ -19216,10 +19275,12 @@
             }
             
             console.log(`✨ Final feed built: ${result.length} posts`);
-            console.log(`   📍 Hyper-local: ${hyperLocalToAdd.length} (target: ${hyperLocalTarget})`);
+            console.log(`   � User's own:               ${userPosts.length}`);
+            console.log(`   💎 Boost + Sell scattered:   ${boostSellToAdd.length} (target: ${boostSellTarget})`);
+            console.log(`   📍 Hyper-local:              ${hyperLocalToAdd.length} (target: ${hyperLocalTarget})`);
             console.log(`   🌐 Near-local well-reviewed: ${nearLocalToAdd.length} (target: ${nearLocalTarget})`);
-            console.log(`   🌟 Website top posts: ${websiteTopToAdd.length} (target: ${websiteTopTarget})`);
-            console.log(`   👤 User's own: ${userPosts.length}`);
+            console.log(`   🌟 Website top:              ${websiteTopToAdd.length} (target: ${websiteTopTarget})`);
+            console.log(`   🛰️ Distant filler:           ${distantToAdd.length} (target: ${distantFillerTarget})`);
 
             // Enforce disliked-post placement rule: move any post with more dislikes than likes
             // to the end of the feed while preserving relative order for both groups.
@@ -23156,42 +23217,79 @@
             }
             
             // ========================================================================
-            // 🔒 CRITICAL AREA-TAG FILTER (PRODUCTION REQUIREMENT)
+            // 🔒 AREA-TAG FILTER (QUIET-AREA ADAPTIVE)
             // ========================================================================
-            // Posts should ONLY be visible to users near their area tag
-            // Exception: Globally viral posts (5+ net likes) can show to anyone
+            // PRODUCTION RULE: every user should always see a full, lively feed.
+            // If the user's area has plenty of local activity, we filter strictly
+            // (hyper-local). If the area is QUIET (few local posts), we KEEP distant
+            // posts in the pool tagged `_distantFiller=true` so applyUnifiedRanking
+            // can mix them in as "new activity around you". Boost & sell posts
+            // ALWAYS pass — creators paid / are transacting and deserve reach.
             // ========================================================================
             const beforeFilterCount = displayPosts.length;
+
+            // First, measure local density to decide filter strictness.
+            const localMatchCount = displayPosts.reduce((n, p) => {
+                if (!p) return n;
+                if (p.county === userAreaTag) return n + 1;
+                if (p.proximityClass === 'nearby' || p.proximityClass === 'featured' || p.proximityClass === 'community') return n + 1;
+                return n;
+            }, 0);
+            // Quiet area = fewer than 40 truly-local posts available.
+            const QUIET_AREA_THRESHOLD = 40;
+            const isQuietArea = localMatchCount < QUIET_AREA_THRESHOLD;
+
             displayPosts = displayPosts.filter(post => {
+                if (!post) return false;
                 // Always show user's own posts
                 const isOwnPost = post.authId === currentUserId || 
                                  post.userId === currentUserId || 
                                  post.createdBy === currentUserId;
-                if (isOwnPost) return true;
-                
+                if (isOwnPost) { post._distantFiller = false; return true; }
+
                 // KEEP: Post's area tag matches user's area exactly
-                if (post.county === userAreaTag) return true;
-                
+                if (post.county === userAreaTag) { post._distantFiller = false; return true; }
+
                 // KEEP: Post is in nearby/community proximity (within distance)
                 if (post.proximityClass === 'nearby' || 
                     post.proximityClass === 'featured' || 
                     post.proximityClass === 'community') {
+                    post._distantFiller = false;
                     return true;
                 }
-                
+
+                // KEEP ALWAYS: Boost-paid posts (creator paid to extend reach)
+                if (post.boostPaidAt || post.boostStatus === 'active') {
+                    post._distantFiller = false;
+                    post._isBoosted = true;
+                    return true;
+                }
+
+                // KEEP ALWAYS: Sell / marketplace posts (active commerce)
+                if (post.sellBadge || post.forSale || post.buyBadge) {
+                    post._distantFiller = false;
+                    post._isSell = true;
+                    return true;
+                }
+
                 // KEEP: Post is globally viral (5+ net likes - can show anywhere)
                 const netLikes = (post.likes || 0) - (post.dislikes || 0);
-                if (netLikes >= 5) return true;
-                
-                // KEEP: Boost-paid posts (creator paid to extend reach)
-                if (post.boostPaidAt || post.boostStatus === 'active') return true;
-                
-                // FILTER OUT: Far-away posts with no special status
+                if (netLikes >= 5) { post._distantFiller = false; return true; }
+
+                // QUIET-AREA FILL-IN: when local activity is sparse, let distant
+                // posts ride along so the feed feels alive. Mark them so ranking
+                // can blend them in at controlled positions instead of dumping.
+                if (isQuietArea) {
+                    post._distantFiller = true;
+                    return true;
+                }
+
+                // FILTER OUT: Far-away posts with no special status (dense area)
                 return false;
             });
-            
+
             const filteredOut = beforeFilterCount - displayPosts.length;
-            console.log(`🔒 AREA FILTER: Kept ${displayPosts.length}, removed ${filteredOut} far-away posts not relevant to "${userAreaTag}"`);
+            console.log(`🔒 AREA FILTER: kept ${displayPosts.length} (local=${localMatchCount}, quietArea=${isQuietArea}), removed ${filteredOut} for "${userAreaTag}"`);
             
             // ========================================================================
             // 🎯 APPLY UNIFIED RANKING SYSTEM
