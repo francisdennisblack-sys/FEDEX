@@ -19196,28 +19196,78 @@
             nearLocalWellReviewed.sort((a, b) => b.netLikes - a.netLikes);
             fallbackPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
 
-            // 🎨 ADAPTIVE TARGETS — quiet area pulls more distant content forward.
+            // ========================================================================
+            // 🌐 WEBSITE-SCALE ADAPTIVE DISTRIBUTION
+            // ========================================================================
+            // The blend of local vs global content is driven by TOTAL website
+            // activity, not just one user's area. The bigger the network, the
+            // more hyper-local it gets — because every area has enough local
+            // supply to fill the feed. At low scale, we lean global so every
+            // user sees a lively feed even if their own area is empty.
+            //
+            //   Scale anchors (interpolated log-linearly):
+            //     ~10        users online   → 20% local / 25% near / 25% top / 20% distant / 10% boost+sell  (seed mode)
+            //     ~1,000     users online   → 45% local / 18% near / 17% top /  10% distant / 10% boost+sell  (growth)
+            //     ~100,000   users online   → 65% local / 12% near / 10% top /   3% distant / 10% boost+sell  (regional)
+            //     ~10,000,000 users online  → 80% local /  5% near /  5% top /   0% distant / 10% boost+sell  (full 80/10/10)
+            //
+            // Per-user reality check: if the user's hyper-local supply can't
+            // fill the local quota, the shortfall flows into distant filler so
+            // the feed stays full.
+            // ========================================================================
             const totalTarget = Math.min(2000, rankedPosts.length);
-            // "Quiet" = hyper-local supply can't fill 30% of the feed.
-            const isQuietArea = hyperLocal.length < Math.floor(totalTarget * 0.3);
-            console.log(`🌀 Area density: hyperLocal=${hyperLocal.length}, totalTarget=${totalTarget}, quietArea=${isQuietArea}`);
 
-            const boostSellTarget = Math.min(boostSellPosts.length, Math.floor(totalTarget * 0.10));
-            let hyperLocalTarget, nearLocalTarget, websiteTopTarget, distantFillerTarget;
-            if (isQuietArea) {
-                hyperLocalTarget   = hyperLocal.length;                      // take everything local
-                nearLocalTarget    = Math.floor(totalTarget * 0.20);
-                websiteTopTarget   = Math.floor(totalTarget * 0.15);
-                distantFillerTarget = Math.floor(totalTarget * 0.45) - boostSellTarget;
-                if (distantFillerTarget < 0) distantFillerTarget = 0;
-            } else {
-                hyperLocalTarget   = Math.floor(totalTarget * 0.75);
-                nearLocalTarget    = Math.floor(totalTarget * 0.08);
-                websiteTopTarget   = Math.floor(totalTarget * 0.07);
-                distantFillerTarget = 0;
+            // Read live signals. onlineUsers is a Map<userId, presence>. allPosts
+            // is the global post array. Use whichever gives a stronger signal.
+            let liveOnline = 0;
+            try {
+                if (typeof onlineUsers !== 'undefined' && onlineUsers && typeof onlineUsers.size === 'number') {
+                    liveOnline = onlineUsers.size;
+                }
+            } catch (e) { liveOnline = 0; }
+            const liveTotalPosts = Array.isArray(allPosts) ? allPosts.length : rankedPosts.length;
+            // Network-scale proxy: treat 1 post as ~1 user of activity. Take the
+            // max so a heavy post archive with few live users still scales up,
+            // and a sudden traffic spike with few posts also scales up.
+            const networkSignal = Math.max(liveOnline, Math.floor(liveTotalPosts / 2));
+
+            // Log-linear interpolation from 1 → 10,000,000.
+            // t = 0 at networkSignal <= 1, t = 1 at networkSignal >= 10M.
+            const MAX_SCALE = 10_000_000;
+            const t = Math.max(0, Math.min(1,
+                Math.log10(Math.max(1, networkSignal)) / Math.log10(MAX_SCALE)
+            ));
+
+            // Anchor weights at t=0 (seed) and t=1 (full 80/10/10).
+            // Boost+sell stays a fixed 10% at every scale.
+            const seed = { local: 0.20, near: 0.25, top: 0.25, distant: 0.20, boostSell: 0.10 };
+            const full = { local: 0.80, near: 0.05, top: 0.05, distant: 0.00, boostSell: 0.10 };
+            const lerp = (a, b) => a + (b - a) * t;
+            const weights = {
+                local:     lerp(seed.local,     full.local),
+                near:      lerp(seed.near,      full.near),
+                top:       lerp(seed.top,       full.top),
+                distant:   lerp(seed.distant,   full.distant),
+                boostSell: lerp(seed.boostSell, full.boostSell),
+            };
+
+            let hyperLocalTarget    = Math.floor(totalTarget * weights.local);
+            let nearLocalTarget     = Math.floor(totalTarget * weights.near);
+            let websiteTopTarget    = Math.floor(totalTarget * weights.top);
+            let distantFillerTarget = Math.floor(totalTarget * weights.distant);
+            const boostSellTarget   = Math.min(boostSellPosts.length, Math.floor(totalTarget * weights.boostSell));
+
+            // 🔁 PER-USER REALITY CHECK: if THIS user's local supply can't fill
+            // its quota (their area is quiet relative to the website-scale rule),
+            // redirect the shortfall into distant filler so the feed stays full.
+            const localShortfall = Math.max(0, hyperLocalTarget - hyperLocal.length);
+            if (localShortfall > 0) {
+                hyperLocalTarget = hyperLocal.length;
+                distantFillerTarget += localShortfall;
             }
-            
-            console.log(`📊 Adaptive Distribution Plan (${isQuietArea ? 'QUIET' : 'DENSE'} area):`);
+
+            console.log(`🌐 Website scale: onlineUsers=${liveOnline}, totalPosts=${liveTotalPosts}, networkSignal=${networkSignal}, t=${t.toFixed(3)}`);
+            console.log(`📊 Scale-adaptive Distribution Plan (local shortfall=${localShortfall}):`);
             console.log(`   User own posts:       ${userPosts.length}`);
             console.log(`   Boost + Sell:         need ${boostSellTarget}, have ${boostSellPosts.length}`);
             console.log(`   Hyper-local:          need ${hyperLocalTarget}, have ${hyperLocal.length}`);
@@ -23235,9 +23285,24 @@
                 if (p.proximityClass === 'nearby' || p.proximityClass === 'featured' || p.proximityClass === 'community') return n + 1;
                 return n;
             }, 0);
-            // Quiet area = fewer than 40 truly-local posts available.
+            // Quiet decision is now WEBSITE-SCALE-AWARE. We keep distant posts in
+            // the pool whenever either: (a) the website is small enough that the
+            // ranker will want distant filler (network scale t < 1), or (b) this
+            // specific user's local supply is below 40. The ranker downstream is
+            // the authoritative chooser of how many distant posts actually appear.
+            let _liveOnline = 0;
+            try {
+                if (typeof onlineUsers !== 'undefined' && onlineUsers && typeof onlineUsers.size === 'number') {
+                    _liveOnline = onlineUsers.size;
+                }
+            } catch (e) { _liveOnline = 0; }
+            const _liveTotal = Array.isArray(allPosts) ? allPosts.length : displayPosts.length;
+            const _networkSignal = Math.max(_liveOnline, Math.floor(_liveTotal / 2));
+            const _scaleT = Math.max(0, Math.min(1,
+                Math.log10(Math.max(1, _networkSignal)) / Math.log10(10_000_000)
+            ));
             const QUIET_AREA_THRESHOLD = 40;
-            const isQuietArea = localMatchCount < QUIET_AREA_THRESHOLD;
+            const isQuietArea = (_scaleT < 1) || (localMatchCount < QUIET_AREA_THRESHOLD);
 
             displayPosts = displayPosts.filter(post => {
                 if (!post) return false;
