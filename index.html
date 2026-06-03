@@ -20866,19 +20866,23 @@
             }
 
             // Ensure POI database is available (await on mobile to avoid empty lists)
-            if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
-                try {
-                    // Reuse existing preload promise if present
-                    const p = window._poiIndexPreloadPromise || window.ensureGlobalPoiSearchIndex();
-                    // Wait up to 2500ms for index to be ready so mobile shows results
-                    const res = await Promise.race([
-                        p,
-                        new Promise((resolve) => setTimeout(() => resolve(null), 2500))
-                    ]);
-                    if (!res) console.log('⚠️ POI index not ready within timeout; continuing with what is available');
-                } catch (e) {
-                    console.warn('⚠️ ensureGlobalPoiSearchIndex() failed:', e && e.message);
+            if (!window.CLEANUP_FLAGS || window.CLEANUP_FLAGS.ENABLE_POI_LOADING !== false) {
+                if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                    try {
+                        // Reuse existing preload promise if present
+                        const p = window._poiIndexPreloadPromise || window.ensureGlobalPoiSearchIndex();
+                        // Wait longer (up to 5s) so slower connections/devices get a chance
+                        const res = await Promise.race([
+                            p,
+                            new Promise((resolve) => setTimeout(() => resolve(null), 5000))
+                        ]);
+                        if (!res) console.log('⚠️ POI index not ready within timeout; continuing with what is available');
+                    } catch (e) {
+                        console.warn('⚠️ ensureGlobalPoiSearchIndex() failed:', e && e.message);
+                    }
                 }
+            } else {
+                console.log('⚠️ POI loading disabled by CLEANUP_FLAGS.ENABLE_POI_LOADING');
             }
 
             let html = '';
@@ -21000,7 +21004,22 @@
                 }
                 console.log(`✅ Found POI candidates: ${items.filter(i=>i.type==='poi').length}`);
             } else {
-                console.warn('⚠️ POI database not loaded yet');
+                console.warn('⚠️ POI database not loaded yet - attempting a fallback sync from Firebase');
+                // Try a best-effort sync from Firebase before giving up (non-blocking)
+                try {
+                    if (window.poiManagementSystem && typeof window.poiManagementSystem.syncPOIsFromFirebase === 'function') {
+                        window.poiManagementSystem.syncPOIsFromFirebase().then(pois => {
+                            if (Array.isArray(pois) && pois.length) {
+                                console.log('✅ Fallback POI sync completed:', pois.length);
+                                // Re-open the dropdown to show results if the user still has it open
+                                if (document.getElementById('autocompleteDropdown') && document.getElementById('autocompleteDropdown').style.display === 'block') {
+                                    // Small delay to let UI update
+                                    setTimeout(() => showNearbyPOIsDropdown(), 300);
+                                }
+                            }
+                        }).catch(e => console.warn('Fallback POI sync failed:', e));
+                    }
+                } catch (e) { console.warn('Fallback POI sync attempt failed', e); }
             }
             
             // ============================================
