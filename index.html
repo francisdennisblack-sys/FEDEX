@@ -22281,6 +22281,43 @@
             
             // Add proximity badges to all posts
             displayPosts = displayPosts.map(post => addProximityBadge(post, currentGrid));
+
+            // ====================================================================
+            // AUTO-HIDE: Opt-in automatic hiding rules (client-side only)
+            // - Controlled by localStorage key `autoHideDisliked` ('true' to enable)
+            // - When enabled, posts with more dislikes than likes are automatically
+            //   added to the user's hidden list and will not be shown on the grid.
+            // ====================================================================
+            try {
+                const autoHideFlag = localStorage.getItem('autoHideDisliked');
+                const autoHideEnabled = (autoHideFlag === 'true' || autoHideFlag === true);
+                if (autoHideEnabled && currentUserId && Array.isArray(displayPosts) && displayPosts.length > 0) {
+                    const toAutoHide = [];
+                    for (const p of displayPosts) {
+                        const likes = Number(p.likes || 0);
+                        const dislikes = Number(p.dislikes || 0);
+                        if (dislikes > likes) {
+                            toAutoHide.push(p.id);
+                        }
+                    }
+                    if (toAutoHide.length > 0) {
+                        // Update in-memory map
+                        if (!hiddenPosts[currentUserId]) hiddenPosts[currentUserId] = [];
+                        const persistedHidden = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
+                        for (const hid of toAutoHide) {
+                            if (!hiddenPosts[currentUserId].includes(hid)) hiddenPosts[currentUserId].push(hid);
+                            if (!persistedHidden.includes(hid)) persistedHidden.push(hid);
+                        }
+                        // Persist so the hide survives reloads
+                        try { localStorage.setItem('hiddenPosts', JSON.stringify(persistedHidden)); } catch (e) { /* ignore */ }
+                        // Ensure immediate render-time filter sees the new hides
+                        hiddenForThisPOI = Array.from(new Set([...(hiddenForThisPOI || []), ...toAutoHide]));
+                        console.log(`🔕 autoHideDisliked: hid ${toAutoHide.length} posts for user ${currentUserId}`);
+                    }
+                }
+            } catch (e) {
+                console.warn('autoHideDisliked check failed', e);
+            }
             
             // ========================================================================
             // 🔒 CRITICAL AREA-TAG FILTER (PRODUCTION REQUIREMENT)
