@@ -1408,20 +1408,24 @@
                         const res = await createUserWithEmailAndPassword(window.auth, email, password);
                         const firebaseUid = res.user.uid;
                         const database = getDatabase();
-                        // Use permanent local id as canonical user id so local posts remain linked
-                        const canonicalUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
+                        // ✅ ACCOUNT-SCOPED: canonical id is the Firebase Auth UID so the same
+                        // account loads the same grid on every device. The local `permanentUserId`
+                        // remains as a device-only fallback for anonymous visitors.
+                        const canonicalUid = firebaseUid;
                         if (database) {
                             await set(ref(database, `users/${canonicalUid}/profile`), { username: username || email.split('@')[0], email: email, createdAt: Date.now(), linkedFirebaseUid: firebaseUid });
                             // init stats
                             await set(ref(database, `users/${canonicalUid}/stats`), { postsCount: 0, totalLikes: 0 });
                         }
                         window.currentUserId = canonicalUid;
+                        try { if (typeof currentUserId !== 'undefined') currentUserId = canonicalUid; } catch (e) {}
                         window.currentUserEmail = email;
                         try {
                             localStorage.setItem('lastSignedInFirebaseUid', firebaseUid);
                             localStorage.setItem('lastSignedInAt', String(Date.now()));
                             localStorage.setItem('userId', canonicalUid);
-                            localStorage.setItem('permanentUserId', canonicalUid);
+                            // NOTE: intentionally NOT overwriting permanentUserId — that stays the
+                            // device-scoped anonymous id and is only used pre-sign-in.
                             localStorage.setItem('isSignedIn', '1');
                             // Persist displayName/grid/post ids for email-created accounts
                             try {
@@ -1473,15 +1477,17 @@
                         if (!window.auth) throw new Error('Auth not initialized');
                         const res = await signInWithEmailAndPassword(window.auth, email, password);
                         const user = res.user;
-                        // Map Firebase-authenticated session to canonical local id
-                        const canonicalUid = window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : ('local-' + (Date.now())));
+                        // ✅ ACCOUNT-SCOPED: bind the session to the Firebase Auth UID so the
+                        // same account loads the same grid on every device.
+                        const canonicalUid = user.uid;
                         window.currentUserId = canonicalUid;
+                        try { if (typeof currentUserId !== 'undefined') currentUserId = canonicalUid; } catch (e) {}
                         window.currentUserEmail = user.email;
                         try {
                             localStorage.setItem('lastSignedInFirebaseUid', user.uid || '');
                             localStorage.setItem('lastSignedInAt', String(Date.now()));
                             localStorage.setItem('userId', canonicalUid);
-                            if (canonicalUid) localStorage.setItem('permanentUserId', canonicalUid);
+                            // NOTE: intentionally NOT overwriting permanentUserId — device id stays separate.
                             localStorage.setItem('isSignedIn', '1');
                         // Persist displayName/grid/post ids for email sign-ins
                         try {
@@ -9184,10 +9190,14 @@
                 startupMetrics.bootstrapStart = Date.now();
                 recordMilestone('Auth initialized', startupMetrics.bootstrapStart);
                 
-                // ✅ STEP 2: Use PERMANENT userId (not Firebase UID which can change)
-                // This ensures the same user always has the same ID across sessions
-                const newUserId = permanentUserId;
+                // ✅ STEP 2: Account-scoped vs device-scoped identity.
+                //   - Signed-in users (email/password): use Firebase Auth UID so the same
+                //     grid/posts/votes load on every device they sign in on.
+                //   - Anonymous visitors: fall back to the device-scoped permanent ID.
+                const isSignedInUser = !!user && user.isAnonymous === false;
+                const newUserId = isSignedInUser ? user.uid : permanentUserId;
                 currentUserId = newUserId;
+                try { window.currentUserId = currentUserId; } catch (e) {}
                 localStorage.setItem('userId', currentUserId);
 
                 // Rehydrate username if local storage was cleared but auth session survived.
