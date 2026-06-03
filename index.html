@@ -12685,45 +12685,14 @@
                 localStorage.setItem(`userVotes_${userId}`, JSON.stringify(userVotes));
                 console.log(`   💾 Vote saved to localStorage for post ${postId}`);
                 
-                // THEN save to Firebase using per-post votes to ensure unique user counts
-                // Write user's vote under post-votes/{postId}/{userId}
-                const postVoteRef = ref(database, `post-votes/${postId}/${userId}`);
-                const userVoteRef = ref(database, `user-votes/${userId}/${postId}`);
-
-                if (voteType === null) {
-                    // Remove vote entries
-                    console.log(`   🔄 Removing vote from Firebase...`);
-                    await remove(postVoteRef);
-                    try { await remove(userVoteRef); } catch (e) { /* ignore */ }
-                    console.log(`   ✅ Removed vote for post ${postId} from Firebase (per-post & per-user)`);
-                } else {
-                    // Save vote (like or dislike) in both per-post and per-user locations
-                    console.log(`   🔄 Saving ${voteType} vote to Firebase...`);
-                    await set(postVoteRef, voteType);
-                    try { await set(userVoteRef, voteType); } catch (e) { /* ignore */ }
-                    console.log(`   ✅ Saved ${voteType} vote for post ${postId} to Firebase (per-post & per-user)`);
-                }
-
-                // Recompute aggregate likes/dislikes from post-votes to ensure unique-user totals
+                // Use atomic transaction helper to set/remove this user's vote and update aggregated totals.
+                console.log(`   🔄 Submitting vote transaction for ${postId} (${voteType})...`);
                 try {
-                    console.log(`   🔢 Recomputing vote counts...`);
-                    const votesSnapshot = await get(ref(database, `post-votes/${postId}`));
-                    let likeCount = 0, dislikeCount = 0;
-                    if (votesSnapshot && votesSnapshot.exists()) {
-                        const votesObj = votesSnapshot.val();
-                        for (const uid in votesObj) {
-                            const v = votesObj[uid];
-                            if (v === 'like') likeCount++;
-                            else if (v === 'dislike') dislikeCount++;
-                        }
-                    }
-
-                    // Persist aggregated totals on the post object
-                    console.log(`   📝 Updating post with aggregated counts: ${likeCount} likes, ${dislikeCount} dislikes`);
-                    await update(ref(database, `posts/${postId}`), { likes: likeCount, dislikes: dislikeCount });
-                    console.log(`   ✅ Aggregated post ${postId} votes: likes=${likeCount}, dislikes=${dislikeCount}`);
+                    await submitVoteTransaction(userId, postId, voteType);
+                    console.log(`   ✅ submitVoteTransaction succeeded for ${postId}`);
                 } catch (e) {
-                    console.warn('   ⚠️ Failed to recompute aggregated post votes:', e);
+                    console.warn('   ⚠️ submitVoteTransaction failed:', e);
+                    throw e;
                 }
                 
                 console.log(`✅ saveVoteToFirebase COMPLETE\n`);
@@ -13046,9 +13015,10 @@
                 for (const key in offlineVotes) {
                     const [userId, postId] = key.split('_');
                     const voteType = offlineVotes[key];
-                    
+
                     try {
-                        await saveVoteToFirebase(userId, postId, voteType, 0); // No retry on sync
+                        // Use transaction for authoritative write
+                        await submitVoteTransaction(userId, postId, voteType);
                         delete offlineVotes[key];
                         syncedCount++;
                     } catch (error) {
