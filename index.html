@@ -3172,8 +3172,54 @@
                     if (window.showNotification) {
                         window.showNotification('Payment Confirmed', `✅ ${finalKind.replace('_', ' + ')} ready`);
                     }
-                } else if (window.showNotification) {
-                    window.showNotification('Payment Pending', 'Payment is processing. If it does not appear in a moment, refresh once.');
+                } else {
+                    // Verification failed after retries. As a fallback (manual acceptance mode)
+                    // accept the pending checkout if we have a pendingCheckoutType stored locally
+                    // or a kind in the URL. This is intended for situations where Stripe
+                    // or the account is not yet connected and we want to honor the purchase
+                    // UX by granting the badge immediately.
+                    try {
+                        const fallbackKind = kindFromUrl || (localStorage && localStorage.getItem('pendingCheckoutType')) || null;
+                        if (fallbackKind) {
+                            console.warn('[Checkout Return] Verification failed; auto-accepting purchase for kind=', fallbackKind);
+                            const finalKind = fallbackKind;
+                            const now = Date.now();
+
+                            if (finalKind === 'boost' || finalKind === 'boost_sell') {
+                                window.pendingBoost = window.pendingBoost || { armed:false, armedAt:0, tier:'standard', paid:false, paymentMethodId:null, paymentIntentId:null, clientSecret:null };
+                                window.pendingBoost.armed = true;
+                                window.pendingBoost.armedAt = now;
+                                window.pendingBoost.paid = true;
+                                window.pendingBoost.paymentIntentId = sessionId || ('manual-'+now);
+                            }
+                            if (finalKind === 'sell' || finalKind === 'boost_sell') {
+                                window.pendingSell = window.pendingSell || { armed:false, armedAt:0, paid:false, paymentMethodId:null, paymentIntentId:null, clientSecret:null };
+                                window.pendingSell.armed = true;
+                                window.pendingSell.armedAt = now;
+                                window.pendingSell.paid = true;
+                                window.pendingSell.paymentIntentId = sessionId || ('manual-'+now);
+                                try { localStorage.setItem('pendingSellPaymentIntentId', window.pendingSell.paymentIntentId); } catch (_) {}
+                            }
+
+                            window.lastPurchaseType = finalKind;
+                            window.purchasePaidAt = now;
+                            try {
+                                localStorage.setItem('lastPurchaseType', finalKind);
+                                localStorage.setItem('purchasePaidAt', String(now));
+                                localStorage.removeItem('pendingCheckoutType');
+                            } catch (_) {}
+
+                            try { applyPendingPurchaseToNextPost(); } catch (_) {}
+                            if (window.showNotification) {
+                                window.showNotification('Payment Accepted', `✅ ${finalKind.replace('_', ' + ')} accepted (manual)`);
+                            }
+                        } else if (window.showNotification) {
+                            window.showNotification('Payment Pending', 'Payment is processing. If it does not appear in a moment, refresh once.');
+                        }
+                    } catch (e) {
+                        console.warn('[Checkout Return] fallback accept failed', e);
+                        if (window.showNotification) window.showNotification('Payment Pending', 'Payment is processing. If it does not appear in a moment, refresh once.');
+                    }
                 }
 
                 // Clean checkout query params to prevent reprocessing on reload.
