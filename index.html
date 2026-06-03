@@ -12718,8 +12718,10 @@
                 console.log('↻ Performing soft refresh — removing', pending.length, 'posts');
 
                 // Remove from gridScroller items
+                let oldScrollerLength = 0;
                 try {
                     if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                        oldScrollerLength = (window.gridScroller.items || []).length;
                         window.gridScroller.items = (window.gridScroller.items || []).filter(i => !(i && pending.includes(i.id)));
                         if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh();
                     }
@@ -12731,6 +12733,50 @@
                         gridContent[k] = (gridContent[k] || []).filter(p => !(p && pending.includes(p.id)));
                     });
                 } catch(e) { console.warn('softRefresh: gridContent purge failed', e); }
+
+                // Attempt to actively fill vacated slots by appending candidates
+                try {
+                    // Use latest sorted posts (set by ranking) as preferred source
+                    const existingIds = new Set();
+                    if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                        window.gridScroller.items.forEach(i => { if (i && i.id) existingIds.add(i.id); });
+                    }
+
+                    const sourceList = (window.latestSortedPosts && Array.isArray(window.latestSortedPosts) && window.latestSortedPosts.length > 0)
+                        ? window.latestSortedPosts
+                        : (allFirebasePosts && Array.isArray(allFirebasePosts) ? allFirebasePosts : []);
+
+                    // Build candidate list excluding hidden/pending/deleted
+                    const hiddenReported = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
+                    const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
+                    const candidates = [];
+                    for (const p of sourceList) {
+                        if (!p || !p.id) continue;
+                        if (existingIds.has(p.id)) continue;
+                        if (pending.includes(p.id)) continue;
+                        if (hiddenReported.includes(p.id)) continue;
+                        if (deletedOwnPosts.includes(p.id)) continue;
+                        candidates.push(p);
+                    }
+
+                    const currentLen = (window.gridScroller && Array.isArray(window.gridScroller.items)) ? window.gridScroller.items.length : 0;
+                    const missing = Math.max(0, oldScrollerLength - currentLen);
+                    const toAdd = Math.max(missing, 6); // try to add at least a few to avoid repeated small fills
+
+                    if (candidates.length > 0 && typeof safeAddItemsToGridScroller === 'function') {
+                        safeAddItemsToGridScroller(candidates.slice(0, toAdd));
+                        // After adding, refresh the scroller and re-render badges
+                        try { if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh(); } catch(e){}
+                        try { recomputeAndApplyBadges(); } catch(e){}
+                    } else if (candidates.length > 0 && window.gridScroller && typeof gridScroller.addItems === 'function') {
+                        try { gridScroller.addItems(candidates.slice(0, toAdd)); } catch(e){}
+                    } else {
+                        // As a fallback, trigger a batch load which may repopulate `allFirebasePosts`
+                        if (typeof loadMorePostsFromDatabase === 'function') {
+                            try { await loadMorePostsFromDatabase(); } catch(e) { /* ignore */ }
+                        }
+                    }
+                } catch(e) { console.warn('softRefresh: fill attempt failed', e); }
 
                 // Reset flags and re-render
                 window.pendingRemovedPosts = new Set();
