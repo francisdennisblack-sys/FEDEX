@@ -11185,6 +11185,18 @@
          * Scales from: 1 post with 0 likes → 100M users with top posts at 10M+ likes
          * Uses: Percentile ranking + Logarithmic engagement scoring + Area normalization
          */
+        // Return NEW badge window (ms) based on active user count
+        function getNewBadgeWindowMs(userCount = 0) {
+            try {
+                const uc = Number(userCount) || 0;
+                if (uc < 1000) return 10 * 60 * 1000; // 10 minutes
+                if (uc >= 1000 && uc < 100000) return 2 * 60 * 1000; // 2 minutes
+                if (uc >= 100000 && uc < 1000000) return 1 * 60 * 1000; // 1 minute
+                // 1,000,000+ users
+                return 30 * 1000; // 30 seconds
+            } catch (e) { return 2 * 60 * 60 * 1000; }
+        }
+
         const adaptiveBadgeSystem = {
             // Track what badges posts have had
             postBadgeHistory: {}, // { postId: [{ badge, timestamp, area, reasoning }] }
@@ -11230,9 +11242,13 @@
                 const likes = post.likes || 0;
                 const dislikes = post.dislikes || 0;
                 
-                // 1. NEW BADGE - Fresh posts get visibility boost (within 2 hours)
-                if (postAge < 2 * 60 * 60 * 1000) {
-                    return 'new';
+                // 1. NEW BADGE - Fresh posts get visibility boost
+                // Duration scales with user count (fast decay at scale)
+                try {
+                    const windowMs = (typeof getNewBadgeWindowMs === 'function') ? getNewBadgeWindowMs(totalUserCount) : (2 * 60 * 60 * 1000);
+                    if (postAge < windowMs) return 'new';
+                } catch (e) {
+                    if (postAge < 2 * 60 * 60 * 1000) return 'new';
                 }
                 
                 if (!allPostsInArea || allPostsInArea.length === 0) {
@@ -22967,6 +22983,52 @@
                 console.warn('safeAddItemsToGridScroller failed:', e);
                 return 0;
             }
+
+            /**
+             * Insert a newly created post into the user's grid near the top while
+             * respecting the top-3 reserved slots and any leading user-owned posts.
+             * This helps avoid confusing empty DOM slots after deletes and ensures
+             * new posts are visible immedately without fighting the virtual scroller.
+             */
+            function insertNewPostIntoGrid(contentKey, postData) {
+                if (!contentKey) contentKey = currentUserId || 'temp-posts';
+                if (!postData || !postData.id) return;
+                if (!gridContent[contentKey]) gridContent[contentKey] = [];
+
+                // If already present, update in place
+                const already = gridContent[contentKey].findIndex(p => p && p.id === postData.id);
+                if (already !== -1) { gridContent[contentKey][already] = postData; return; }
+
+                // Determine insertion index: after top-3 initial slots and after any
+                // leading posts owned by the current user.
+                let insertAt = 3; // prefer after top-3
+                if (insertAt > gridContent[contentKey].length) insertAt = gridContent[contentKey].length;
+
+                // Advance insertAt past any leading posts that are owned by currentUserId
+                while (insertAt < gridContent[contentKey].length && gridContent[contentKey][insertAt] && (gridContent[contentKey][insertAt].ownerUid === currentUserId || gridContent[contentKey][insertAt].authId === currentUserId)) {
+                    insertAt++;
+                }
+
+                // If there are empty reserved slots (e.g., box elements missing), prefer to fill them by
+                // inserting at the first index where a DOM box without data exists. Fallback to splice.
+                try {
+                    const gridEl = document.getElementById('grid');
+                    if (gridEl) {
+                        const nodes = Array.from(gridEl.querySelectorAll('.grid-box'));
+                        for (let i = 1; i < nodes.length; i++) {
+                            const n = nodes[i];
+                            if (!n) continue;
+                            const pid = n.getAttribute('data-post-id');
+                            if (!pid || pid.trim() === '') {
+                                insertAt = Math.min(insertAt, i);
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) { /* ignore DOM probing failures */ }
+
+                gridContent[contentKey].splice(insertAt, 0, postData);
+            }
         }
         
         // ORIGINAL renderGrid function (renamed)
@@ -25998,7 +26060,7 @@
                     const contentKey = currentUserId || 'pending-local';
                     if (!gridContent[contentKey]) gridContent[contentKey] = [];
                     if (!gridContent[contentKey].some(p => p && p.id === postData.id)) {
-                        gridContent[contentKey].push(postData);
+                        try { insertNewPostIntoGrid(contentKey, postData); } catch(e) { gridContent[contentKey].push(postData); }
                     } else {
                         console.log(`  ↩️ Skipping duplicate pending push for id ${postData.id}`);
                     }
@@ -26101,7 +26163,7 @@
                 if (_alreadyPresent) {
                     console.log(`  ↩️ Skipping duplicate push to gridContent[${contentKey}] - id already present: ${postData.id}`);
                 } else {
-                    gridContent[contentKey].push(postData);
+                    try { insertNewPostIntoGrid(contentKey, postData); } catch(e) { gridContent[contentKey].push(postData); }
                 }
                 // Ensure grid rendering always detects media: copy photoURL into imageData
                 // for legacy or inconsistent consumers that check imageData.
@@ -26152,9 +26214,19 @@
                 // All users will see this post via the Firebase listener
                 // (No need to copy to multiple user folders anymore)
                 
-                postData.isNew = true; // Add "new" badge
-                postData.createdAt = new Date().getTime();
-                postData.badge = 'NEW';
+                // Mark as NEW with dynamic expiry window
+                try {
+                    postData.isNew = true;
+                    const windowMs = (typeof getNewBadgeWindowMs === 'function') ? getNewBadgeWindowMs(onlineUserCount || 0) : (2 * 60 * 60 * 1000);
+                    postData.newExpiresAt = Date.now() + windowMs;
+                    postData.newDurationMs = windowMs;
+                    postData.createdAt = new Date().getTime();
+                    postData.badge = 'NEW';
+                } catch (e) {
+                    postData.isNew = true;
+                    postData.createdAt = new Date().getTime();
+                    postData.badge = 'NEW';
+                }
                 
                 // 📍 TRACK POST IN AREA HIERARCHY SYSTEM
                 // This ensures the post appears on user's grid and tracks its growth
