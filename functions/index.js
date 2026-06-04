@@ -22,10 +22,37 @@ try { admin.initializeApp(); } catch (e) { }
 const db = admin.database();
 const MAX_POSTS_PER_USER = 20;
 
-const STRIPE_SECRET = (functions.config && functions.config().stripe && functions.config().stripe.secret) || process.env.STRIPE_SECRET;
-const STRIPE_WEBHOOK_SECRET = (functions.config && functions.config().stripe && functions.config().stripe.webhook_secret) || process.env.STRIPE_WEBHOOK_SECRET;
-let stripe = null;
-try { if (STRIPE_SECRET) stripe = require('stripe')(STRIPE_SECRET); } catch (e) { console.warn('Stripe not available'); }
+// Stripe secrets are stored in Google Secret Manager (not the deprecated
+// functions:config). They are injected as env vars at function runtime via
+// the `secrets: [...]` option on each function below.
+const { defineSecret } = require('firebase-functions/params');
+const stripeSecretParam = defineSecret('STRIPE_SECRET');
+const stripeWebhookSecretParam = defineSecret('STRIPE_WEBHOOK_SECRET');
+
+// Lazy Stripe client — built per-invocation so process.env.STRIPE_SECRET is
+// already populated by the time we read it.
+let _stripeCache = null;
+let _stripeCacheKey = null;
+function getStripe() {
+  const key = process.env.STRIPE_SECRET
+    || (functions.config && functions.config().stripe && functions.config().stripe.secret)
+    || null;
+  if (!key) return null;
+  if (_stripeCache && _stripeCacheKey === key) return _stripeCache;
+  try {
+    _stripeCache = require('stripe')(key);
+    _stripeCacheKey = key;
+    return _stripeCache;
+  } catch (e) {
+    console.warn('Stripe init failed:', e && e.message);
+    return null;
+  }
+}
+function getWebhookSecret() {
+  return process.env.STRIPE_WEBHOOK_SECRET
+    || (functions.config && functions.config().stripe && functions.config().stripe.webhook_secret)
+    || null;
+}
 
 function setDefaultCors(res){ res.set('Access-Control-Allow-Origin','*'); res.set('Access-Control-Allow-Methods','GET,POST,OPTIONS'); res.set('Access-Control-Allow-Headers','Content-Type,Stripe-Signature'); }
 async function incrementCounter(path, delta=1){ const ref=db.ref(path); try{ await ref.transaction(cur => (Number(cur)||0)+delta); }catch(e){console.error('inc',path,e);} }
@@ -66,6 +93,7 @@ function normalizeCheckoutInput(input) {
 }
 
 async function createStripeCheckoutSession(payload) {
+  const stripe = getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const normalized = normalizeCheckoutInput(payload);
   const { postId, kind, unit_amount, currency, okSuccess, okCancel, metaPostId, metaKind, metaUserId } = normalized;
@@ -111,59 +139,76 @@ exports.enforceUserPostLimit = functions.database.ref('/posts/{postId}').onCreat
 
 exports.postMetricsAggregator = functions.database.ref('/posts/{postId}').onCreate(async (snap, ctx)=>{ const post=snap.val()||{}; try{ await incrementCounter('metrics/global/postsTotal',1); const zone=post.zoneTag||post.county||'unknown'; await incrementCounter(`metrics/postsByZone/${encodeURIComponent(zone)}`,1);}catch(e){console.error(e);} return null; });
 
-exports.createCheckoutSession = functions.https.onRequest(async (req,res)=>{
-  setDefaultCors(res); if(req.method==='OPTIONS'){res.status(204).send('');return;} if(!stripe) return res.status(500).json({error:'Stripe not configured'});
-  try{
-    const session = await createStripeCheckoutSession(req.body || {});
-    return res.json(session);
-  }catch(e){ console.error(e); return res.status(500).json({error:e&&e.message}); }
+exports.createCheckoutSession = functions
+  .runWith({ secrets: [stripeSecretParam] })
+  .https.onRequest(async (req,res)=>{
+    setDefaultCors(res); if(req.method==='OPTIONS'){res.status(204).send('');return;}
+    if(!getStripe()) return res.status(500).json({error:'Stripe not configured'});
+    try{
+      const session = await createStripeCheckoutSession(req.body || {});
+      return res.json(session);
+    }catch(e){ console.error('createCheckoutSession error:', e && (e.message||e)); return res.status(500).json({error:e&&e.message}); }
 });
 
-exports.createCheckoutSessionCallable = functions.https.onCall(async (data, context) => {
-  if (!stripe) throw new functions.https.HttpsError('failed-precondition', 'Stripe not configured');
-  try {
-    const session = await createStripeCheckoutSession(data || {});
-    return session;
-  } catch (e) {
-    throw new functions.https.HttpsError('invalid-argument', e && e.message ? e.message : 'Failed to create checkout session');
-  }
+exports.createCheckoutSessionCallable = functions
+  .runWith({ secrets: [stripeSecretParam] })
+  .https.onCall(async (data, context) => {
+    if (!getStripe()) throw new functions.https.HttpsError('failed-precondition', 'Stripe not configured');
+    try {
+      const session = await createStripeCheckoutSession(data || {});
+      return session;
+    } catch (e) {
+      console.error('createCheckoutSessionCallable error:', e && (e.message||e));
+      throw new functions.https.HttpsError('invalid-argument', e && e.message ? e.message : 'Failed to create checkout session');
+    }
 });
 
-exports.getCheckoutSessionResult = functions.https.onCall(async (data, context) => {
-  if (!stripe) throw new functions.https.HttpsError('failed-precondition', 'Stripe not configured');
-  const sessionId = data && data.sessionId ? String(data.sessionId) : '';
-  if (!sessionId) throw new functions.https.HttpsError('invalid-argument', 'sessionId required');
+exports.getCheckoutSessionResult = functions
+  .runWith({ secrets: [stripeSecretParam] })
+  .https.onCall(async (data, context) => {
+    const stripe = getStripe();
+    if (!stripe) throw new functions.https.HttpsError('failed-precondition', 'Stripe not configured');
+    const sessionId = data && data.sessionId ? String(data.sessionId) : '';
+    if (!sessionId) throw new functions.https.HttpsError('invalid-argument', 'sessionId required');
 
-  // First: check canonical processed payment record from webhook.
-  const paymentSnap = await db.ref(`payments/${sessionId}`).once('value');
-  if (paymentSnap.exists()) {
-    const p = paymentSnap.val() || {};
+    // First: check canonical processed payment record from webhook.
+    const paymentSnap = await db.ref(`payments/${sessionId}`).once('value');
+    if (paymentSnap.exists()) {
+      const p = paymentSnap.val() || {};
+      return {
+        paid: true,
+        kind: p.kind || null,
+        sessionId,
+        amount: p.amount || null,
+        currency: p.currency || null,
+        source: 'payments-db'
+      };
+    }
+
+    // Fallback: query Stripe directly (covers webhook lag).
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const isPaid = session && (session.payment_status === 'paid' || session.status === 'complete');
     return {
-      paid: true,
-      kind: p.kind || null,
+      paid: !!isPaid,
+      kind: session && session.metadata ? (session.metadata.kind || null) : null,
       sessionId,
-      amount: p.amount || null,
-      currency: p.currency || null,
-      source: 'payments-db'
+      amount: session ? session.amount_total : null,
+      currency: session ? session.currency : null,
+      source: 'stripe-session'
     };
-  }
-
-  // Fallback: query Stripe directly (covers webhook lag).
-  const session = await stripe.checkout.sessions.retrieve(sessionId);
-  const isPaid = session && (session.payment_status === 'paid' || session.status === 'complete');
-  return {
-    paid: !!isPaid,
-    kind: session && session.metadata ? (session.metadata.kind || null) : null,
-    sessionId,
-    amount: session ? session.amount_total : null,
-    currency: session ? session.currency : null,
-    source: 'stripe-session'
-  };
 });
 
-exports.handleStripeWebhook = functions.https.onRequest(async (req,res)=>{
-  setDefaultCors(res); if(!stripe) return res.status(500).send('Stripe not configured'); const sig = req.headers['stripe-signature']||req.headers['Stripe-Signature']; let event;
-  try{ event = stripe.webhooks.constructEvent(req.rawBody,sig,STRIPE_WEBHOOK_SECRET); }catch(err){ console.error('sig',err&&err.message); return res.status(400).send(`Webhook Error: ${err&&err.message}`); }
+exports.handleStripeWebhook = functions
+  .runWith({ secrets: [stripeSecretParam, stripeWebhookSecretParam] })
+  .https.onRequest(async (req,res)=>{
+    setDefaultCors(res);
+    const stripe = getStripe();
+    if(!stripe) return res.status(500).send('Stripe not configured');
+    const whSecret = getWebhookSecret();
+    if(!whSecret) { console.error('STRIPE_WEBHOOK_SECRET not set'); return res.status(500).send('Webhook secret not configured'); }
+    const sig = req.headers['stripe-signature']||req.headers['Stripe-Signature'];
+    let event;
+    try{ event = stripe.webhooks.constructEvent(req.rawBody,sig,whSecret); }catch(err){ console.error('webhook signature verification failed:', err&&err.message); return res.status(400).send(`Webhook Error: ${err&&err.message}`); }
   
   // 🔥 CRITICAL: Only process successful checkout sessions
   if (event.type === 'checkout.session.completed') {
@@ -326,7 +371,12 @@ function _rank(v) {
 const _HATE_SLUR_PATTERNS = [
   /\bn[i1!|]gg(?:e|3)rs?\b/i,
   /\bn[i1!|]gg(?:a|4)s?\b/i,
+  // Google sometimes returns censored slurs even when filterProfanity=false.
+  // Catch the masked forms: n****, n----, n___, n##, etc. (3+ mask chars after 'n').
+  /\bn[*#_\-]{3,}\b/i,
+  /\bn[i1!|]g{1,2}[*#_\-]+\b/i,
   /\bf[a@]gg?(?:o|0)ts?\b/i,
+  /\bf[a@]g{1,2}[*#_\-]+\b/i,
   /\bk[i1!|]kes?\b/i,
   /\bch[i1!|]nks?\b/i,
   /\bsp[i1!|]cs?\b/i,
@@ -608,6 +658,7 @@ exports.moderateMedia = functions
         if (safe) {
           const textAnns = annotations.textAnnotations || [];
           const fullText = textAnns.map(t => (t.text || '')).join(' \n ');
+          console.log('🎬 video OCR text (first 500 chars):', JSON.stringify(fullText.slice(0, 500)));
           const hateHit = _containsHateText(fullText);
           if (hateHit) {
             safe = false;
@@ -626,6 +677,7 @@ exports.moderateMedia = functions
           transcript = speechAnns
             .map(st => (st.alternatives && st.alternatives[0] && st.alternatives[0].transcript) || '')
             .join(' \n ');
+          console.log('🎙️ video transcript length:', transcript.length, '| first 500 chars:', JSON.stringify(transcript.slice(0, 500)));
           const audioHateHit = _containsHateText(transcript);
           if (audioHateHit) {
             safe = false;
