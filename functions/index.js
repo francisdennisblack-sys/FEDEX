@@ -350,12 +350,15 @@ exports.moderateMedia = functions
           medical: _rank(ss.medical),
           spoof: _rank(ss.spoof)
         };
-        // Block on LIKELY/VERY_LIKELY adult or violence; block VERY_LIKELY racy.
+        // Instagram-style thresholds: only block clearly pornographic
+        // or graphically violent content. Allow swimwear, kissing, art
+        // nudity, suggestive poses, action-movie violence, etc.
+        // Block only VERY_LIKELY adult (actual porn) or VERY_LIKELY
+        // violence (gore). Ignore 'racy' entirely (covers bikinis, etc.).
         let safe = true;
         let reason = '';
-        if (scores.adult >= 4) { safe = false; reason = 'adult content detected'; }
-        else if (scores.violence >= 4) { safe = false; reason = 'violent content detected'; }
-        else if (scores.racy >= 5) { safe = false; reason = 'explicit content detected'; }
+        if (scores.adult >= 5) { safe = false; reason = 'pornographic content detected'; }
+        else if (scores.violence >= 5) { safe = false; reason = 'graphic violence detected'; }
         return { safe, reason, scores, mediaType };
       }
 
@@ -374,10 +377,10 @@ exports.moderateMedia = functions
           const r = _rank(f.pornographyLikelihood);
           if (r > worst) worst = r;
         }
-        const safe = worst < 4; // block LIKELY or VERY_LIKELY
+        const safe = worst < 5; // Instagram-style: only block VERY_LIKELY pornography
         return {
           safe,
-          reason: safe ? '' : 'explicit content detected in video',
+          reason: safe ? '' : 'pornographic content detected in video',
           scores: { pornography: worst, frameCount: frames.length },
           mediaType
         };
