@@ -24887,6 +24887,18 @@
                 const file = files[0];
                 const isVideo = file.type.startsWith('video');
                 const isImage = file.type.startsWith('image');
+
+                // Bump a generation token so stale moderation results / overlay timeouts
+                // from a previous (rejected) file can be ignored when a new file is picked.
+                window._mediaUploadGen = (window._mediaUploadGen || 0) + 1;
+                const myGen = window._mediaUploadGen;
+                // Cancel any pending "Image blocked: ..." overlay-clear timer so it doesn't
+                // hide the new "Checking image content..." overlay mid-check.
+                if (window._mediaOverlayTimer) {
+                    clearTimeout(window._mediaOverlayTimer);
+                    window._mediaOverlayTimer = null;
+                }
+                console.log(`📁 handleFiles gen=${myGen} name=${file.name} size=${file.size} type=${file.type}`);
                 
                 // Process video before accepting — show popout while processing, no inline preview
                 if (isVideo) {
@@ -24896,6 +24908,10 @@
                     hideDeleteMediaButton();
 
                     processVideo(file).then((processedBlob) => {
+                        if (myGen !== window._mediaUploadGen) {
+                            console.log(`  ⏭ stale video processVideo result (gen ${myGen} vs ${window._mediaUploadGen}), ignoring`);
+                            return;
+                        }
                         hideMediaLoadingOverlay();
                         if (processedBlob) {
                             selectedFile = processedBlob;
@@ -24939,6 +24955,13 @@
                             isSafe = false;
                         }
 
+                        // If user picked another file while this one was being checked,
+                        // discard this result — the newer handleFiles call owns the UI.
+                        if (myGen !== window._mediaUploadGen) {
+                            console.log(`  ⏭ stale image moderation result for gen=${myGen} (current=${window._mediaUploadGen}), ignoring`);
+                            return;
+                        }
+
                         if (!isSafe) {
                             hideMediaLoadingOverlay();
                             selectedFile = null;
@@ -24948,7 +24971,12 @@
                             const reason = (window.lastModerationReason || 'not allowed').toString();
                             // Show brief warning message in overlay area
                             showMediaLoadingOverlay('Image blocked: ' + reason.replace(/_/g,' ').slice(0,80));
-                            setTimeout(() => hideMediaLoadingOverlay(), 3000);
+                            if (window._mediaOverlayTimer) clearTimeout(window._mediaOverlayTimer);
+                            window._mediaOverlayTimer = setTimeout(() => {
+                                // Only clear if no newer upload has taken over.
+                                if (myGen === window._mediaUploadGen) hideMediaLoadingOverlay();
+                                window._mediaOverlayTimer = null;
+                            }, 3000);
                             return;
                         }
 
@@ -24961,6 +24989,7 @@
                         if (previewText) previewText.textContent = 'Photo selected';
                     };
                     reader.onerror = (err) => {
+                        if (myGen !== window._mediaUploadGen) return;
                         console.error('FileReader error during image moderation prep:', err);
                         hideMediaLoadingOverlay();
                         selectedFile = null;
@@ -24968,7 +24997,11 @@
                         hideDeleteMediaButton();
                         isMediaProcessing = false;
                         showMediaLoadingOverlay('Could not read image — try another');
-                        setTimeout(() => hideMediaLoadingOverlay(), 2200);
+                        if (window._mediaOverlayTimer) clearTimeout(window._mediaOverlayTimer);
+                        window._mediaOverlayTimer = setTimeout(() => {
+                            if (myGen === window._mediaUploadGen) hideMediaLoadingOverlay();
+                            window._mediaOverlayTimer = null;
+                        }, 2200);
                     };
                     reader.readAsDataURL(file);
                 } else {
