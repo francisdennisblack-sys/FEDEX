@@ -6907,8 +6907,10 @@
                         }
 
                         // Boost / Buy badges (persisted flags)
-                        if (post.boosted || post.isBoosted || post.boostStatus === 'active') badges.push({ kind: 'boost', label: '🚀 Boost' });
-                        if (post.sellBadge || post.forSale || post.buyBadge) badges.push({ kind: 'sell', label: '💠 Sell' });
+                        const hasBoostFlag = !!(post.boosted || post.isBoosted || post.boostStatus === 'active' || (post.badges && post.badges.includes('boost')));
+                        const hasSellFlag = !!(post.sellBadge || post.forSale || post.buyBadge || (post.badges && post.badges.includes('sell')));
+                        if (hasBoostFlag) badges.push({ kind: 'boost', label: '🚀 Boost' });
+                        if (hasSellFlag) badges.push({ kind: 'sell', label: '💠 Sell' });
 
                         // Tier badges - ensure LIKED takes precedence over DISLIKED
                         if (!podium.includes(post.id)) {
@@ -6920,7 +6922,12 @@
                                 badges.push({ kind: 'hot', label: '🔥 Hot' });
                             }
                             if (tier === 'NEW') {
-                                badges.push({ kind: 'new', label: '✨ New' });
+                                // Do not show the contextual "NEW" badge when a purchase badge (boost or sell)
+                                // has been applied. UX: purchased boosts/sells should not trigger the "NEW" badge
+                                // or change the visual color scheme for the post.
+                                if (!hasBoostFlag && !hasSellFlag) {
+                                    badges.push({ kind: 'new', label: '✨ New' });
+                                }
                             }
 
                             // LIKED should be shown before DISLIKED when both conditions might be ambiguous
@@ -27461,9 +27468,9 @@
                         // Render Boost badge DOM element when present
                         ensureBadgeStyles();
                         const hasBoost = (updates.badges || []).includes('boost');
-                        // Apply special border classes when badges present
-                        if (hasBoost) box.classList.add('border-boost'); else box.classList.remove('border-boost');
-                        if ((updates.badges || []).includes('sell')) box.classList.add('border-sell'); else box.classList.remove('border-sell');
+                        // Note: intentionally DO NOT apply border color classes here.
+                        // UX decision: purchased boost/sell should not change the post's
+                        // overall color scheme (no border-boost / border-sell applied).
                         let badgeEl = box.querySelector('.boost-badge');
                         if (hasBoost) {
                             // Determine label: prefer postCache metadata, then pendingPayments, else default
@@ -27514,14 +27521,6 @@
         function pushPendingOrder(order) {
             try {
                 const arr = getPendingOrders();
-                // Deduplicate by paymentIntentId: avoid pushing the same PI twice
-                if (order && order.paymentIntentId) {
-                    const exists = arr.some(o => o && o.paymentIntentId && o.paymentIntentId === order.paymentIntentId);
-                    if (exists) {
-                        console.log('📥 pushPendingOrder: duplicate paymentIntentId, skipping push ->', order.paymentIntentId);
-                        return false;
-                    }
-                }
                 arr.push(Object.assign({ consumed: false, paidAt: Date.now() }, order || {}));
                 localStorage.setItem('pendingOrders', JSON.stringify(arr));
                 console.log('📥 pushPendingOrder: added order ->', order);
@@ -27719,60 +27718,61 @@
         window.toggleTheme = toggleTheme;
         window.openLink = openLink;
         window.sharePost = sharePost;
-                    // Ensure pendingPayments hasn't already marked this PI consumed
-                    try {
-                        const pending = JSON.parse(localStorage.getItem('pendingPayments') || '{}');
-                        if (o && o.paymentIntentId && pending[o.paymentIntentId] && pending[o.paymentIntentId].consumed) {
-                            // Skip entries already consumed in pendingPayments map
-                            orders[i].consumed = true; // clean up stale order
-                            continue;
-                        }
-                    } catch (e) {}
-                    if (o.kind === 'boost' && boostOrderIdx === -1) boostOrderIdx = i;
-                    if (o.kind === 'sell' && sellOrderIdx === -1) sellOrderIdx = i;
+        window.reportPost = reportPost;
+        window.closeViewModal = closeViewModal;
+        window.showZoneSelector = showZoneSelector;
+        window.closeZoneSelector = closeZoneSelector;
+        window.checkContentModeration = checkContentModeration;
+        window.updateCharCount = updateCharCount;
+        
+        // Verify all functions are accessible
+        console.log('✅ ALL HTML event handler functions exposed to window:');
+        console.log('  - window.selectAutocomplete:', typeof window.selectAutocomplete === 'function' ? '✅' : '❌');
+        console.log('  - window.selectMLArea:', typeof window.selectMLArea === 'function' ? '✅' : '❌');
         console.log('  - window.showRecommendedAreasDropdown:', typeof window.showRecommendedAreasDropdown === 'function' ? '✅' : '❌');
         console.log('  - window.handleCustomZoneInput:', typeof window.handleCustomZoneInput === 'function' ? '✅' : '❌');
-                // Atomically mark matched orders and corresponding pendingPayments consumed
-                const toConsume = [];
-                if (boostOrderIdx !== -1) toConsume.push(boostOrderIdx);
-                if (sellOrderIdx !== -1 && sellOrderIdx !== boostOrderIdx) toConsume.push(sellOrderIdx);
+        console.log('  - window.clearLocationTag:', typeof window.clearLocationTag === 'function' ? '✅' : '❌');
+        console.log('  - window.updateZonePredictorWithCustom:', typeof window.updateZonePredictorWithCustom === 'function' ? '✅' : '❌');
+        console.log('  - window.uploadPost:', typeof window.uploadPost === 'function' ? '✅' : '❌');
+        console.log('  - window.toggleLike:', typeof window.toggleLike === 'function' ? '✅' : '❌');
+        console.log('  - window.toggleTheme:', typeof window.toggleTheme === 'function' ? '✅' : '❌');
+        
+        console.log('✅ GEOLOCATION MANAGEMENT functions exposed:');
+        console.log('  - window.toggleContinuousLocationTracking:', typeof window.toggleContinuousLocationTracking === 'function' ? '✅' : '❌');
+        console.log('  - window.resetLocationPermission:', typeof window.resetLocationPermission === 'function' ? '✅' : '❌');
+        console.log('  - window.getContinuousLocationStatus:', typeof window.getContinuousLocationStatus === 'function' ? '✅' : '❌');
+        console.log('  - window.startContinuousLocationTracking:', typeof window.startContinuousLocationTracking === 'function' ? '✅' : '❌');
 
-                if (toConsume.length > 0) {
-                    try {
-                        const pending = JSON.parse(localStorage.getItem('pendingPayments') || '{}');
-                        // Mark pendingPayments consumed for these paymentIntentIds to avoid races
-                        toConsume.forEach(idx => {
-                            const o = orders[idx];
-                            if (o && o.paymentIntentId && pending[o.paymentIntentId] && !pending[o.paymentIntentId].consumed) {
-                                pending[o.paymentIntentId].consumed = true;
-                            }
-                            // also mark orders[idx].consumed now
-                            orders[idx].consumed = true;
-                        });
-                        // Persist both maps before attaching to postData
-                        try { localStorage.setItem('pendingPayments', JSON.stringify(pending)); } catch(e) { console.warn('Failed to persist pendingPayments', e); }
-                        try { localStorage.setItem('pendingOrders', JSON.stringify(orders)); } catch(e) { console.warn('Failed to persist pendingOrders', e); }
-                        try { console.log('    pendingPayments AFTER:', JSON.parse(localStorage.getItem('pendingPayments')||'{}')); } catch(e){}
-                        consumedAny = true;
-                    } catch (e) { console.warn('Failed to atomically mark pending as consumed', e); }
+        console.log('✅ REAL-TIME POLLING functions exposed:');
+        console.log('  - window.startLocationPolling:', typeof window.startLocationPolling === 'function' ? '✅' : '❌');
+        console.log('  - window.startPOIPolling:', typeof window.startPOIPolling === 'function' ? '✅' : '❌');
+        console.log('  - window.stopLocationAndPOIPolling:', typeof window.stopLocationAndPOIPolling === 'function' ? '✅' : '❌');
 
-                    // Now attach matched orders to postData using fresh values
-                    if (boostOrderIdx !== -1) {
-                        const bo = orders[boostOrderIdx];
-                        postData.badges = postData.badges || [];
-                        if (!postData.badges.includes('boost')) postData.badges.push('boost');
-                        postData.boostBadge = { paymentIntentId: bo.paymentIntentId || null, purchasedAt: bo.paidAt || Date.now(), label: bo.badgeLabel || 'Boost', amountCents: bo.amount || null };
-                        postData.primaryBadge = postData.primaryBadge || 'boost';
+    </script>
+
+    <!-- Global debug functions (after module script completes) -->
+    <script>
+        console.log('⏳ Waiting for module to initialize...');
+        
+        setTimeout(() => {
+            console.log('🔧 Setting up global debug functions...');
+            
+            // Make sure Firebase objects are available
+            if (!window.database) {
+                console.error('❌ Database not initialized yet!');
+                return;
+            }
+            
+            window.createTestPost = async function() {
+                console.log('🧪 CREATING TEST POST DIRECTLY TO FIREBASE');
+                try {
+                    if (!window.currentUserId) {
+                        console.error('❌ currentUserId not set');
+                        return;
                     }
-
-                    if (sellOrderIdx !== -1) {
-                        const so = orders[sellOrderIdx];
-                        postData.badges = postData.badges || [];
-                        if (!postData.badges.includes('sell')) postData.badges.push('sell');
-                        postData.sellBadge = { paymentIntentId: so.paymentIntentId || null, purchasedAt: so.paidAt || Date.now(), label: so.badgeLabel || 'Buy', amountCents: so.amount || null };
-                        postData.primaryBadge = postData.primaryBadge || 'sell';
-                    }
-                }
+                    
+                    const testPostId = `test-${Date.now()}`;
+                    const testData = {
                         content: 'Test post created at ' + new Date().toLocaleTimeString(),
                         timestamp: Date.now(),
                         likes: 0,
