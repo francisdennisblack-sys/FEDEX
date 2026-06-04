@@ -320,6 +320,31 @@ function _rank(v) {
   return _LIKELIHOOD_RANK[String(v).toUpperCase()] || 0;
 }
 
+// Best-effort hate speech detector. Word-boundary regex against a small set
+// of unambiguous slurs. This is intentionally conservative to avoid false
+// positives (e.g., 'spook' as a noun for ghost). It will NOT catch coded
+// language, leetspeak, or non-English slurs — that requires a real model.
+const _HATE_SLUR_PATTERNS = [
+  /\bn[i1!|]gg(?:e|3)rs?\b/i,
+  /\bn[i1!|]gg(?:a|4)s?\b/i,
+  /\bf[a@]gg?(?:o|0)ts?\b/i,
+  /\bk[i1!|]kes?\b/i,
+  /\bch[i1!|]nks?\b/i,
+  /\bsp[i1!|]cs?\b/i,
+  /\bw[e3]tb[a@]cks?\b/i,
+  /\btr[a@]nn(?:y|ie)s?\b/i,
+  /\bret[a@]rds?\b/i,
+  /\bheil hitler\b/i,
+  /\bwhite power\b/i,
+  /\b1488\b/,
+  /\b14\/88\b/
+];
+function _containsHateSpeech(text) {
+  if (!text) return false;
+  for (const re of _HATE_SLUR_PATTERNS) { if (re.test(text)) return true; }
+  return false;
+}
+
 exports.moderateMedia = functions
   .runWith({ secrets: [visionSecret], timeoutSeconds: 120, memory: '512MB' })
   .https.onCall(async (data, context) => {
@@ -350,15 +375,36 @@ exports.moderateMedia = functions
           medical: _rank(ss.medical),
           spoof: _rank(ss.spoof)
         };
-        // Instagram-style thresholds: only block clearly pornographic
-        // or graphically violent content. Allow swimwear, kissing, art
-        // nudity, suggestive poses, action-movie violence, etc.
-        // Block only VERY_LIKELY adult (actual porn) or VERY_LIKELY
-        // violence (gore). Ignore 'racy' entirely (covers bikinis, etc.).
+        // Strict thresholds: no nudity, no violence.
+        // - adult >= LIKELY catches toplessness, nudity, sex acts.
+        // - violence >= LIKELY catches fights, weapons, blood, gore.
+        // - racy >= VERY_LIKELY catches extreme suggestive content
+        //   (full-body lingerie shots, etc.); bikinis usually score POSSIBLE.
+        // NOTE: Vision SafeSearch does NOT detect racism/hate symbols.
+        // We run text OCR below and block on hate slurs as a best-effort
+        // check for text-in-image racism (swastikas etc. would need a
+        // custom label model — not covered here).
         let safe = true;
         let reason = '';
-        if (scores.adult >= 5) { safe = false; reason = 'pornographic content detected'; }
-        else if (scores.violence >= 5) { safe = false; reason = 'graphic violence detected'; }
+        if (scores.adult >= 4) { safe = false; reason = 'nudity or sexual content detected'; }
+        else if (scores.violence >= 4) { safe = false; reason = 'violent content detected'; }
+        else if (scores.racy >= 5) { safe = false; reason = 'explicit content detected'; }
+
+        // Best-effort hate-speech / racism check via text OCR
+        if (safe) {
+          try {
+            const [textResult] = await client.textDetection({ image: { content: bytes } });
+            const fullText = (textResult && textResult.fullTextAnnotation && textResult.fullTextAnnotation.text) || '';
+            if (fullText && _containsHateSpeech(fullText)) {
+              safe = false;
+              reason = 'hate speech or slurs detected in image text';
+            }
+          } catch (e) {
+            // OCR failure shouldn't block uploads
+            console.warn('text OCR failed:', e && e.message);
+          }
+        }
+
         return { safe, reason, scores, mediaType };
       }
 
@@ -377,10 +423,10 @@ exports.moderateMedia = functions
           const r = _rank(f.pornographyLikelihood);
           if (r > worst) worst = r;
         }
-        const safe = worst < 5; // Instagram-style: only block VERY_LIKELY pornography
+        const safe = worst < 4; // Strict: block LIKELY or VERY_LIKELY pornography/nudity
         return {
           safe,
-          reason: safe ? '' : 'pornographic content detected in video',
+          reason: safe ? '' : 'nudity or sexual content detected in video',
           scores: { pornography: worst, frameCount: frames.length },
           mediaType
         };
