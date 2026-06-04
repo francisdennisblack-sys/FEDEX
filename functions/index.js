@@ -17,13 +17,14 @@ try {
       const sellSnap = await admin.database().ref('pricing/sell').once('value');
       const boost = boostSnap.exists() ? boostSnap.val() : null;
       const sell = sellSnap.exists() ? sellSnap.val() : null;
+      const min = getMinForCurrency('usd');
       const out = {
         boost: {
-          amountCents: boost && Number.isInteger(Number(boost.amountCents)) ? Number(boost.amountCents) : (boost && Number.isFinite(Number(boost.basePrice)) ? Math.round(Number(boost.basePrice)) : 75),
+          amountCents: Math.max(min + 1, boost && Number.isInteger(Number(boost.amountCents)) ? Number(boost.amountCents) : (boost && Number.isFinite(Number(boost.basePrice)) ? Math.round(Number(boost.basePrice)) : 75)),
           label: boost && boost.label ? String(boost.label) : null
         },
         sell: {
-          amountCents: sell && Number.isInteger(Number(sell.amountCents)) ? Number(sell.amountCents) : (sell && Number.isFinite(Number(sell.basePrice)) ? Math.round(Number(sell.basePrice)) : 200),
+          amountCents: Math.max(min + 1, sell && Number.isInteger(Number(sell.amountCents)) ? Number(sell.amountCents) : (sell && Number.isFinite(Number(sell.basePrice)) ? Math.round(Number(sell.basePrice)) : 200)),
           label: sell && sell.label ? String(sell.label) : null
         }
       };
@@ -149,8 +150,8 @@ async function createStripeCheckoutSession(payload) {
   // Enforce minimum charge to avoid Stripe/Network rejections for tiny amounts
   const min = getMinForCurrency(currency);
   if (final_unit_amount < min) {
-    console.warn(`Requested amount ${final_unit_amount} < min ${min} for ${currency}; using min`);
-    final_unit_amount = min;
+    console.warn(`Requested amount ${final_unit_amount} < min ${min} for ${currency}; using min+1`);
+    final_unit_amount = min + 1;
   }
 
   const session = await stripe.checkout.sessions.create({
@@ -409,8 +410,8 @@ exports.createPaymentIntent = functions
     try {
       const min = getMinForCurrency(currency);
       if (amount < min) {
-        console.warn(`createPaymentIntent: amount ${amount} < min ${min} for ${currency}; using min`);
-        amount = min;
+        console.warn(`createPaymentIntent: amount ${amount} < min ${min} for ${currency}; using min+1`);
+        amount = min + 1;
       }
     } catch (e) { /* ignore */ }
     if (!['boost', 'sell', 'boost_sell'].includes(kind)) {
