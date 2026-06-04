@@ -3096,7 +3096,7 @@
         //
         // For Apple/Google Pay:  pass paymentMethodId (from the PR event)
         // For inline Card form:  pass cardElement (the Stripe Elements card)
-        async function payInline({ amount, kind, postId, paymentMethodId = null, cardElement = null, source = 'inline' }) {
+        async function payInline({ amount, kind, postId, paymentMethodId = null, cardElement = null, source = 'inline', badgeLabel = null } = {}) {
             const stripe = _getStripe();
             if (!stripe) throw new Error('Stripe.js not loaded');
 
@@ -3107,12 +3107,15 @@
             }
             const createPaymentIntent = window.httpsCallable(window.functions, 'createPaymentIntent');
             console.log('[Inline Pay] requesting PaymentIntent', { amount, kind, postId, source });
+            // Allow an optional badge label coming from the caller; fall back to sensible defaults
+            const finalBadgeLabel = (badgeLabel && String(badgeLabel).trim()) ? String(badgeLabel).slice(0,128) : (kind === 'sell' ? 'Buy' : 'Boost');
             const piRes = await createPaymentIntent({
                 amount,
                 kind,
                 postId: postId || 'new_post',
                 userId: window.currentUserId || 'anonymous',
-                source
+                source,
+                badgeLabel: finalBadgeLabel
             });
             const clientSecret = piRes && piRes.data && piRes.data.clientSecret;
             const paymentIntentId = piRes && piRes.data && piRes.data.paymentIntentId;
@@ -3140,8 +3143,13 @@
                 try {
                     window.lastPurchaseType = kind;
                     window.purchasePaidAt = Date.now();
+                    // Persist both quick flags and a robust pendingPayments map
                     localStorage.setItem('lastPurchaseType', kind);
                     localStorage.setItem('purchasePaidAt', String(Date.now()));
+                    const pendingRaw = localStorage.getItem('pendingPayments') || '{}';
+                    const pending = JSON.parse(pendingRaw || '{}');
+                    pending[pi.id] = { kind, amount, paidAt: Date.now(), consumed: false, badgeLabel: finalBadgeLabel || null };
+                    localStorage.setItem('pendingPayments', JSON.stringify(pending));
                 } catch (_) {}
                 return { paid: true, paymentIntentId: pi.id, kind };
             }
@@ -25720,7 +25728,16 @@
                     try {
                         if (!Array.isArray(postData.badges)) postData.badges = [];
                         if (!postData.badges.includes('boost')) postData.badges.push('boost');
-                        postData.boostBadge = 'boost';
+                        // Attach boost badge metadata; prefer custom label from pendingPayments
+                        try {
+                            const piId = postData.boostIntent && postData.boostIntent.paymentIntentId ? postData.boostIntent.paymentIntentId : (window.pendingBoost && window.pendingBoost.paymentIntentId) || (localStorage && localStorage.getItem ? localStorage.getItem('pendingBoostPaymentIntentId') : null);
+                            let bLabel = 'Boost';
+                            try {
+                                const pending = JSON.parse(localStorage.getItem('pendingPayments') || '{}');
+                                if (piId && pending && pending[piId] && pending[piId].badgeLabel) bLabel = pending[piId].badgeLabel;
+                            } catch (_) {}
+                            postData.boostBadge = { label: bLabel, paymentIntentId: piId };
+                        } catch (e) { postData.boostBadge = 'boost'; }
                         postData.boostPaidAt = postData.boostIntent ? postData.boostIntent.armedAt : Date.now();
                         postData.boostExpiresAt = postData.boostPaidAt + (24*60*60*1000); // 24h default for MVP
                         postData.boostStatus = 'active';
@@ -25808,14 +25825,22 @@
                         try {
                             if (!Array.isArray(postData.badges)) postData.badges = [];
                             if (!postData.badges.includes('sell')) postData.badges.push('sell');
-                            postData.sellBadge = {
-                                paymentIntentId: window.pendingSell.paymentIntentId || (localStorage && localStorage.getItem ? localStorage.getItem('pendingSellPaymentIntentId') : null),
-                                purchasedAt: Date.now(),
-                                amountCents: 200,
-                                currency: 'usd',
-                                label: 'Buy',
-                                sizeMultiplier: 1.25
-                            };
+                            try {
+                                const piId = window.pendingSell.paymentIntentId || (localStorage && localStorage.getItem ? localStorage.getItem('pendingSellPaymentIntentId') : null);
+                                let label = 'Buy';
+                                try {
+                                    const pending = JSON.parse(localStorage.getItem('pendingPayments') || '{}');
+                                    if (piId && pending && pending[piId] && pending[piId].badgeLabel) label = pending[piId].badgeLabel;
+                                } catch (_) {}
+                                postData.sellBadge = {
+                                    paymentIntentId: piId,
+                                    purchasedAt: Date.now(),
+                                    amountCents: 200,
+                                    currency: 'usd',
+                                    label: label,
+                                    sizeMultiplier: 1.25
+                                };
+                            } catch (e) { console.warn('Failed to attach sell badge metadata', e); }
                             postData.primaryBadge = 'sell';
                         } catch (e) { console.warn('Failed to attach sell badge metadata', e); }
                     }

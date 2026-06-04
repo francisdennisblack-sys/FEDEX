@@ -292,7 +292,8 @@ async function processSuccessfulPayment({ paymentId, type, postId, kind, userId,
       const userSnapshot = await userRef.once('value');
       const account = userSnapshot.val() || { balance: 0, purchases: {} };
       if (!account.purchases) account.purchases = {};
-      account.purchases[paymentId] = { kind, postId, amount, currency, purchasedAt: Date.now() };
+        const badgeLabel = raw && raw.metadata && raw.metadata.badgeLabel ? String(raw.metadata.badgeLabel) : null;
+        account.purchases[paymentId] = { kind, postId, amount, currency, purchasedAt: Date.now(), badgeLabel: badgeLabel || null };
       if (!account.entitlements) account.entitlements = {};
       if (kind === 'boost' || kind === 'boost_sell') {
         account.entitlements.boost = { paid: true, paymentId, purchasedAt: Date.now() };
@@ -303,6 +304,22 @@ async function processSuccessfulPayment({ paymentId, type, postId, kind, userId,
       await userRef.set(account);
       console.log(`👤 Credited user account: ${userId}, kind=${kind}`);
     }
+      // Also create a user-level badge record (preserved until consumed by next post)
+      try {
+        if (userId && userId !== 'anonymous' && badgeLabel) {
+          const badgeRef = db.ref(`users/${userId}/badges/${paymentId}`);
+          await badgeRef.set({
+            paymentId,
+            type: kind,
+            label: badgeLabel,
+            purchasedAt: admin.database.ServerValue.TIMESTAMP,
+            consumed: false,
+            amount,
+            currency
+          });
+          console.log(`🏷️ Saved user badge record for ${userId} / ${paymentId}`);
+        }
+      } catch (e) { console.error('Failed saving user badge record:', e); }
   } catch (e) {
     console.error('processSuccessfulPayment error:', e);
   }
@@ -326,6 +343,7 @@ exports.createPaymentIntent = functions
     if (!['boost', 'sell', 'boost_sell'].includes(kind)) {
       throw new functions.https.HttpsError('invalid-argument', 'kind must be boost, sell, or boost_sell');
     }
+    const badgeLabel = data && data.badgeLabel ? String(data.badgeLabel).slice(0,128) : null;
     try {
       const pi = await stripe.paymentIntents.create({
         amount,
@@ -336,7 +354,8 @@ exports.createPaymentIntent = functions
           postId: String(postId).replace(/[^a-zA-Z0-9_\-\.]/g, '_'),
           kind: kind.replace(/[^a-zA-Z0-9_\-]/g, '_'),
           userId: String(userId).replace(/[^a-zA-Z0-9_\-\.]/g, '_'),
-          source: (data && data.source) || 'inline'
+          source: (data && data.source) || 'inline',
+          badgeLabel: badgeLabel || ''
         }
       });
       return { clientSecret: pi.client_secret, paymentIntentId: pi.id };
