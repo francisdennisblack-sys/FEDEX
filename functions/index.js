@@ -10,6 +10,29 @@ try {
   const app = express();
   app.use(express.json());
   app.use('/api', poisRouter);
+  // Lightweight pricing endpoint so the client can fetch the authoritative boost/sell price
+  app.get('/api/boost-price', async (req, res) => {
+    try {
+      const boostSnap = await admin.database().ref('pricing/boost').once('value');
+      const sellSnap = await admin.database().ref('pricing/sell').once('value');
+      const boost = boostSnap.exists() ? boostSnap.val() : null;
+      const sell = sellSnap.exists() ? sellSnap.val() : null;
+      const out = {
+        boost: {
+          amountCents: boost && Number.isInteger(Number(boost.amountCents)) ? Number(boost.amountCents) : (boost && Number.isFinite(Number(boost.basePrice)) ? Math.round(Number(boost.basePrice)) : 75),
+          label: boost && boost.label ? String(boost.label) : null
+        },
+        sell: {
+          amountCents: sell && Number.isInteger(Number(sell.amountCents)) ? Number(sell.amountCents) : (sell && Number.isFinite(Number(sell.basePrice)) ? Math.round(Number(sell.basePrice)) : 200),
+          label: sell && sell.label ? String(sell.label) : null
+        }
+      };
+      return res.json(out);
+    } catch (e) {
+      console.error('boost-price error', e && e.message);
+      return res.status(500).json({ error: 'internal' });
+    }
+  });
   // Export a combined express app as `api`
   exports.api = functions.https.onRequest(app);
   expressAppMounted = true;
@@ -98,8 +121,24 @@ async function createStripeCheckoutSession(payload) {
   const normalized = normalizeCheckoutInput(payload);
   const { postId, kind, unit_amount, currency, okSuccess, okCancel, metaPostId, metaKind, metaUserId } = normalized;
 
-  if (!postId || !kind || !unit_amount) throw new Error('postId,kind,amount required');
-  if (!Number.isInteger(unit_amount) || unit_amount <= 0) throw new Error('invalid amount; provide integer cents or decimal dollars');
+  // Resolve server-side configured price for kinds we control (boost/sell).
+  let final_unit_amount = unit_amount;
+  try {
+    if (kind === 'boost' || kind === 'sell' || kind === 'boost_sell') {
+      const priceSnap = await db.ref(`pricing/${kind}`).once('value');
+      if (priceSnap.exists()) {
+        const data = priceSnap.val();
+        if (data && Number.isInteger(Number(data.amountCents))) {
+          final_unit_amount = Number(data.amountCents);
+        } else if (data && Number.isFinite(Number(data.basePrice))) {
+          final_unit_amount = Math.round(Number(data.basePrice));
+        }
+      }
+    }
+  } catch (e) { console.warn('Price lookup failed, using client amount', e && e.message); }
+
+  if (!postId || !kind || !final_unit_amount) throw new Error('postId,kind,amount required');
+  if (!Number.isInteger(final_unit_amount) || final_unit_amount <= 0) throw new Error('invalid amount; provide integer cents or decimal dollars');
 
   const session = await stripe.checkout.sessions.create({
     payment_method_types:['card'],
@@ -108,7 +147,7 @@ async function createStripeCheckoutSession(payload) {
       price_data:{
         currency,
         product_data:{name:`${kind} for post ${postId}`},
-        unit_amount
+        unit_amount: final_unit_amount
       },
       quantity:1
     }],
@@ -332,11 +371,24 @@ exports.createPaymentIntent = functions
   .https.onCall(async (data, context) => {
     const stripe = getStripe();
     if (!stripe) throw new functions.https.HttpsError('failed-precondition', 'Stripe not configured');
-    const amount = Math.round(Number(data && data.amount));
+    // Determine amount (cents). Prefer server-side configured price for controlled kinds.
+    let amount = data && data.amount ? Math.round(Number(data.amount)) : 0;
     const currency = String((data && data.currency) || 'usd').toLowerCase();
     const kind = String((data && data.kind) || '').toLowerCase();
     const postId = data && data.postId ? String(data.postId) : 'new_post';
     const userId = (data && data.userId) || (context && context.auth && context.auth.uid) || 'anonymous';
+    // If this is a server-controlled kind (boost/sell), attempt to fetch authoritative price
+    try {
+      if (['boost','sell','boost_sell'].includes(kind)) {
+        const priceSnap = await db.ref(`pricing/${kind}`).once('value');
+        if (priceSnap.exists()) {
+          const p = priceSnap.val();
+          if (p && Number.isInteger(Number(p.amountCents))) amount = Number(p.amountCents);
+          else if (p && Number.isFinite(Number(p.basePrice))) amount = Math.round(Number(p.basePrice));
+        }
+      }
+    } catch (e) { console.warn('Price lookup failed for createPaymentIntent', e && e.message); }
+
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new functions.https.HttpsError('invalid-argument', 'amount (positive integer cents) required');
     }
