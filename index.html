@@ -27864,6 +27864,8 @@
         async function applyPurchaseBadges(postId, { boost = false, sell = false } = {}) {
             if (!postId) return;
             try {
+                console.log('🔔 applyPurchaseBadges start', { postId, boost, sell });
+                try { console.trace && console.trace('applyPurchaseBadges stacktrace'); } catch(e){}
                 // Find post in local caches
                 let post = null;
                 if (typeof postCache !== 'undefined' && postCache && postCache[postId]) post = postCache[postId];
@@ -27905,15 +27907,17 @@
                 // Update local caches so UI reflects immediately
                 try {
                     if (typeof postCache !== 'undefined' && postCache && postCache[postId]) {
-                        postCache[postId].badges = updates.badges;
+                        // Defensive clone arrays to avoid sharing the same array
+                        postCache[postId].badges = (updates.badges || []).slice();
                         if (updates.boostExpiresAt) postCache[postId].boostExpiresAt = updates.boostExpiresAt;
                         if (updates.boostStatus) postCache[postId].boostStatus = updates.boostStatus;
                     }
                     if (typeof gridContent !== 'undefined') {
                         for (const key in gridContent) {
                             (gridContent[key] || []).forEach(p => {
-                                if (p.id === postId) {
-                                    p.badges = updates.badges;
+                                if (p && p.id === postId) {
+                                    // Defensive clone to avoid accidentally sharing arrays between objects
+                                    p.badges = (updates.badges || []).slice();
                                     if (updates.boostExpiresAt) p.boostExpiresAt = updates.boostExpiresAt;
                                     if (updates.boostStatus) p.boostStatus = updates.boostStatus;
                                 }
@@ -27926,6 +27930,12 @@
                 try {
                     const box = document.querySelector(`.grid-box[data-post-id="${postId}"]`);
                     if (box) {
+                        // Extra guard: ensure box actually belongs to the postId
+                        try {
+                            if (box.getAttribute('data-post-id') !== postId) {
+                                console.warn('applyPurchaseBadges: matched box has mismatched data-post-id', box.getAttribute('data-post-id'), postId);
+                            }
+                        } catch (e) {}
                         box.classList.remove('badge-sell', 'badge-boost');
                         Array.from(updates.badges || []).forEach(b => box.classList.add(`badge-${b}`));
                         // Render Boost badge DOM element when present
@@ -27934,37 +27944,19 @@
                         // Note: intentionally DO NOT apply border color classes here.
                         // UX decision: purchased boost/sell should not change the post's
                         // overall color scheme (no border-boost / border-sell applied).
-                        let badgeEl = box.querySelector('.boost-badge');
-                        if (hasBoost) {
-                            // Determine label: prefer postCache metadata, then pendingPayments, else default
-                            let labelText = 'Boost';
-                            try {
-                                if (postCache && postCache[postId] && postCache[postId].boostBadge) {
-                                    const bb = postCache[postId].boostBadge;
-                                    if (typeof bb === 'string') labelText = bb;
-                                    else if (bb && bb.label) labelText = bb.label;
-                                } else {
-                                    const pending = JSON.parse(localStorage.getItem('pendingPayments') || '{}');
-                                    for (const k of Object.keys(pending)) {
-                                        const p = pending[k];
-                                        if (p && p.kind === 'boost' && !p.consumed) { labelText = p.badgeLabel || labelText; break; }
-                                    }
-                                }
-                            } catch (_) {}
-                            if (!badgeEl) {
-                                badgeEl = document.createElement('div');
-                                badgeEl.className = 'boost-badge';
-                                badgeEl.innerHTML = `<span class="rocket">🚀</span><span class="label">${labelText}</span>`;
-                                badgeEl.dataset.label = labelText;
-                                box.appendChild(badgeEl);
+                        // Instead of creating a separate prominent boost element here,
+                        // rely on the canonical right-hand `.post-badges` container so
+                        // BOOST and BUY render together side-by-side. Trigger a
+                        // recompute/render so visible tiles update immediately.
+                        try {
+                            if (typeof recomputeAndApplyBadges === 'function') {
+                                try { recomputeAndApplyBadges(); } catch(e) { console.warn('recomputeAndApplyBadges failed after applyPurchaseBadges', e); }
                             } else {
-                                try { badgeEl.querySelector('.label').textContent = labelText; badgeEl.dataset.label = labelText; } catch(_){}
+                                // Fallback: toggle compact classes so CSS-only styles still reflect state
+                                try { box.classList.toggle('badge-boost', hasBoost); } catch(e){}
+                                try { box.classList.toggle('badge-sell', (updates.badges||[]).includes('sell')); } catch(e){}
                             }
-                            // Keep badge interactive: click shows details if needed
-                            if (!badgeEl.onclick) badgeEl.onclick = (ev) => { ev.stopPropagation(); openBadgeInfoModal && openBadgeInfoModal(postId); };
-                        } else {
-                            if (badgeEl && badgeEl.parentNode) badgeEl.parentNode.removeChild(badgeEl);
-                        }
+                        } catch(e) { /* ignore DOM sync errors */ }
                     }
                 } catch (e) { /* ignore DOM update failures */ }
 
@@ -27996,7 +27988,8 @@
         function consumePendingOrdersForPost(postData) {
             if (!postData) return;
             try {
-                console.log('🍽️ consumePendingOrdersForPost: starting. postId=', postData && postData.id);
+                console.log('🍽️ consumePendingOrdersForPost: starting.', { postId: postData && postData.id });
+                try { console.trace && console.trace('consumePendingOrdersForPost stacktrace'); } catch(e){}
                 console.log('    current pendingOrders BEFORE:', getPendingOrders());
                 try { console.log('    current pendingPayments BEFORE:', JSON.parse(localStorage.getItem('pendingPayments')||'{}')); } catch(e){}
                 const orders = getPendingOrders();
@@ -28068,6 +28061,15 @@
                         orders.forEach(o => { if (o && o.consumed && o.kind) inc(o.kind); });
                     } catch(e) { /* ignore counter errors */ }
                     } catch(e) { console.warn('Failed clearing transient purchase flags', e); }
+                    // Apply the badges to the post via canonical helper so caches/DOM update consistently
+                    try {
+                        const boostFlag = !!(postData.badges && postData.badges.includes('boost'));
+                        const sellFlag = !!(postData.badges && postData.badges.includes('sell'));
+                        if (postData.id) {
+                            console.log('🍽️ consumePendingOrdersForPost: calling applyPurchaseBadges for', postData.id, { boost: boostFlag, sell: sellFlag });
+                            try { applyPurchaseBadges(postData.id, { boost: boostFlag, sell: sellFlag }); } catch(e){ console.warn('Failed to call applyPurchaseBadges from consumePendingOrdersForPost', e); }
+                        }
+                    } catch(e) { /* ignore */ }
                 }
             } catch (e) { console.warn('consumePendingOrdersForPost failed', e); }
         }
