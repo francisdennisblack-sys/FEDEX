@@ -26649,6 +26649,54 @@
                     return d;
                 })
                 .catch(e => console.warn('OSM places preload failed:', e));
+
+            // Ensure POI data is (re)loaded when the user returns to the tab or focuses the window
+            window.ensurePOIDataReady = async function ensurePOIDataReady() {
+                try {
+                    if (!window.CLEANUP_FLAGS || window.CLEANUP_FLAGS.ENABLE_POI_LOADING === false) {
+                        console.log('⚠️ POI loading disabled by CLEANUP_FLAGS');
+                        return;
+                    }
+
+                    // If the global POI DB is already populated, nothing to do
+                    if (window.globalPOIDatabase && Array.isArray(window.globalPOIDatabase) && window.globalPOIDatabase.length > 0) {
+                        console.log('✅ POI DB already loaded');
+                        return;
+                    }
+
+                    // kick off both the search-index preload and the lightweight POI load
+                    if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                        window._poiIndexPreloadPromise = window._poiIndexPreloadPromise || window.ensureGlobalPoiSearchIndex().catch(e => console.warn('POI index preload failed:', e));
+                    }
+                    // Start the state-optimized POI load (non-blocking)
+                    if (typeof window.loadPOIData === 'function') {
+                        // Don't await here; let callers await if they need blocking behavior
+                        window._poiDataLoadPromise = window._poiDataLoadPromise || window.loadPOIData().catch(e => console.warn('POI data load failed:', e));
+                    }
+                } catch (e) { console.warn('ensurePOIDataReady error', e); }
+            };
+
+            // When page/tab becomes visible again, ensure POIs and location are refreshed
+            document.addEventListener('visibilitychange', () => {
+                try {
+                    if (document.visibilityState === 'visible') {
+                        console.log('👀 Page visible again — ensuring POI data and fresh location');
+                        // Re-request geolocation (best-effort)
+                        requestGeolocation().catch(() => {});
+                        // Ensure POI preload runs
+                        try { window.ensurePOIDataReady(); } catch(e){}
+                    }
+                } catch(e){}
+            });
+
+            // Also handle window focus as some browsers don't always fire visibilitychange reliably
+            window.addEventListener('focus', () => {
+                try {
+                    console.log('🔆 Window focused — ensuring POI data');
+                    requestGeolocation().catch(() => {});
+                    try { window.ensurePOIDataReady(); } catch(e){}
+                } catch(e){}
+            });
             
             // ⚡ CRITICAL PATH: Show content IMMEDIATELY (before anything else)
             // Initialize theme, show grid skeleton
