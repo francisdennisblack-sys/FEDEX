@@ -359,20 +359,25 @@ const _HATE_PHRASE_PATTERNS = [
 // Labels returned by Cloud Vision LABEL_DETECTION or OBJECT_LOCALIZATION
 // that indicate weapons, gore, or hate imagery. We require a score >= 0.7
 // (high confidence) to block, to keep false positives down.
+// IMPORTANT: keep entries here distinctive enough that a word-boundary match
+// won't blow up on benign content. Generic terms like "blood", "death",
+// "knife", "blade", "bullet", "magazine", "injury", "wound" were removed
+// because they false-positive on kitchen videos, sports highlights, food
+// (blood orange, bloody mary), trains (bullet train), nature (death valley,
+// blade of grass), reading (magazine), etc.
 const _WEAPON_LABELS = [
-  'gun','handgun','pistol','revolver','rifle','shotgun','firearm','assault rifle',
+  'handgun','pistol','revolver','rifle','shotgun','firearm','assault rifle',
   'machine gun','submachine gun','sniper rifle','ak-47','ar-15','glock','uzi',
-  'ammunition','bullet','cartridge','magazine (firearms)',
-  'knife','dagger','sword','machete','katana','blade'
+  'machete','katana'
 ];
 const _GORE_LABELS = [
-  'blood','bleeding','wound','injury','gore','corpse','dead body','death',
-  'dismemberment','decapitation','severed','mutilation','massacre'
+  'gore','corpse','dead body','dismemberment','decapitation','severed head',
+  'mutilation','massacre','disembowelment'
 ];
 const _HATE_SYMBOL_LABELS = [
   'swastika','nazi','nazism','third reich','hitler','ss insignia','ss runes',
   'ku klux klan','kkk','klan','burning cross','confederate flag','rebel flag',
-  'iron cross','sonnenrad','black sun','celtic cross (white supremacist)',
+  'sonnenrad','black sun','celtic cross (white supremacist)',
   'noose','lynching'
 ];
 const _ALL_BLOCKED_LABELS = new Set([
@@ -380,6 +385,13 @@ const _ALL_BLOCKED_LABELS = new Set([
   ..._GORE_LABELS.map(s => s.toLowerCase()),
   ..._HATE_SYMBOL_LABELS.map(s => s.toLowerCase())
 ]);
+// Word-boundary regex per blocked label, so "magazine (firearms)" only
+// matches the literal phrase, "ku klux klan" matches even inside a longer
+// description, but "blade" never matches "blade of grass".
+const _BLOCKED_LABEL_REGEXES = Array.from(_ALL_BLOCKED_LABELS).map(label => {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return { label, re: new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i') };
+});
 
 function _containsHateText(text) {
   if (!text) return false;
@@ -392,14 +404,17 @@ function _findBadLabel(labelAnnotations) {
   for (const lab of labelAnnotations) {
     const desc = (lab.description || '').toLowerCase().trim();
     const score = typeof lab.score === 'number' ? lab.score : 0;
-    if (score < 0.65) continue;
+    if (score < 0.75) continue;
     if (_ALL_BLOCKED_LABELS.has(desc)) {
       return { label: desc, score, category: _WEAPON_LABELS.includes(desc) ? 'weapon' : _GORE_LABELS.includes(desc) ? 'gore' : 'hate_symbol' };
     }
-    // Partial match for compound descriptions like "assault rifle in hands"
-    for (const blocked of _ALL_BLOCKED_LABELS) {
-      if (desc.includes(blocked)) {
-        return { label: desc, matched: blocked, score, category: 'partial' };
+    // Word-boundary match for compound descriptions like "assault rifle in hands"
+    for (const { label, re } of _BLOCKED_LABEL_REGEXES) {
+      if (re.test(desc)) {
+        const cat = _WEAPON_LABELS.includes(label) ? 'weapon'
+                  : _GORE_LABELS.includes(label) ? 'gore'
+                  : 'hate_symbol';
+        return { label: desc, matched: label, score, category: cat };
       }
     }
   }
@@ -410,10 +425,10 @@ function _findBadObject(objectAnnotations) {
   for (const obj of objectAnnotations) {
     const name = (obj.name || '').toLowerCase().trim();
     const score = typeof obj.score === 'number' ? obj.score : 0;
-    if (score < 0.6) continue;
+    if (score < 0.7) continue;
     if (_ALL_BLOCKED_LABELS.has(name)) return { object: name, score };
-    for (const blocked of _ALL_BLOCKED_LABELS) {
-      if (name.includes(blocked)) return { object: name, matched: blocked, score };
+    for (const { label, re } of _BLOCKED_LABEL_REGEXES) {
+      if (re.test(name)) return { object: name, matched: label, score };
     }
   }
   return null;
@@ -543,20 +558,28 @@ exports.moderateMedia = functions
         const [opResult] = await operation.promise();
         const annotations = (opResult && opResult.annotationResults && opResult.annotationResults[0]) || {};
 
-        // Pass 1: explicit content per-frame
+        // Pass 1: explicit content per-frame.
+        // Video Intelligence likelihoods: 1=VERY_UNLIKELY ... 5=VERY_LIKELY.
+        // To avoid blocking benign videos where a single frame is mis-scored
+        // (swimwear, dancing, low light), we require EITHER one VERY_LIKELY
+        // frame OR at least 3 LIKELY frames.
         const expFrames = (annotations.explicitAnnotation && annotations.explicitAnnotation.frames) || [];
         let worstExplicit = 0;
+        let likelyCount = 0;
+        let veryLikelyCount = 0;
         for (const f of expFrames) {
           const r = _rank(f.pornographyLikelihood);
           if (r > worstExplicit) worstExplicit = r;
+          if (r >= 4) likelyCount++;
+          if (r >= 5) veryLikelyCount++;
         }
         const checks = [];
         let safe = true;
         let reason = '';
-        if (worstExplicit >= 4) {
+        if (veryLikelyCount >= 1 || likelyCount >= 3) {
           safe = false;
           reason = 'nudity or sexual content detected in video';
-          checks.push('video:explicit');
+          checks.push(`video:explicit(vl=${veryLikelyCount},l=${likelyCount})`);
         }
 
         // Pass 2: shot-level + segment labels → weapons, gore, hate symbols
