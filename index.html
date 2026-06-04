@@ -12464,6 +12464,52 @@
                 await set(postRef, postData);
                 console.log('✅ Firebase set() completed successfully');
 
+                // Immediately consume any unconsumed user-level badge purchase so
+                // the badge is persisted on the newly-created post and visible
+                // to other users without waiting for webhooks or manual flush.
+                try {
+                    if (postData.authId) {
+                        const badgesRef = ref(database, `users/${postData.authId}/badges`);
+                        const badgesSnap = await get(badgesRef);
+                        if (badgesSnap && badgesSnap.exists()) {
+                            const badgesObj = badgesSnap.val();
+                            // Find the oldest unconsumed badge record
+                            const keys = Object.keys(badgesObj || {}).sort((a,b)=> (badgesObj[a].purchasedAt||0) - (badgesObj[b].purchasedAt||0));
+                            for (const k of keys) {
+                                try {
+                                    const rec = badgesObj[k];
+                                    if (!rec || rec.consumed) continue;
+                                    // Apply based on type
+                                    const updates = {};
+                                    if (rec.type === 'boost') {
+                                        updates[`posts/${postId}/boostPaidAt`] = admin.database.ServerValue.TIMESTAMP;
+                                        updates[`posts/${postId}/boostExpiresAt`] = Date.now() + (24*60*60*1000);
+                                        updates[`posts/${postId}/boostStatus`] = 'active';
+                                        updates[`posts/${postId}/boostBadge`] = { label: rec.label || 'Boost', paymentId: rec.paymentId || k };
+                                    } else if (rec.type === 'sell') {
+                                        updates[`posts/${postId}/sellPaidAt`] = admin.database.ServerValue.TIMESTAMP;
+                                        updates[`posts/${postId}/primaryBadge`] = 'sell';
+                                        updates[`posts/${postId}/sellBadge`] = { label: rec.label || 'Buy', paymentId: rec.paymentId || k };
+                                    } else {
+                                        // unknown badge type — skip
+                                        continue;
+                                    }
+                                    // Persist updates atomically
+                                    await db.ref().update(updates);
+                                    // Mark badge as consumed
+                                    await ref(database, `users/${postData.authId}/badges/${k}`).update({ consumed: true, consumedAt: Date.now(), consumedOnPost: postId });
+                                    console.log(`🏷️ Consumed badge ${k} for user ${postData.authId} -> applied to post ${postId}`);
+                                    break; // consume only one badge per post
+                                } catch (recErr) {
+                                    console.warn('Failed to consume badge record', k, recErr);
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Badge consumption after post save failed:', e && e.message ? e.message : e);
+                }
+
                 // ALSO write per-user index and zone index for tracking and fast queries
                 try {
                     if (postData.authId) {
