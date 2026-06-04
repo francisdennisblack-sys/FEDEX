@@ -25606,6 +25606,31 @@
 
             if (!lastPurchaseType) return; // No pending purchase
 
+            // Extra safeguard: ensure there are actually unconsumed pendingOrders
+            try {
+                const ordersCheck = (typeof getPendingOrders === 'function') ? getPendingOrders() : JSON.parse(localStorage.getItem('pendingOrders') || '[]');
+                const hasUnconsumedBoost = ordersCheck.some(o => o && !o.consumed && o.kind === 'boost');
+                const hasUnconsumedSell = ordersCheck.some(o => o && !o.consumed && o.kind === 'sell');
+                if (lastPurchaseType === 'boost' && !hasUnconsumedBoost) {
+                    console.log('applyPendingPurchaseToNextPost: no unconsumed boost orders found, clearing lastPurchaseType');
+                    try { localStorage.removeItem('lastPurchaseType'); } catch(_) {}
+                    window.lastPurchaseType = null;
+                    return;
+                }
+                if (lastPurchaseType === 'sell' && !hasUnconsumedSell) {
+                    console.log('applyPendingPurchaseToNextPost: no unconsumed sell orders found, clearing lastPurchaseType');
+                    try { localStorage.removeItem('lastPurchaseType'); } catch(_) {}
+                    window.lastPurchaseType = null;
+                    return;
+                }
+                if (lastPurchaseType === 'boost_sell' && !(hasUnconsumedBoost || hasUnconsumedSell)) {
+                    console.log('applyPendingPurchaseToNextPost: no unconsumed boost/sell orders found, clearing lastPurchaseType');
+                    try { localStorage.removeItem('lastPurchaseType'); } catch(_) {}
+                    window.lastPurchaseType = null;
+                    return;
+                }
+            } catch (e) { /* ignore check failures */ }
+
             // Mirror to window so both code paths see the same value
             window.lastPurchaseType = lastPurchaseType;
             window.purchasePaidAt = purchasePaidAt;
@@ -26427,6 +26452,10 @@
                     }
                     const previewTextEl = document.getElementById('uploadPreviewText');
                     if (previewTextEl) previewTextEl.textContent = 'No media selected';
+                    // Ensure full reset of payment UI (unmount Stripe elements,
+                    // restore buttons) so payments are not pre-filled for next post.
+                    try { if (typeof resetBoostButton === 'function') resetBoostButton(); } catch(e){}
+                    try { if (typeof resetSellButton === 'function') resetSellButton(); } catch(e){}
                 } catch (e) {
                     console.warn('⚠️ Failed to reset composer badge UI:', e);
                 }
@@ -27890,6 +27919,20 @@
                         try { if (window.selectedBadges) { window.selectedBadges = []; } } catch(e){}
                         try { window.primaryBadge = null; } catch(e){}
                         console.log('🍽️ consumePendingOrdersForPost: cleared transient purchase flags from localStorage and window state');
+                    // Increment local counters recording how many boost/sell badges
+                    // this user has consumed. This helps enforce "one-post-only"
+                    // behavior and for light analytics in the client.
+                    try {
+                        const inc = (k) => {
+                            try {
+                                const key = `userBadgeCount_${k}`;
+                                const cur = parseInt(localStorage.getItem(key) || '0', 10) || 0;
+                                localStorage.setItem(key, String(cur + 1));
+                                console.log(`🔢 ${key} ->`, cur + 1);
+                            } catch(e){}
+                        };
+                        orders.forEach(o => { if (o && o.consumed && o.kind) inc(o.kind); });
+                    } catch(e) { /* ignore counter errors */ }
                     } catch(e) { console.warn('Failed clearing transient purchase flags', e); }
                 }
             } catch (e) { console.warn('consumePendingOrdersForPost failed', e); }
