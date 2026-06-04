@@ -15138,6 +15138,7 @@
                     });
                     console.log('🧹 Purged deleted post from gridContent and postCache:', selectedPostId);
                 } catch(e) { console.warn('Failed to purge deleted post from gridContent', e); }
+                try { rebuildGridScrollerFromGridContent(); } catch(e) { console.warn('rebuild scroller after delete failed', e); }
             } catch (e) { console.warn('Cleanup after delete failed', e); }
 
             // If using VirtualGridScroller, remove the item from its cache for instant disappearance
@@ -23028,6 +23029,40 @@
                 } catch (e) { /* ignore DOM probing failures */ }
 
                 gridContent[contentKey].splice(insertAt, 0, postData);
+                try { console.log(`➕ insertNewPostIntoGrid: inserted ${postData.id} at index ${insertAt} in ${contentKey}`); } catch(e){}
+
+                // Update virtual scroller items to reflect this new insertion so the
+                // visible grid updates without a full page refresh.
+                try { rebuildGridScrollerFromGridContent(); } catch(e) { console.warn('rebuild scroller after insert failed', e); }
+            }
+
+            // Rebuild VirtualGridScroller items from current gridContent state.
+            function rebuildGridScrollerFromGridContent() {
+                try {
+                    if (!window.gridScroller) return;
+                    const seen = new Set();
+                    const all = [];
+                    // Prefer user's key first to keep owned posts visible
+                    if (currentUserId && Array.isArray(gridContent[currentUserId])) {
+                        gridContent[currentUserId].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
+                    }
+                    if (Array.isArray(gridContent['shared-posts'])) {
+                        gridContent['shared-posts'].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
+                    }
+                    Object.keys(gridContent).forEach(k => {
+                        if (!Array.isArray(gridContent[k])) return;
+                        if (k === currentUserId || k === 'shared-posts') return;
+                        gridContent[k].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
+                    });
+
+                    if (typeof gridScroller.setItems === 'function') {
+                        gridScroller.setItems(all);
+                    } else if (Array.isArray(gridScroller.items)) {
+                        gridScroller.items = all;
+                        if (typeof gridScroller.refresh === 'function') gridScroller.refresh();
+                    }
+                    try { console.log('🔁 rebuildGridScrollerFromGridContent: rebuilt scroller with', all.length, 'items'); } catch(e){}
+                } catch (e) { console.warn('rebuildGridScrollerFromGridContent failed', e); }
             }
         }
         
