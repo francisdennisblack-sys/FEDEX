@@ -3087,6 +3087,69 @@
         }
         window.initiateCheckout = initiateCheckout; // Expose for button clicks
 
+        // ==========================================================================
+        // 🟢 INLINE PAYMENT (no redirect)
+        // ==========================================================================
+        // Creates a Stripe PaymentIntent on the backend and confirms it client-side
+        // with stripe.confirmCardPayment(). The user never leaves wificontent.com.
+        // Used by both Apple/Google Pay wallets and the inline Card Element.
+        //
+        // For Apple/Google Pay:  pass paymentMethodId (from the PR event)
+        // For inline Card form:  pass cardElement (the Stripe Elements card)
+        async function payInline({ amount, kind, postId, paymentMethodId = null, cardElement = null, source = 'inline' }) {
+            const stripe = _getStripe();
+            if (!stripe) throw new Error('Stripe.js not loaded');
+
+            if (!window.functions) {
+                const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
+                window.functions = getFunctions(window.app, 'us-central1');
+                window.httpsCallable = httpsCallable;
+            }
+            const createPaymentIntent = window.httpsCallable(window.functions, 'createPaymentIntent');
+            console.log('[Inline Pay] requesting PaymentIntent', { amount, kind, postId, source });
+            const piRes = await createPaymentIntent({
+                amount,
+                kind,
+                postId: postId || 'new_post',
+                userId: window.currentUserId || 'anonymous',
+                source
+            });
+            const clientSecret = piRes && piRes.data && piRes.data.clientSecret;
+            const paymentIntentId = piRes && piRes.data && piRes.data.paymentIntentId;
+            if (!clientSecret) throw new Error('No clientSecret returned from server');
+
+            // Confirm with whichever payment method we have.
+            let confirm;
+            if (paymentMethodId) {
+                confirm = await stripe.confirmCardPayment(clientSecret, { payment_method: paymentMethodId });
+            } else if (cardElement) {
+                confirm = await stripe.confirmCardPayment(clientSecret, { payment_method: { card: cardElement } });
+            } else {
+                throw new Error('No payment method provided');
+            }
+
+            if (confirm.error) {
+                console.error('[Inline Pay] confirm error:', confirm.error);
+                throw new Error(confirm.error.message || 'Card declined');
+            }
+            const pi = confirm.paymentIntent;
+            if (pi && pi.status === 'succeeded') {
+                console.log('[Inline Pay] ✅ payment succeeded', pi.id);
+                // Persist prepaid state so the badge survives reloads /
+                // composer-reopens (handled the same way as the redirect flow).
+                try {
+                    window.lastPurchaseType = kind;
+                    window.purchasePaidAt = Date.now();
+                    localStorage.setItem('lastPurchaseType', kind);
+                    localStorage.setItem('purchasePaidAt', String(Date.now()));
+                } catch (_) {}
+                return { paid: true, paymentIntentId: pi.id, kind };
+            }
+            // Anything else (requires_action, processing, etc.) — surface as error.
+            throw new Error('Payment status: ' + (pi ? pi.status : 'unknown'));
+        }
+        window.payInline = payInline;
+
         async function handleCheckoutReturn() {
             try {
                 const url = new URL(window.location.href);
@@ -26876,13 +26939,18 @@
                     const combined = !!(window.pendingSell && window.pendingSell.armed && window.pendingBoost && window.pendingBoost.armed);
                     const kind = combined ? 'boost_sell' : 'boost';
                     const amount = _currentCombinedPrice();
-                    ev.complete('success');
-                    await initiateCheckout('new_post_boost', amount, kind, {
-                        source: 'boost_payment_request',
-                        paymentMethodId: ev && ev.paymentMethod ? ev.paymentMethod.id : null
+                    const pmId = ev && ev.paymentMethod ? ev.paymentMethod.id : null;
+                    const result = await payInline({
+                        amount, kind,
+                        postId: selectedPostId || window.currentPostId || 'new_post_boost',
+                        paymentMethodId: pmId,
+                        source: 'boost_payment_request'
                     });
+                    ev.complete('success');
+                    _showBoostPaid();
+                    if (combined) { try { _showSellPaid(); } catch(_){} }
                 } catch (e) {
-                    ev.complete('fail');
+                    try { ev.complete('fail'); } catch(_){}
                     _showBoostError(e.message || 'payment failed');
                 }
             });
@@ -26912,7 +26980,14 @@
                 const combined = !!(window.pendingSell && window.pendingSell.armed && window.pendingBoost && window.pendingBoost.armed);
                 const kind = combined ? 'boost_sell' : 'boost';
                 const amount = _currentCombinedPrice();
-                await initiateCheckout('new_post_boost', amount, kind, { source: 'boost_card_fallback' });
+                await payInline({
+                    amount, kind,
+                    postId: selectedPostId || window.currentPostId || 'new_post_boost',
+                    cardElement: _stripeCardElement,
+                    source: 'boost_card_fallback'
+                });
+                _showBoostPaid();
+                if (combined) { try { _showSellPaid(); } catch(_){} }
             } catch (e) {
                 _showBoostError(e.message || 'card payment failed');
             }
@@ -27061,13 +27136,18 @@
                     const combined = !!(window.pendingBoost && window.pendingBoost.armed && window.pendingSell && window.pendingSell.armed);
                     const kind = combined ? 'boost_sell' : 'sell';
                     const amount = combined ? _currentCombinedPrice() : 200;
-                    ev.complete('success');
-                    await initiateCheckout('new_post_sell', amount, kind, {
-                        source: 'sell_payment_request',
-                        paymentMethodId: ev && ev.paymentMethod ? ev.paymentMethod.id : null
+                    const pmId = ev && ev.paymentMethod ? ev.paymentMethod.id : null;
+                    await payInline({
+                        amount, kind,
+                        postId: selectedPostId || window.currentPostId || 'new_post_sell',
+                        paymentMethodId: pmId,
+                        source: 'sell_payment_request'
                     });
+                    ev.complete('success');
+                    _showSellPaid();
+                    if (combined) { try { _showBoostPaid(); } catch(_){} }
                 } catch (e) {
-                    ev.complete('fail');
+                    try { ev.complete('fail'); } catch(_){}
                     _showSellError(e.message || 'payment failed');
                 }
             });
@@ -27095,7 +27175,14 @@
                 const combined = !!(window.pendingBoost && window.pendingBoost.armed && window.pendingSell && window.pendingSell.armed);
                 const kind = combined ? 'boost_sell' : 'sell';
                 const amount = combined ? _currentCombinedPrice() : 200;
-                await initiateCheckout('new_post_sell', amount, kind, { source: 'sell_card_fallback' });
+                await payInline({
+                    amount, kind,
+                    postId: selectedPostId || window.currentPostId || 'new_post_sell',
+                    cardElement: _stripeSellCardElement,
+                    source: 'sell_card_fallback'
+                });
+                _showSellPaid();
+                if (combined) { try { _showBoostPaid(); } catch(_){} }
             } catch (e) {
                 _showSellError(e.message || 'card payment failed');
             }

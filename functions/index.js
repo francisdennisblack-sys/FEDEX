@@ -210,105 +210,140 @@ exports.handleStripeWebhook = functions
     let event;
     try{ event = stripe.webhooks.constructEvent(req.rawBody,sig,whSecret); }catch(err){ console.error('webhook signature verification failed:', err&&err.message); return res.status(400).send(`Webhook Error: ${err&&err.message}`); }
   
-  // 🔥 CRITICAL: Only process successful checkout sessions
+  // Hosted Checkout completed (redirect-style flow)
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const meta = session.metadata || {};
-    const postId = meta.postId || null;
-    const kind = (meta.kind || '').toLowerCase();
-    const userId = meta.userId || null;
-    const paymentId = session.id;
-    
-    console.log(`✅ Payment completed: postId=${postId}, kind=${kind}, userId=${userId}`);
-    
-    try {
-      // 💾 Store payment record
-      const pRef = db.ref(`payments/${paymentId}`);
-      const exists = await pRef.once('value');
-      if (!exists.exists()) {
-        await pRef.set({
-          paymentId,
-          type: 'checkout.session.completed',
-          kind,
-          postId,
-          userId,
-          amount: session.amount_total,
-          currency: session.currency,
-          status: 'completed',
-          completedAt: admin.database.ServerValue.TIMESTAMP,
-          raw: session
-        });
-        console.log(`💾 Stored payment: ${paymentId}`);
-      }
-      
-      // 🏅 Apply badge to post
-      if (postId) {
-        const updates = {};
-        
-        if (kind === 'boost' || kind === 'boost_sell') {
-          // Apply BOOST badge to post + set expiration (30 days from now)
-          updates[`posts/${postId}/boostPaidAt`] = admin.database.ServerValue.TIMESTAMP;
-          updates[`posts/${postId}/boostExpiresAt`] = Date.now() + (30 * 24 * 60 * 60 * 1000); // 30 days
-          updates[`posts/${postId}/boostStatus`] = 'active';
-          console.log(`🚀 Applied BOOST badge to post ${postId}`);
-        }
-        if (kind === 'sell' || kind === 'boost_sell') {
-          // Apply SELL badge to post
-          updates[`posts/${postId}/sellPaidAt`] = admin.database.ServerValue.TIMESTAMP;
-          updates[`posts/${postId}/primaryBadge`] = 'sell';
-          console.log(`💰 Applied SELL badge to post ${postId}`);
-        }
-        
-        if (Object.keys(updates).length > 0) {
-          await db.ref().update(updates);
-          console.log(`✅ Updated post with badge updates`);
-        }
-      }
-      
-      // 👤 Credit user account if userId provided
-      if (userId) {
-        const userRef = db.ref(`users/${userId}/account`);
-        const userSnapshot = await userRef.once('value');
-        const account = userSnapshot.val() || { balance: 0, purchases: {} };
-        
-        // Add purchase record
-        if (!account.purchases) account.purchases = {};
-        account.purchases[paymentId] = {
-          kind,
-          postId,
-          amount: session.amount_total,
-          currency: session.currency,
-          purchasedAt: Date.now()
-        };
-
-        // Materialize current entitlements so clients can safely apply paid flags after verified checkout.
-        if (!account.entitlements) account.entitlements = {};
-        if (kind === 'boost' || kind === 'boost_sell') {
-          account.entitlements.boost = {
-            paid: true,
-            paymentId,
-            purchasedAt: Date.now()
-          };
-        }
-        if (kind === 'sell' || kind === 'boost_sell') {
-          account.entitlements.sell = {
-            paid: true,
-            paymentId,
-            purchasedAt: Date.now()
-          };
-        }
-        
-        // Update user account
-        await userRef.set(account);
-        console.log(`👤 Credited user account: ${userId}, kind=${kind}`);
-      }
-      
-    } catch (e) {
-      console.error('webhook processing error:', e);
-    }
+    await processSuccessfulPayment({
+      paymentId: session.id,
+      type: 'checkout.session.completed',
+      postId: meta.postId || null,
+      kind: (meta.kind || '').toLowerCase(),
+      userId: meta.userId || null,
+      amount: session.amount_total,
+      currency: session.currency,
+      raw: session
+    });
   }
-  
+
+  // Inline PaymentIntent succeeded (no-redirect flow)
+  if (event.type === 'payment_intent.succeeded') {
+    const pi = event.data.object;
+    const meta = pi.metadata || {};
+    await processSuccessfulPayment({
+      paymentId: pi.id,
+      type: 'payment_intent.succeeded',
+      postId: meta.postId || null,
+      kind: (meta.kind || '').toLowerCase(),
+      userId: meta.userId || null,
+      amount: pi.amount_received || pi.amount,
+      currency: pi.currency,
+      raw: pi
+    });
+  }
+
   return res.json({received: true});
+});
+
+// Shared post-payment processing: store record + apply badges + credit user.
+// Called from both the hosted Checkout webhook AND the inline PaymentIntent
+// webhook so badge/entitlement application is identical in both flows.
+async function processSuccessfulPayment({ paymentId, type, postId, kind, userId, amount, currency, raw }) {
+  console.log(`✅ Payment completed [${type}]: postId=${postId}, kind=${kind}, userId=${userId}`);
+  try {
+    const pRef = db.ref(`payments/${paymentId}`);
+    const exists = await pRef.once('value');
+    if (!exists.exists()) {
+      await pRef.set({
+        paymentId,
+        type,
+        kind,
+        postId,
+        userId,
+        amount,
+        currency,
+        status: 'completed',
+        completedAt: admin.database.ServerValue.TIMESTAMP,
+        raw
+      });
+      console.log(`💾 Stored payment: ${paymentId}`);
+    }
+
+    if (postId && postId !== 'new_post' && postId !== 'new_post_boost' && postId !== 'new_post_sell') {
+      const updates = {};
+      if (kind === 'boost' || kind === 'boost_sell') {
+        updates[`posts/${postId}/boostPaidAt`] = admin.database.ServerValue.TIMESTAMP;
+        updates[`posts/${postId}/boostExpiresAt`] = Date.now() + (30 * 24 * 60 * 60 * 1000);
+        updates[`posts/${postId}/boostStatus`] = 'active';
+        console.log(`🚀 Applied BOOST badge to post ${postId}`);
+      }
+      if (kind === 'sell' || kind === 'boost_sell') {
+        updates[`posts/${postId}/sellPaidAt`] = admin.database.ServerValue.TIMESTAMP;
+        updates[`posts/${postId}/primaryBadge`] = 'sell';
+        console.log(`💰 Applied SELL badge to post ${postId}`);
+      }
+      if (Object.keys(updates).length > 0) {
+        await db.ref().update(updates);
+      }
+    }
+
+    if (userId && userId !== 'anonymous') {
+      const userRef = db.ref(`users/${userId}/account`);
+      const userSnapshot = await userRef.once('value');
+      const account = userSnapshot.val() || { balance: 0, purchases: {} };
+      if (!account.purchases) account.purchases = {};
+      account.purchases[paymentId] = { kind, postId, amount, currency, purchasedAt: Date.now() };
+      if (!account.entitlements) account.entitlements = {};
+      if (kind === 'boost' || kind === 'boost_sell') {
+        account.entitlements.boost = { paid: true, paymentId, purchasedAt: Date.now() };
+      }
+      if (kind === 'sell' || kind === 'boost_sell') {
+        account.entitlements.sell = { paid: true, paymentId, purchasedAt: Date.now() };
+      }
+      await userRef.set(account);
+      console.log(`👤 Credited user account: ${userId}, kind=${kind}`);
+    }
+  } catch (e) {
+    console.error('processSuccessfulPayment error:', e);
+  }
+}
+
+// Inline checkout: create a PaymentIntent the browser confirms with
+// stripe.confirmCardPayment() — no Stripe-hosted redirect page.
+exports.createPaymentIntent = functions
+  .runWith({ secrets: [stripeSecretParam] })
+  .https.onCall(async (data, context) => {
+    const stripe = getStripe();
+    if (!stripe) throw new functions.https.HttpsError('failed-precondition', 'Stripe not configured');
+    const amount = Math.round(Number(data && data.amount));
+    const currency = String((data && data.currency) || 'usd').toLowerCase();
+    const kind = String((data && data.kind) || '').toLowerCase();
+    const postId = data && data.postId ? String(data.postId) : 'new_post';
+    const userId = (data && data.userId) || (context && context.auth && context.auth.uid) || 'anonymous';
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new functions.https.HttpsError('invalid-argument', 'amount (positive integer cents) required');
+    }
+    if (!['boost', 'sell', 'boost_sell'].includes(kind)) {
+      throw new functions.https.HttpsError('invalid-argument', 'kind must be boost, sell, or boost_sell');
+    }
+    try {
+      const pi = await stripe.paymentIntents.create({
+        amount,
+        currency,
+        // Cards + wallets (Apple/Google Pay tokens arrive as card PaymentMethods).
+        automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
+        metadata: {
+          postId: String(postId).replace(/[^a-zA-Z0-9_\-\.]/g, '_'),
+          kind: kind.replace(/[^a-zA-Z0-9_\-]/g, '_'),
+          userId: String(userId).replace(/[^a-zA-Z0-9_\-\.]/g, '_'),
+          source: (data && data.source) || 'inline'
+        }
+      });
+      return { clientSecret: pi.client_secret, paymentIntentId: pi.id };
+    } catch (e) {
+      console.error('createPaymentIntent error:', e && (e.message || e));
+      throw new functions.https.HttpsError('internal', e && e.message ? e.message : 'Stripe error');
+    }
 });
 
 // ============================================================================
