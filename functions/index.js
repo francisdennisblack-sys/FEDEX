@@ -192,6 +192,51 @@ exports.enforceUserPostLimit = functions.database.ref('/posts/{postId}').onCreat
 
 exports.postMetricsAggregator = functions.database.ref('/posts/{postId}').onCreate(async (snap, ctx)=>{ const post=snap.val()||{}; try{ await incrementCounter('metrics/global/postsTotal',1); const zone=post.zoneTag||post.county||'unknown'; await incrementCounter(`metrics/postsByZone/${encodeURIComponent(zone)}`,1);}catch(e){console.error(e);} return null; });
 
+// Consume a user's unconsumed badge record when they create a post so the
+// badge is persisted on the post and visible to all users immediately.
+exports.consumeUserBadgeOnPostCreate = functions.database.ref('/posts/{postId}').onCreate(async (snap, ctx) => {
+  try {
+    const postId = ctx.params.postId;
+    const post = snap.val() || {};
+    const authId = post.authId || post.userId || post.createdBy;
+    if (!authId) return null;
+
+    const badgesRef = db.ref(`users/${authId}/badges`);
+    const badgesSnap = await badgesRef.once('value');
+    if (!badgesSnap.exists()) return null;
+
+    const badges = badgesSnap.val() || {};
+    // Find oldest unconsumed badge
+    const keys = Object.keys(badges).sort((a,b)=> (badges[a].purchasedAt||0) - (badges[b].purchasedAt||0));
+    for (const k of keys) {
+      const rec = badges[k];
+      if (!rec || rec.consumed) continue;
+      const updates = {};
+      if (rec.type === 'boost') {
+        updates[`posts/${postId}/boostPaidAt`] = admin.database.ServerValue.TIMESTAMP;
+        updates[`posts/${postId}/boostExpiresAt`] = Date.now() + (24*60*60*1000);
+        updates[`posts/${postId}/boostStatus`] = 'active';
+        updates[`posts/${postId}/boostBadge`] = { label: rec.label || 'Boost', paymentId: rec.paymentId || k };
+      } else if (rec.type === 'sell') {
+        updates[`posts/${postId}/sellPaidAt`] = admin.database.ServerValue.TIMESTAMP;
+        updates[`posts/${postId}/primaryBadge`] = 'sell';
+        updates[`posts/${postId}/sellBadge`] = { label: rec.label || 'Buy', paymentId: rec.paymentId || k };
+      } else {
+        continue;
+      }
+
+      // Atomically apply updates and mark badge consumed
+      await db.ref().update(updates);
+      await db.ref(`users/${authId}/badges/${k}`).update({ consumed: true, consumedAt: admin.database.ServerValue.TIMESTAMP, consumedOnPost: postId });
+      console.log(`Consumed badge ${k} of type ${rec.type} for user ${authId} on post ${postId}`);
+      break; // only one badge per post
+    }
+  } catch (e) {
+    console.error('consumeUserBadgeOnPostCreate failed:', e && e.message ? e.message : e);
+  }
+  return null;
+});
+
 exports.createCheckoutSession = functions
   .runWith({ secrets: [stripeSecretParam] })
   .https.onRequest(async (req,res)=>{
