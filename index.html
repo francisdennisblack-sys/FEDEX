@@ -28131,16 +28131,30 @@
                 const postRef = window.ref(window.database, `posts/${postId}`);
                 const now = Date.now();
                 const updatePayload = {};
+                // Read existing post to merge badges safely (avoid overwriting server badges)
+                let existing = null;
+                try {
+                    if (typeof window.get === 'function') {
+                        const snap = await window.get(postRef);
+                        if (snap && snap.exists && snap.exists()) existing = snap.val();
+                    }
+                } catch (e) {
+                    console.warn('applyBadgeToPost: failed to read existing post from server', e);
+                }
+                // Fallback to local cache if server read wasn't possible
+                if (!existing && window.postCache && window.postCache[postId]) existing = window.postCache[postId];
+                const existingBadges = Array.isArray(existing && existing.badges) ? existing.badges.slice() : [];
                 // Ensure badges array contains the kind
                 updatePayload.updatedAt = now;
                 if (kind === 'boost') {
                     updatePayload.boostStatus = 'active';
                     updatePayload.boostBadge = { paymentIntentId: details.paymentIntentId || null, purchasedAt: now, label: details.badgeLabel || 'Boost', amountCents: details.amount || null };
-                    // Add to badges array server-side via a shallow update
-                    updatePayload.badges = (Array.isArray(details.existingBadges) ? details.existingBadges.filter(Boolean) : []).concat(['boost']);
+                    if (!existingBadges.includes('boost')) existingBadges.push('boost');
+                    updatePayload.badges = existingBadges;
                 } else if (kind === 'sell') {
                     updatePayload.sellBadge = { paymentIntentId: details.paymentIntentId || null, purchasedAt: now, label: details.badgeLabel || 'Buy', amountCents: details.amount || null };
-                    updatePayload.badges = (Array.isArray(details.existingBadges) ? details.existingBadges.filter(Boolean) : []).concat(['sell']);
+                    if (!existingBadges.includes('sell')) existingBadges.push('sell');
+                    updatePayload.badges = existingBadges;
                 }
 
                 // Attempt to update server
