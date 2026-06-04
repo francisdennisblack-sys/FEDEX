@@ -2934,6 +2934,7 @@
         console.log('  auth:', auth);
         
         // CRITICAL: Expose Firebase objects to global scope so they're accessible outside module
+        window.app = app;
         window.database = database;
         window.storage = storage;
         // Persist and restore the user's selected area tag so selections survive navigation
@@ -24801,32 +24802,43 @@
         // Backed by Google Cloud Vision (SafeSearchDetection) on project `wificontent`.
         // Returns true if safe, false if blocked.
         async function checkImageModeration(imageDataUrl) {
+            console.log('🔍 checkImageModeration called, image bytes ~=', (imageDataUrl||'').length);
             try {
+                if (!window.app) {
+                    console.error('❌ Moderation aborted: window.app is undefined (Firebase not exposed). BLOCKING upload as a safety default.');
+                    try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'moderation_unavailable_app_missing'; } catch(e) {}
+                    return false; // fail CLOSED — safer
+                }
                 if (!window.functions) {
+                    console.log('  Loading firebase-functions SDK...');
                     const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
                     window.functions = getFunctions(window.app, 'us-central1');
                     window.httpsCallable = httpsCallable;
+                    console.log('  ✅ functions SDK ready');
                 }
                 const moderateMedia = window.httpsCallable(window.functions, 'moderateMedia');
                 const base64Data = (typeof imageDataUrl === 'string' && imageDataUrl.indexOf(',') !== -1)
                     ? imageDataUrl.split(',')[1]
                     : imageDataUrl;
+                console.log('  📤 Calling moderateMedia... base64 length=', (base64Data||'').length);
                 const res = await moderateMedia({ base64: base64Data, mediaType: 'image' });
                 const out = (res && res.data) || {};
+                console.log('  📥 Moderation result:', out);
                 if (out.failOpen) {
-                    console.warn('⚠️ Image moderation unavailable, allowing upload:', out.reason);
+                    console.warn('⚠️ Image moderation backend unavailable, allowing upload:', out.reason);
                     return true;
                 }
                 if (out.safe === false) {
-                    console.log('❌ Image blocked:', out.reason, out.scores);
+                    console.log('❌ Image BLOCKED:', out.reason, 'checks:', out.checks, 'scores:', out.scores);
                     try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = out.reason; } catch(e) {}
                     return false;
                 }
-                console.log('✅ Image approved', out.scores);
+                console.log('✅ Image approved', out.scores, 'checks:', out.checks);
                 return true;
             } catch (error) {
-                console.error('Image moderation error:', error && error.message);
-                return true; // Fail open
+                console.error('❌ Image moderation error — BLOCKING upload to be safe:', error && (error.message || error));
+                try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'moderation_error: ' + (error && error.message || 'unknown'); } catch(e) {}
+                return false; // fail CLOSED — was fail-open, but that silently allowed everything when broken
             }
         }
 
