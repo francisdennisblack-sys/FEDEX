@@ -44,6 +44,13 @@ try { admin.initializeApp(); } catch (e) { }
 
 const db = admin.database();
 const MAX_POSTS_PER_USER = 20;
+// Minimum charge per currency to satisfy Stripe / card network limits.
+const MIN_CHARGE_CENTS = {
+  usd: 50, // $0.50 minimum for USD
+  eur: 50, // €0.50
+  gbp: 50, // £0.50
+};
+function getMinForCurrency(curr){ curr = String(curr||'').toLowerCase(); return MIN_CHARGE_CENTS[curr]||50; }
 
 // Stripe secrets are stored in Google Secret Manager (not the deprecated
 // functions:config). They are injected as env vars at function runtime via
@@ -139,6 +146,12 @@ async function createStripeCheckoutSession(payload) {
 
   if (!postId || !kind || !final_unit_amount) throw new Error('postId,kind,amount required');
   if (!Number.isInteger(final_unit_amount) || final_unit_amount <= 0) throw new Error('invalid amount; provide integer cents or decimal dollars');
+  // Enforce minimum charge to avoid Stripe/Network rejections for tiny amounts
+  const min = getMinForCurrency(currency);
+  if (final_unit_amount < min) {
+    console.warn(`Requested amount ${final_unit_amount} < min ${min} for ${currency}; using min`);
+    final_unit_amount = min;
+  }
 
   const session = await stripe.checkout.sessions.create({
     payment_method_types:['card'],
@@ -392,6 +405,14 @@ exports.createPaymentIntent = functions
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new functions.https.HttpsError('invalid-argument', 'amount (positive integer cents) required');
     }
+    // Enforce minimum per-currency to prevent Stripe errors on tiny charges
+    try {
+      const min = getMinForCurrency(currency);
+      if (amount < min) {
+        console.warn(`createPaymentIntent: amount ${amount} < min ${min} for ${currency}; using min`);
+        amount = min;
+      }
+    } catch (e) { /* ignore */ }
     if (!['boost', 'sell', 'boost_sell'].includes(kind)) {
       throw new functions.https.HttpsError('invalid-argument', 'kind must be boost, sell, or boost_sell');
     }
