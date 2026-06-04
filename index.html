@@ -12914,6 +12914,87 @@
                         console.log('  ⚠️ Posts collection is empty');
                     }
                     
+                    // Merge any local optimistic badge updates so badges appear immediately
+                    try {
+                        // queuedBadgeUpdates: [{ postId, kind, details }]
+                        const queuedRaw = localStorage.getItem('queuedBadgeUpdates') || '[]';
+                        const queued = JSON.parse(queuedRaw || '[]');
+                        if (Array.isArray(queued) && queued.length > 0) {
+                            queued.forEach(q => {
+                                try {
+                                    if (!q || !q.postId) return;
+                                    const target = allPosts.find(p => p && p.id === q.postId);
+                                    if (!target) return;
+                                    // apply kind-specific metadata
+                                    if (!Array.isArray(target.badges)) target.badges = target.badges || [];
+                                    if (q.kind === 'boost') {
+                                        if (!target.badges.includes('boost')) target.badges.push('boost');
+                                        target.boostBadge = Object.assign({}, target.boostBadge || {}, q.details || { label: 'Boost' });
+                                        target.boostStatus = 'active';
+                                    } else if (q.kind === 'sell' || q.kind === 'buy') {
+                                        if (!target.badges.includes('sell')) target.badges.push('sell');
+                                        target.sellBadge = Object.assign({}, target.sellBadge || {}, q.details || { label: 'Buy' });
+                                    }
+                                } catch (e) { /* continue */ }
+                            });
+                            console.log('✅ Applied queuedBadgeUpdates to local post cache');
+                        }
+
+                        // pendingOrders: FIFO list of in-flight purchases (may include postId)
+                        try {
+                            const pRaw = localStorage.getItem('pendingOrders') || '[]';
+                            const pendingOrders = JSON.parse(pRaw || '[]');
+                            if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
+                                pendingOrders.forEach(po => {
+                                    try {
+                                        if (!po || !po.postId) return;
+                                        const t = allPosts.find(p => p && p.id === po.postId);
+                                        if (!t) return;
+                                        if (po.kind === 'sell') {
+                                            t.sellBadge = Object.assign({}, t.sellBadge || {}, { label: po.badgeLabel || 'Buy', pending: true });
+                                            if (!Array.isArray(t.badges)) t.badges = t.badges || [];
+                                            if (!t.badges.includes('sell')) t.badges.push('sell');
+                                        }
+                                        if (po.kind === 'boost') {
+                                            t.boostBadge = Object.assign({}, t.boostBadge || {}, { label: po.badgeLabel || 'Boost', pending: true });
+                                            if (!Array.isArray(t.badges)) t.badges = t.badges || [];
+                                            if (!t.badges.includes('boost')) t.badges.push('boost');
+                                            t.boostStatus = 'pending';
+                                        }
+                                    } catch (e) {}
+                                });
+                                console.log('✅ Applied pendingOrders to local posts');
+                            }
+                        } catch (e) {}
+
+                        // pendingPayments map: paymentIntentId -> { badgeLabel, amount, postId }
+                        try {
+                            const mapRaw = localStorage.getItem('pendingPayments') || '{}';
+                            const pendingMap = JSON.parse(mapRaw || '{}');
+                            if (pendingMap && typeof pendingMap === 'object' && Object.keys(pendingMap).length > 0) {
+                                Object.keys(pendingMap).forEach(pid => {
+                                    try {
+                                        const info = pendingMap[pid];
+                                        if (!info || !info.postId) return;
+                                        const t = allPosts.find(p => p && p.id === info.postId);
+                                        if (!t) return;
+                                        if (info.kind === 'boost') {
+                                            t.boostBadge = Object.assign({}, t.boostBadge || {}, { label: info.badgeLabel || 'Boost', paymentIntentId: pid, pending: true });
+                                            if (!Array.isArray(t.badges)) t.badges = t.badges || [];
+                                            if (!t.badges.includes('boost')) t.badges.push('boost');
+                                            t.boostStatus = 'pending';
+                                        } else if (info.kind === 'sell') {
+                                            t.sellBadge = Object.assign({}, t.sellBadge || {}, { label: info.badgeLabel || 'Buy', paymentIntentId: pid, pending: true });
+                                            if (!Array.isArray(t.badges)) t.badges = t.badges || [];
+                                            if (!t.badges.includes('sell')) t.badges.push('sell');
+                                        }
+                                    } catch (e) {}
+                                });
+                                console.log('✅ Merged pendingPayments into local posts');
+                            }
+                        } catch (e) {}
+                    } catch (e) { console.warn('Failed to merge local badge queues into posts', e); }
+
                     // 💾 AGGRESSIVE PERSISTENCE: Save posts to localStorage immediately
                     if (allPosts.length > 0) {
                         try {
