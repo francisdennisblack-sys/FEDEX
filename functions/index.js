@@ -320,10 +320,9 @@ function _rank(v) {
   return _LIKELIHOOD_RANK[String(v).toUpperCase()] || 0;
 }
 
-// Best-effort hate speech detector. Word-boundary regex against a small set
-// of unambiguous slurs. This is intentionally conservative to avoid false
-// positives (e.g., 'spook' as a noun for ghost). It will NOT catch coded
-// language, leetspeak, or non-English slurs — that requires a real model.
+// ----- Hate / racism keyword & slur lists (English, conservative) -----
+// Word-boundary regex avoids false positives ("classic" containing "ass").
+// Intentionally simple; coded language and non-English are NOT covered.
 const _HATE_SLUR_PATTERNS = [
   /\bn[i1!|]gg(?:e|3)rs?\b/i,
   /\bn[i1!|]gg(?:a|4)s?\b/i,
@@ -334,19 +333,94 @@ const _HATE_SLUR_PATTERNS = [
   /\bw[e3]tb[a@]cks?\b/i,
   /\btr[a@]nn(?:y|ie)s?\b/i,
   /\bret[a@]rds?\b/i,
-  /\bheil hitler\b/i,
-  /\bwhite power\b/i,
-  /\b1488\b/,
-  /\b14\/88\b/
+  /\bgooks?\b/i,
+  /\btowel ?heads?\b/i,
+  /\bsand ?n[i1!|]gg?(?:e|3|a|4)rs?\b/i,
+  /\bcoons?\b/i,
+  /\bsh(?:e|3)males?\b/i,
+  /\bdykes?\b/i
 ];
-function _containsHateSpeech(text) {
+const _HATE_PHRASE_PATTERNS = [
+  /\bheil hitler\b/i,
+  /\bsieg heil\b/i,
+  /\bwhite power\b/i,
+  /\bwhite pride\b/i,
+  /\bwhite nationalis[mt]\b/i,
+  /\bwhite supremac/i,
+  /\bgo back to (?:africa|mexico|china|india|your country)\b/i,
+  /\ball lives matter\s+(?:not|over)\b/i,
+  /\bkill all (?:jews|blacks|whites|muslims|gays|trans|asians|mexicans)\b/i,
+  /\b(?:f[\*\W]?ck|kill|hang|lynch|gas|burn|nuke|murder|exterminate)\s+(?:the\s+)?(?:jews|blacks|whites|muslims|gays|trans|asians|mexicans|n[i1!|]gg(?:e|3|a|4)rs?)\b/i,
+  /\b1488\b/,
+  /\b14\/88\b/,
+  /\b\bhh ?88\b/i
+];
+
+// Labels returned by Cloud Vision LABEL_DETECTION or OBJECT_LOCALIZATION
+// that indicate weapons, gore, or hate imagery. We require a score >= 0.7
+// (high confidence) to block, to keep false positives down.
+const _WEAPON_LABELS = [
+  'gun','handgun','pistol','revolver','rifle','shotgun','firearm','assault rifle',
+  'machine gun','submachine gun','sniper rifle','ak-47','ar-15','glock','uzi',
+  'ammunition','bullet','cartridge','magazine (firearms)',
+  'knife','dagger','sword','machete','katana','blade'
+];
+const _GORE_LABELS = [
+  'blood','bleeding','wound','injury','gore','corpse','dead body','death',
+  'dismemberment','decapitation','severed','mutilation','massacre'
+];
+const _HATE_SYMBOL_LABELS = [
+  'swastika','nazi','nazism','third reich','hitler','ss insignia','ss runes',
+  'ku klux klan','kkk','klan','burning cross','confederate flag','rebel flag',
+  'iron cross','sonnenrad','black sun','celtic cross (white supremacist)',
+  'noose','lynching'
+];
+const _ALL_BLOCKED_LABELS = new Set([
+  ..._WEAPON_LABELS.map(s => s.toLowerCase()),
+  ..._GORE_LABELS.map(s => s.toLowerCase()),
+  ..._HATE_SYMBOL_LABELS.map(s => s.toLowerCase())
+]);
+
+function _containsHateText(text) {
   if (!text) return false;
-  for (const re of _HATE_SLUR_PATTERNS) { if (re.test(text)) return true; }
+  for (const re of _HATE_SLUR_PATTERNS) { if (re.test(text)) return { kind: 'slur' }; }
+  for (const re of _HATE_PHRASE_PATTERNS) { if (re.test(text)) return { kind: 'hate_phrase' }; }
   return false;
+}
+function _findBadLabel(labelAnnotations) {
+  if (!Array.isArray(labelAnnotations)) return null;
+  for (const lab of labelAnnotations) {
+    const desc = (lab.description || '').toLowerCase().trim();
+    const score = typeof lab.score === 'number' ? lab.score : 0;
+    if (score < 0.65) continue;
+    if (_ALL_BLOCKED_LABELS.has(desc)) {
+      return { label: desc, score, category: _WEAPON_LABELS.includes(desc) ? 'weapon' : _GORE_LABELS.includes(desc) ? 'gore' : 'hate_symbol' };
+    }
+    // Partial match for compound descriptions like "assault rifle in hands"
+    for (const blocked of _ALL_BLOCKED_LABELS) {
+      if (desc.includes(blocked)) {
+        return { label: desc, matched: blocked, score, category: 'partial' };
+      }
+    }
+  }
+  return null;
+}
+function _findBadObject(objectAnnotations) {
+  if (!Array.isArray(objectAnnotations)) return null;
+  for (const obj of objectAnnotations) {
+    const name = (obj.name || '').toLowerCase().trim();
+    const score = typeof obj.score === 'number' ? obj.score : 0;
+    if (score < 0.6) continue;
+    if (_ALL_BLOCKED_LABELS.has(name)) return { object: name, score };
+    for (const blocked of _ALL_BLOCKED_LABELS) {
+      if (name.includes(blocked)) return { object: name, matched: blocked, score };
+    }
+  }
+  return null;
 }
 
 exports.moderateMedia = functions
-  .runWith({ secrets: [visionSecret], timeoutSeconds: 120, memory: '512MB' })
+  .runWith({ secrets: [visionSecret], timeoutSeconds: 180, memory: '512MB' })
   .https.onCall(async (data, context) => {
     const mediaType = (data && data.mediaType) || 'image';
     const base64 = data && data.base64;
@@ -366,7 +440,20 @@ exports.moderateMedia = functions
     try {
       if (mediaType === 'image') {
         const client = _getVisionClient();
-        const [result] = await client.safeSearchDetection({ image: { content: bytes } });
+        // ONE batched call: SafeSearch + Labels + Objects + OCR text + Web.
+        // Cheaper and faster than 5 separate calls.
+        const [result] = await client.annotateImage({
+          image: { content: bytes },
+          features: [
+            { type: 'SAFE_SEARCH_DETECTION' },
+            { type: 'LABEL_DETECTION', maxResults: 30 },
+            { type: 'OBJECT_LOCALIZATION', maxResults: 20 },
+            { type: 'TEXT_DETECTION' },
+            { type: 'WEB_DETECTION', maxResults: 10 }
+          ]
+        });
+
+        // Pass 1: SafeSearch (nudity / violence / racy)
         const ss = (result && result.safeSearchAnnotation) || {};
         const scores = {
           adult: _rank(ss.adult),
@@ -375,59 +462,136 @@ exports.moderateMedia = functions
           medical: _rank(ss.medical),
           spoof: _rank(ss.spoof)
         };
-        // Strict thresholds: no nudity, no violence.
-        // - adult >= LIKELY catches toplessness, nudity, sex acts.
-        // - violence >= LIKELY catches fights, weapons, blood, gore.
-        // - racy >= VERY_LIKELY catches extreme suggestive content
-        //   (full-body lingerie shots, etc.); bikinis usually score POSSIBLE.
-        // NOTE: Vision SafeSearch does NOT detect racism/hate symbols.
-        // We run text OCR below and block on hate slurs as a best-effort
-        // check for text-in-image racism (swastikas etc. would need a
-        // custom label model — not covered here).
         let safe = true;
         let reason = '';
-        if (scores.adult >= 4) { safe = false; reason = 'nudity or sexual content detected'; }
-        else if (scores.violence >= 4) { safe = false; reason = 'violent content detected'; }
-        else if (scores.racy >= 5) { safe = false; reason = 'explicit content detected'; }
+        const checks = [];
+        if (scores.adult >= 4) { safe = false; reason = 'nudity or sexual content detected'; checks.push('safesearch:adult'); }
+        else if (scores.violence >= 4) { safe = false; reason = 'violent content detected'; checks.push('safesearch:violence'); }
+        else if (scores.racy >= 5) { safe = false; reason = 'explicit content detected'; checks.push('safesearch:racy'); }
 
-        // Best-effort hate-speech / racism check via text OCR
+        // Pass 2: Labels (weapons, gore, hate symbols by name)
         if (safe) {
-          try {
-            const [textResult] = await client.textDetection({ image: { content: bytes } });
-            const fullText = (textResult && textResult.fullTextAnnotation && textResult.fullTextAnnotation.text) || '';
-            if (fullText && _containsHateSpeech(fullText)) {
-              safe = false;
-              reason = 'hate speech or slurs detected in image text';
-            }
-          } catch (e) {
-            // OCR failure shouldn't block uploads
-            console.warn('text OCR failed:', e && e.message);
+          const badLabel = _findBadLabel(result.labelAnnotations);
+          if (badLabel) {
+            safe = false;
+            const cat = badLabel.category === 'weapon' ? 'weapon'
+                      : badLabel.category === 'gore' ? 'graphic violence'
+                      : badLabel.category === 'hate_symbol' ? 'hate symbol'
+                      : 'prohibited content';
+            reason = `${cat} detected (${badLabel.label})`;
+            checks.push(`label:${badLabel.label}`);
           }
         }
 
-        return { safe, reason, scores, mediaType };
+        // Pass 3: Object localization (e.g., a clearly-visible gun in scene)
+        if (safe) {
+          const badObj = _findBadObject(result.localizedObjectAnnotations);
+          if (badObj) {
+            safe = false;
+            reason = `prohibited object detected (${badObj.object})`;
+            checks.push(`object:${badObj.object}`);
+          }
+        }
+
+        // Pass 4: OCR text → hate speech / slurs
+        if (safe) {
+          const fullText = (result.fullTextAnnotation && result.fullTextAnnotation.text) || '';
+          const hateHit = _containsHateText(fullText);
+          if (hateHit) {
+            safe = false;
+            reason = hateHit.kind === 'slur'
+              ? 'racial slur or hate speech detected in image text'
+              : 'hate speech detected in image text';
+            checks.push(`ocr:${hateHit.kind}`);
+          }
+        }
+
+        // Pass 5: Web detection — best-titles & best-guess often reveal
+        // context (e.g., images cropped from porn sites, hate-group memes).
+        if (safe && result.webDetection) {
+          const wd = result.webDetection;
+          const webText = [
+            ...(wd.bestGuessLabels || []).map(x => x.label || ''),
+            ...(wd.webEntities || []).map(x => x.description || ''),
+            ...(wd.pagesWithMatchingImages || []).map(x => (x.pageTitle || '') + ' ' + (x.url || ''))
+          ].join(' \n ').toLowerCase();
+          const webHateHit = _containsHateText(webText);
+          const webPornHit = /\b(porn|xxx|nud(?:e|ity)|onlyfans|hentai|pornhub|xvideos|xhamster|brazzers)\b/i.test(webText);
+          const webGoreHit = /\b(gore|beheading|isis execution|liveleak|bestgore|nsfl)\b/i.test(webText);
+          if (webPornHit) { safe = false; reason = 'image matches known pornographic content on web'; checks.push('web:porn'); }
+          else if (webGoreHit) { safe = false; reason = 'image matches known graphic violence content on web'; checks.push('web:gore'); }
+          else if (webHateHit) { safe = false; reason = 'image matches known hate content on web'; checks.push('web:hate'); }
+        }
+
+        return { safe, reason, scores, checks, mediaType };
       }
 
       if (mediaType === 'video') {
         const client = _getVideoClient();
         const [operation] = await client.annotateVideo({
           inputContent: bytes.toString('base64'),
-          features: ['EXPLICIT_CONTENT_DETECTION']
+          features: ['EXPLICIT_CONTENT_DETECTION', 'LABEL_DETECTION', 'TEXT_DETECTION']
         });
         const [opResult] = await operation.promise();
         const annotations = (opResult && opResult.annotationResults && opResult.annotationResults[0]) || {};
-        const frames = (annotations.explicitAnnotation && annotations.explicitAnnotation.frames) || [];
-        // Compute worst frame
-        let worst = 0;
-        for (const f of frames) {
+
+        // Pass 1: explicit content per-frame
+        const expFrames = (annotations.explicitAnnotation && annotations.explicitAnnotation.frames) || [];
+        let worstExplicit = 0;
+        for (const f of expFrames) {
           const r = _rank(f.pornographyLikelihood);
-          if (r > worst) worst = r;
+          if (r > worstExplicit) worstExplicit = r;
         }
-        const safe = worst < 4; // Strict: block LIKELY or VERY_LIKELY pornography/nudity
+        const checks = [];
+        let safe = true;
+        let reason = '';
+        if (worstExplicit >= 4) {
+          safe = false;
+          reason = 'nudity or sexual content detected in video';
+          checks.push('video:explicit');
+        }
+
+        // Pass 2: shot-level + segment labels → weapons, gore, hate symbols
+        if (safe) {
+          const allLabels = [
+            ...((annotations.shotLabelAnnotations) || []),
+            ...((annotations.segmentLabelAnnotations) || [])
+          ];
+          const flat = allLabels.map(la => ({
+            description: la.entity && la.entity.description,
+            score: Math.max(0, ...((la.segments || la.frames || []).map(s => (s.confidence || 0))))
+          }));
+          const badLabel = _findBadLabel(flat);
+          if (badLabel) {
+            safe = false;
+            const cat = badLabel.category === 'weapon' ? 'weapon'
+                      : badLabel.category === 'gore' ? 'graphic violence'
+                      : badLabel.category === 'hate_symbol' ? 'hate symbol'
+                      : 'prohibited content';
+            reason = `${cat} detected in video (${badLabel.label})`;
+            checks.push(`video:label:${badLabel.label}`);
+          }
+        }
+
+        // Pass 3: text-on-screen OCR → hate speech
+        if (safe) {
+          const textAnns = annotations.textAnnotations || [];
+          const fullText = textAnns.map(t => (t.text || '')).join(' \n ');
+          const hateHit = _containsHateText(fullText);
+          if (hateHit) {
+            safe = false;
+            reason = hateHit.kind === 'slur'
+              ? 'racial slur or hate speech detected in video text'
+              : 'hate speech detected in video text';
+            checks.push(`video:ocr:${hateHit.kind}`);
+          }
+        }
+
         return {
           safe,
-          reason: safe ? '' : 'nudity or sexual content detected in video',
-          scores: { pornography: worst, frameCount: frames.length },
+          reason,
+          scores: { pornography: worstExplicit, frameCount: expFrames.length },
+          checks,
           mediaType
         };
       }
@@ -441,4 +605,5 @@ exports.moderateMedia = functions
       return { safe: true, reason: 'moderation_unavailable: ' + (e && e.message), scores: {}, mediaType, failOpen: true };
     }
   });
+
 
