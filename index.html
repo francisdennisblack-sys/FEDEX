@@ -14793,6 +14793,43 @@
             document.head.appendChild(s);
         }
 
+        // Ensure badge CSS exists (Boost badge: rocket + label, orange/gold glow)
+        function ensureBadgeStyles() {
+            if (document.getElementById('badge-styles')) return;
+            const s = document.createElement('style');
+            s.id = 'badge-styles';
+            s.textContent = `
+                /* Boost badge: thick pill with rocket emoji and label */
+                .grid-box { position: relative; }
+                .boost-badge {
+                    position: absolute;
+                    top: 8px;
+                    right: 8px;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 8px 12px;
+                    border-radius: 14px;
+                    font-weight: 700;
+                    font-size: 13px;
+                    color: #fff;
+                    background: linear-gradient(90deg, #ff8a00 0%, #ffd166 60%);
+                    border: 3px solid rgba(255,200,70,0.95);
+                    box-shadow: 0 8px 28px rgba(255,138,0,0.28), 0 0 12px rgba(255,210,120,0.18) inset;
+                    z-index: 30;
+                    transform-origin: top right;
+                    transition: transform 220ms cubic-bezier(.2,.9,.2,1), opacity 180ms ease;
+                    backdrop-filter: blur(6px);
+                }
+                .boost-badge .rocket { font-size: 16px; line-height: 1; }
+                .boost-badge .label { text-transform: uppercase; letter-spacing: 0.6px; }
+                .grid-box.badge-boost .boost-badge { opacity: 1; transform: translateY(0) scale(1); }
+                .grid-box .boost-badge { opacity: 0; transform: translateY(-6px) scale(0.96); }
+                .boost-badge:hover { box-shadow: 0 12px 40px rgba(255,138,0,0.36), 0 0 20px rgba(255,210,120,0.22); transform: translateY(-3px) scale(1.02); }
+            `;
+            document.head.appendChild(s);
+        }
+
         // Capture current positions of grid boxes: Map<Element, DOMRect>
         function captureGridRects() {
             try {
@@ -27365,6 +27402,40 @@
                     if (box) {
                         box.classList.remove('badge-sell', 'badge-boost');
                         Array.from(updates.badges || []).forEach(b => box.classList.add(`badge-${b}`));
+                        // Render Boost badge DOM element when present
+                        ensureBadgeStyles();
+                        const hasBoost = (updates.badges || []).includes('boost');
+                        let badgeEl = box.querySelector('.boost-badge');
+                        if (hasBoost) {
+                            // Determine label: prefer postCache metadata, then pendingPayments, else default
+                            let labelText = 'Boost';
+                            try {
+                                if (postCache && postCache[postId] && postCache[postId].boostBadge) {
+                                    const bb = postCache[postId].boostBadge;
+                                    if (typeof bb === 'string') labelText = bb;
+                                    else if (bb && bb.label) labelText = bb.label;
+                                } else {
+                                    const pending = JSON.parse(localStorage.getItem('pendingPayments') || '{}');
+                                    for (const k of Object.keys(pending)) {
+                                        const p = pending[k];
+                                        if (p && p.kind === 'boost' && !p.consumed) { labelText = p.badgeLabel || labelText; break; }
+                                    }
+                                }
+                            } catch (_) {}
+                            if (!badgeEl) {
+                                badgeEl = document.createElement('div');
+                                badgeEl.className = 'boost-badge';
+                                badgeEl.innerHTML = `<span class="rocket">🚀</span><span class="label">${labelText}</span>`;
+                                badgeEl.dataset.label = labelText;
+                                box.appendChild(badgeEl);
+                            } else {
+                                try { badgeEl.querySelector('.label').textContent = labelText; badgeEl.dataset.label = labelText; } catch(_){}
+                            }
+                            // Keep badge interactive: click shows details if needed
+                            if (!badgeEl.onclick) badgeEl.onclick = (ev) => { ev.stopPropagation(); openBadgeInfoModal && openBadgeInfoModal(postId); };
+                        } else {
+                            if (badgeEl && badgeEl.parentNode) badgeEl.parentNode.removeChild(badgeEl);
+                        }
                     }
                 } catch (e) { /* ignore DOM update failures */ }
 
@@ -27421,6 +27492,20 @@
             } catch (error) {
                 console.error('Error creating test post:', error);
             }
+        };
+
+        // Show badge info modal (simple fallback)
+        window.openBadgeInfoModal = function(postId) {
+            try {
+                const post = (postCache && postCache[postId]) || null;
+                let msg = `Boost badge for post ${postId}`;
+                if (post && post.boostBadge) {
+                    const bb = post.boostBadge;
+                    if (typeof bb === 'string') msg += `: ${bb}`;
+                    else if (bb && bb.label) msg += `: ${bb.label}`;
+                }
+                alert(msg);
+            } catch (e) { alert('Badge info'); }
         };
         
         // Verify function is accessible
