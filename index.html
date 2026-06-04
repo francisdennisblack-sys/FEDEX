@@ -15115,11 +15115,16 @@
             const deleteIndex = userPostBoxes.indexOf(selectedBoxIndex);
             if (deleteIndex > -1) userPostBoxes.splice(deleteIndex, 1);
 
-            // Remove any rendered DOM node immediately for instant feedback
+            // Preserve the DOM slot but clear its data so new posts can fill it immediately
             try {
                 const boxEl = document.querySelector(`.grid-box[data-post-id="${selectedPostId}"]`);
-                if (boxEl && boxEl.parentNode) boxEl.parentNode.removeChild(boxEl);
-            } catch (e) { console.warn('Immediate DOM removal failed', e); }
+                if (boxEl) {
+                    try { boxEl.removeAttribute('data-post-id'); } catch(e){}
+                    try { boxEl.classList.remove('filled'); } catch(e){}
+                    try { boxEl.innerHTML = '<div style="min-height:80px;display:flex;align-items:center;justify-content:center;color:#9ca3af;">(empty)</div>'; } catch(e){}
+                    try { boxEl.classList.add('empty-slot'); } catch(e){}
+                }
+            } catch (e) { console.warn('Immediate DOM clearing failed', e); }
 
             // ALSO: remove the post from in-memory caches so renderGrid/loader
             // won't keep an empty/reserved slot around. This prevents a deleted
@@ -15130,11 +15135,17 @@
                 try { if (postCache && postCache[selectedPostId]) delete postCache[selectedPostId]; } catch(e){}
 
                 // Remove from every gridContent bucket
-                try {
+                    try {
                     Object.keys(gridContent).forEach(k => {
                         if (!Array.isArray(gridContent[k])) return;
-                        gridContent[k] = gridContent[k].filter(p => !(p && p.id === selectedPostId));
-                        if (gridContent[k].length === 0) delete gridContent[k];
+                        // Replace the deleted post in-place with a placeholder so array indexes remain stable
+                        for (let i = 0; i < gridContent[k].length; i++) {
+                            const p = gridContent[k][i];
+                            if (p && p.id === selectedPostId) {
+                                gridContent[k][i] = { id: null, __placeholder: true };
+                            }
+                        }
+                        // Do not delete empty buckets here; leave placeholders so the scroller mapping stays stable
                     });
                     console.log('🧹 Purged deleted post from gridContent and postCache:', selectedPostId);
                     try { console.log('DEBUG after delete: gridContent keys sizes:', Object.keys(gridContent).map(k=>({k, n: (gridContent[k]||[]).length}))); } catch(e){}
