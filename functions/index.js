@@ -530,7 +530,15 @@ exports.moderateMedia = functions
         const client = _getVideoClient();
         const [operation] = await client.annotateVideo({
           inputContent: bytes.toString('base64'),
-          features: ['EXPLICIT_CONTENT_DETECTION', 'LABEL_DETECTION', 'TEXT_DETECTION']
+          features: ['EXPLICIT_CONTENT_DETECTION', 'LABEL_DETECTION', 'TEXT_DETECTION', 'SPEECH_TRANSCRIPTION'],
+          videoContext: {
+            speechTranscriptionConfig: {
+              languageCode: 'en-US',
+              enableAutomaticPunctuation: true,
+              filterProfanity: false, // we want to see the words so our slur regex can match
+              maxAlternatives: 1
+            }
+          }
         });
         const [opResult] = await operation.promise();
         const annotations = (opResult && opResult.annotationResults && opResult.annotationResults[0]) || {};
@@ -587,10 +595,28 @@ exports.moderateMedia = functions
           }
         }
 
+        // Pass 4: spoken audio transcription → hate speech
+        // Uses Video Intelligence's built-in SPEECH_TRANSCRIPTION (no separate API).
+        let transcript = '';
+        if (safe) {
+          const speechAnns = annotations.speechTranscriptions || [];
+          transcript = speechAnns
+            .map(st => (st.alternatives && st.alternatives[0] && st.alternatives[0].transcript) || '')
+            .join(' \n ');
+          const audioHateHit = _containsHateText(transcript);
+          if (audioHateHit) {
+            safe = false;
+            reason = audioHateHit.kind === 'slur'
+              ? 'racial slur or hate speech detected in video audio'
+              : 'hate speech detected in video audio';
+            checks.push(`video:audio:${audioHateHit.kind}`);
+          }
+        }
+
         return {
           safe,
           reason,
-          scores: { pornography: worstExplicit, frameCount: expFrames.length },
+          scores: { pornography: worstExplicit, frameCount: expFrames.length, transcriptLength: transcript.length },
           checks,
           mediaType
         };
