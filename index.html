@@ -25230,16 +25230,25 @@
             const purchasePaidAt = window.purchasePaidAt || (localStorage && localStorage.getItem('purchasePaidAt'));
             
             if (!lastPurchaseType) return; // No pending purchase
-            
+
+            // Mirror to window so both code paths see the same value
+            window.lastPurchaseType = lastPurchaseType;
+            window.purchasePaidAt = purchasePaidAt;
+
             console.log(`💰 Applying pending ${lastPurchaseType} purchase to next post...`);
-            
+
+            // Track whether we actually applied to a visible button. If the composer
+            // isn't open yet (handler ran on page-load after Stripe redirect), the
+            // buttons don't exist — in that case we DO NOT clear the pending flag,
+            // so when the user opens the composer the badge auto-arms then.
+            let appliedToUI = false;
+
             if (lastPurchaseType === 'boost' || lastPurchaseType === 'boost_sell') {
-                // Auto-arm boost badge
+                window.pendingBoost = window.pendingBoost || { armed:false, armedAt:0, tier:'standard', paid:false, paymentMethodId:null, paymentIntentId:null, clientSecret:null };
                 window.pendingBoost.armed = true;
                 window.pendingBoost.armedAt = Date.now();
                 window.pendingBoost.paid = true;
                 
-                // Update boost button UI
                 const boostBtn = document.getElementById('boostBtn');
                 if (boostBtn) {
                     boostBtn.setAttribute('aria-pressed', 'true');
@@ -25247,15 +25256,16 @@
                     boostBtn.style.color = '#111827';
                     boostBtn.style.borderColor = '#f59e0b';
                     boostBtn.style.boxShadow = '0 6px 20px rgba(251,191,36,0.55)';
+                    appliedToUI = true;
                 }
                 const boostLabel = document.getElementById('boostBtnLabel');
                 if (boostLabel) boostLabel.textContent = 'boosted';
                 
-                console.log('  ✅ Boost badge auto-armed for next post');
+                console.log('  ✅ Boost badge auto-armed for next post' + (appliedToUI ? '' : ' (UI not open yet — will re-arm when composer opens)'));
             }
 
             if (lastPurchaseType === 'sell' || lastPurchaseType === 'boost_sell') {
-                // Auto-arm sell badge
+                window.pendingSell = window.pendingSell || { armed:false, armedAt:0, paid:false, paymentMethodId:null, paymentIntentId:null, clientSecret:null };
                 window.pendingSell.armed = true;
                 window.pendingSell.armedAt = Date.now();
                 window.pendingSell.paid = true;
@@ -25263,7 +25273,6 @@
                 if (!window.selectedBadges.includes('sell')) window.selectedBadges.push('sell');
                 window.primaryBadge = 'sell';
                 
-                // Update sell button UI
                 const sellBtn = document.getElementById('sellBtn');
                 if (sellBtn) {
                     sellBtn.setAttribute('aria-pressed', 'true');
@@ -25272,15 +25281,21 @@
                     sellBtn.style.color = '#fff';
                     sellBtn.style.borderColor = '#1e40af';
                     sellBtn.style.boxShadow = '0 6px 20px rgba(59,130,246,0.35)';
+                    appliedToUI = true;
                 }
                 
-                console.log('  ✅ Sell badge auto-armed for next post');
+                console.log('  ✅ Sell badge auto-armed for next post' + (appliedToUI ? '' : ' (UI not open yet — will re-arm when composer opens)'));
             }
             
-            // Clear the pending purchase after applying it
-            window.lastPurchaseType = null;
-            window.purchasePaidAt = null;
-            try { localStorage.removeItem('lastPurchaseType'); localStorage.removeItem('purchasePaidAt'); } catch(e){}
+            // Only consume the pending purchase flag once we actually applied it to
+            // a visible button. If the composer wasn't open, leave the flag set so
+            // the next composer open (which calls this fn) re-arms the badge.
+            // The flag is ultimately cleared in uploadPost() after a successful post.
+            if (appliedToUI) {
+                // Keep the flag around: uploadPost() is the canonical consumer.
+                // (We intentionally do NOT clear here. Previous bug: clearing on
+                //  page-load wiped the prepaid state before the composer existed.)
+            }
         }
 
         async function uploadPost() {
@@ -25988,6 +26003,18 @@
                 if (!userPostBoxes.includes(boxIndex)) {
                     userPostBoxes.push(boxIndex);
                 }
+
+                // Post is published — now safe to consume any pending prepaid purchase.
+                // (We deliberately don't clear it earlier so a Stripe redirect that lands
+                //  before the composer is opened doesn't wipe the prepaid state.)
+                try {
+                    window.lastPurchaseType = null;
+                    window.purchasePaidAt = null;
+                    if (window.localStorage) {
+                        localStorage.removeItem('lastPurchaseType');
+                        localStorage.removeItem('purchasePaidAt');
+                    }
+                } catch(_) {}
 
                 // Close modal and show notification
                 closeModal();
