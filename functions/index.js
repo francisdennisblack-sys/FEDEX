@@ -265,3 +265,131 @@ exports.handleStripeWebhook = functions.https.onRequest(async (req,res)=>{
   
   return res.json({received: true});
 });
+
+// ============================================================================
+// Media moderation (Google Cloud Vision + Video Intelligence)
+//
+// Project layout note: Firebase app lives in `wificontent-143da` but the
+// service account that has Vision/Video API access lives in a separate
+// GCP project called `wificontent`. The SA key is stored in a Firebase
+// Functions secret named VISION_SA_KEY (JSON contents of the key file).
+//
+// To set the secret once locally before deploying:
+//   firebase functions:secrets:set VISION_SA_KEY < ~/secrets/fedex-vision-key.json
+//
+// Client passes base64 (data URL stripped) plus mediaType: 'image' | 'video'.
+// Function returns { safe: bool, reason: string, scores: {...} }.
+// ============================================================================
+const VISION_SA_KEY = functions.params
+  ? null
+  : null; // placeholder so editors don't complain
+const visionSecret = require('firebase-functions/params').defineSecret('VISION_SA_KEY');
+
+let _visionClient = null;
+let _videoClient = null;
+function _getVisionCreds() {
+  const raw = process.env.VISION_SA_KEY || visionSecret.value();
+  if (!raw) throw new Error('VISION_SA_KEY secret not set');
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (e) { throw new Error('VISION_SA_KEY is not valid JSON'); }
+  return {
+    projectId: parsed.project_id,
+    credentials: {
+      client_email: parsed.client_email,
+      private_key: parsed.private_key
+    }
+  };
+}
+function _getVisionClient() {
+  if (_visionClient) return _visionClient;
+  const { ImageAnnotatorClient } = require('@google-cloud/vision');
+  _visionClient = new ImageAnnotatorClient(_getVisionCreds());
+  return _visionClient;
+}
+function _getVideoClient() {
+  if (_videoClient) return _videoClient;
+  const { VideoIntelligenceServiceClient } = require('@google-cloud/video-intelligence');
+  _videoClient = new VideoIntelligenceServiceClient(_getVisionCreds());
+  return _videoClient;
+}
+
+// Likelihood map: VERY_UNLIKELY=1 ... VERY_LIKELY=5
+const _LIKELIHOOD_RANK = { VERY_UNLIKELY: 1, UNLIKELY: 2, POSSIBLE: 3, LIKELY: 4, VERY_LIKELY: 5 };
+function _rank(v) {
+  if (typeof v === 'number') return v;
+  return _LIKELIHOOD_RANK[String(v).toUpperCase()] || 0;
+}
+
+exports.moderateMedia = functions
+  .runWith({ secrets: [visionSecret], timeoutSeconds: 120, memory: '512MB' })
+  .https.onCall(async (data, context) => {
+    const mediaType = (data && data.mediaType) || 'image';
+    const base64 = data && data.base64;
+    if (!base64 || typeof base64 !== 'string') {
+      throw new functions.https.HttpsError('invalid-argument', 'base64 (string) required');
+    }
+    // Strip data URL prefix if present
+    const cleanB64 = base64.indexOf(',') !== -1 ? base64.split(',')[1] : base64;
+    const bytes = Buffer.from(cleanB64, 'base64');
+
+    // Size guard (Vision: 20MB inline; Video: 10MB inline)
+    const maxBytes = mediaType === 'video' ? 9 * 1024 * 1024 : 19 * 1024 * 1024;
+    if (bytes.length > maxBytes) {
+      throw new functions.https.HttpsError('invalid-argument', `media too large for inline moderation (${bytes.length} bytes)`);
+    }
+
+    try {
+      if (mediaType === 'image') {
+        const client = _getVisionClient();
+        const [result] = await client.safeSearchDetection({ image: { content: bytes } });
+        const ss = (result && result.safeSearchAnnotation) || {};
+        const scores = {
+          adult: _rank(ss.adult),
+          violence: _rank(ss.violence),
+          racy: _rank(ss.racy),
+          medical: _rank(ss.medical),
+          spoof: _rank(ss.spoof)
+        };
+        // Block on LIKELY/VERY_LIKELY adult or violence; block VERY_LIKELY racy.
+        let safe = true;
+        let reason = '';
+        if (scores.adult >= 4) { safe = false; reason = 'adult content detected'; }
+        else if (scores.violence >= 4) { safe = false; reason = 'violent content detected'; }
+        else if (scores.racy >= 5) { safe = false; reason = 'explicit content detected'; }
+        return { safe, reason, scores, mediaType };
+      }
+
+      if (mediaType === 'video') {
+        const client = _getVideoClient();
+        const [operation] = await client.annotateVideo({
+          inputContent: bytes.toString('base64'),
+          features: ['EXPLICIT_CONTENT_DETECTION']
+        });
+        const [opResult] = await operation.promise();
+        const annotations = (opResult && opResult.annotationResults && opResult.annotationResults[0]) || {};
+        const frames = (annotations.explicitAnnotation && annotations.explicitAnnotation.frames) || [];
+        // Compute worst frame
+        let worst = 0;
+        for (const f of frames) {
+          const r = _rank(f.pornographyLikelihood);
+          if (r > worst) worst = r;
+        }
+        const safe = worst < 4; // block LIKELY or VERY_LIKELY
+        return {
+          safe,
+          reason: safe ? '' : 'explicit content detected in video',
+          scores: { pornography: worst, frameCount: frames.length },
+          mediaType
+        };
+      }
+
+      throw new functions.https.HttpsError('invalid-argument', `unknown mediaType: ${mediaType}`);
+    } catch (e) {
+      if (e && e.code && typeof e.code === 'string' && e.code.startsWith('functions/')) throw e;
+      console.error('moderateMedia error', e && e.message, e && e.stack);
+      // Fail-open: return safe=true so uploads aren't blocked by infra errors,
+      // but include the error reason so the client can log it.
+      return { safe: true, reason: 'moderation_unavailable: ' + (e && e.message), scores: {}, mediaType, failOpen: true };
+    }
+  });
+
