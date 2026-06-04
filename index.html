@@ -3205,7 +3205,9 @@
                         window.pendingBoost.armedAt = now;
                         window.pendingBoost.paid = true;
                         window.pendingBoost.paymentIntentId = sessionId;
-                        try { pushPendingOrder({ kind: 'boost', paymentIntentId: sessionId, badgeLabel: verified && verified.badgeLabel ? verified.badgeLabel : 'Boost', amount: verified && verified.amount ? verified.amount : null }); } catch(_) {}
+                        try { pushPendingOrder({ kind: 'boost', paymentIntentId: sessionId, badgeLabel: verified && verified.badgeLabel ? verified.badgeLabel : 'Boost', amount: verified && verified.amount ? verified.amount : null, postId: verified && verified.postId ? verified.postId : null }); } catch(_) {}
+                        // If the session is tied to a specific post, apply the badge immediately server-side
+                        try { if (verified && verified.postId) applyBadgeToPost(verified.postId, 'boost', { paymentIntentId: sessionId, badgeLabel: verified.badgeLabel || 'Boost', amount: verified.amount || null }); } catch(e) { console.warn('Immediate applyBadgeToPost failed', e); }
                     }
                     if (finalKind === 'sell' || finalKind === 'boost_sell') {
                         window.pendingSell = window.pendingSell || { armed:false, armedAt:0, paid:false, paymentMethodId:null, paymentIntentId:null, clientSecret:null };
@@ -3214,7 +3216,8 @@
                         window.pendingSell.paid = true;
                         window.pendingSell.paymentIntentId = sessionId;
                         try { localStorage.setItem('pendingSellPaymentIntentId', sessionId); } catch (_) {}
-                        try { pushPendingOrder({ kind: 'sell', paymentIntentId: sessionId, badgeLabel: verified && verified.badgeLabel ? verified.badgeLabel : 'Buy', amount: verified && verified.amount ? verified.amount : null }); } catch(_) {}
+                        try { pushPendingOrder({ kind: 'sell', paymentIntentId: sessionId, badgeLabel: verified && verified.badgeLabel ? verified.badgeLabel : 'Buy', amount: verified && verified.amount ? verified.amount : null, postId: verified && verified.postId ? verified.postId : null }); } catch(_) {}
+                        try { if (verified && verified.postId) applyBadgeToPost(verified.postId, 'sell', { paymentIntentId: sessionId, badgeLabel: verified.badgeLabel || 'Buy', amount: verified.amount || null }); } catch(e) { console.warn('Immediate applyBadgeToPost for sell failed', e); }
                     }
 
                     window.lastPurchaseType = finalKind;
@@ -15597,6 +15600,13 @@
                                      .catch(err => console.log(`⏸️ autoplay attempt failed (${label}):`, err && err.message));
                                 }
                             } catch (e) {}
+                            // If this payment targets an existing post, immediately persist
+                            // the badge to the server so other users see it right away.
+                            try {
+                                if (postId) {
+                                    applyBadgeToPost(postId, kind, { paymentIntentId: pi.id, badgeLabel: finalBadgeLabel, amount });
+                                }
+                            } catch (e) { console.warn('applyBadgeToPost failed after inline pay', e); }
                         };
                         // 1) Force the network fetch to begin immediately.
                         try { vidEl.load(); } catch (e) {}
@@ -28114,6 +28124,71 @@
                     } catch(e) { console.warn('Failed clearing transient purchase flags', e); }
                 }
             } catch (e) { console.warn('consumePendingOrdersForPost failed', e); }
+        }
+        
+        /**
+         * Persist a badge (boost/sell) to a post on the server and update local caches
+         * so the UI (and other users) see the change immediately.
+         */
+        async function applyBadgeToPost(postId, kind, details = {}) {
+            if (!postId) return;
+            try {
+                if (!window.database || !window.ref || !window.update) {
+                    console.warn('Firebase not initialized, cannot apply badge to post');
+                    return;
+                }
+                const postRef = window.ref(window.database, `posts/${postId}`);
+                const now = Date.now();
+                const updatePayload = {};
+                // Ensure badges array contains the kind
+                updatePayload.updatedAt = now;
+                if (kind === 'boost') {
+                    updatePayload.boostStatus = 'active';
+                    updatePayload.boostBadge = { paymentIntentId: details.paymentIntentId || null, purchasedAt: now, label: details.badgeLabel || 'Boost', amountCents: details.amount || null };
+                    // Add to badges array server-side via a shallow update
+                    updatePayload.badges = (Array.isArray(details.existingBadges) ? details.existingBadges.filter(Boolean) : []).concat(['boost']);
+                } else if (kind === 'sell') {
+                    updatePayload.sellBadge = { paymentIntentId: details.paymentIntentId || null, purchasedAt: now, label: details.badgeLabel || 'Buy', amountCents: details.amount || null };
+                    updatePayload.badges = (Array.isArray(details.existingBadges) ? details.existingBadges.filter(Boolean) : []).concat(['sell']);
+                }
+
+                // Attempt to update server
+                try {
+                    await window.update(postRef, updatePayload);
+                    console.log(`✅ applyBadgeToPost: persisted ${kind} to post ${postId}`);
+                } catch (e) {
+                    console.warn('applyBadgeToPost: server update failed, will continue with local cache update', e);
+                }
+
+                // Update local postCache and gridContent so UI reflects immediately
+                try {
+                    if (window.postCache && window.postCache[postId]) {
+                        const p = window.postCache[postId];
+                        p.badges = p.badges || [];
+                        if (!p.badges.includes(kind)) p.badges.push(kind);
+                        if (kind === 'boost') p.boostStatus = 'active';
+                        if (kind === 'boost') p.boostBadge = updatePayload.boostBadge;
+                        if (kind === 'sell') p.sellBadge = updatePayload.sellBadge;
+                    }
+                    if (window.gridContent) {
+                        for (const k in window.gridContent) {
+                            if (!Array.isArray(window.gridContent[k])) continue;
+                            window.gridContent[k].forEach(p => {
+                                if (p && p.id === postId) {
+                                    p.badges = p.badges || [];
+                                    if (!p.badges.includes(kind)) p.badges.push(kind);
+                                    if (kind === 'boost') { p.boostStatus = 'active'; p.boostBadge = updatePayload.boostBadge; }
+                                    if (kind === 'sell') { p.sellBadge = updatePayload.sellBadge; }
+                                }
+                            });
+                        }
+                    }
+                } catch (e) { console.warn('applyBadgeToPost: local cache update failed', e); }
+
+                // Recompute badges for visible posts and re-render
+                try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch (e) {}
+                try { scheduleRenderGrid(); } catch (e) {}
+            } catch (e) { console.warn('applyBadgeToPost failed', e); }
         }
         window.toggleSellPurchase = toggleSellPurchase;
         window.resetSellButton = resetSellButton;
