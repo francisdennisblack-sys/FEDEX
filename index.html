@@ -12544,12 +12544,23 @@
 
         // Video Moderation - calls moderateMedia Cloud Function (Video Intelligence API)
         async function moderateVideo(videoUrl, postId) {
+            console.log('🔍 moderateVideo called');
             try {
-                if (!videoUrl) return true;
+                if (!videoUrl) {
+                    console.warn('⚠️ moderateVideo: no videoUrl provided, blocking to be safe');
+                    return false;
+                }
+                if (!window.app) {
+                    console.error('❌ Video moderation aborted: window.app missing. BLOCKING.');
+                    try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'moderation_unavailable_app_missing'; } catch(e) {}
+                    return false;
+                }
                 const blob = (videoUrl instanceof Blob) ? videoUrl : await (await fetch(videoUrl)).blob();
+                console.log('  video blob size:', blob.size, 'bytes (', (blob.size/1024/1024).toFixed(2), 'MB)');
                 if (blob.size > 9 * 1024 * 1024) {
-                    console.warn('⚠️ Video too large for inline moderation (>9MB), allowing');
-                    return true;
+                    console.error('❌ Video too large for moderation (>9MB). BLOCKING — user must shrink the video.');
+                    try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'video_too_large_for_moderation'; } catch(e) {}
+                    return false;
                 }
                 const base64 = await new Promise((resolve, reject) => {
                     const r = new FileReader();
@@ -12557,28 +12568,37 @@
                     r.onerror = reject;
                     r.readAsDataURL(blob);
                 });
+                console.log('  base64 length:', base64.length);
                 if (!window.functions) {
+                    console.log('  Loading firebase-functions SDK...');
                     const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
                     window.functions = getFunctions(window.app, 'us-central1');
                     window.httpsCallable = httpsCallable;
                 }
-                const moderateMedia = window.httpsCallable(window.functions, 'moderateMedia');
-                const res = await moderateMedia({ base64, mediaType: 'video' });
+                const moderateMedia = window.httpsCallable(window.functions, 'moderateMedia', { timeout: 200000 });
+                console.log('  📤 Calling moderateMedia (video)...');
+                // Race the callable against a 195s timeout so the UI never hangs forever.
+                const res = await Promise.race([
+                    moderateMedia({ base64, mediaType: 'video' }),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('moderation_timeout_195s')), 195000))
+                ]);
                 const out = (res && res.data) || {};
+                console.log('  📥 Video moderation result:', out);
                 if (out.failOpen) {
-                    console.warn('⚠️ Video moderation unavailable, allowing upload:', out.reason);
+                    console.warn('⚠️ Video moderation backend unavailable, allowing upload:', out.reason);
                     return true;
                 }
                 if (out.safe === false) {
-                    console.log('❌ Video blocked:', out.reason, out.scores);
+                    console.log('❌ Video BLOCKED:', out.reason, 'checks:', out.checks, 'scores:', out.scores);
                     try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = out.reason; } catch(e) {}
                     return false;
                 }
-                console.log('✅ Video approved', out.scores);
+                console.log('✅ Video approved', out.scores, 'checks:', out.checks);
                 return true;
             } catch (error) {
-                console.error('Video check error:', error && error.message);
-                return true; // Fail open - allow upload
+                console.error('❌ Video moderation error — BLOCKING:', error && (error.message || error));
+                try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'video_moderation_error: ' + (error && error.message || 'unknown'); } catch(e) {}
+                return false; // fail CLOSED
             }
         }
 
@@ -24809,6 +24829,22 @@
                     try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'moderation_unavailable_app_missing'; } catch(e) {}
                     return false; // fail CLOSED — safer
                 }
+                const base64Data = (typeof imageDataUrl === 'string' && imageDataUrl.indexOf(',') !== -1)
+                    ? imageDataUrl.split(',')[1]
+                    : imageDataUrl;
+                // Size guard: Cloud Function rejects >19MB; check up front so we surface a clear error
+                // instead of a confusing backend failure.
+                if (!base64Data || base64Data.length === 0) {
+                    console.error('❌ Moderation aborted: empty image data. BLOCKING.');
+                    try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'empty_image_data'; } catch(e) {}
+                    return false;
+                }
+                const approxBytes = Math.floor(base64Data.length * 0.75);
+                if (approxBytes > 19 * 1024 * 1024) {
+                    console.error('❌ Image too large for moderation (>19MB). BLOCKING — user must shrink the photo.');
+                    try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'image_too_large_for_moderation'; } catch(e) {}
+                    return false;
+                }
                 if (!window.functions) {
                     console.log('  Loading firebase-functions SDK...');
                     const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
@@ -24816,12 +24852,13 @@
                     window.httpsCallable = httpsCallable;
                     console.log('  ✅ functions SDK ready');
                 }
-                const moderateMedia = window.httpsCallable(window.functions, 'moderateMedia');
-                const base64Data = (typeof imageDataUrl === 'string' && imageDataUrl.indexOf(',') !== -1)
-                    ? imageDataUrl.split(',')[1]
-                    : imageDataUrl;
-                console.log('  📤 Calling moderateMedia... base64 length=', (base64Data||'').length);
-                const res = await moderateMedia({ base64: base64Data, mediaType: 'image' });
+                const moderateMedia = window.httpsCallable(window.functions, 'moderateMedia', { timeout: 90000 });
+                console.log('  📤 Calling moderateMedia... base64 length=', base64Data.length);
+                // 85s race so a hung callable never leaves the UI stuck.
+                const res = await Promise.race([
+                    moderateMedia({ base64: base64Data, mediaType: 'image' }),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('moderation_timeout_85s')), 85000))
+                ]);
                 const out = (res && res.data) || {};
                 console.log('  📥 Moderation result:', out);
                 if (out.failOpen) {
@@ -24893,18 +24930,25 @@
                     
                     const reader = new FileReader();
                     reader.onload = async (e) => {
-                        // Check image moderation
-                        const isSafe = await checkImageModeration(e.target.result);
-                        
+                        let isSafe = false;
+                        try {
+                            // Check image moderation
+                            isSafe = await checkImageModeration(e.target.result);
+                        } catch (modErr) {
+                            console.error('handleFiles: moderation threw, treating as unsafe:', modErr);
+                            isSafe = false;
+                        }
+
                         if (!isSafe) {
                             hideMediaLoadingOverlay();
                             selectedFile = null;
                             fileInput.value = '';
                             hideDeleteMediaButton();
                             isMediaProcessing = false; // Clear flag
+                            const reason = (window.lastModerationReason || 'not allowed').toString();
                             // Show brief warning message in overlay area
-                            showMediaLoadingOverlay('Image not allowed — try another');
-                            setTimeout(() => hideMediaLoadingOverlay(), 2200);
+                            showMediaLoadingOverlay('Image blocked: ' + reason.replace(/_/g,' ').slice(0,80));
+                            setTimeout(() => hideMediaLoadingOverlay(), 3000);
                             return;
                         }
 
@@ -24915,6 +24959,16 @@
                         showDeleteMediaButton();
                         const previewText = document.getElementById('uploadPreviewText');
                         if (previewText) previewText.textContent = 'Photo selected';
+                    };
+                    reader.onerror = (err) => {
+                        console.error('FileReader error during image moderation prep:', err);
+                        hideMediaLoadingOverlay();
+                        selectedFile = null;
+                        fileInput.value = '';
+                        hideDeleteMediaButton();
+                        isMediaProcessing = false;
+                        showMediaLoadingOverlay('Could not read image — try another');
+                        setTimeout(() => hideMediaLoadingOverlay(), 2200);
                     };
                     reader.readAsDataURL(file);
                 } else {
