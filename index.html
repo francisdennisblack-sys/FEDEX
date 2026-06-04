@@ -5603,6 +5603,23 @@
                         cLog('POI loading skipped by CLEANUP_FLAGS.ENABLE_POI_LOADING');
                         return;
                     }
+                    // QUICK PATH: if a small cached POI subset exists from a previous session,
+                    // populate `globalPOIDatabase` immediately and kick off a background refresh.
+                    try {
+                        if ((!window.globalPOIDatabase || window.globalPOIDatabase.length === 0) && localStorage.getItem && localStorage.getItem('lastPOIs')) {
+                            const raw = localStorage.getItem('lastPOIs');
+                            if (raw) {
+                                const cached = JSON.parse(raw);
+                                if (Array.isArray(cached) && cached.length > 0) {
+                                    window.globalPOIDatabase = cached;
+                                    console.log(`⚡ Using cached POI subset (${cached.length} items) for instant availability`);
+                                    // Schedule background refresh of full POI data without blocking
+                                    setTimeout(() => { try { loadPOIDataInBackground(); } catch(e){} }, 50);
+                                    return; // fast return so callers (dropdown) get immediate response
+                                }
+                            }
+                        }
+                    } catch(e) { console.warn('Failed to load POI cache:', e); }
                     
                     // 🚀 MOBILE OPTIMIZATION: Load ONLY nearby state POIs on startup (lightweight)
                     cLog('📥 MOBILE OPTIMIZED: Loading minimal POI data for current location...');
@@ -5625,6 +5642,12 @@
                                 }));
                                 window.globalPOIDatabase = converted;
                                 console.log(`✅ Loaded POIs from pois/search-index.json (${converted.length} rows)`);
+                                try {
+                                    // Persist a small subset for instant startup (limit to 500 items)
+                                    const small = converted.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.type || null, state: p.state || null }));
+                                    localStorage.setItem('lastPOIs', JSON.stringify(small));
+                                    localStorage.setItem('lastPOIsAt', String(Date.now()));
+                                } catch(e) { /* ignore storage errors */ }
                                 // Defer background per-state loading still
                                 if (typeof requestIdleCallback !== 'undefined') {
                                     requestIdleCallback(() => { loadPOIDataInBackground(); }, { timeout: 8000 });
@@ -5659,6 +5682,11 @@
                             
                             globalPOIDatabase = statePOIs;
                             console.log(`✅ Loaded ${statePOIs.length} POIs for ${userState}`);
+                        try {
+                            const small = statePOIs.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.category || null, state: p.state || null }));
+                            localStorage.setItem('lastPOIs', JSON.stringify(small));
+                            localStorage.setItem('lastPOIsAt', String(Date.now()));
+                        } catch(e) {}
                         } catch (stateErr) {
                             console.warn(`⚠️ Could not load state POIs:`, stateErr.message);
                             globalPOIDatabase = [];
@@ -5677,6 +5705,11 @@
                                 if (Array.isArray(masterPois) && masterPois.length > 0) {
                                     globalPOIDatabase = masterPois;
                                     console.log(`✅ Loaded ${masterPois.length} POIs from master_pois_database.json fallback`);
+                                    try {
+                                        const small = masterPois.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.category || null, state: p.state || null }));
+                                        localStorage.setItem('lastPOIs', JSON.stringify(small));
+                                        localStorage.setItem('lastPOIsAt', String(Date.now()));
+                                    } catch(e) {}
                                 }
                             }
                         }
@@ -21882,7 +21915,7 @@
                         // Wait longer (up to 5s) so slower connections/devices get a chance
                         const res = await Promise.race([
                             p,
-                            new Promise((resolve) => setTimeout(() => resolve(null), 5000))
+                            new Promise((resolve) => setTimeout(() => resolve(null), 700))
                         ]);
                         if (!res) console.log('⚠️ POI index not ready within timeout; continuing with what is available');
                     } catch (e) {
@@ -26656,6 +26689,18 @@
                     return d;
                 })
                 .catch(e => console.warn('OSM places preload failed:', e));
+
+            // QUICK COLD START: Use a small cached POI subset from previous sessions for instant dropdowns
+            try {
+                const raw = localStorage.getItem('lastPOIs');
+                if (raw) {
+                    const parsed = JSON.parse(raw);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                        window.globalPOIDatabase = parsed;
+                        console.log(`⚡ Instant POI warm cache loaded: ${parsed.length} items from localStorage.lastPOIs`);
+                    }
+                }
+            } catch (e) { console.warn('Failed to restore cached POIs from localStorage', e); }
 
             // Ensure POI data is (re)loaded when the user returns to the tab or focuses the window
             window.ensurePOIDataReady = async function ensurePOIDataReady() {
