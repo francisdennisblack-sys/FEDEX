@@ -23017,7 +23017,8 @@
                 }
 
                 // If there are empty reserved slots (e.g., box elements missing), prefer to fill them by
-                // inserting at the first index where a DOM box without data exists. Fallback to splice.
+                // inserting into the first empty slot (preserve array length and scroller indexes).
+                // Fallback to splice insertion which shifts indexes.
                 try {
                     const gridEl = document.getElementById('grid');
                     if (gridEl) {
@@ -23027,6 +23028,7 @@
                             if (!n) continue;
                             const pid = n.getAttribute('data-post-id');
                             if (!pid || pid.trim() === '') {
+                                // prefer to fill this DOM-empty slot if it maps into our intended content array
                                 insertAt = Math.min(insertAt, i);
                                 break;
                             }
@@ -23034,7 +23036,19 @@
                     }
                 } catch (e) { /* ignore DOM probing failures */ }
 
-                gridContent[contentKey].splice(insertAt, 0, postData);
+                // Prefer to fill an existing empty slot in gridContent rather than splicing which
+                // shifts indexes and can confuse the virtual scroller's mapping.
+                let filled = false;
+                try {
+                    const emptyIndex = gridContent[contentKey].findIndex(p => !p || !p.id);
+                    if (emptyIndex !== -1) {
+                        gridContent[contentKey][emptyIndex] = postData;
+                        insertAt = emptyIndex;
+                        filled = true;
+                    }
+                } catch (e) { /* ignore */ }
+
+                if (!filled) gridContent[contentKey].splice(insertAt, 0, postData);
                 try { console.log(`➕ insertNewPostIntoGrid: inserted ${postData.id} at index ${insertAt} in ${contentKey}`); } catch(e){}
 
                 // Dump debug state: gridContent sizes, scroller items, and first DOM boxes
@@ -23072,6 +23086,13 @@
                     });
 
                     try {
+                        // Force-clear the scroller internal items before setting new ones to avoid
+                        // stale index->DOM mappings when slots were removed previously.
+                        try {
+                            if (typeof gridScroller.setItems === 'function') gridScroller.setItems([]);
+                            else if (Array.isArray(gridScroller.items)) gridScroller.items = [];
+                        } catch(e) { /* ignore */ }
+
                         if (typeof gridScroller.setItems === 'function') {
                             gridScroller.setItems(all);
                         } else if (Array.isArray(gridScroller.items)) {
