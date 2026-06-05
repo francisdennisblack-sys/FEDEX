@@ -22333,7 +22333,37 @@
                 }
                 // Do not return — proceed to display cached/global POIs below
             }
-            
+            // If both location and POI DBs are empty, attempt a fast fallback fetch
+            if ((!globalLocationDatabase || globalLocationDatabase.length === 0) && (!globalPOIDatabase || globalPOIDatabase.length === 0)) {
+                console.warn('⚠️ No in-memory POI/location DBs found — attempting quick fallback fetches');
+                try {
+                    // Try lightweight expanded fallback (smaller payload)
+                    const p1 = fetch('/poi_database_expanded.json').then(r => r.ok ? r.json() : null).catch(() => null);
+                    const p2 = fetch('/pois/search-index.json').then(r => r.ok ? r.json() : null).catch(() => null);
+                    const [expanded, searchIndex] = await Promise.all([p1, p2]);
+                    if (expanded) {
+                        try {
+                            const arr = Array.isArray(expanded) ? expanded : (expanded.locations || []);
+                            window.globalLocationDatabase = window.globalLocationDatabase || [];
+                            window.globalLocationDatabase.push(...arr.map(loc => ({ name: loc.name, lat: loc.lat, lon: loc.lon, state: loc.state, type: loc.type || 'poi', category: loc.category })));
+                            console.log('✅ Fallback: loaded poi_database_expanded.json', window.globalLocationDatabase.length);
+                        } catch (e) { console.warn('Fallback expanded load parse failed', e); }
+                    }
+                    if (searchIndex && searchIndex.rows && Array.isArray(searchIndex.rows)) {
+                        try {
+                            window.globalPoiSearchIndex = searchIndex;
+                            window.globalPOIDatabase = window.globalPOIDatabase || [];
+                            // Push first N rows as lightweight POIs for dropdown
+                            const rows = searchIndex.rows.slice(0, 20000).map(r => ({ name: r.name || r.title || r[0], lat: r.lat, lon: r.lon, category: r.category }));
+                            window.globalPOIDatabase.push(...rows);
+                            console.log('✅ Fallback: loaded pois/search-index.json (sample rows)', window.globalPOIDatabase.length);
+                        } catch (e) { console.warn('Fallback search-index parse failed', e); }
+                    }
+                } catch (e) {
+                    console.warn('Fallback POI fetches failed', e && e.message);
+                }
+            }
+
             console.log(`🔍 Searching near: ${uLat.toFixed(4)}, ${uLon.toFixed(4)}`);
             
             html += '<div style="padding: 10px 12px; background-color: #1f2937; border-bottom: 1px solid #2a2a2a; color: #667eea; font-size: 11px; text-transform: uppercase; font-weight: 600;">📍 Nearby Locations & POIs</div>';
