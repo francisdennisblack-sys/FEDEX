@@ -12956,6 +12956,16 @@
                         } catch (e) { console.warn('Snapshot prune failed', e); }
                         
                         console.log(`  📊 Total posts after processing: ${allPosts.length}`);
+                        // Temporarily short-circuit localStorage reads for heavy badge queues
+                        // so we don't block the realtime snapshot processing. Any queued
+                        // work will be handled asynchronously by `flushQueuedBadges()`.
+                        const __orig_localStorage_getItem = localStorage.getItem.bind(localStorage);
+                        try {
+                            localStorage.getItem = function(k) {
+                                if (k === 'queuedBadgeUpdates' || k === 'pendingOrders' || k === 'pendingPayments') return '[]';
+                                return __orig_localStorage_getItem(k);
+                            };
+                        } catch (e) { /* if access denied, ignore */ }
                     } else {
                         console.log('  ⚠️ Posts collection is empty');
                     }
@@ -13040,6 +13050,7 @@
                             }
                         } catch (e) {}
                     } catch (e) { console.warn('Failed to merge local badge queues into posts', e); }
+                    try { if (typeof __orig_localStorage_getItem === 'function') localStorage.getItem = __orig_localStorage_getItem; } catch(e) { /* ignore */ }
 
                     // 💾 AGGRESSIVE PERSISTENCE: Save posts to localStorage immediately
                     if (allPosts.length > 0) {
@@ -13055,6 +13066,7 @@
                     console.log(`  📞 About to call callback with ${allPosts.length} posts`);
                     callback(allPosts);
                     console.log('  ✅ callback completed');
+                    try { if (typeof flushQueuedBadges === 'function') setTimeout(flushQueuedBadges, 100); } catch(e) {}
                     
                     // 💾 CACHE POSTS IN SERVICE WORKER FOR OFFLINE ACCESS
                     if ('serviceWorker' in navigator && navigator.serviceWorker.controller && allPosts.length > 0) {
@@ -28359,6 +28371,64 @@
                 try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch (e) {}
                 try { scheduleRenderGrid(); } catch (e) {}
             } catch (e) { console.warn('applyBadgeToPost failed', e); }
+        }
+        
+        // Flush queued/pending local badge updates to server in a safe, idempotent way.
+        // Only apply entries that reference a concrete `postId` so we don't mutate
+        // the global snapshot during realtime processing. This runs in background
+        // and removes entries it successfully persists.
+        async function flushQueuedBadges() {
+            try {
+                if (!window.database || !window.applyBadgeToPost) return;
+                // queuedBadgeUpdates: [{ postId, kind, details }]
+                let queued = [];
+                try { queued = JSON.parse(localStorage.getItem('queuedBadgeUpdates') || '[]') || []; } catch (e) { queued = []; }
+                for (let i = queued.length - 1; i >= 0; i--) {
+                    const q = queued[i];
+                    if (!q || !q.postId) continue;
+                    try {
+                        await applyBadgeToPost(q.postId, q.kind, q.details || {});
+                        queued.splice(i, 1);
+                    } catch (e) {
+                        console.warn('flushQueuedBadges: apply failed for', q.postId, e);
+                    }
+                }
+                try { localStorage.setItem('queuedBadgeUpdates', JSON.stringify(queued)); } catch (e) {}
+
+                // pendingOrders: FIFO list — persist those with postId to server
+                let pending = [];
+                try { pending = JSON.parse(localStorage.getItem('pendingOrders') || '[]') || []; } catch (e) { pending = []; }
+                for (let i = pending.length - 1; i >= 0; i--) {
+                    const o = pending[i];
+                    if (!o || !o.postId) continue;
+                    try {
+                        await applyBadgeToPost(o.postId, o.kind, { paymentIntentId: o.paymentIntentId || null, badgeLabel: o.badgeLabel || null, amount: o.amount || null });
+                        pending.splice(i, 1);
+                    } catch (e) {
+                        console.warn('flushQueuedBadges: pendingOrders apply failed for', o.postId, e);
+                    }
+                }
+                try { localStorage.setItem('pendingOrders', JSON.stringify(pending)); } catch (e) {}
+
+                // pendingPayments: map paymentIntentId -> info { postId, kind, badgeLabel }
+                let pm = {};
+                try { pm = JSON.parse(localStorage.getItem('pendingPayments') || '{}') || {}; } catch (e) { pm = {}; }
+                for (const pid of Object.keys(pm)) {
+                    const info = pm[pid];
+                    if (!info || !info.postId) continue;
+                    try {
+                        await applyBadgeToPost(info.postId, info.kind || 'boost', { paymentIntentId: pid, badgeLabel: info.badgeLabel || null, amount: info.amount || null });
+                        delete pm[pid];
+                    } catch (e) {
+                        console.warn('flushQueuedBadges: pendingPayments apply failed for', pid, e);
+                    }
+                }
+                try { localStorage.setItem('pendingPayments', JSON.stringify(pm)); } catch (e) {}
+
+                console.log('✅ flushQueuedBadges complete');
+            } catch (e) {
+                console.warn('flushQueuedBadges overall error', e);
+            }
         }
         window.toggleSellPurchase = toggleSellPurchase;
         window.resetSellButton = resetSellButton;
