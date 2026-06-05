@@ -2575,7 +2575,7 @@
             </div>
             <!-- Sell badge purchase hint (mirrors boost UI) -->
             <div id="sellHint" style="display:none; margin-top:8px; padding:10px; background:rgba(59,130,246,0.04); border:1px solid rgba(59,130,246,0.12); border-radius:8px; color:#60a5fa; font-size:12px; font-weight:600;">
-                <div id="sellHintText" style="text-align:center; margin-bottom:8px;">💠 Buy badge armed — $0.05</div>
+                <div id="sellHintText" style="text-align:center; margin-bottom:8px;">💠 Buy badge armed — $0.51</div>
                 <div id="sellPayRequestMount" style="min-height:0;"></div>
                 <div id="sellPayStatus" style="display:none; text-align:center; margin-top:6px; color:#10b981; font-size:11px;"></div>
                 <div style="text-align:center; margin-top:6px;">
@@ -2583,7 +2583,7 @@
                 </div>
                 <div id="sellCardWrap" style="display:none; margin-top:8px;">
                     <div id="sellCardMount" style="background:#0f172a; border:1px solid #334155; border-radius:6px; padding:10px;"></div>
-                    <button type="button" id="sellCardPayBtn" onclick="window.initiateCheckout('new_post_sell', 5, 'sell')" style="width:100%; margin-top:6px; padding:8px; background:#3b82f6; color:#fff; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay $0.05 with card</button>
+                    <button type="button" id="sellCardPayBtn" onclick="window.initiateCheckout('new_post_sell', (window.SELL_PRICE_CENTS||51), 'sell')" style="width:100%; margin-top:6px; padding:8px; background:#3b82f6; color:#fff; border:none; border-radius:6px; font-weight:800; font-size:12px; cursor:pointer;">pay $0.51 with card</button>
                     <div id="sellCardError" style="display:none; color:#ef4444; font-size:11px; margin-top:4px; text-align:center;"></div>
                 </div>
             </div>
@@ -6885,40 +6885,6 @@
         // Recompute badge assignments for visible posts and apply DOM updates
         function recomputeAndApplyBadges() {
             try {
-                // Quick pre-hydration: ensure visible posts have server badge data
-                try {
-                    const visibleIds = new Set();
-                    if (window.gridScroller && typeof gridScroller.getVisibleItems === 'function') {
-                        const vis = gridScroller.getVisibleItems();
-                        vis.forEach(v => { if (v && v.item && v.item.id) visibleIds.add(v.item.id); });
-                    } else {
-                        const nodes = Array.from(document.querySelectorAll('.grid-box[data-post-id]'));
-                        nodes.forEach(n => { const id = n.getAttribute('data-post-id'); if (id) visibleIds.add(id); });
-                    }
-
-                    const idsNeeding = [];
-                    visibleIds.forEach(pid => {
-                        try {
-                            const pc = window.postCache && window.postCache[pid];
-                            if (pc && (pc.badges || pc.boostBadge || pc.sellBadge || pc.boostStatus === 'active')) return;
-                            // check gridContent quickly for existing badge flags
-                            let foundWithBadge = false;
-                            if (window.gridContent) {
-                                for (const k in window.gridContent) {
-                                    if (!Array.isArray(window.gridContent[k])) continue;
-                                    const f = window.gridContent[k].find(p => p && p.id === pid);
-                                    if (f && (f.badges || f.boostBadge || f.sellBadge || f.boostStatus === 'active' || f.boostPaidAt || f.sellPaidAt)) { foundWithBadge = true; break; }
-                                }
-                            }
-                            if (!foundWithBadge) idsNeeding.push({ id: pid });
-                        } catch (e) { /* ignore per-id errors */ }
-                    });
-
-                    if (idsNeeding.length > 0) {
-                        try { hydrateVisiblePostBadges(idsNeeding, idsNeeding.length); } catch (e) {}
-                        return; // wait for hydration to re-run recompute
-                    }
-                } catch (e) { /* ignore pre-hydration errors */ }
                 // Build top-100 ranking by engagement (likes - dislikes)
                 const allPostsList = [];
                 for (const k in gridContent) {
@@ -6935,10 +6901,6 @@
                     const p = allPostsList[i];
                     if (p && (p.authId !== currentUserId) && p.id) podium.push(p.id);
                 }
-
-                // Debug flags (enable in console: `window.FEDX_DEBUG_BADGES = true`)
-                const debug = !!window.FEDX_DEBUG_BADGES;
-                const forceRefresh = !!window.FEDX_FORCE_REFRESH;
 
                 // Determine visible boxes from gridScroller if available, otherwise query DOM
                 let visibleBoxes = [];
@@ -6969,13 +6931,6 @@
 
                         // Compose badges
                         const badges = [];
-
-                        if (debug) {
-                            try {
-                                const pc = window.postCache && window.postCache[post.id];
-                                console.debug('[BADGE DEBUG] postId=', post.id, 'hasPostFlags:', { boosted: !!(post.boosted||post.isBoosted||post.boostStatus==='active'), sell: !!(post.sellBadge||post.forSale||post.buyBadge) }, 'postCache:', !!pc, 'postCache.badges:', pc && pc.badges);
-                            } catch(e) { /* ignore debug errors */ }
-                        }
 
                         // MY badge: show when the post is owned by the current user.
                         // Use the canonical helper `isOwnedByCurrentUser` which relies on
@@ -7079,11 +7034,6 @@
                         badgeContainer.innerHTML = badgeHtml;
                     } catch(e){ console.warn('applyBadge error', e); }
                 });
-
-                // Optionally force a scroller refresh to ensure reused DOM nodes repaint
-                if (forceRefresh && window.gridScroller && typeof gridScroller.refresh === 'function') {
-                    try { gridScroller.refresh(); } catch(e) { /* ignore */ }
-                }
 
                 function findPostById(id) {
                     for (const k in gridContent) {
@@ -28160,6 +28110,17 @@
                 try { if (window.pendingBoost && window.pendingBoost.armed) _initBoostPaymentRequest(); } catch(e){}
             }
         }
+        // Force-open the sell checkout UI (arms sell and initializes its payment UI)
+        function openSellCheckout() {
+            window.pendingSell = window.pendingSell || { armed: false, armedAt: 0, paid: false, paymentMethodId: null, paymentIntentId: null, clientSecret: null };
+            window.pendingSell.armed = true;
+            window.pendingSell.armedAt = Date.now();
+            try { _initSellPaymentRequest(); } catch(e) { console.warn('openSellCheckout _initSellPaymentRequest failed', e); }
+            try { const wrap = document.getElementById('sellCardWrap'); if (wrap) wrap.style.display = ''; } catch(e){}
+            try { const other = document.getElementById('sellOtherWaysBtn'); if (other) other.style.display = ''; } catch(e){}
+            try { const hint = document.getElementById('sellHint'); if (hint) hint.style.display = 'block'; } catch(e){}
+        }
+        window.openSellCheckout = openSellCheckout;
         function resetSellButton() {
             window.pendingSell = { armed: false, armedAt: 0, paid: false, paymentMethodId: null, paymentIntentId: null, clientSecret: null };
             try { localStorage.removeItem('pendingSellPaymentIntentId'); } catch(e){}
