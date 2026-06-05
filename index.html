@@ -22404,8 +22404,26 @@
             
             // ============================================
             // STEP 2: Search POI database (businesses/landmarks)
+            // Prefer server-side geosearch for small payloads; fallback to client DB if unavailable
             // ============================================
-            if (globalPOIDatabase && globalPOIDatabase.length > 0) {
+            let serverUsed = false;
+            try {
+                if (!uLat || !uLon) throw new Error('no-loc');
+                const s = await Promise.race([
+                    fetch(`/geosearch?lat=${encodeURIComponent(uLat)}&lon=${encodeURIComponent(uLon)}&n=200`).catch(() => null),
+                    new Promise((resolve) => setTimeout(() => resolve(null), 700))
+                ]);
+                if (s && s.ok) {
+                    const payload = await s.json();
+                    if (payload && Array.isArray(payload.results) && payload.results.length > 0) {
+                        payload.results.forEach(r => items.push({ type: 'poi', name: r.name, display: r.name, emoji: '📍', category: r.category || '', mi: r.distanceMi || 0 }));
+                        serverUsed = true;
+                        console.log(`🔁 Nearby: used server geosearch, got ${payload.results.length} results`);
+                    }
+                }
+            } catch(e) { console.warn('Server geosearch attempt failed', e && e.message); }
+
+            if (!serverUsed && globalPOIDatabase && globalPOIDatabase.length > 0) {
                 // Use POI worker if available for nearest-N queries
                 if (window.POI_WORKER) {
                     try {
