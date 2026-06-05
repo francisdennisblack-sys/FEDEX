@@ -28535,6 +28535,91 @@
         // Run a quick pass on startup to surface any recently-written payments
         // and badges so testing reflects server state immediately.
         try { setTimeout(watchPendingPaymentsAndApply, 250); } catch(e) {}
+        // Attach a persistent listener to `payments` so when the server records
+        // a completed payment we immediately fetch the denormalized badge on
+        // the associated post and apply it to the local cache/UI.
+        function attachPaymentsRealtimeListener() {
+            try {
+                if (!window.database) return;
+                if (window._paymentsListenerAttached) return;
+                window._paymentsListenerAttached = true;
+                const paymentsRoot = ref(database, 'payments');
+                console.log('🎧 Attaching payments realtime listener for immediate badge propagation');
+                onChildAdded(paymentsRoot, (snap) => {
+                    try {
+                        const paymentId = snap.key;
+                        const pay = snap.val() || {};
+                        if (!paymentId || !pay) return;
+                        const kind = (pay.kind || '').toLowerCase();
+                        if (!['boost','sell','boost_sell'].includes(kind)) return;
+                        // Only act when payment is completed
+                        if (pay.status && pay.status !== 'completed') return;
+                        const postId = pay.postId;
+                        if (!postId || postId === 'new_post' || postId === 'new_post_boost' || postId === 'new_post_sell') return;
+                        const badgeRef = ref(database, `posts/${postId}/badges/${paymentId}`);
+                        get(badgeRef).then(bsnap => {
+                            if (!bsnap.exists()) return;
+                            const badgeRec = bsnap.val() || {};
+                            try {
+                                postCache = postCache || {};
+                                postCache[postId] = postCache[postId] || {};
+                                const pc = postCache[postId];
+                                pc.id = postId;
+                                pc.badges = pc.badges || [];
+                                if (badgeRec.kind && !pc.badges.includes(badgeRec.kind)) pc.badges.push(badgeRec.kind);
+                                if (badgeRec.kind === 'boost') {
+                                    pc.boostBadge = pc.boostBadge || {};
+                                    pc.boostBadge.label = badgeRec.label || pc.boostBadge.label || 'Boost';
+                                    pc.boostBadge.paymentId = paymentId;
+                                    pc.boostStatus = pc.boostStatus || 'active';
+                                    pc.boostPaidAt = pc.boostPaidAt || badgeRec.appliedAt || Date.now();
+                                }
+                                if (badgeRec.kind === 'sell') {
+                                    pc.sellBadge = pc.sellBadge || {};
+                                    pc.sellBadge.label = badgeRec.label || pc.sellBadge.label || 'Buy';
+                                    pc.sellBadge.paymentId = paymentId;
+                                    pc.primaryBadge = pc.primaryBadge || 'sell';
+                                    pc.sellPaidAt = pc.sellPaidAt || badgeRec.appliedAt || Date.now();
+                                }
+                                try { scheduleRenderGrid(); } catch(e){}
+                                try { recomputeAndApplyBadges(); } catch(e){}
+                                console.log('🔔 payments listener applied badge to cache', postId, paymentId);
+                            } catch (e) { console.warn('payments listener apply error', e); }
+                        }).catch(e=>{});
+                    } catch (e) { console.warn('payments onChildAdded handler failed', e); }
+                });
+                // Also react to changes (e.g., status updated to completed)
+                onChildChanged(paymentsRoot, (snap) => {
+                    try {
+                        const paymentId = snap.key; const pay = snap.val() || {};
+                        if (!paymentId || !pay) return;
+                        if (pay.status && pay.status === 'completed') {
+                            // reuse the same logic by invoking the added handler path
+                            const postId = pay.postId;
+                            if (!postId) return;
+                            const badgeRef = ref(database, `posts/${postId}/badges/${paymentId}`);
+                            get(badgeRef).then(bsnap => {
+                                if (!bsnap.exists()) return;
+                                const badgeRec = bsnap.val() || {};
+                                postCache = postCache || {};
+                                postCache[postId] = postCache[postId] || {};
+                                const pc = postCache[postId];
+                                pc.id = postId;
+                                pc.badges = pc.badges || [];
+                                if (badgeRec.kind && !pc.badges.includes(badgeRec.kind)) pc.badges.push(badgeRec.kind);
+                                if (badgeRec.kind === 'boost') { pc.boostBadge = pc.boostBadge || {}; pc.boostBadge.label = badgeRec.label || 'Boost'; pc.boostBadge.paymentId = paymentId; pc.boostStatus = pc.boostStatus || 'active'; }
+                                if (badgeRec.kind === 'sell') { pc.sellBadge = pc.sellBadge || {}; pc.sellBadge.label = badgeRec.label || 'Buy'; pc.sellBadge.paymentId = paymentId; pc.primaryBadge = pc.primaryBadge || 'sell'; }
+                                try { scheduleRenderGrid(); } catch(e){}
+                                try { recomputeAndApplyBadges(); } catch(e){}
+                                console.log('🔁 payments changed applied badge to cache', postId, paymentId);
+                            }).catch(e=>{});
+                        }
+                    } catch (e) { console.warn('payments onChildChanged handler failed', e); }
+                });
+            } catch (e) { console.warn('attachPaymentsRealtimeListener failed', e); }
+        }
+
+        try { setTimeout(attachPaymentsRealtimeListener, 500); } catch(e) {}
         window.toggleSellPurchase = toggleSellPurchase;
         window.resetSellButton = resetSellButton;
         window.paySellWithCard = paySellWithCard;
