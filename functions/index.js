@@ -303,6 +303,27 @@ exports.getCheckoutSessionResult = functions
     // Fallback: query Stripe directly (covers webhook lag).
     const session = await stripe.checkout.sessions.retrieve(sessionId);
     const isPaid = session && (session.payment_status === 'paid' || session.status === 'complete');
+    if (isPaid) {
+      // If webhook hasn't yet recorded the payment, persist it now so the
+      // client sees badges immediately after redirect. processSuccessfulPayment
+      // is idempotent (it checks payments/{id} first), so this is safe.
+      try {
+        const meta = session.metadata || {};
+        await processSuccessfulPayment({
+          paymentId: session.id,
+          type: 'checkout.session.completed (immediate-confirm)',
+          postId: meta.postId || null,
+          kind: (meta.kind || '').toLowerCase(),
+          userId: meta.userId || null,
+          amount: session.amount_total,
+          currency: session.currency,
+          raw: session
+        });
+      } catch (e) {
+        console.error('Immediate processSuccessfulPayment failed:', e && e.message);
+      }
+    }
+
     return {
       paid: !!isPaid,
       kind: session && session.metadata ? (session.metadata.kind || null) : null,
