@@ -6915,7 +6915,15 @@
                 visibleBoxes.forEach(entry => {
                     try {
                         const box = entry.dom;
-                        const post = entry.post || (entry.postId ? findPostById(entry.postId) : null);
+                        let post = entry.post || (entry.postId ? findPostById(entry.postId) : null);
+                        // If the client hydrated badges into `postCache`, prefer those
+                        // badge/flag fields by merging them into the visible `post` object.
+                        try {
+                            if (post && window.postCache && window.postCache[post.id]) {
+                                // Create a shallow merged view so original gridContent isn't mutated
+                                post = Object.assign({}, post, window.postCache[post.id]);
+                            }
+                        } catch(e) { /* continue with original post */ }
                         if (!box || !post) return;
 
                         // compute tier
@@ -28630,6 +28638,7 @@
                 if (!Array.isArray(allPosts) || allPosts.length === 0) return;
                 if (!window.database) return;
                 const toCheck = allPosts.slice(0, max);
+                const hydratedIds = [];
                 for (const p of toCheck) {
                     try {
                         if (!p || !p.id) continue;
@@ -28668,11 +28677,39 @@
                                 }
                             } catch(e) { /* continue */ }
                         }
-                        try { scheduleRenderGrid(); } catch(e) {}
-                        try { recomputeAndApplyBadges(); } catch(e) {}
+                        // track which posts we hydrated
+                        hydratedIds.push(p.id);
                     } catch (e) { /* continue */ }
                 }
-                console.log('✅ hydrateVisiblePostBadges complete');
+                // Merge hydrated badge fields into the live gridContent objects so
+                // rendering and grid-scroller see them immediately without needing
+                // an interaction (like/dislike) to trigger updates.
+                try {
+                    if (Array.isArray(hydratedIds) && hydratedIds.length > 0 && window.gridContent) {
+                        for (const id of hydratedIds) {
+                            try {
+                                for (const k in window.gridContent) {
+                                    if (!Array.isArray(window.gridContent[k])) continue;
+                                    const idx = window.gridContent[k].findIndex(pp => pp && pp.id === id);
+                                    if (idx >= 0) {
+                                        // Merge badge fields into the existing object (in-place)
+                                        const existing = window.gridContent[k][idx];
+                                        if (existing && window.postCache && window.postCache[id]) {
+                                            Object.assign(existing, window.postCache[id]);
+                                        }
+                                        break;
+                                    }
+                                }
+                            } catch(e) { /* continue per id */ }
+                        }
+                    }
+                } catch(e) { /* ignore merge errors */ }
+
+                // Single batched refresh after hydration
+                try { scheduleRenderGrid(); } catch(e) {}
+                try { recomputeAndApplyBadges(); } catch(e) {}
+
+                console.log('✅ hydrateVisiblePostBadges complete (hydrated', hydratedIds.length, 'posts)');
             } catch (e) { console.warn('hydrateVisiblePostBadges failed', e); }
         }
         window.toggleSellPurchase = toggleSellPurchase;
