@@ -225,6 +225,23 @@ exports.consumeUserBadgeOnPostCreate = functions.database.ref('/posts/{postId}')
         continue;
       }
 
+      // Also write a structured denormalized badge entry under posts/{postId}/badges/{badgeId}
+      try {
+        const badgeId = rec.paymentId || k;
+        updates[`posts/${postId}/badges/${badgeId}`] = {
+          kind: rec.type || null,
+          label: rec.label || (rec.type === 'sell' ? 'Buy' : (rec.type === 'boost' ? 'Boost' : null)),
+          paymentId: badgeId,
+          appliedAt: admin.database.ServerValue.TIMESTAMP,
+          expiresAt: rec.type === 'boost' ? (Date.now() + (24*60*60*1000)) : null,
+          userId: authId || null,
+          amount: rec.amount || null,
+          currency: rec.currency || null
+        };
+      } catch (e) {
+        console.warn('Failed to denormalize badge into post on create', e && e.message);
+      }
+
       // Atomically apply updates and mark badge consumed
       await db.ref().update(updates);
       await db.ref(`users/${authId}/badges/${k}`).update({ consumed: true, consumedAt: admin.database.ServerValue.TIMESTAMP, consumedOnPost: postId });
@@ -379,6 +396,22 @@ async function processSuccessfulPayment({ paymentId, type, postId, kind, userId,
         updates[`posts/${postId}/sellPaidAt`] = admin.database.ServerValue.TIMESTAMP;
         updates[`posts/${postId}/primaryBadge`] = 'sell';
         console.log(`💰 Applied SELL badge to post ${postId}`);
+      }
+      // Denormalize a structured badge record under posts/{postId}/badges/{paymentId}
+      try {
+        const badgeRecord = {
+          kind: kind || null,
+          label: (raw && raw.metadata && raw.metadata.badgeLabel) ? String(raw.metadata.badgeLabel) : (kind === 'sell' ? 'Buy' : (kind === 'boost' ? 'Boost' : null)),
+          paymentId: paymentId,
+          appliedAt: admin.database.ServerValue.TIMESTAMP,
+          expiresAt: (kind === 'boost' || kind === 'boost_sell') ? (Date.now() + (30 * 24 * 60 * 60 * 1000)) : null,
+          userId: userId || null,
+          amount: amount || null,
+          currency: currency || null
+        };
+        updates[`posts/${postId}/badges/${paymentId}`] = badgeRecord;
+      } catch (e) {
+        console.warn('Failed to add denormalized badge record for post update', e && e.message);
       }
       if (Object.keys(updates).length > 0) {
         await db.ref().update(updates);
