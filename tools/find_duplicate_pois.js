@@ -66,9 +66,11 @@ function unionFind(n) {
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-  const thresholdMeters = Number(args[1]||50); // default 50m
-  const candidates = args[0] ? [args[0]] : ['pois/search-index.json','pois/places.json','poi_database.json','pois/manifest.json','pois/search.json'];
+  const argv = process.argv.slice(2);
+  const mergeFlag = argv.includes('--merge') || argv.includes('-m');
+  const specified = argv.find(a=>!a.startsWith('-'));
+  const thresholdMeters = Number(argv.find(a=>!/^-/.test(a) && a!==specified) || argv[1] || 50); // default 50m
+  const candidates = specified ? [specified] : ['pois/search-index.json','pois/places.json','poi_database.json','pois/manifest.json','pois/search.json'];
   const pois = loadPois(candidates);
   if (!pois) {
     console.error('No POI file found. Try: node tools/find_duplicate_pois.js <path-to-poi-json> [thresholdMeters]');
@@ -119,6 +121,39 @@ async function main() {
     console.log(`\nGroup ${idx+1} - ${r.count} POIs -> names: ${r.names.join(' | ')}`);
     r.members.slice(0,10).forEach(m=> console.log(`  - ${m.name} (${m.lat},${m.lon})`));
   });
+  if (mergeFlag) {
+    // perform safe merge for exact or near-exact coordinate duplicates
+    const merged = [];
+    const seen = new Set();
+    const mergeGroups = groups.filter(g=>g.length>1);
+    for (const g of mergeGroups) {
+      // pick canonical by exact coordinate match first (within 1m), then longest name
+      const canonical = g.reduce((acc,cur)=>{
+        if (!acc) return cur;
+        const d = haversineKm(acc.lat,acc.lon,cur.lat,cur.lon);
+        if (d <= 1) {
+          // prefer the name that is longest (more descriptive) or earlier id
+          return String(cur.name).length > String(acc.name).length ? cur : acc;
+        }
+        // if coords differ, pick the one with longest name
+        return String(cur.name).length > String(acc.name).length ? cur : acc;
+      }, null);
+      const members = g.map(x=>x);
+      members.forEach(m=> seen.add(m.idx));
+      merged.push({ canonical: { id: canonical.id, name: canonical.name, lat: canonical.lat, lon: canonical.lon }, members });
+    }
+
+    // build merged list: include non-merged POIs and canonical entries for merged groups
+    const nonMerged = cleaned.filter((c,i)=>!seen.has(i)).map(c=>({ id:c.id, name:c.name, lat:c.lat, lon:c.lon }));
+    const canonicalEntries = merged.map(m=>m.canonical);
+    const finalList = nonMerged.concat(canonicalEntries);
+    const mergeOut = path.resolve('tmp','poi_duplicates_merged.json');
+    fs.writeFileSync(mergeOut, JSON.stringify({ thresholdMeters, mergedCount: merged.length, totalBefore: cleaned.length, totalAfter: finalList.length, mergedGroups: merged }, null, 2));
+    const mergedPoisOut = path.resolve('tmp','poi_merged_list.json');
+    fs.writeFileSync(mergedPoisOut, JSON.stringify(finalList, null, 2));
+    console.log(`Wrote merged summary to ${mergeOut} and merged list to ${mergedPoisOut}`);
+  }
+
 }
 
 main().catch(e=>{ console.error(e); process.exit(2); });
