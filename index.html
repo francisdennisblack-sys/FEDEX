@@ -12909,6 +12909,40 @@
                             seenPostIds.add(postId);
                             // Defensive merge: if incoming post has missing/empty content, preserve cached content
                             const incoming = postsObj[postId] || {};
+                            // Normalize any server-side denormalized badges into simple client fields
+                            try {
+                                const rawBadgeMap = incoming.badges || incoming.badgesMap || null;
+                                if (rawBadgeMap && typeof rawBadgeMap === 'object' && !Array.isArray(rawBadgeMap)) {
+                                    const kinds = [];
+                                    Object.keys(rawBadgeMap).forEach(bid => {
+                                        try {
+                                            const rec = rawBadgeMap[bid] || {};
+                                            const kind = rec.kind || rec.type || (rec.label && String(rec.label).toLowerCase().includes('boost') ? 'boost' : (rec.label && String(rec.label).toLowerCase().includes('buy') ? 'sell' : null));
+                                            if (kind) kinds.push(kind);
+                                            if (kind === 'boost') {
+                                                incoming.boostBadge = incoming.boostBadge || {};
+                                                incoming.boostBadge.label = incoming.boostBadge.label || rec.label || 'Boost';
+                                                incoming.boostBadge.paymentId = incoming.boostBadge.paymentId || rec.paymentId || bid;
+                                                incoming.boostStatus = incoming.boostStatus || 'active';
+                                                incoming.boostPaidAt = incoming.boostPaidAt || rec.appliedAt || rec.purchasedAt || null;
+                                                incoming.boostExpiresAt = incoming.boostExpiresAt || rec.expiresAt || null;
+                                            }
+                                            if (kind === 'sell') {
+                                                incoming.sellBadge = incoming.sellBadge || {};
+                                                incoming.sellBadge.label = incoming.sellBadge.label || rec.label || 'Buy';
+                                                incoming.sellBadge.paymentId = incoming.sellBadge.paymentId || rec.paymentId || bid;
+                                                incoming.primaryBadge = incoming.primaryBadge || 'sell';
+                                                incoming.sellPaidAt = incoming.sellPaidAt || rec.appliedAt || rec.purchasedAt || null;
+                                            }
+                                        } catch (e) { /* individual badge normalization should not block */ }
+                                    });
+                                    incoming.badges = kinds;
+                                }
+                                if ((incoming.boostPaidAt || incoming.boostStatus === 'active') && !incoming.boostBadge) {
+                                    incoming.boostBadge = incoming.boostBadge || { label: 'Boost' };
+                                    incoming.boostStatus = incoming.boostStatus || 'active';
+                                }
+                            } catch (e) { /* ignore normalization errors */ }
                             const cached = (postCache && postCache[postId]) || cachedPostsMap[postId] || null;
                             if ((incoming.content === undefined || incoming.content === null || (typeof incoming.content === 'string' && incoming.content.trim() === '')) && cached && cached.content) {
                                 incoming.content = cached.content;
