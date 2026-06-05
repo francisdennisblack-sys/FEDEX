@@ -13107,6 +13107,7 @@
                     
                     console.log(`  📞 About to call callback with ${allPosts.length} posts`);
                     callback(allPosts);
+                    try { setTimeout(() => { if (typeof hydrateVisiblePostBadges === 'function') hydrateVisiblePostBadges(allPosts); }, 150); } catch(e) {}
                     console.log('  ✅ callback completed');
                     try { if (typeof flushQueuedBadges === 'function') setTimeout(flushQueuedBadges, 100); } catch(e) {}
                     
@@ -28620,6 +28621,60 @@
         }
 
         try { setTimeout(attachPaymentsRealtimeListener, 500); } catch(e) {}
+        
+        // Hydrate badges for visible posts on initial snapshot so refresh shows
+        // server-denormalized badges immediately. This fetches badges for at
+        // most `max` posts and applies them into `postCache` then refreshes UI.
+        async function hydrateVisiblePostBadges(allPosts, max = 120) {
+            try {
+                if (!Array.isArray(allPosts) || allPosts.length === 0) return;
+                if (!window.database) return;
+                const toCheck = allPosts.slice(0, max);
+                for (const p of toCheck) {
+                    try {
+                        if (!p || !p.id) continue;
+                        // If client already has badge info, skip
+                        const hasBadge = !!(p.badges || p.boostBadge || p.sellBadge || p.primaryBadge || p.boostStatus === 'active' || p.boostPaidAt || p.sellPaidAt);
+                        if (hasBadge) continue;
+                        const badgeRef = ref(database, `posts/${p.id}/badges`);
+                        const snap = await get(badgeRef);
+                        if (!snap.exists()) continue;
+                        const map = snap.val() || {};
+                        const keys = Object.keys(map || {});
+                        if (keys.length === 0) continue;
+                        postCache = postCache || {};
+                        postCache[p.id] = postCache[p.id] || {};
+                        const pc = postCache[p.id];
+                        pc.id = p.id;
+                        pc.badges = pc.badges || [];
+                        for (const k of keys) {
+                            try {
+                                const rec = map[k] || {};
+                                const kind = rec.kind || rec.type || null;
+                                if (kind && !pc.badges.includes(kind)) pc.badges.push(kind);
+                                if (kind === 'boost') {
+                                    pc.boostBadge = pc.boostBadge || {};
+                                    pc.boostBadge.label = rec.label || pc.boostBadge.label || 'Boost';
+                                    pc.boostBadge.paymentId = rec.paymentId || k;
+                                    pc.boostStatus = pc.boostStatus || 'active';
+                                    pc.boostPaidAt = pc.boostPaidAt || rec.appliedAt || rec.purchasedAt || Date.now();
+                                }
+                                if (kind === 'sell') {
+                                    pc.sellBadge = pc.sellBadge || {};
+                                    pc.sellBadge.label = rec.label || pc.sellBadge.label || 'Buy';
+                                    pc.sellBadge.paymentId = rec.paymentId || k;
+                                    pc.primaryBadge = pc.primaryBadge || 'sell';
+                                    pc.sellPaidAt = pc.sellPaidAt || rec.appliedAt || rec.purchasedAt || Date.now();
+                                }
+                            } catch(e) { /* continue */ }
+                        }
+                        try { scheduleRenderGrid(); } catch(e) {}
+                        try { recomputeAndApplyBadges(); } catch(e) {}
+                    } catch (e) { /* continue */ }
+                }
+                console.log('✅ hydrateVisiblePostBadges complete');
+            } catch (e) { console.warn('hydrateVisiblePostBadges failed', e); }
+        }
         window.toggleSellPurchase = toggleSellPurchase;
         window.resetSellButton = resetSellButton;
         window.paySellWithCard = paySellWithCard;
