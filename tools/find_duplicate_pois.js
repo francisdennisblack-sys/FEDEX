@@ -68,6 +68,7 @@ function unionFind(n) {
 async function main() {
   const argv = process.argv.slice(2);
   const mergeFlag = argv.includes('--merge') || argv.includes('-m');
+  const strictFlag = argv.includes('--strict') || argv.includes('-s');
   const specified = argv.find(a=>!a.startsWith('-'));
   const thresholdMeters = Number(argv.find(a=>!/^-/.test(a) && a!==specified) || argv[1] || 50); // default 50m
   const candidates = specified ? [specified] : ['pois/search-index.json','pois/places.json','poi_database.json','pois/manifest.json','pois/search.json'];
@@ -122,25 +123,54 @@ async function main() {
     r.members.slice(0,10).forEach(m=> console.log(`  - ${m.name} (${m.lat},${m.lon})`));
   });
   if (mergeFlag) {
-    // perform safe merge for exact or near-exact coordinate duplicates
+    // perform safe merge. If --strict: merge when same normalized name OR exact same coordinates.
     const merged = [];
     const seen = new Set();
-    const mergeGroups = groups.filter(g=>g.length>1);
-    for (const g of mergeGroups) {
-      // pick canonical by exact coordinate match first (within 1m), then longest name
-      const canonical = g.reduce((acc,cur)=>{
-        if (!acc) return cur;
-        const d = haversineKm(acc.lat,acc.lon,cur.lat,cur.lon);
-        if (d <= 1) {
-          // prefer the name that is longest (more descriptive) or earlier id
-          return String(cur.name).length > String(acc.name).length ? cur : acc;
+
+    if (strictFlag) {
+      // Build union-find via maps to avoid O(n^2)
+      const nameMap = new Map();
+      const coordMap = new Map();
+      const uf = unionFind(cleaned.length);
+      cleaned.forEach((c,i)=>{
+        if (c.norm) {
+          if (!nameMap.has(c.norm)) nameMap.set(c.norm, []);
+          nameMap.get(c.norm).push(i);
         }
-        // if coords differ, pick the one with longest name
-        return String(cur.name).length > String(acc.name).length ? cur : acc;
-      }, null);
-      const members = g.map(x=>x);
-      members.forEach(m=> seen.add(m.idx));
-      merged.push({ canonical: { id: canonical.id, name: canonical.name, lat: canonical.lat, lon: canonical.lon }, members });
+        const coordKey = `${c.lat}|${c.lon}`;
+        if (!coordMap.has(coordKey)) coordMap.set(coordKey, []);
+        coordMap.get(coordKey).push(i);
+      });
+      for (const group of nameMap.values()) {
+        for (let i=1;i<group.length;i++) uf.union(group[0], group[i]);
+      }
+      for (const group of coordMap.values()) {
+        for (let i=1;i<group.length;i++) uf.union(group[0], group[i]);
+      }
+
+      const mergeGroupsStrict = uf.groups().map(g=>g.map(i=>cleaned[i])).filter(g=>g.length>1);
+      for (const g of mergeGroupsStrict) {
+        const canonical = g.reduce((acc,cur)=>{
+          if (!acc) return cur;
+          return String(cur.name).length > String(acc.name).length ? cur : acc;
+        }, null);
+        const members = g.map(x=>x);
+        members.forEach(m=> seen.add(m.idx));
+        merged.push({ canonical: { id: canonical.id, name: canonical.name, lat: canonical.lat, lon: canonical.lon }, members });
+      }
+    } else {
+      const mergeGroups = groups.filter(g=>g.length>1);
+      for (const g of mergeGroups) {
+        const canonical = g.reduce((acc,cur)=>{
+          if (!acc) return cur;
+          const d = haversineKm(acc.lat,acc.lon,cur.lat,cur.lon);
+          if (d <= 1) return String(cur.name).length > String(acc.name).length ? cur : acc;
+          return String(cur.name).length > String(acc.name).length ? cur : acc;
+        }, null);
+        const members = g.map(x=>x);
+        members.forEach(m=> seen.add(m.idx));
+        merged.push({ canonical: { id: canonical.id, name: canonical.name, lat: canonical.lat, lon: canonical.lon }, members });
+      }
     }
 
     // build merged list: include non-merged POIs and canonical entries for merged groups
@@ -148,7 +178,7 @@ async function main() {
     const canonicalEntries = merged.map(m=>m.canonical);
     const finalList = nonMerged.concat(canonicalEntries);
     const mergeOut = path.resolve('tmp','poi_duplicates_merged.json');
-    fs.writeFileSync(mergeOut, JSON.stringify({ thresholdMeters, mergedCount: merged.length, totalBefore: cleaned.length, totalAfter: finalList.length, mergedGroups: merged }, null, 2));
+    fs.writeFileSync(mergeOut, JSON.stringify({ thresholdMeters, strict: !!strictFlag, mergedCount: merged.length, totalBefore: cleaned.length, totalAfter: finalList.length, mergedGroups: merged }, null, 2));
     const mergedPoisOut = path.resolve('tmp','poi_merged_list.json');
     fs.writeFileSync(mergedPoisOut, JSON.stringify(finalList, null, 2));
     console.log(`Wrote merged summary to ${mergeOut} and merged list to ${mergedPoisOut}`);
