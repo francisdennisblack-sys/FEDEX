@@ -28464,6 +28464,69 @@
                 console.warn('flushQueuedBadges overall error', e);
             }
         }
+
+        // Watch for payments that have completed and ensure their denormalized
+        // badge records on posts are reflected in the local cache immediately.
+        // Useful for deterministic testing: if a webhook writes payments/{id}
+        // and posts/{postId}/badges/{id}, this helper will copy that badge into
+        // `postCache` and trigger a UI refresh so the badge appears without
+        // waiting for the full next realtime snapshot merge.
+        function watchPendingPaymentsAndApply() {
+            try {
+                if (!window.database) return;
+                const pendingRaw = localStorage.getItem('pendingPayments') || '{}';
+                let pending = {};
+                try { pending = JSON.parse(pendingRaw || '{}') || {}; } catch(e){ pending = {}; }
+                Object.keys(pending).forEach(pid => {
+                    try {
+                        const info = pending[pid];
+                        if (!info || !info.postId) return;
+                        const paymentRef = ref(database, `payments/${pid}`);
+                        // One-time get to see if payment record exists
+                        get(paymentRef).then(snap => {
+                            if (!snap.exists()) return;
+                            // Payment exists; now check post badge
+                            const badgeRef = ref(database, `posts/${info.postId}/badges/${pid}`);
+                            get(badgeRef).then(bsnap => {
+                                if (!bsnap.exists()) return;
+                                const badgeRec = bsnap.val() || {};
+                                try {
+                                    // Ensure postCache entry exists
+                                    postCache = postCache || {};
+                                    postCache[info.postId] = postCache[info.postId] || {};
+                                    const pc = postCache[info.postId];
+                                    pc.id = info.postId;
+                                    pc.badges = pc.badges || [];
+                                    if (badgeRec.kind && !pc.badges.includes(badgeRec.kind)) pc.badges.push(badgeRec.kind);
+                                    if (badgeRec.kind === 'boost') {
+                                        pc.boostBadge = pc.boostBadge || {};
+                                        pc.boostBadge.label = badgeRec.label || pc.boostBadge.label || 'Boost';
+                                        pc.boostBadge.paymentId = pid;
+                                        pc.boostStatus = pc.boostStatus || 'active';
+                                        pc.boostPaidAt = pc.boostPaidAt || badgeRec.appliedAt || Date.now();
+                                    }
+                                    if (badgeRec.kind === 'sell') {
+                                        pc.sellBadge = pc.sellBadge || {};
+                                        pc.sellBadge.label = badgeRec.label || pc.sellBadge.label || 'Buy';
+                                        pc.sellBadge.paymentId = pid;
+                                        pc.primaryBadge = pc.primaryBadge || 'sell';
+                                        pc.sellPaidAt = pc.sellPaidAt || badgeRec.appliedAt || Date.now();
+                                    }
+                                    // Trigger UI refresh for this post
+                                    try { scheduleRenderGrid(); } catch(e){}
+                                    try { recomputeAndApplyBadges(); } catch(e){}
+                                    console.log('✅ Applied server-side badge into local cache for', info.postId, pid);
+                                } catch (e) { console.warn('apply badge to cache failed', e); }
+                            }).catch(e=>{});
+                        }).catch(e=>{});
+                    } catch(e){}
+                });
+            } catch (e) { console.warn('watchPendingPaymentsAndApply failed', e); }
+        }
+
+        // Run a quick pass on startup to surface any recently-written payments
+        // and badges so testing reflects server state immediately.
+        try { setTimeout(watchPendingPaymentsAndApply, 250); } catch(e) {}
         window.toggleSellPurchase = toggleSellPurchase;
         window.resetSellButton = resetSellButton;
         window.paySellWithCard = paySellWithCard;
