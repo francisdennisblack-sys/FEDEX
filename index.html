@@ -28707,6 +28707,18 @@
                                         const existing = window.gridContent[k][idx];
                                         if (existing && window.postCache && window.postCache[id]) {
                                             Object.assign(existing, window.postCache[id]);
+                                            // Clear any cached badge computation so the
+                                            // render path recalculates badges immediately.
+                                            try { existing.cachedBadges = null; } catch(e){}
+                                            try {
+                                                if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                                                    for (const it of window.gridScroller.items) {
+                                                        if (it && it.id === id) {
+                                                            try { it.cachedBadges = null; it.likes = it.likes || existing.likes || 0; it.dislikes = it.dislikes || existing.dislikes || 0; } catch(e){}
+                                                        }
+                                                    }
+                                                }
+                                            } catch(e){}
                                         }
                                         break;
                                     }
@@ -28716,9 +28728,18 @@
                     }
                 } catch(e) { /* ignore merge errors */ }
 
-                // Single batched refresh after hydration
+                // Single batched refresh after hydration. Refresh the virtual scroller
+                // if present and run recompute on the next animation frame so the
+                // DOM updates from the scroller can settle first.
                 try { scheduleRenderGrid(); } catch(e) {}
-                try { recomputeAndApplyBadges(); } catch(e) {}
+                try { if (window.gridScroller && typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh(); } catch(e) {}
+                try {
+                    requestAnimationFrame(() => {
+                        try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute after hydrate failed', e); }
+                    });
+                } catch(e) {
+                    try { recomputeAndApplyBadges(); } catch(e) {}
+                }
 
                 console.log('✅ hydrateVisiblePostBadges complete (hydrated', hydratedIds.length, 'posts)');
             } catch (e) { console.warn('hydrateVisiblePostBadges failed', e); }
