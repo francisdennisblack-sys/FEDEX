@@ -82,8 +82,8 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Database file path
-const dbPath = path.join(__dirname, 'wifi_database.json');
+// Database file path (allow override via env for canary instances)
+const dbPath = process.env.DB_PATH || path.join(__dirname, 'wifi_database.json');
 
 // In-memory storage for posts (loaded from disk on startup)
 let postsDatabase = {}; // { zoneId: [post1, post2, ...] }
@@ -367,6 +367,241 @@ loadTopLikedCacheFromDisk();
 // Periodic recompute (best-effort background job)
 setInterval(() => { try { computeTopLiked(); } catch (e) { sWarn('Recompute top-liked failed', e); } }, TOP_LIKED_RECOMPUTE_MS);
 
+// --------------------------
+// Server-side: Best-post per zone (authoritative)
+// - Compute a single "best" post for each zone using likes, boost, and recency
+// - Persist to disk and expose via API endpoints for clients to fetch
+// - Admin endpoint to force refresh
+// --------------------------
+
+const BEST_POSTS_TTL_MS = parseInt(process.env.BEST_POSTS_TTL_MS || String(30 * 1000), 10); // 30s
+const BEST_POSTS_RECOMPUTE_MS = parseInt(process.env.BEST_POSTS_RECOMPUTE_MS || String(60 * 1000), 10); // 60s
+const BEST_POSTS_PERSIST_PATH = path.join(__dirname, 'best_posts_cache.json');
+
+let bestPostsCache = { ts: 0, ttl: BEST_POSTS_TTL_MS, data: {} };
+
+function persistBestPostsCache() {
+    try {
+        const out = { ts: bestPostsCache.ts, ttl: bestPostsCache.ttl, data: bestPostsCache.data };
+        fs.writeFileSync(BEST_POSTS_PERSIST_PATH, JSON.stringify(out, null, 2));
+    } catch (e) { sWarn('persistBestPostsCache failed', e && e.message); }
+}
+
+function loadBestPostsCacheFromDisk() {
+    try {
+        if (fs.existsSync(BEST_POSTS_PERSIST_PATH)) {
+            const raw = fs.readFileSync(BEST_POSTS_PERSIST_PATH, 'utf8');
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.data) {
+                bestPostsCache = { ts: parsed.ts || Date.now(), ttl: parsed.ttl || BEST_POSTS_TTL_MS, data: parsed.data };
+                sLog('Loaded best-posts cache from disk, zones=', Object.keys(bestPostsCache.data).length);
+            }
+        }
+    } catch (e) { sWarn('loadBestPostsCacheFromDisk failed', e && e.message); }
+}
+
+function computeBestPosts() {
+    try {
+        const now = Date.now();
+        const BOOST_WEIGHT = 1000; // boost gives a big bump
+        const RECENCY_WINDOW_MS = 24 * 60 * 60 * 1000; // 1 day for recency bonus
+
+        const out = {};
+        for (const zid in postsDatabase) {
+            const arr = postsDatabase[zid] || [];
+            if (!arr.length) continue;
+
+            let best = null;
+            let bestScore = -Infinity;
+                for (const p of arr) {
+                const likes = Number(p.likes || 0);
+                const boost = (p.boostStatus === 'active' || (p.boostExpiresAt && Number(p.boostExpiresAt) > now)) ? 1 : 0;
+                const ageMs = now - (p.timestamp || now);
+                const recencyBonus = Math.max(0, (RECENCY_WINDOW_MS - Math.min(RECENCY_WINDOW_MS, ageMs)) / RECENCY_WINDOW_MS);
+                    // ML scorer contribution (if enabled)
+                    let mlScore = 0;
+                    try {
+                        if (isMlEnabledForZone(zid) && modelScorer && typeof modelScorer.model !== 'undefined') {
+                            const loader = require('./ml/model_loader');
+                            mlScore = Number(loader.scoreWithModel(modelScorer.model, p) || 0);
+                        } else if (isMlEnabledForZone(zid) && mlScorer && typeof mlScorer.score === 'function') {
+                            mlScore = Number(mlScorer.score(p) || 0);
+                        }
+                    } catch (e) { mlScore = 0; }
+                    // Score = likes + boostWeight*boost + recencyBonus (0..1) + scaled mlScore
+                    const score = likes + (BOOST_WEIGHT * boost) + recencyBonus + (mlScore * 10);
+                if (score > bestScore) { bestScore = score; best = p; }
+            }
+
+            if (best) {
+                out[zid] = { postId: best.id, score: bestScore, computedAt: now, zoneId: zid, snapshot: { id: best.id, likes: best.likes || 0, boostStatus: best.boostStatus || null, timestamp: best.timestamp || null, title: best.title || null } };
+            }
+        }
+
+        const prev = bestPostsCache && bestPostsCache.data ? bestPostsCache.data : {};
+        bestPostsCache = { ts: now, ttl: BEST_POSTS_TTL_MS, data: out };
+        persistBestPostsCache();
+        sLog('computeBestPosts: computed best posts for zones=', Object.keys(out).length);
+
+        // Broadcast per-zone diffs to SSE clients subscribed to those zones
+        try {
+            const changedZones = [];
+            for (const zid of Object.keys(out)) {
+                const prevPostId = prev[zid] && prev[zid].postId ? String(prev[zid].postId) : null;
+                const newPostId = out[zid] && out[zid].postId ? String(out[zid].postId) : null;
+                if (prevPostId !== newPostId) changedZones.push(zid);
+            }
+
+            if (changedZones.length > 0 && Array.isArray(global.__sseClients) && global.__sseClients.length > 0) {
+                for (const client of global.__sseClients.slice()) {
+                    try {
+                        // If client subscribed to a zone, only send if that zone changed
+                        if (client.zoneId) {
+                            if (!changedZones.includes(client.zoneId)) continue;
+                            const payload = JSON.stringify({ zoneId: client.zoneId, best: out[client.zoneId] || null });
+                            client.res.write(`event: best_post_update\n`);
+                            client.res.write(`data: ${payload}\n\n`);
+                        } else {
+                            // Generic client: send summary of changed zones
+                            const payload = JSON.stringify({ changed: changedZones, ts: now });
+                            client.res.write(`event: best_posts_summary\n`);
+                            client.res.write(`data: ${payload}\n\n`);
+                        }
+                    } catch (e) {
+                        // ignore client write errors
+                    }
+                }
+            }
+        } catch (e) { sWarn('broadcast best-posts SSE failed', e && e.message); }
+
+        // increment metric
+        try { metricsCounters.best_recomputes = (metricsCounters.best_recomputes || 0) + 1; } catch (e) {}
+
+        return bestPostsCache;
+    } catch (e) {
+        sErr('computeBestPosts error', e && e.message);
+        return bestPostsCache;
+    }
+}
+
+// Load persisted best-posts on startup
+loadBestPostsCacheFromDisk();
+
+// Periodic recompute
+setInterval(() => { try { computeBestPosts(); } catch (e) { sWarn('Recompute best-posts failed', e); } }, BEST_POSTS_RECOMPUTE_MS);
+
+// API: fetch best post for a zone
+app.get('/api/posts/best/:zoneId', (req, res) => {
+    try {
+        const zoneId = req.params.zoneId;
+        const cached = bestPostsCache.data && bestPostsCache.data[zoneId];
+        if (cached) return res.json({ best: cached, cached: true, ageMs: Date.now() - bestPostsCache.ts });
+
+        // Fallback: compute on-demand for this zone
+        const arr = postsDatabase[zoneId] || [];
+        if (!arr.length) return res.json({ best: null });
+        let best = null; let bestScore = -Infinity; const now = Date.now();
+        for (const p of arr) {
+            const likes = Number(p.likes || 0);
+            const boost = (p.boostStatus === 'active' || (p.boostExpiresAt && Number(p.boostExpiresAt) > now)) ? 1 : 0;
+            const ageMs = now - (p.timestamp || now);
+            const recencyBonus = Math.max(0, ((24*60*60*1000) - Math.min(24*60*60*1000, ageMs)) / (24*60*60*1000));
+            const score = likes + (1000 * boost) + recencyBonus;
+            if (score > bestScore) { bestScore = score; best = p; }
+        }
+        const out = { postId: best.id, score: bestScore, snapshot: { id: best.id, likes: best.likes || 0, boostStatus: best.boostStatus || null, timestamp: best.timestamp || null } };
+        return res.json({ best: out, cached: false });
+    } catch (e) { sErr('GET /api/posts/best/:zoneId error', e && e.message); return res.status(500).json({ error: 'internal' }); }
+});
+
+// API: fetch all best posts (rate-limited lightly)
+app.get('/api/posts/best', (req, res) => {
+    try {
+        const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.socket.remoteAddress || 'unknown';
+        if (!checkRateLimit(ip)) return res.status(429).json({ error: 'rate_limited' });
+        return res.json({ best: bestPostsCache.data || {}, cached: true, ageMs: Date.now() - bestPostsCache.ts });
+    } catch (e) { sErr('GET /api/posts/best error', e && e.message); return res.status(500).json({ error: 'internal' }); }
+});
+
+// Admin endpoint to recompute immediately
+app.post('/api/admin/refresh-best', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        computeBestPosts();
+        return res.json({ success: true, refreshedAt: bestPostsCache.ts });
+    } catch (e) { sErr('POST /api/admin/refresh-best error', e && e.message); return res.status(500).json({ error: 'internal' }); }
+});
+
+// Admin: reload ML scorer plugin
+app.post('/api/admin/reload-ml', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        loadMlScorer();
+        return res.json({ success: true, loaded: !!mlScorer });
+    } catch (e) { return res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// Admin: load JSON model from disk
+app.post('/api/admin/load-model', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        loadModelFromDisk();
+        return res.json({ success: true, loaded: !!modelScorer });
+    } catch (e) { return res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// Admin: enable/disable ML scoring
+app.post('/api/admin/enable-ml', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        mlEnabled = true; return res.json({ success: true, mlEnabled: true });
+    } catch (e) { return res.status(500).json({ success: false, error: String(e) }); }
+});
+app.post('/api/admin/disable-ml', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        mlEnabled = false; return res.json({ success: true, mlEnabled: false });
+    } catch (e) { return res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// Admin: per-zone ML canary toggles
+app.post('/api/admin/enable-ml-zone', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        const zone = req.body && req.body.zoneId;
+        if (!zone) return res.status(400).json({ error: 'zoneId required' });
+        mlEnabledZones[zone] = true;
+        return res.json({ success: true, zone, enabled: true });
+    } catch (e) { return res.status(500).json({ success: false, error: String(e) }); }
+});
+app.post('/api/admin/disable-ml-zone', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        const zone = req.body && req.body.zoneId;
+        if (!zone) return res.status(400).json({ error: 'zoneId required' });
+        delete mlEnabledZones[zone];
+        return res.json({ success: true, zone, enabled: false });
+    } catch (e) { return res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// Server-Sent Events clients container (shared across module)
+global.__sseClients = global.__sseClients || []; // array of { res, zoneId }
+
+// SSE endpoint for best-post updates (supports per-zone subscription via ?zoneId=...)
+app.get('/api/posts/best/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.write(`: connected\n\n`);
+    const zoneId = req.query.zoneId || null;
+    const client = { res, zoneId };
+    global.__sseClients.push(client);
+    req.on('close', () => {
+        const idx = global.__sseClients.indexOf(client);
+        if (idx !== -1) global.__sseClients.splice(idx, 1);
+    });
+});
+
 // Simple rate limiter per IP for the top-liked endpoint
 const rateLimitMap = {}; // ip -> { count, windowStart }
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
@@ -384,6 +619,56 @@ function checkRateLimit(ip) {
         return rec.count <= RATE_LIMIT_MAX;
     } catch (e) { return true; }
 }
+
+// Basic in-memory metrics counters (exported via /metrics for Prometheus scraping)
+const metricsCounters = {
+    impressions: 0,
+    clicks: 0,
+    locations: 0,
+    best_recomputes: 0,
+    top_liked_recomputes: 0
+};
+
+// Admin authentication helper
+function isAdminAuthenticated(req) {
+    try {
+        const password = req.headers['x-admin-password'] || (req.body && req.body.adminPassword) || (req.query && req.query.adminPassword);
+        // If ADMIN_PASSWORD is configured, require it. Otherwise allow weak fallback only when explicitly permitted.
+        if (process.env.ADMIN_PASSWORD && String(process.env.ADMIN_PASSWORD).length > 0) {
+            if (password === process.env.ADMIN_PASSWORD) return true;
+            // allow weak fallback only if explicitly enabled by ALLOW_WEAK_ADMIN env var
+            if (process.env.ALLOW_WEAK_ADMIN === '1' && password === '19696') return true;
+            return false;
+        }
+        // No ADMIN_PASSWORD set: allow only when ALLOW_WEAK_ADMIN is set to '1' and password matches legacy value
+        if (process.env.ALLOW_WEAK_ADMIN === '1' && password === '19696') return true;
+        return false;
+    } catch (e) { return false; }
+}
+
+// Prometheus-style metrics endpoint
+app.get('/metrics', (req, res) => {
+    try {
+        res.setHeader('Content-Type', 'text/plain; version=0.0.4');
+        const lines = [];
+        lines.push(`# HELP fedex_impressions_total Number of post impressions recorded`);
+        lines.push(`# TYPE fedex_impressions_total counter`);
+        lines.push(`fedex_impressions_total ${metricsCounters.impressions}`);
+        lines.push(`# HELP fedex_clicks_total Number of post clicks recorded`);
+        lines.push(`# TYPE fedex_clicks_total counter`);
+        lines.push(`fedex_clicks_total ${metricsCounters.clicks}`);
+        lines.push(`# HELP fedex_location_snapshots_total Number of location snapshots received`);
+        lines.push(`# TYPE fedex_location_snapshots_total counter`);
+        lines.push(`fedex_location_snapshots_total ${metricsCounters.locations}`);
+        lines.push(`# HELP fedex_best_recomputes_total Number of best-post recomputes`);
+        lines.push(`# TYPE fedex_best_recomputes_total counter`);
+        lines.push(`fedex_best_recomputes_total ${metricsCounters.best_recomputes}`);
+        lines.push(`# HELP fedex_top_liked_recomputes_total Number of top-liked recomputes`);
+        lines.push(`# TYPE fedex_top_liked_recomputes_total counter`);
+        lines.push(`fedex_top_liked_recomputes_total ${metricsCounters.top_liked_recomputes}`);
+        res.send(lines.join('\n') + '\n');
+    } catch (e) { res.status(500).send('error'); }
+});
 
 app.get('/api/posts/top-liked', (req, res) => {
     try {
@@ -410,10 +695,13 @@ app.get('/api/posts/top-liked', (req, res) => {
     }
 });
 
+// (metrics endpoints implemented below with file-backed logs and counters)
+
 // Admin endpoint: force refresh of top-liked cache (protected by ADMIN_PASSWORD or env)
 app.post('/api/admin/refresh-top-liked', (req, res) => {
-    const password = req.headers['x-admin-password'] || req.body && req.body.adminPassword;
-    if (password !== process.env.ADMIN_PASSWORD && password !== '19696') return res.status(403).json({ error: 'unauthorized' });
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+    } catch (e) { return res.status(500).json({ success: false, error: String(e) }); }
     computeTopLiked().then(cache => res.json({ success: true, items: cache.data.length })).catch(e => res.status(500).json({ success: false, error: String(e) }));
 });
 
@@ -423,12 +711,55 @@ app.post('/api/admin/refresh-top-liked', (req, res) => {
 const metricsDir = path.join(__dirname, 'metrics');
 if (!fs.existsSync(metricsDir)) try { fs.mkdirSync(metricsDir); } catch(e) {}
 
+// ML data dir for training event collection and optional JS scorer hook
+const ML_DATA_DIR = path.join(__dirname, 'ml', 'data');
+if (!fs.existsSync(ML_DATA_DIR)) try { fs.mkdirSync(ML_DATA_DIR, { recursive: true }); } catch(e) {}
+
+// Optional JS-based scorer plugin: exports.score(post) -> numeric
+let mlScorer = null;
+function loadMlScorer() {
+    try {
+        delete require.cache[require.resolve('./ml/scorer')];
+        mlScorer = require('./ml/scorer');
+        sLog('ML scorer loaded');
+    } catch (e) { mlScorer = null; sWarn('No ML scorer available', e && e.message); }
+}
+loadMlScorer();
+
+// Runtime JSON model loader (trained model) and toggle
+let modelScorer = null;
+let mlEnabled = (process.env.ML_ENABLED === '1');
+// per-zone ML canary toggles
+const mlEnabledZones = {}; // zoneId -> true
+function loadModelFromDisk() {
+    try {
+        const p = path.join(__dirname, 'ml', 'model.json');
+        if (!fs.existsSync(p)) { modelScorer = null; sWarn('No ml/model.json found'); return; }
+        const raw = fs.readFileSync(p, 'utf8');
+        const parsed = JSON.parse(raw);
+        // parsed expected to have coef (2d), intercept (1d)
+        modelScorer = { model: parsed };
+        sLog('ML model loaded from disk');
+    } catch (e) { modelScorer = null; sWarn('Failed loading model.json', e && e.message); }
+}
+loadModelFromDisk();
+
+function isMlEnabledForZone(zoneId) {
+    try { return mlEnabled || (zoneId && !!mlEnabledZones[zoneId]); } catch (e) { return !!mlEnabled; }
+}
+
 app.post('/api/metrics/impression', (req, res) => {
     try {
         const payload = req.body || {};
         payload.ts = Date.now();
         const line = JSON.stringify({ type: 'impression', ...payload }) + '\n';
         fs.appendFile(path.join(metricsDir, 'impressions.log'), line, () => {});
+        try { metricsCounters.impressions = (metricsCounters.impressions || 0) + 1; } catch(e){}
+        // also store lightweight event for ML training
+        try {
+            const ev = { kind: 'impression', ts: Date.now(), postId: payload.postId || null, zoneId: payload.zoneId || null };
+            fs.appendFile(path.join(ML_DATA_DIR, 'events.jsonl'), JSON.stringify(ev) + '\n', () => {});
+        } catch(e) {}
         return res.json({ success: true });
     } catch (e) {
         return res.status(500).json({ success: false, error: String(e) });
@@ -441,11 +772,144 @@ app.post('/api/metrics/click', (req, res) => {
         payload.ts = Date.now();
         const line = JSON.stringify({ type: 'click', ...payload }) + '\n';
         fs.appendFile(path.join(metricsDir, 'clicks.log'), line, () => {});
+        try { metricsCounters.clicks = (metricsCounters.clicks || 0) + 1; } catch(e){}
+        try {
+            const ev = { kind: 'click', ts: Date.now(), postId: payload.postId || null, zoneId: payload.zoneId || null }; 
+            fs.appendFile(path.join(ML_DATA_DIR, 'events.jsonl'), JSON.stringify(ev) + '\n', () => {});
+        } catch(e) {}
         return res.json({ success: true });
     } catch (e) {
         return res.status(500).json({ success: false, error: String(e) });
     }
 });
+
+// Ingest batched location snapshots
+// Lightweight rate limiting for location uploads (per IP)
+const locationRateLimitMap = {};
+const LOCATION_RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const LOCATION_RATE_LIMIT_MAX = parseInt(process.env.LOCATION_RATE_LIMIT || '120', 10); // 120 req/min per IP default
+
+function checkLocationRateLimit(ip) {
+    try {
+        const now = Date.now();
+        const rec = locationRateLimitMap[ip] || { count: 0, windowStart: now };
+        if (now - rec.windowStart > LOCATION_RATE_LIMIT_WINDOW_MS) {
+            rec.count = 0; rec.windowStart = now;
+        }
+        rec.count += 1;
+        locationRateLimitMap[ip] = rec;
+        return rec.count <= LOCATION_RATE_LIMIT_MAX;
+    } catch (e) { return true; }
+}
+
+app.post('/api/metrics/location', (req, res) => {
+    try {
+        const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.socket.remoteAddress || 'unknown';
+        if (!checkLocationRateLimit(ip)) return res.status(429).json({ error: 'rate_limited' });
+
+        const payload = req.body || {};
+        const snapshots = Array.isArray(payload.snapshots) ? payload.snapshots : [payload];
+
+        if (!snapshots.length) return res.status(400).json({ error: 'no_snapshots' });
+        if (snapshots.length > 500) return res.status(400).json({ error: 'too_many_snapshots', max: 500 });
+
+        const sanitized = snapshots.map(s => {
+            const out = {};
+            if (s && typeof s === 'object') {
+                out.userId = s.userId || null;
+                out.ts = Number(s.ts) || Date.now();
+                out.areaTag = (s.areaTag && String(s.areaTag)) || null;
+
+                // Only accept numeric lat/lon in reasonable ranges; otherwise null
+                const lat = (s.lat !== undefined && s.lat !== null) ? Number(s.lat) : null;
+                const lon = (s.lon !== undefined && s.lon !== null) ? Number(s.lon) : null;
+                if (lat !== null && !Number.isFinite(lat)) out.lat = null; else out.lat = lat;
+                if (lon !== null && !Number.isFinite(lon)) out.lon = null; else out.lon = lon;
+
+                out.accuracy = (s.accuracy !== undefined && s.accuracy !== null) ? Number(s.accuracy) : null;
+            } else {
+                out.ts = Date.now();
+            }
+            return out;
+        });
+
+        const lines = sanitized.map(item => JSON.stringify({ type: 'location', ...item }) + '\n').join('');
+        fs.appendFile(path.join(metricsDir, 'locations.log'), lines, () => {});
+        try { metricsCounters.locations = (metricsCounters.locations || 0) + sanitized.length; } catch(e){}
+        try {
+            const evs = sanitized.map(item => ({ kind: 'location', ts: Date.now(), lat: item.lat || null, lon: item.lon || null, userId: item.userId || null }));
+            const out = evs.map(e => JSON.stringify(e)).join('\n') + '\n';
+            fs.appendFile(path.join(ML_DATA_DIR, 'events.jsonl'), out, () => {});
+        } catch(e) {}
+        return res.json({ success: true, written: sanitized.length });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e) });
+    }
+});
+
+// Admin: list available metric log files
+app.get('/api/admin/metrics/list', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        const files = fs.readdirSync(metricsDir).filter(f => f.endsWith('.log') || f.includes('.log.'));
+        res.json({ success: true, files });
+    } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// Admin: download a metric file (protected)
+app.get('/api/admin/metrics/download', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+    const file = req.query.file;
+    if (!file || typeof file !== 'string') return res.status(400).json({ error: 'missing_file' });
+    // Prevent path traversal
+    if (file.includes('..') || file.includes('/') || file.includes('\\')) return res.status(400).json({ error: 'invalid_file' });
+    const full = path.join(metricsDir, file);
+    if (!fs.existsSync(full)) return res.status(404).json({ error: 'not_found' });
+    res.download(full);
+    } catch (e) { return res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// Admin: rotate metric logs (move to timestamped archive)
+app.post('/api/admin/metrics/rotate', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        const baseFiles = ['impressions.log', 'clicks.log', 'locations.log'];
+        const rotated = [];
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        for (const f of baseFiles) {
+            const src = path.join(metricsDir, f);
+            if (fs.existsSync(src)) {
+                const dest = path.join(metricsDir, `${f}.${ts}`);
+                try { fs.renameSync(src, dest); fs.writeFileSync(src, ''); rotated.push({ from: f, to: path.basename(dest) }); } catch (e) { rotated.push({ from: f, error: String(e) }); }
+            }
+        }
+        return res.json({ success: true, rotated });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e) });
+    }
+});
+
+// Daily retention cleanup for archived metric logs
+const METRICS_RETENTION_DAYS = parseInt(process.env.METRICS_RETENTION_DAYS || '30', 10);
+setInterval(() => {
+    try {
+        const files = fs.readdirSync(metricsDir);
+        const now = Date.now();
+        for (const f of files) {
+            // Only remove rotated files which include .log.
+            if (!f.includes('.log.')) continue;
+            const full = path.join(metricsDir, f);
+            try {
+                const st = fs.statSync(full);
+                const ageDays = (now - st.mtimeMs) / (1000 * 60 * 60 * 24);
+                if (ageDays > METRICS_RETENTION_DAYS) {
+                    fs.unlinkSync(full);
+                }
+            } catch (e) { /* ignore per-file errors */ }
+        }
+    } catch (e) { sWarn('metrics cleanup failed', e && e.message); }
+}, 24 * 60 * 60 * 1000);
 
 // Admin: Get all zones and posts
 app.get('/api/admin/zones', (req, res) => {
@@ -465,10 +929,9 @@ app.get('/api/admin/zones', (req, res) => {
 
 // Admin: Clear a zone's posts (protected)
 app.delete('/api/admin/zone/:zoneId', (req, res) => {
-    const password = req.headers['x-admin-password'];
-    if (password !== process.env.ADMIN_PASSWORD && password !== '19696') {
-        return res.status(403).json({ error: 'Unauthorized' });
-    }
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'Unauthorized' });
+    } catch (e) { return res.status(500).json({ error: String(e) }); }
     
     const zoneId = req.params.zoneId;
     if (postsDatabase[zoneId]) {
