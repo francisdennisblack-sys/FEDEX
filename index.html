@@ -5867,7 +5867,6 @@
                                 } else {
                                     setTimeout(() => { loadPOIDataInBackground(); }, 3000);
                                 }
-                                try { if (typeof mergePOIsIntoLocationDatabase === 'function') mergePOIsIntoLocationDatabase(); } catch(e) {}
                                 return;
                             }
                         }
@@ -5896,7 +5895,6 @@
                             
                             globalPOIDatabase = statePOIs;
                             console.log(`✅ Loaded ${statePOIs.length} POIs for ${userState}`);
-                        try { if (typeof mergePOIsIntoLocationDatabase === 'function') mergePOIsIntoLocationDatabase(); } catch(e) {}
                         try {
                             const small = statePOIs.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.category || null, state: p.state || null }));
                             localStorage.setItem('lastPOIs', JSON.stringify(small));
@@ -5920,7 +5918,6 @@
                                 if (Array.isArray(masterPois) && masterPois.length > 0) {
                                     globalPOIDatabase = masterPois;
                                     console.log(`✅ Loaded ${masterPois.length} POIs from master_pois_database.json fallback`);
-                                    try { if (typeof mergePOIsIntoLocationDatabase === 'function') mergePOIsIntoLocationDatabase(); } catch(e) {}
                                     try {
                                         const small = masterPois.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.category || null, state: p.state || null }));
                                         localStorage.setItem('lastPOIs', JSON.stringify(small));
@@ -5943,36 +5940,6 @@
                 console.error('❌ Error loading POI data:', error);
                 if (!globalPOIDatabase) globalPOIDatabase = [];
             }
-        }
-
-        // Ensure POIs are available as 'locations' for the main location search system.
-        function mergePOIsIntoLocationDatabase() {
-            try {
-                if (!window.globalPOIDatabase || !Array.isArray(window.globalPOIDatabase) || window.globalPOIDatabase.length === 0) return;
-                if (!window.globalLocationDatabase) window.globalLocationDatabase = [];
-
-                const existingKeys = new Set(window.globalLocationDatabase.map(l => (String(l.name||'') + '::' + String(l.lat||'') + '::' + String(l.lon||'')).toLowerCase()));
-                let added = 0;
-                for (const p of window.globalPOIDatabase) {
-                    if (!p || !p.name) continue;
-                    const key = (String(p.name) + '::' + String(p.lat||'') + '::' + String(p.lon||'')).toLowerCase();
-                    if (existingKeys.has(key)) continue;
-                    const rec = {
-                        name: p.name,
-                        state: p.state || (p.region || null),
-                        city: p.city || null,
-                        lat: p.lat,
-                        lon: p.lon,
-                        category: p.category || p.type || 'poi',
-                        isPOI: true
-                    };
-                    window.globalLocationDatabase.push(rec);
-                    existingKeys.add(key);
-                    added++;
-                    if (added >= 2000) break; // avoid huge merges on first run
-                }
-                if (added > 0) console.log(`🔀 Merged ${added} POIs into globalLocationDatabase for unified location+POI search`);
-            } catch (e) { console.warn('mergePOIsIntoLocationDatabase error', e); }
         }
         
         // Background POI loader - loads remaining states and comprehensive data without blocking
@@ -17341,25 +17308,14 @@
             if (!customTagInput) return;
 
             // Lazy-load the global POI search index and enhanced locations
-            try {
-                if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
-                    window._poiIndexPreloadPromise = window._poiIndexPreloadPromise || window.ensureGlobalPoiSearchIndex().catch(e => { console.warn('POI index preload failed:', e); return null; });
-                }
-            } catch (e) { console.warn('ensureGlobalPoiSearchIndex invocation failed', e); }
+            if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                window.ensureGlobalPoiSearchIndex();
+            }
 
             // Trigger lazy-load of enhanced locations in background
-            try {
-                if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
-                    window._enhancedLocationsPreloadPromise = window._enhancedLocationsPreloadPromise || window.lazyLoadEnhancedLocationDatabase().catch(e => { console.warn('Location DB preload failed:', e); return null; });
-                }
-            } catch (e) { console.warn('lazyLoadEnhancedLocationDatabase invocation failed', e); }
-
-            // Ensure lightweight POI data is loaded for instant suggestions (uses local cache if available)
-            try {
-                if (typeof window.loadPOIData === 'function') {
-                    window.loadPOIData();
-                }
-            } catch (e) { console.warn('loadPOIData invocation failed', e); }
+            if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
+                window.lazyLoadEnhancedLocationDatabase().catch(e => console.log('Background enhance load:', e));
+            }
 
             // Dropdown will only appear when user starts typing
             console.log('📍 Refine location field focused - ready for typing');
@@ -17367,7 +17323,7 @@
             try {
                 const customTagInput = document.getElementById('customZoneTag');
                 if (customTagInput && customTagInput.value.trim() === '') {
-                    try { if (typeof populateRefineDefaults === 'function') populateRefineDefaults(); } catch(e) { console.warn('populateRefineDefaults failed', e); }
+                    fetchRefineDefaults();
                     // Ensure the refine dropdown/search UI is visible (helps mobile)
                     try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
                 }
@@ -17422,106 +17378,6 @@
                 const searchInput = document.getElementById('refineLocationSearchInput');
                 if (searchInput) searchInput.focus();
             }, 10);
-        }
-
-        // Populate refine dropdown with defaults (popular cities + cached POIs)
-        async function populateRefineDefaults() {
-            try {
-                const dropdown = document.getElementById('refineLocationDropdown');
-                if (!dropdown) return;
-                // Ensure the dropdown UI is visible
-                try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
-
-                let resultsContainer = document.getElementById('refineLocationResultsContainer');
-                if (!resultsContainer) {
-                    dropdown.innerHTML = '<div id="refineLocationResultsContainer" style="padding: 10px; text-align: center; color: #888; font-size: 13px;"></div>';
-                    resultsContainer = document.getElementById('refineLocationResultsContainer');
-                }
-
-                resultsContainer.innerHTML = '<div style="padding:12px;color:#999">Loading suggestions...</div>';
-
-                // Build top 35 POIs + top 15 locations (nearest first)
-                const userLat = userLocation && (userLocation.latitude || userLocation.lat);
-                const userLon = userLocation && (userLocation.longitude || userLocation.lon);
-
-                let poiResults = [];
-                let locationResults = [];
-
-                // Try server geosearch first when we have geolocation
-                const geoBase = (window.GEOSEARCH_URL || '/geosearch').replace(/\/$/, '');
-                const devFallback = 'http://localhost:3030/geosearch';
-                const urlTry = (lat, lon) => `${geoBase}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&n=100&radiusMi=2000`;
-                const urlDev = (lat, lon) => `${devFallback}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&n=100&radiusMi=2000`;
-
-                if (userLat && userLon) {
-                    try {
-                        let payload = null;
-                        try { const res = await fetch(urlTry(userLat, userLon)).catch(() => null); if (res && res.ok) payload = await res.json(); } catch(e){}
-                        if (!payload) { try { const res2 = await fetch(urlDev(userLat, userLon)).catch(()=>null); if (res2 && res2.ok) payload = await res2.json(); } catch(e){} }
-
-                        if (payload && Array.isArray(payload.results) && payload.results.length > 0) {
-                            const mapped = payload.results.map(r => ({ type: r.category ? 'poi' : 'location', name: r.name, display: r.name + (r.state ? ', ' + r.state : ''), lat: r.lat, lon: r.lon, category: r.category || null, distanceMi: r.distanceMi || null }));
-                            poiResults = mapped.filter(m => m.type === 'poi');
-                            locationResults = mapped.filter(m => m.type === 'location');
-                        }
-                    } catch (e) {
-                        console.warn('geosearch fetch failed', e);
-                    }
-                }
-
-                // Fallback to client-side nearest selection
-                if (poiResults.length === 0) {
-                    if (window.globalPOIDatabase && Array.isArray(window.globalPOIDatabase) && window.globalPOIDatabase.length > 0) {
-                        const list = window.globalPOIDatabase.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, category: p.category || p.type || null }));
-                        if (userLat && userLon) {
-                            list.forEach(p => { p._d = (typeof calculateDistance === 'function') ? (calculateDistance(userLat, userLon, p.lat, p.lon) * 0.621371) : Infinity; });
-                            list.sort((a,b)=> (a._d||Infinity) - (b._d||Infinity));
-                        }
-                        poiResults = list.slice(0, 35);
-                    } else {
-                        // Use cached small POIs
-                        try { const raw = localStorage.getItem && localStorage.getItem('lastPOIs'); if (raw) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) poiResults = parsed.slice(0,35).map(p=>({ name: p.name, lat: p.lat, lon: p.lon, category: p.category||null })); } } catch(e){}
-                    }
-                } else {
-                    poiResults = poiResults.slice(0,35);
-                }
-
-                if (locationResults.length === 0) {
-                    if (window.globalLocationDatabase && Array.isArray(window.globalLocationDatabase) && window.globalLocationDatabase.length > 0) {
-                        const list = window.globalLocationDatabase.map(l => ({ name: l.name + (l.state ? ', ' + l.state : ''), lat: l.lat, lon: l.lon }));
-                        if (userLat && userLon) {
-                            list.forEach(p => { p._d = (typeof calculateDistance === 'function') ? (calculateDistance(userLat, userLon, p.lat, p.lon) * 0.621371) : Infinity; });
-                            list.sort((a,b)=> (a._d||Infinity) - (b._d||Infinity));
-                        }
-                        locationResults = list.slice(0,15);
-                    }
-                } else {
-                    locationResults = locationResults.slice(0,15);
-                }
-
-                // Build HTML: POIs then Locations
-                let html = '';
-                if (poiResults && poiResults.length) {
-                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Nearby POIs</div>`;
-                    poiResults.forEach(p => {
-                        const disp = p.display || p.name;
-                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(disp).replace(/'/g,"\\'")}', event)">${disp}${p._d?` <span style=\"color:#777;float:right\">${(p._d||0).toFixed(1)}mi</span>`:''}</div>`;
-                    });
-                }
-                if (locationResults && locationResults.length) {
-                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Nearby Locations</div>`;
-                    locationResults.forEach(p => {
-                        const disp = p.display || p.name;
-                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(disp).replace(/'/g,"\\'")}', event)">${disp}${p._d?` <span style=\"color:#777;float:right\">${(p._d||0).toFixed(1)}mi</span>`:''}</div>`;
-                    });
-                }
-
-                if (!html) html = '<div style="padding:12px;color:#999;text-align:center">No nearby suggestions</div>';
-                resultsContainer.innerHTML = html;
-                dropdown.style.display = 'block';
-            } catch (e) {
-                console.warn('populateRefineDefaults error', e);
-            }
         }
 
         /**
