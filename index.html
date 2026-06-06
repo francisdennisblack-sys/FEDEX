@@ -19105,17 +19105,48 @@
                     }
                 };
 
+                // Fisher-Yates shuffle
+                window._shuffleArray = function(arr) {
+                    const a = Array.isArray(arr) ? arr.slice() : [];
+                    for (let i = a.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        const t = a[i]; a[i] = a[j]; a[j] = t;
+                    }
+                    return a;
+                };
+
                 // Populate device-scoped feed with static test posts for unsigned users only.
                 window.populateTestPostsIfUnsigned = async function() {
                     try {
-                        if (typeof getPermanentUserId !== 'function') return { skipped: true };
-                        const pid = getPermanentUserId();
-                        if (!pid || !String(pid).startsWith('device-')) return { skipped: true };
+                        // If Firebase auth shows a signed-in user, do not populate test posts.
+                        try {
+                            if (window.firebase && firebase && firebase.auth && firebase.auth().currentUser) {
+                                return { skipped: true, reason: 'signed_in' };
+                            }
+                        } catch (e) {}
+
+                        // Try to get an existing permanent ID; if missing, generate a device-scoped id.
+                        let pid = null;
+                        try {
+                            if (typeof getPermanentUserId === 'function') pid = getPermanentUserId();
+                        } catch (e) {}
+                        if (!pid) {
+                            // fall back to localStorage-stored device id or create one
+                            pid = localStorage.getItem('permanentUserId');
+                            if (!pid) {
+                                pid = 'device-' + Date.now() + '-' + Math.random().toString(36).slice(2,8);
+                                try { localStorage.setItem('permanentUserId', pid); } catch (e) {}
+                            }
+                        }
+
+                        // Ensure we only proceed for device-scoped ids
+                        if (!String(pid).startsWith('device-')) return { skipped: true };
+
                         const posts = await window.fetchTestPosts();
                         if (!posts || !posts.length) return { ok: false, reason: 'no posts' };
                         window.gridContent = window.gridContent || {};
                         // keep at most 100 posts
-                        window.gridContent[pid] = posts.slice(0, 100);
+                        window.gridContent[pid] = window._shuffleArray(posts).slice(0, 100);
                         if (typeof renderGrid === 'function') renderGrid();
                         return { ok: true, count: window.gridContent[pid].length };
                     } catch (e) {
