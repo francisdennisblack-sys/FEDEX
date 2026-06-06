@@ -19154,6 +19154,89 @@
                 // Run the unsigned-user test-post population non-blocking on load.
                 try { window.populateTestPostsIfUnsigned(); } catch(e) {}
 
+                // ------------------------------
+                // Top-liked rotation engine
+                // Fetch top-100 from server and rotate waves of 1..10 posts
+                // Each wave duration random 15..100s. Logs impressions to server.
+                // ------------------------------
+                window.topLikedState = window.topLikedState || { list: [], ttl: 30*1000, fetchedAt: 0, timerId: null };
+
+                window.fetchTopLikedPosts = async function(limit = 100) {
+                    try {
+                        const now = Date.now();
+                        if (window.topLikedState.list && window.topLikedState.list.length && (now - window.topLikedState.fetchedAt) < window.topLikedState.ttl) {
+                            return window.topLikedState.list.slice(0, limit);
+                        }
+                        const url = `/api/posts/top-liked?limit=${encodeURIComponent(limit)}`;
+                        const resp = await fetch(url, { cache: 'no-cache' });
+                        if (!resp.ok) return [];
+                        const json = await resp.json();
+                        const arr = (json && json.posts) ? json.posts : [];
+                        window.topLikedState.list = arr;
+                        window.topLikedState.fetchedAt = Date.now();
+                        return arr.slice(0, limit);
+                    } catch (e) {
+                        return [];
+                    }
+                };
+
+                window._randInt = function(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; };
+
+                window.renderTopLikedWave = async function() {
+                    try {
+                        // Ensure signed-in users are not disturbed
+                        if (typeof window.currentUserId !== 'undefined' && window.currentUserId) return { skipped: true };
+
+                        const pool = await window.fetchTopLikedPosts(100);
+                        if (!pool || !pool.length) return { ok:false, reason:'empty_pool' };
+
+                        const waveSize = window._randInt(1, Math.min(10, pool.length));
+                        // Pick unique random indices
+                        const shuffled = window._shuffleArray(pool);
+                        const wave = shuffled.slice(0, waveSize);
+
+                        // Merge into gridContent without removing existing 'real users' posts
+                        window.gridContent = window.gridContent || {};
+                        window.gridContent['top-liked'] = wave;
+
+                        // Render grid if available
+                        if (typeof renderGrid === 'function') renderGrid();
+
+                        // Log impressions for each post (best-effort)
+                        try {
+                            for (const p of wave) {
+                                fetch('/api/metrics/impression', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ postId: p.id || p.id_str || null, source: 'top-liked', waveSize: wave.length }) }).catch(()=>{});
+                            }
+                        } catch (e) {}
+
+                        return { ok:true, waveSize: wave.length, ids: wave.map(p=>p.id)};
+                    } catch (e) { return { ok:false, error: String(e) }; }
+                };
+
+                window.startTopLikedRotation = async function() {
+                    try {
+                        // Clear existing timer if any
+                        try { if (window.topLikedState.timerId) clearTimeout(window.topLikedState.timerId); } catch(e) {}
+
+                        // Immediately render first wave
+                        await window.renderTopLikedWave();
+
+                        // Schedule next waves repeatedly
+                        const scheduleNext = async () => {
+                            const duration = window._randInt(15, 100) * 1000; // ms
+                            window.topLikedState.timerId = setTimeout(async () => {
+                                await window.renderTopLikedWave();
+                                scheduleNext();
+                            }, duration);
+                        };
+                        scheduleNext();
+                        return { started: true };
+                    } catch (e) { return { error: String(e) }; }
+                };
+
+                // Start rotation for real users grid (non-blocking). Guards prevent signed-in interference.
+                try { window.startTopLikedRotation(); } catch(e) {}
+
 
         // Update post count display on UI
         async function updatePostCountDisplay() {

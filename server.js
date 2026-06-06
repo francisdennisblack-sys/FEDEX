@@ -286,6 +286,96 @@ app.get('/api/status', (req, res) => {
     });
 });
 
+// --------------------------
+// Top-liked posts endpoint
+// Returns cached top-N posts sorted by likes (safe fallback to samples)
+// --------------------------
+let topLikedCache = { ts: 0, ttl: 30 * 1000, data: [] }; // 30s TTL
+
+app.get('/api/posts/top-liked', (req, res) => {
+    try {
+        const limit = Math.max(1, Math.min(100, parseInt(req.query.limit || '100', 10)));
+
+        // Return cache if fresh
+        if (Date.now() - topLikedCache.ts < topLikedCache.ttl && topLikedCache.data && topLikedCache.data.length) {
+            return res.json({ posts: topLikedCache.data.slice(0, limit), cached: true, ttl: topLikedCache.ttl, ageMs: Date.now() - topLikedCache.ts });
+        }
+
+        // Build a flat list of posts from postsDatabase
+        let allPosts = [];
+        for (const zid in postsDatabase) {
+            const arr = postsDatabase[zid] || [];
+            allPosts = allPosts.concat(arr.map(p => ({ ...p, zoneId: zid })));
+        }
+
+        // Fallback: if database empty, try reading test-posts.json
+        if (!allPosts.length) {
+            try {
+                const testPath = path.join(__dirname, 'test-posts.json');
+                if (fs.existsSync(testPath)) {
+                    const raw = fs.readFileSync(testPath, 'utf8');
+                    const parsed = JSON.parse(raw);
+                    const arr = Array.isArray(parsed) ? parsed : (parsed.posts || []);
+                    allPosts = arr.map((p, i) => ({ id: p.id || `tp-${i}`, title: p.title || p.body || 'POST', body: p.body || p.title || '', likes: p.likes || 0, area: p.area || null }));
+                }
+            } catch (e) {
+                // ignore
+            }
+        }
+
+        // Final fallback: single built-in post
+        if (!allPosts.length) {
+            allPosts = [{ id: 'post-1', title: 'POST1', body: 'POST1', likes: 0, area: 'Test Neighborhood' }];
+        }
+
+        // Sort by likes desc, then recency
+        allPosts.sort((a,b) => {
+            const la = (a.likes || 0);
+            const lb = (b.likes || 0);
+            if (lb !== la) return lb - la;
+            const ta = a.timestamp || 0; const tb = b.timestamp || 0;
+            return tb - ta;
+        });
+
+        topLikedCache = { ts: Date.now(), ttl: 30 * 1000, data: allPosts.slice(0, 100) };
+
+        res.json({ posts: topLikedCache.data.slice(0, limit), cached: false, ttl: topLikedCache.ttl });
+    } catch (error) {
+        console.error('/api/posts/top-liked error', error);
+        res.status(500).json({ error: String(error) });
+    }
+});
+
+// --------------------------
+// Metrics endpoints (lightweight)
+// --------------------------
+const metricsDir = path.join(__dirname, 'metrics');
+if (!fs.existsSync(metricsDir)) try { fs.mkdirSync(metricsDir); } catch(e) {}
+
+app.post('/api/metrics/impression', (req, res) => {
+    try {
+        const payload = req.body || {};
+        payload.ts = Date.now();
+        const line = JSON.stringify({ type: 'impression', ...payload }) + '\n';
+        fs.appendFile(path.join(metricsDir, 'impressions.log'), line, () => {});
+        return res.json({ success: true });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e) });
+    }
+});
+
+app.post('/api/metrics/click', (req, res) => {
+    try {
+        const payload = req.body || {};
+        payload.ts = Date.now();
+        const line = JSON.stringify({ type: 'click', ...payload }) + '\n';
+        fs.appendFile(path.join(metricsDir, 'clicks.log'), line, () => {});
+        return res.json({ success: true });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e) });
+    }
+});
+
 // Admin: Get all zones and posts
 app.get('/api/admin/zones', (req, res) => {
     const zones = {};
