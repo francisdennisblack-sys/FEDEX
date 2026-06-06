@@ -12589,10 +12589,29 @@
                         }
 
                         console.log('Attempting flush for queued post:', pId);
-                        await savePostToFirebaseShared(pId, pData);
-                        // On success, remove from queue
-                        await removeQueuedPost(enqueueId);
-                        console.log('Flushed and removed queued post:', pId);
+                        try {
+                            // Defensive check: if post already exists on server, skip to avoid duplicates
+                            const db = getDatabase();
+                            if (db) {
+                                try {
+                                    const existing = await get(ref(db, `posts/${pId}`));
+                                    if (existing && existing.exists()) {
+                                        console.log('Queued post already exists on server, removing from queue:', pId);
+                                        await removeQueuedPost(enqueueId);
+                                        continue; // skip to next queued item
+                                    }
+                                } catch (e_check) {
+                                    console.warn('Could not check existing post before flush (will attempt save):', e_check);
+                                }
+                            }
+
+                            await savePostToFirebaseShared(pId, pData);
+                            // On success, remove from queue
+                            await removeQueuedPost(enqueueId);
+                            console.log('Flushed and removed queued post:', pId);
+                        } catch (e_save) {
+                            throw e_save;
+                        }
                     } catch (err) {
                         console.warn('Failed flushing queued post (will retry later):', err);
                         // don't remove; will retry later
@@ -12831,6 +12850,7 @@
                 console.log('='.repeat(70) + '\n');
 
                 return { success: true, path: `posts/${postId}` };
+                return { success: true, path: `posts/${postId}` };
             } catch (error) {
                 console.error('\n' + '❌'.repeat(35));
                 console.error('ERROR SAVING POST TO FIREBASE');
@@ -12863,7 +12883,19 @@
                 }
 
                 // Re-throw original Firebase error as a last resort
+                // Re-throw original Firebase error as a last resort
                 throw error;
+            } finally {
+                // Always clear posting state and restore submit button so user can retry
+                try {
+                    isPostingInProgress = false;
+                    const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
+                    if (submitButton) {
+                        submitButton.disabled = false;
+                        submitButton.style.opacity = '';
+                        submitButton.style.cursor = '';
+                    }
+                } catch (e) { /* ignore UI restore errors */ }
             }
         }
         
