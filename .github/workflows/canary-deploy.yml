@@ -1,0 +1,47 @@
+name: Canary Deploy and Smoke
+
+on:
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  canary-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install deps (none required)
+        run: echo "No install step needed for smoke scripts"
+
+      - name: Run smoke tests against canary
+        env:
+          CANARY_URL: ${{ inputs.canary_url || env.CANARY_URL || 'http://localhost:5001' }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          echo "Running smoke against $CANARY_URL"
+          bash scripts/run_smoke.sh "$CANARY_URL"
+
+      - name: Run lightweight load test
+        if: ${{ inputs.run_load == 'true' || env.RUN_LOAD == 'true' }}
+        env:
+          CANARY_URL: ${{ inputs.canary_url || env.CANARY_URL || 'http://localhost:5001' }}
+        run: |
+          bash scripts/run_load_node.sh "$CANARY_URL" 10 10
+
+      - name: Auto retrain and reload model on canary
+        env:
+          CANARY_URL: ${{ inputs.canary_url || env.CANARY_URL || 'http://localhost:5001' }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          bash scripts/auto_retrain_and_reload.sh "$CANARY_URL" "$ADMIN_PASSWORD"
+
+      - name: End of canary job
+        run: echo 'Canary smoke/load/retrain completed.'
