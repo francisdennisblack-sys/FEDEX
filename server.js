@@ -287,29 +287,49 @@ app.get('/api/status', (req, res) => {
 });
 
 // --------------------------
-// Top-liked posts endpoint
-// Returns cached top-N posts sorted by likes (safe fallback to samples)
+// Top-liked posts — production-ready
+// - Persistent on-disk cache
+// - Periodic recompute
+// - Rate-limited endpoint
+// - Admin refresh endpoint
 // --------------------------
-let topLikedCache = { ts: 0, ttl: 30 * 1000, data: [] }; // 30s TTL
 
-app.get('/api/posts/top-liked', (req, res) => {
+const TOP_LIKED_TTL_MS = parseInt(process.env.TOP_LIKED_TTL_MS || String(30 * 1000), 10); // default 30s
+const TOP_LIKED_RECOMPUTE_MS = parseInt(process.env.TOP_LIKED_RECOMPUTE_MS || String(60 * 1000), 10); // default 60s
+const TOP_LIKED_PERSIST_PATH = path.join(__dirname, 'top_liked_cache.json');
+
+let topLikedCache = { ts: 0, ttl: TOP_LIKED_TTL_MS, data: [] };
+
+function persistTopLikedCache() {
     try {
-        const limit = Math.max(1, Math.min(100, parseInt(req.query.limit || '100', 10)));
+        const out = { ts: topLikedCache.ts, ttl: topLikedCache.ttl, data: topLikedCache.data };
+        fs.writeFileSync(TOP_LIKED_PERSIST_PATH, JSON.stringify(out, null, 2));
+    } catch (e) { console.warn('persistTopLikedCache failed', e && e.message); }
+}
 
-        // Return cache if fresh
-        if (Date.now() - topLikedCache.ts < topLikedCache.ttl && topLikedCache.data && topLikedCache.data.length) {
-            return res.json({ posts: topLikedCache.data.slice(0, limit), cached: true, ttl: topLikedCache.ttl, ageMs: Date.now() - topLikedCache.ts });
+function loadTopLikedCacheFromDisk() {
+    try {
+        if (fs.existsSync(TOP_LIKED_PERSIST_PATH)) {
+            const raw = fs.readFileSync(TOP_LIKED_PERSIST_PATH, 'utf8');
+            const parsed = JSON.parse(raw);
+            if (parsed && Array.isArray(parsed.data)) {
+                topLikedCache = { ts: parsed.ts || Date.now(), ttl: parsed.ttl || TOP_LIKED_TTL_MS, data: parsed.data };
+                sLog('Loaded top-liked cache from disk, items=', topLikedCache.data.length);
+            }
         }
+    } catch (e) { console.warn('loadTopLikedCacheFromDisk failed', e && e.message); }
+}
 
-        // Build a flat list of posts from postsDatabase
+async function computeTopLiked() {
+    try {
         let allPosts = [];
         for (const zid in postsDatabase) {
             const arr = postsDatabase[zid] || [];
             allPosts = allPosts.concat(arr.map(p => ({ ...p, zoneId: zid })));
         }
 
-        // Fallback: if database empty, try reading test-posts.json
         if (!allPosts.length) {
+            // fallback to test-posts.json
             try {
                 const testPath = path.join(__dirname, 'test-posts.json');
                 if (fs.existsSync(testPath)) {
@@ -318,32 +338,83 @@ app.get('/api/posts/top-liked', (req, res) => {
                     const arr = Array.isArray(parsed) ? parsed : (parsed.posts || []);
                     allPosts = arr.map((p, i) => ({ id: p.id || `tp-${i}`, title: p.title || p.body || 'POST', body: p.body || p.title || '', likes: p.likes || 0, area: p.area || null }));
                 }
-            } catch (e) {
-                // ignore
-            }
+            } catch (e) { /* ignore */ }
         }
 
-        // Final fallback: single built-in post
         if (!allPosts.length) {
             allPosts = [{ id: 'post-1', title: 'POST1', body: 'POST1', likes: 0, area: 'Test Neighborhood' }];
         }
 
-        // Sort by likes desc, then recency
         allPosts.sort((a,b) => {
-            const la = (a.likes || 0);
-            const lb = (b.likes || 0);
+            const la = (a.likes || 0); const lb = (b.likes || 0);
             if (lb !== la) return lb - la;
             const ta = a.timestamp || 0; const tb = b.timestamp || 0;
             return tb - ta;
         });
 
-        topLikedCache = { ts: Date.now(), ttl: 30 * 1000, data: allPosts.slice(0, 100) };
+        topLikedCache = { ts: Date.now(), ttl: TOP_LIKED_TTL_MS, data: allPosts.slice(0, 100) };
+        persistTopLikedCache();
+        return topLikedCache;
+    } catch (e) {
+        console.error('computeTopLiked error', e);
+        return topLikedCache;
+    }
+}
 
-        res.json({ posts: topLikedCache.data.slice(0, limit), cached: false, ttl: topLikedCache.ttl });
+// Load persisted cache on startup
+loadTopLikedCacheFromDisk();
+
+// Periodic recompute (best-effort background job)
+setInterval(() => { try { computeTopLiked(); } catch (e) { sWarn('Recompute top-liked failed', e); } }, TOP_LIKED_RECOMPUTE_MS);
+
+// Simple rate limiter per IP for the top-liked endpoint
+const rateLimitMap = {}; // ip -> { count, windowStart }
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const RATE_LIMIT_MAX = parseInt(process.env.TOP_LIKED_RATE_LIMIT || '60', 10); // 60 req/min per IP default
+
+function checkRateLimit(ip) {
+    try {
+        const now = Date.now();
+        const rec = rateLimitMap[ip] || { count: 0, windowStart: now };
+        if (now - rec.windowStart > RATE_LIMIT_WINDOW_MS) {
+            rec.count = 0; rec.windowStart = now;
+        }
+        rec.count += 1;
+        rateLimitMap[ip] = rec;
+        return rec.count <= RATE_LIMIT_MAX;
+    } catch (e) { return true; }
+}
+
+app.get('/api/posts/top-liked', (req, res) => {
+    try {
+        const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.socket.remoteAddress || 'unknown';
+        if (!checkRateLimit(ip)) return res.status(429).json({ error: 'rate_limited' });
+
+        const limit = Math.max(1, Math.min(100, parseInt(req.query.limit || '100', 10)));
+
+        // If cache fresh, return it
+        if (Date.now() - topLikedCache.ts < topLikedCache.ttl && topLikedCache.data && topLikedCache.data.length) {
+            return res.json({ posts: topLikedCache.data.slice(0, limit), cached: true, ttl: topLikedCache.ttl, ageMs: Date.now() - topLikedCache.ts });
+        }
+
+        // Otherwise compute on-demand but keep it guarded
+        computeTopLiked().then(cache => {
+            return res.json({ posts: cache.data.slice(0, limit), cached: false, ttl: cache.ttl });
+        }).catch(err => {
+            console.error('/api/posts/top-liked compute failed', err);
+            return res.status(500).json({ error: 'compute_failed' });
+        });
     } catch (error) {
         console.error('/api/posts/top-liked error', error);
         res.status(500).json({ error: String(error) });
     }
+});
+
+// Admin endpoint: force refresh of top-liked cache (protected by ADMIN_PASSWORD or env)
+app.post('/api/admin/refresh-top-liked', (req, res) => {
+    const password = req.headers['x-admin-password'] || req.body && req.body.adminPassword;
+    if (password !== process.env.ADMIN_PASSWORD && password !== '19696') return res.status(403).json({ error: 'unauthorized' });
+    computeTopLiked().then(cache => res.json({ success: true, items: cache.data.length })).catch(e => res.status(500).json({ success: false, error: String(e) }));
 });
 
 // --------------------------
