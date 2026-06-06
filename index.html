@@ -18646,6 +18646,38 @@
                     const contentKey = 'shared-posts';
                     gridContent[contentKey] = uniquePosts;
                     console.log(`  ✅ gridContent['${contentKey}'] updated with ${uniquePosts.length} posts`);
+
+                    // If the viewer is not fully signed-in, build an anonymous
+                    // view bucket with up to 100 relevant posts so they see a
+                    // rich feed but cannot interact (no likes/dislikes/posts).
+                    try {
+                        const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
+                        if (!isSignedIn) {
+                            window.readOnlyViewer = true;
+                            const curZone = (window.currentZoneTag || window.userDetectedCounty || '').toString().trim();
+                            const matched = [];
+                            // First, prefer posts matching the detected area tag
+                            for (const p of uniquePosts) {
+                                try {
+                                    const area = (p.displayAreaTag || p.county || p.zoneTag || p.area || p.customTag || p.neighborhood || p.city || p.region || '').toString();
+                                    if (curZone && area && area.toLowerCase().includes(curZone.toLowerCase())) matched.push(p);
+                                } catch (e) { /* ignore per-post parse errors */ }
+                                if (matched.length >= 100) break;
+                            }
+                            // If we still need more posts, append most recent ones
+                            if (matched.length < 100) {
+                                const remaining = uniquePosts.filter(p => !matched.includes(p)).sort((a,b) => ((b.timestamp||b.createdAt||0) - (a.timestamp||a.createdAt||0)));
+                                for (const p of remaining) {
+                                    matched.push(p);
+                                    if (matched.length >= 100) break;
+                                }
+                            }
+                            gridContent['anon-view'] = matched.slice(0,100);
+                            console.log('  ✅ anon-view bucket populated with', (gridContent['anon-view']||[]).length, 'posts for non-signed-in viewer');
+                        } else {
+                            window.readOnlyViewer = false;
+                        }
+                    } catch(e) { console.warn('Failed building anon-view bucket', e); }
                     
             // 💾 BACKUP CACHE: Only add NEW posts to cache, don't re-add existing ones
                     // This prevents memory explosion from Firebase firing multiple times per second
@@ -23169,7 +23201,16 @@
                     const mediaEmoji = isVideo ? '🎥' : '📷';
                     const mediaIndicatorHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; display:flex; align-items:center; justify-content:center;"><div style="font-size: 64px;" title="Tap to view ${isVideo ? 'video' : 'photo'}">${mediaEmoji}</div></div>`;
 
-                    const voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↑ <span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
+                    let voteBadge = '';
+                    try {
+                        if (window.readOnlyViewer) {
+                            voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↑ ${likes > 0 ? likes : ''}</div><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↓ ${dislikes > 0 ? dislikes : ''}</div></div>`;
+                        } else {
+                            voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↑ <span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
+                        }
+                    } catch (e) {
+                        voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↑ ${likes > 0 ? likes : ''}</div><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↓ ${dislikes > 0 ? dislikes : ''}</div></div>`;
+                    }
 
                     const enrichedPost = enrichPostWithLocationData(post);
                     
@@ -23217,7 +23258,16 @@
                                        post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
                                        'Nearby Area';
                     // Vote buttons sit just above the area tag (28px tall) at the bottom
-                    const voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↑ <span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
+                    let voteBadge = '';
+                    try {
+                        if (window.readOnlyViewer) {
+                            voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↑ ${likes > 0 ? likes : ''}</div><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↓ ${dislikes > 0 ? dislikes : ''}</div></div>`;
+                        } else {
+                            voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↑ <span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
+                        }
+                    } catch (e) {
+                        voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↑ ${likes > 0 ? likes : ''}</div><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↓ ${dislikes > 0 ? dislikes : ''}</div></div>`;
+                    }
                     // Area tag pinned to the very bottom, BELOW the like/dislike buttons.
                     // When `post.displayAreaTag` is set we use it verbatim (one read, zero formatter cost).
                     const renderedAreaTag = post.displayAreaTag
