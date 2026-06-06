@@ -5867,6 +5867,7 @@
                                 } else {
                                     setTimeout(() => { loadPOIDataInBackground(); }, 3000);
                                 }
+                                try { if (typeof mergePOIsIntoLocationDatabase === 'function') mergePOIsIntoLocationDatabase(); } catch(e) {}
                                 return;
                             }
                         }
@@ -5895,6 +5896,7 @@
                             
                             globalPOIDatabase = statePOIs;
                             console.log(`✅ Loaded ${statePOIs.length} POIs for ${userState}`);
+                        try { if (typeof mergePOIsIntoLocationDatabase === 'function') mergePOIsIntoLocationDatabase(); } catch(e) {}
                         try {
                             const small = statePOIs.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.category || null, state: p.state || null }));
                             localStorage.setItem('lastPOIs', JSON.stringify(small));
@@ -5918,6 +5920,7 @@
                                 if (Array.isArray(masterPois) && masterPois.length > 0) {
                                     globalPOIDatabase = masterPois;
                                     console.log(`✅ Loaded ${masterPois.length} POIs from master_pois_database.json fallback`);
+                                    try { if (typeof mergePOIsIntoLocationDatabase === 'function') mergePOIsIntoLocationDatabase(); } catch(e) {}
                                     try {
                                         const small = masterPois.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.category || null, state: p.state || null }));
                                         localStorage.setItem('lastPOIs', JSON.stringify(small));
@@ -5940,6 +5943,36 @@
                 console.error('❌ Error loading POI data:', error);
                 if (!globalPOIDatabase) globalPOIDatabase = [];
             }
+        }
+
+        // Ensure POIs are available as 'locations' for the main location search system.
+        function mergePOIsIntoLocationDatabase() {
+            try {
+                if (!window.globalPOIDatabase || !Array.isArray(window.globalPOIDatabase) || window.globalPOIDatabase.length === 0) return;
+                if (!window.globalLocationDatabase) window.globalLocationDatabase = [];
+
+                const existingKeys = new Set(window.globalLocationDatabase.map(l => (String(l.name||'') + '::' + String(l.lat||'') + '::' + String(l.lon||'')).toLowerCase()));
+                let added = 0;
+                for (const p of window.globalPOIDatabase) {
+                    if (!p || !p.name) continue;
+                    const key = (String(p.name) + '::' + String(p.lat||'') + '::' + String(p.lon||'')).toLowerCase();
+                    if (existingKeys.has(key)) continue;
+                    const rec = {
+                        name: p.name,
+                        state: p.state || (p.region || null),
+                        city: p.city || null,
+                        lat: p.lat,
+                        lon: p.lon,
+                        category: p.category || p.type || 'poi',
+                        isPOI: true
+                    };
+                    window.globalLocationDatabase.push(rec);
+                    existingKeys.add(key);
+                    added++;
+                    if (added >= 2000) break; // avoid huge merges on first run
+                }
+                if (added > 0) console.log(`🔀 Merged ${added} POIs into globalLocationDatabase for unified location+POI search`);
+            } catch (e) { console.warn('mergePOIsIntoLocationDatabase error', e); }
         }
         
         // Background POI loader - loads remaining states and comprehensive data without blocking
