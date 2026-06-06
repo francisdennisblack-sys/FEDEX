@@ -18952,6 +18952,130 @@
             console.log('Firebase real-time sync active - no manual refresh needed');
         }
 
+        // Ensure a globally-accessible device-feed populator exists.
+        // This wrapper will attempt to call the existing fallbackPopulateDeviceFeed,
+        // or build the feed using available DB helper functions when the fallback
+        // isn't reachable in this runtime (ensures unsigned users see posts).
+        window.ensureDeviceFeed = async function() {
+            try {
+                if (typeof window.gridContent === 'undefined' || window.gridContent === null) window.gridContent = {};
+                const gc = window.gridContent;
+                if (typeof fallbackPopulateDeviceFeed === 'function') {
+                    try { await fallbackPopulateDeviceFeed(); if (Object.keys(window.gridContent||{}).length>0) return; } catch(e) { /* fall through */ }
+                }
+
+                // Build feed from available helpers
+                let posts = [];
+                if (typeof getPostsFromFirebase === 'function') {
+                    try { const fetched = await getPostsFromFirebase(); if (Array.isArray(fetched)) posts = fetched; } catch(e) { /* ignore */ }
+                }
+
+                if (posts.length === 0 && window.database && typeof get === 'function' && typeof ref === 'function') {
+                    try {
+                        const snap = await get(ref(database, 'posts'));
+                        if (snap && snap.exists && snap.exists()) {
+                            const obj = snap.val();
+                            posts = Object.keys(obj || {}).map(k => ({ id: k, ...(obj[k] || {}) }));
+                        }
+                    } catch (e) { console.warn('ensureDeviceFeed direct DB GET failed', e); }
+                }
+
+                if (!posts || posts.length === 0) {
+                    // Try local test API as a quick test fallback
+                    try {
+                        const localResp = await fetch('/api/posts/test-zone');
+                        if (localResp && localResp.ok) {
+                            const pj = await localResp.json();
+                            if (pj && Array.isArray(pj.posts)) posts = pj.posts;
+                        }
+                    } catch (e) { /* ignore */ }
+
+                    // Try fetching from production API as a last resort
+                    if (!posts || posts.length === 0) {
+                        try {
+                            const zoneResp = await fetch('https://wificontent.com/api/zone-id');
+                            if (zoneResp && zoneResp.ok) {
+                                const zoneJson = await zoneResp.json();
+                                const zoneId = zoneJson && (zoneJson.zoneId || zoneJson.zone || zoneJson.zone_id) || 'global';
+                                try {
+                                    const postsResp = await fetch('https://wificontent.com/api/posts/' + encodeURIComponent(zoneId));
+                                    if (postsResp && postsResp.ok) {
+                                        const postsJson = await postsResp.json();
+                                        if (postsJson && Array.isArray(postsJson.posts)) posts = postsJson.posts;
+                                        else if (Array.isArray(postsJson)) posts = postsJson;
+                                    }
+                                } catch (e) { console.warn('ensureDeviceFeed prod posts fetch failed', e); }
+                            }
+                        } catch (e) { console.warn('ensureDeviceFeed prod zone-id fetch failed', e); }
+                    }
+
+                    if (!posts || posts.length === 0) {
+                        console.warn('ensureDeviceFeed: no posts available to populate device feed');
+                        return;
+                    }
+                }
+
+                const TARGET = 100;
+                const BOOST_RATIO = 0.10;
+                const boostedCount = Math.max(1, Math.floor(TARGET * BOOST_RATIO));
+
+                const allPosts = posts.filter(p => p && p.id);
+                let mostLiked = null;
+                try { mostLiked = allPosts.reduce((best, cur) => { const b = Number(best && best.likes)||0; const c = Number(cur && cur.likes)||0; return c>b?cur:best; }, null); } catch(e) { mostLiked = null; }
+
+                const boosted = allPosts.filter(p => {
+                    try { if (p.boostStatus === 'active') return true; if (p.boostExpiresAt && Number(p.boostExpiresAt) > Date.now()) return true; if (p.badges && Array.isArray(p.badges) && p.badges.includes && p.badges.includes('boost')) return true; } catch(e){}
+                    return false;
+                }).sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
+
+                const boostedIds = new Set((boosted||[]).map(p => p.id));
+                const randomCandidates = allPosts.filter(p => !boostedIds.has(p.id));
+
+                function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp; } return arr; }
+
+                const used = new Set();
+                const final = [];
+                if (mostLiked && mostLiked.id) { final.push(mostLiked); used.add(mostLiked.id); }
+                for (const b of boosted) {
+                    if (final.length >= TARGET) break;
+                    if (!b || !b.id) continue; if (used.has(b.id)) continue; final.push(b); used.add(b.id); if (final.length >= (1 + boostedCount)) break;
+                }
+                const shuffled = shuffle(randomCandidates.slice());
+                for (const r of shuffled) { if (final.length >= TARGET) break; if (!r||!r.id) continue; if (used.has(r.id)) continue; final.push(r); used.add(r.id); }
+                if (final.length < TARGET) { for (const b of boosted) { if (final.length >= TARGET) break; if (!b||!b.id) continue; if (used.has(b.id)) continue; final.push(b); used.add(b.id); } }
+
+                const deviceId = (typeof permanentUserId !== 'undefined' && permanentUserId) || window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null) || ('device-' + Date.now());
+                try { gridContent = (typeof gridContent === 'object' && gridContent) ? gridContent : {}; gridContent[String(deviceId)] = final.slice(0, TARGET); } catch(e) {}
+                gc[String(deviceId)] = final.slice(0, TARGET);
+                try { window.gridContent = gc; } catch(e) {}
+                console.log('ensureDeviceFeed: populated device feed with', (gc[String(deviceId)]||[]).length);
+                try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
+            } catch (e) { console.warn('ensureDeviceFeed top-level error', e); }
+        };
+
+        try { window.ensureDeviceFeed(); } catch(e) { /* best-effort */ }
+
+        // Local-test shortcut: if running on localhost and grid is empty, quickly populate
+        try {
+            if (location && location.hostname === 'localhost') {
+                window.ensureDeviceFeedLocalTest = async function() {
+                    try {
+                        if (typeof gridContent !== 'undefined' && Object.keys(gridContent||{}).length > 0) return;
+                        const r = await fetch('/api/posts/test-zone');
+                        if (!r.ok) return;
+                        const pj = await r.json();
+                        const posts = pj && pj.posts ? pj.posts : [];
+                        if (!posts || posts.length === 0) return;
+                        const deviceId = (typeof permanentUserId !== 'undefined' && permanentUserId) || window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null) || ('device-local-' + Date.now());
+                        try { gridContent = (typeof gridContent === 'object' && gridContent) ? gridContent : {}; gridContent[String(deviceId)] = posts.slice(0,100); } catch(e) {}
+                        try { window.gridContent = window.gridContent || {}; window.gridContent[String(deviceId)] = posts.slice(0,100); } catch(e) {}
+                        try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
+                    } catch(e) { console.warn('ensureDeviceFeedLocalTest failed', e); }
+                };
+                try { window.ensureDeviceFeedLocalTest(); } catch(e) {}
+            }
+        } catch(e) {}
+
         // Update post count display on UI
         async function updatePostCountDisplay() {
             if (!currentUserId) return;

@@ -997,7 +997,8 @@ app.post('/api/checkout/create-intent', async (req, res) => {
 });
 
 // Serve index.html for any non-API routes (SPA fallback)
-app.get('*', (req, res) => {
+// Use a regex route to avoid path-to-regexp parsing issues for '*' on some versions
+app.get(/.*/, (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
