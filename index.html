@@ -16216,7 +16216,17 @@
             const viewMediaEl = document.getElementById('viewMedia');
             const viewTextEl = document.getElementById('viewText');
                 if (hasMedia && viewMediaEl) {
-                const mediaHTML = (function() {
+                    const isDemoModal = !!(targetPost.id && String(targetPost.id).startsWith('demo-'));
+                    if (isDemoModal) {
+                        const isVideo = (targetPost.mediaType || '').toString().toLowerCase() === 'video';
+                        if (isVideo) {
+                            viewMediaEl.innerHTML = `<div style="width:100%;height:60vh;max-width:100%;max-height:60vh;background:#000;display:block;margin:0 auto;border-radius:6px;"></div>`;
+                        } else {
+                            viewMediaEl.innerHTML = `<div style="width:100%;height:60vh;max-width:100%;max-height:60vh;background:#000;display:block;margin:0 auto;border-radius:6px;"></div>`;
+                        }
+                        viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
+                    } else {
+                    const mediaHTML = (function() {
                     const src = imageSource;
                     const mt = (targetPost.mediaType || '').toString().toLowerCase();
                     const ct = (targetPost.contentType || '').toString().toLowerCase();
@@ -23925,9 +23935,9 @@
                     const isVideo = post.mediaType === 'video' || 
                                    (typeof imageSource === 'string' && (imageSource.includes('.mp4') || imageSource.includes('.webm') || imageSource.includes('.mov')));
 
-                    // 📷 / 🎥 INDICATOR: Show only an emoji marker on the tile so users
-                    // know media is attached. The actual photo/video AND the written
-                    // content are shown only inside the pop-out modal.
+                    // 📷 / 🎥 INDICATOR: Show an emoji marker on the tile so users
+                    // know media is attached. The actual photo/video is shown inside
+                    // the pop-out modal. Demo media tiles still show emoji.
                     const mediaEmoji = isVideo ? '🎥' : '📷';
                     const mediaIndicatorHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; display:flex; align-items:center; justify-content:center;"><div style="font-size: 64px;" title="Tap to view ${isVideo ? 'video' : 'photo'}">${mediaEmoji}</div></div>`;
 
@@ -30504,5 +30514,119 @@
         
         console.log('✅ window.debugBootstrap is now available');
         console.log('   Try: window.debugBootstrap()');
+        // ======================================================================
+        // Demo mode for signed-out users: 4 cycling mock posts in first grid slots
+        // ======================================================================
+        (function setupSignedOutDemo(){
+            if (window.__demoModeInitialized) return; window.__demoModeInitialized = true;
+
+            const LOCAL_MESSAGES = [
+                "We're playing pick up at 5!",
+                "Free tacos at 7pm!",
+                "Live music tonight — come join",
+            ];
+            const GLOBAL_MESSAGES = [
+                "What's going on in Seattle",
+                "Global meetup happening soon",
+                "Tips: How to find local events"
+            ];
+            const HELP_MESSAGES = [
+                "How does this work? Tap to learn",
+                "New here? Signup to post and chat",
+                "This demo cycles post types for preview"
+            ];
+
+            // Badge cycle order (boost and sell suppress other badges per rules)
+            const BADGE_CYCLE = ['none','new','hot','liked','disliked','boost','sell','podium'];
+
+            // Demo assets (replace later by providing window.demoAssets.photo / .video)
+            window.demoAssets = window.demoAssets || { photo: '', video: '' };
+
+            function makeDemoPost(i){
+                // Posts 1-2: written content posts. Post 3: photo. Post 4: video.
+                const isText = (i === 1 || i === 2);
+                const isPhoto = (i === 3);
+                const isVideo = (i === 4);
+                return {
+                    id: `demo-${i}`,
+                    content: isText ? HELP_MESSAGES[i % HELP_MESSAGES.length] : (isPhoto ? '📷' : (isVideo ? '🎥' : '')),
+                    photoURL: (isPhoto || isVideo) ? (window.demoAssets.photo || `demo-photo-${i}`) : null,
+                    mediaType: isVideo ? 'video' : (isPhoto ? 'image' : null),
+                    likes: 0,
+                    dislikes: 0,
+                    displayAreaTag: 'Nearby Area',
+                    poiName: null,
+                    badges: [],
+                    boostStatus: null,
+                    createdAt: Date.now(),
+                    _demoState: { badgeIndex: i, messageIndex: i }
+                };
+            }
+
+            function startDemo(){
+                if (window.currentUserId) return; // only for signed-out
+                if (!window._preDemoGridContent) window._preDemoGridContent = Object.assign({}, window.gridContent || {});
+
+                const demoPosts = [makeDemoPost(1), makeDemoPost(2), makeDemoPost(3), makeDemoPost(4)];
+                window.gridContent = { demo: demoPosts };
+                window.postCache = window.postCache || {};
+                demoPosts.forEach(p => window.postCache[p.id] = p);
+
+                try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(e){}
+                try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
+
+                let tick = 0;
+                window.__demoInterval = setInterval(() => {
+                    if (window.currentUserId) { stopDemo(); return; }
+                    tick++;
+                    demoPosts.forEach((p, idx) => {
+                        // Rotate written content only for text posts (1 & 2). Media posts keep emoji.
+                        if (!p.mediaType) {
+                            const cat = (tick + idx) % 3;
+                            if (cat === 0) p.content = LOCAL_MESSAGES[(p._demoState.messageIndex + tick) % LOCAL_MESSAGES.length];
+                            if (cat === 1) p.content = GLOBAL_MESSAGES[(p._demoState.messageIndex + tick) % GLOBAL_MESSAGES.length];
+                            if (cat === 2) p.content = HELP_MESSAGES[(p._demoState.messageIndex + tick) % HELP_MESSAGES.length];
+                        } else {
+                            p.content = (p.mediaType === 'video') ? '🎥' : '📷';
+                        }
+
+                        p.displayAreaTag = (tick + idx) % 4 === 0 ? 'Bar POI' : ( (tick+idx)%2===0 ? 'Nearby Area' : 'Downtown');
+                        p.poiName = (p.displayAreaTag === 'Bar POI') ? 'Bar POI' : null;
+
+                        p.likes = Math.max(0, Math.floor(Math.abs(Math.sin((tick+idx)/3) * 60)));
+                        p.dislikes = Math.max(0, Math.floor(Math.abs(Math.cos((tick+idx)/2) * 8)));
+
+                        const bIndex = (p._demoState.badgeIndex + tick + idx) % BADGE_CYCLE.length;
+                        const kind = BADGE_CYCLE[bIndex];
+                        p.badges = [];
+                        p.boostStatus = null; p.sellBadge = false; p.forSale = false; p.engagementTier = 'NORMAL'; p._demoPodium = false;
+                        if (kind === 'boost') { p.badges.push('boost'); p.boostStatus = 'active'; }
+                        else if (kind === 'sell') { p.badges.push('sell'); p.sellBadge = true; p.forSale = true; }
+                        else if (kind === 'new') { p.engagementTier = 'NEW'; }
+                        else if (kind === 'hot') { p.engagementTier = 'HOT'; }
+                        else if (kind === 'liked') { p.engagementTier = 'LIKED'; }
+                        else if (kind === 'disliked') { p.engagementTier = 'DISLIKED'; }
+                        else if (kind === 'podium') { p._demoPodium = true; }
+                    });
+
+                    try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(e){}
+                    try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
+                }, 3000);
+            }
+
+            function stopDemo(){
+                if (window.__demoInterval) { clearInterval(window.__demoInterval); window.__demoInterval = null; }
+                if (window._preDemoGridContent) { window.gridContent = window._preDemoGridContent; window._preDemoGridContent = null; }
+                try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
+            }
+
+            try {
+                // auto-start only when signed-out
+                if (!window.currentUserId) setTimeout(startDemo, 250);
+                const authWatch = setInterval(() => { if (window.currentUserId) { stopDemo(); clearInterval(authWatch); } }, 1000);
+                
+            } catch(e){ console.warn('demo init failed', e); }
+
+        })();
     </script>
 </html>
