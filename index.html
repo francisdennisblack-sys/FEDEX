@@ -5,6 +5,26 @@
             <title>Local Grid - POI Proximity</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
     <script>
+    </script>
+
+    <script>
+        // POI fetch helper: if `window.POI_BASE_URL` is set (e.g. https://cdn.example.com),
+        // requests for `/pois/...` will be routed there. Otherwise fall back to relative `/pois/`.
+        // This lets us exclude heavy `pois/tiles/` from deployments and host them on S3/CDN.
+        window.poisFetch = function(path, opts) {
+            // Normalize inputs: support absolute '/pois/...' and relative 'pois/...'
+            if (!path) return fetch(path, opts);
+            const isAbsolute = path.startsWith('/');
+            if (window.POI_BASE_URL) {
+                // Ensure no double-slashes when joining
+                const base = window.POI_BASE_URL.replace(/\/+$/,'');
+                const p = isAbsolute ? path : '/' + path.replace(/^\/+/, '');
+                return fetch(base + p, opts);
+            }
+            // Default: use original fetch with given path
+            return fetch(path, opts);
+        };
+    </script>
         /* Script moved out of style block to avoid CSS/JS mixing */
         async function updatePostZoneOnServer(postId, newZone, oldZone = null) {
             try {
@@ -5740,7 +5760,7 @@
                 
                     // First try the merged search index (fast, comprehensive)
                     try {
-                        const siResp = await fetch('/pois/search-index.json');
+                        const siResp = await poisFetch('/pois/search-index.json');
                         if (siResp && siResp.ok) {
                             const si = await siResp.json();
                             if (si && Array.isArray(si.rows)) {
@@ -5780,7 +5800,7 @@
                         
                         try {
                             const stateFile = `pois/osm/${userState}.json`;
-                            const stateResponse = await fetch(stateFile);
+                            const stateResponse = await poisFetch(stateFile);
                             const stateData = await stateResponse.json();
                             
                             const statePOIs = (Array.isArray(stateData) ? stateData : stateData.pois || []).map(poi => ({
@@ -5812,7 +5832,7 @@
                     // If no per-state POIs found, try loading a prebuilt master POI database as fallback
                     try {
                         if ((!globalPOIDatabase || globalPOIDatabase.length === 0) && typeof fetch === 'function') {
-                            const masterResp = await fetch('/master_pois_database.json');
+                            const masterResp = await poisFetch('/master_pois_database.json');
                             if (masterResp && masterResp.ok) {
                                 const masterData = await masterResp.json();
                                 const masterPois = masterData && masterData.pois ? masterData.pois : (Array.isArray(masterData) ? masterData : []);
@@ -5854,7 +5874,7 @@
                 const osmStates = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New_Hampshire', 'New_Jersey', 'New_Mexico', 'New_York', 'North_Carolina', 'North_Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode_Island', 'South_Carolina', 'South_Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West_Virginia', 'Wisconsin', 'Wyoming'];
                 
                 const osmPromises = osmStates.map(state =>
-                    fetch(`pois/osm/${state}.json`)
+                    poisFetch(`pois/osm/${state}.json`)
                         .then(r => r.json())
                         .then(data => Array.isArray(data) ? data : (data.pois || []))
                         .catch(() => [])
@@ -6206,10 +6226,10 @@
         async function loadWorldwidePOIAsLocationDatabase() {
             try {
                 console.log('🔄 Step 1 PRIMARY: Loading worldwide cities shard (lightweight)…');
-                const [citiesRes, manifestRes] = await Promise.all([
-                    fetch('/pois/cities.json'),
-                    fetch('/pois/manifest.json')
-                ]);
+                    const [citiesRes, manifestRes] = await Promise.all([
+                    poisFetch('/pois/cities.json'),
+                    poisFetch('/pois/manifest.json')
+                    ]);
                 if (!citiesRes.ok) throw new Error('Failed to load /pois/cities.json');
                 const data = await citiesRes.json();
                 if (manifestRes.ok) {
@@ -10571,12 +10591,12 @@
                     const poiLocations = [];
 
                     // 2a — manifest + cities (always load; small)
-                    const manifestResp = await fetch('/pois/manifest.json');
-                    const manifest = manifestResp.ok ? await manifestResp.json() : { states: {} };
+                    const manifestResp = await poisFetch('/pois/manifest.json');
+                    const manifest = manifestResp && manifestResp.ok ? await manifestResp.json() : { states: {} };
                     window.poiManifest = manifest;
 
-                    const citiesResp = await fetch('/pois/cities.json');
-                    if (citiesResp.ok) {
+                    const citiesResp = await poisFetch('/pois/cities.json');
+                    if (citiesResp && citiesResp.ok) {
                         const citiesPayload = await citiesResp.json();
                         Object.values(citiesPayload.cities || {}).forEach(city => {
                             (city.pois || []).forEach(poi => {
@@ -10594,7 +10614,7 @@
                     // 2a-bis — neighborhoods/towns from OSM (small file, drives recommended-areas dropdown)
                     // places.json is built by merge_osm_into_shards.js — graceful fallback if missing.
                     try {
-                        const placesResp = await fetch('/pois/places.json');
+                        const placesResp = await poisFetch('/pois/places.json');
                         if (placesResp.ok) {
                             const placesPayload = await placesResp.json();
                             const places = placesPayload.places || [];
@@ -10633,8 +10653,8 @@
                         const entry = manifest.states[stateName];
                         if (!entry) continue;
                         try {
-                            const sResp = await fetch(`/pois/${entry.file}`);
-                            if (sResp.ok) {
+                            const sResp = await poisFetch(`/pois/${entry.file}`);
+                            if (sResp && sResp.ok) {
                                 const sPayload = await sResp.json();
                                 (sPayload.pois || []).forEach(poi => {
                                     poiLocations.push({
@@ -10658,7 +10678,7 @@
                         const entry = (window.poiManifest && window.poiManifest.states) ? window.poiManifest.states[stateName] : null;
                         if (!entry) return false;
                         try {
-                            const r = await fetch(`/pois/${entry.file}`);
+                            const r = await poisFetch(`/pois/${entry.file}`);
                             if (!r.ok) return false;
                             const p = await r.json();
                             const added = [];
@@ -10692,7 +10712,7 @@
                         window._poiSearchIndexLoading = (async () => {
                             try {
                                 console.log('🔎 Fetching global POI search index (one-time)…');
-                                const r = await fetch('/pois/search-index.json');
+                                const r = await poisFetch('/pois/search-index.json');
                                 if (!r.ok) return null;
                                 const data = await r.json();
                                 window.globalPoiSearchIndex = data;
@@ -17756,7 +17776,7 @@
             // Also ensure OSM places are loaded - reuse preload promise if available
             if (!window.osmPlaces) {
                 try {
-                    const osmPromise = window._osmPlacesPreloadPromise || fetch('/pois/places.json').then(r => r.json());
+                    const osmPromise = window._osmPlacesPreloadPromise || poisFetch('/pois/places.json').then(r => r.json());
                     const data = await osmPromise;
                     window.osmPlaces = data.places || [];
                     console.log(`✅ OSM places ready: ${window.osmPlaces.length} places`);
@@ -18227,7 +18247,7 @@
                 // On-demand fetch fallback for very small places file (fast on mobile)
                 if (source.length === 0) {
                     try {
-                        const resp = await fetch('/pois/places.json');
+                        const resp = await poisFetch('/pois/places.json');
                         if (resp.ok) {
                             const payload = await resp.json();
                             if (payload && Array.isArray(payload.places)) source = payload.places;
@@ -22430,7 +22450,7 @@
                 try {
                     // Try lightweight expanded fallback (smaller payload)
                     const p1 = fetch('/poi_database_expanded.json').then(r => r.ok ? r.json() : null).catch(() => null);
-                    const p2 = fetch('/pois/search-index.json').then(r => r.ok ? r.json() : null).catch(() => null);
+                    const p2 = poisFetch('/pois/search-index.json').then(r => r.ok ? r.json() : null).catch(() => null);
                     const [expanded, searchIndex] = await Promise.all([p1, p2]);
                     if (expanded) {
                         try {
@@ -27215,7 +27235,7 @@
                 window._enhancedLocationsPreloadPromise = window.lazyLoadEnhancedLocationDatabase().catch(e => console.warn('Location DB preload failed:', e));
             }
             // Preload OSM places - store promise so it can be reused
-            window._osmPlacesPreloadPromise = fetch('/pois/places.json')
+            window._osmPlacesPreloadPromise = poisFetch('/pois/places.json')
                 .then(r => r.json())
                 .then(d => {
                     window.osmPlaces = d.places || [];
