@@ -16215,95 +16215,62 @@
             // Render media prominently when present, with written content only in the pop-out description
             const viewMediaEl = document.getElementById('viewMedia');
             const viewTextEl = document.getElementById('viewText');
-                if (hasMedia && viewMediaEl) {
-                    const isDemoModal = !!(targetPost.id && String(targetPost.id).startsWith('demo-'));
-                    if (isDemoModal) {
-                        const isVideo = (targetPost.mediaType || '').toString().toLowerCase() === 'video';
-                        if (isVideo) {
-                            viewMediaEl.innerHTML = `<div style="width:100%;height:60vh;max-width:100%;max-height:60vh;background:#000;display:block;margin:0 auto;border-radius:6px;"></div>`;
-                        } else {
-                            viewMediaEl.innerHTML = `<div style="width:100%;height:60vh;max-width:100%;max-height:60vh;background:#000;display:block;margin:0 auto;border-radius:6px;"></div>`;
-                        }
-                        viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
-                    } else {
+            if (hasMedia && viewMediaEl) {
+                const isDemoModal = !!(targetPost.id && String(targetPost.id).startsWith('demo-'));
+                if (isDemoModal) {
+                    // Demo posts: show a black box in the modal instead of attempting to load assets
+                    viewMediaEl.innerHTML = `<div style="width:100%;height:60vh;max-width:100%;max-height:60vh;background:#000;display:block;margin:0 auto;border-radius:6px;"></div>`;
+                    viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
+                } else {
+                    // Normal media: render video or image depending on source/type
                     const mediaHTML = (function() {
-                    const src = imageSource;
-                    const mt = (targetPost.mediaType || '').toString().toLowerCase();
-                    const ct = (targetPost.contentType || '').toString().toLowerCase();
-                    const looksVideoUrl = typeof src === 'string' && /\.(mp4|webm|mov|m4v|ogv)(\?|$)/i.test(src);
-                    const isVideo = mt === 'video' || ct.startsWith('video/') || looksVideoUrl;
-                    if (isVideo) {
-                        // Guess a sensible source type so the browser knows the codec.
-                        let videoType = '';
-                        if (ct.startsWith('video/')) videoType = ct;
-                        else if (/\.mp4(\?|$)/i.test(src)) videoType = 'video/mp4';
-                        else if (/\.webm(\?|$)/i.test(src)) videoType = 'video/webm';
-                        else if (/\.(mov|m4v)(\?|$)/i.test(src)) videoType = 'video/quicktime';
-                        const typeAttr = videoType ? ` type="${videoType}"` : '';
-                        // NOTE: No `crossorigin` attribute — Firebase Storage on the
-                        // *.firebasestorage.app host often lacks CORS headers, and
-                        // crossorigin="anonymous" turns the request into a CORS
-                        // request which fails and leaves the player black. Plain
-                        // <video> playback does NOT need CORS.
-                        // autoplay + muted + playsinline is required for browsers
-                        // (especially iOS Safari) to allow auto-start without a
-                        // user gesture. User can unmute via controls.
-                        return `<video id="viewMediaVideo" controls autoplay muted playsinline webkit-playsinline preload="auto" style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"><source src="${src}"${typeAttr}>Your browser does not support this video.</video>`;
-                    } else {
-                        return `<img src="${src}" style="max-width:100%; max-height:60vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
-                    }
-                })();
-                viewMediaEl.innerHTML = mediaHTML;
-                // Best-effort: kick off playback as soon as the element is in the DOM,
-                // and again on canplay (iOS Safari sometimes ignores the first play()).
-                try {
-                    const vidEl = viewMediaEl.querySelector('video');
-                    if (vidEl) {
-                        // Set as PROPERTIES (not just attributes) — Safari respects
-                        // these more reliably for autoplay-without-gesture rules.
-                        vidEl.muted = true;
-                        vidEl.defaultMuted = true;
-                        vidEl.playsInline = true;
-                        vidEl.autoplay = true;
-                        vidEl.preload = 'auto';
-                        const tryPlay = (label) => {
-                            try {
-                                const p = vidEl.play();
-                                if (p && typeof p.then === 'function') {
-                                    p.then(() => console.log(`▶️ video autoplay started (${label})`))
-                                     .catch(err => console.log(`⏸️ autoplay attempt failed (${label}):`, err && err.message));
-                                }
-                            } catch (e) {}
-                            // If this payment targets an existing post, immediately persist
-                            // the badge to the server so other users see it right away.
-                            try {
-                                if (postId) {
-                                    applyBadgeToPost(postId, kind, { paymentIntentId: pi.id, badgeLabel: finalBadgeLabel, amount });
-                                }
-                            } catch (e) { console.warn('applyBadgeToPost failed after inline pay', e); }
-                        };
-                        // 1) Force the network fetch to begin immediately.
-                        try { vidEl.load(); } catch (e) {}
-                        // 2) Try right now.
-                        tryPlay('immediate');
-                        // 3) Retry once metadata/data is available.
-                        vidEl.addEventListener('loadedmetadata', () => tryPlay('loadedmetadata'), { once: true });
-                        vidEl.addEventListener('canplay', () => tryPlay('canplay'), { once: true });
-                        // 4) Log load errors so we can see CORS/404 issues in console.
-                        vidEl.addEventListener('error', (ev) => {
-                            const err = vidEl.error;
-                            console.error('🎥 VIDEO ELEMENT ERROR', {
-                                code: err && err.code,
-                                message: err && err.message,
-                                networkState: vidEl.networkState,
-                                readyState: vidEl.readyState,
-                                src: vidEl.currentSrc || (vidEl.querySelector('source') && vidEl.querySelector('source').src)
+                        const src = imageSource;
+                        const mt = (targetPost.mediaType || '').toString().toLowerCase();
+                        const ct = (targetPost.contentType || '').toString().toLowerCase();
+                        const looksVideoUrl = typeof src === 'string' && /\.(mp4|webm|mov|m4v|ogv)(\?|$)/i.test(src);
+                        const isVideo = mt === 'video' || ct.startsWith('video/') || looksVideoUrl;
+                        if (isVideo) {
+                            let videoType = '';
+                            if (ct.startsWith('video/')) videoType = ct;
+                            else if (/\.mp4(\?|$)/i.test(src)) videoType = 'video/mp4';
+                            else if (/\.webm(\?|$)/i.test(src)) videoType = 'video/webm';
+                            else if (/\.(mov|m4v)(\?|$)/i.test(src)) videoType = 'video/quicktime';
+                            const typeAttr = videoType ? ` type="${videoType}"` : '';
+                            return `<video id="viewMediaVideo" controls autoplay muted playsinline webkit-playsinline preload="auto" style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"><source src="${src}"${typeAttr}>Your browser does not support this video.</video>`;
+                        } else {
+                            return `<img src="${src}" style="max-width:100%; max-height:60vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
+                        }
+                    })();
+                    viewMediaEl.innerHTML = mediaHTML;
+                    try {
+                        const vidEl = viewMediaEl.querySelector('video');
+                        if (vidEl) {
+                            vidEl.muted = true;
+                            vidEl.defaultMuted = true;
+                            vidEl.playsInline = true;
+                            vidEl.autoplay = true;
+                            vidEl.preload = 'auto';
+                            const tryPlay = (label) => {
+                                try {
+                                    const p = vidEl.play();
+                                    if (p && typeof p.then === 'function') {
+                                        p.then(() => console.log(`▶️ video autoplay started (${label})`))
+                                         .catch(err => console.log(`⏸️ autoplay attempt failed (${label}):`, err && err.message));
+                                    }
+                                } catch (e) {}
+                            };
+                            try { vidEl.load(); } catch (e) {}
+                            tryPlay('immediate');
+                            vidEl.addEventListener('loadedmetadata', () => tryPlay('loadedmetadata'), { once: true });
+                            vidEl.addEventListener('canplay', () => tryPlay('canplay'), { once: true });
+                            vidEl.addEventListener('error', (ev) => {
+                                const err = vidEl.error;
+                                console.error('🎥 VIDEO ELEMENT ERROR', { code: err && err.code, message: err && err.message, networkState: vidEl.networkState, readyState: vidEl.readyState, src: vidEl.currentSrc || (vidEl.querySelector('source') && vidEl.querySelector('source').src) });
                             });
-                        });
-                    }
-                } catch (e) { /* ignore autoplay errors */ }
-                // Show written content below media in the description area
-                viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
+                        }
+                    } catch (e) { /* ignore autoplay errors */ }
+                    viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
+                }
             } else {
                 // No media: clear media container and show text as primary
                 if (viewMediaEl) viewMediaEl.innerHTML = '';
