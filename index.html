@@ -66,6 +66,84 @@
                     region: newZone,
                     updatedAt: Date.now()
                 };
+
+                // Fetch authoritative best post for a zone from server API
+                window.fetchBestPostForZone = async function(zoneId) {
+                    try {
+                        if (!zoneId) return null;
+                        const url = `/api/posts/best/${encodeURIComponent(zoneId)}`;
+                        const resp = await fetch(url, { cache: 'no-cache' });
+                        if (!resp.ok) return null;
+                        const json = await resp.json();
+                        const best = (json && json.best && json.best.snapshot) ? json.best.snapshot : (json && json.best) || null;
+                        return best || null;
+                    } catch (e) { return null; }
+                };
+
+                // Periodically poll the server for the best post in the current zone
+                window._bestPostPollState = window._bestPostPollState || { timer: null, intervalMs: 60*1000, lastBestId: null };
+                // Try Server-Sent Events per-zone subscription first
+                window._bestPostSSEState = window._bestPostSSEState || { es: null, connected: false };
+                window.startBestPostSSE = function() {
+                    try {
+                        if (window._bestPostSSEState.es) return;
+                        const zid = currentZoneTag || (window.currentZoneTag || null) || '';
+                        // Only run in browsers that support EventSource
+                        if (typeof EventSource === 'undefined') return false;
+                        const url = `/api/posts/best/stream${zid?('?zoneId='+encodeURIComponent(zid)) : ''}`;
+                        const es = new EventSource(url);
+                        es.addEventListener('best_post_update', (ev) => {
+                            try {
+                                const data = JSON.parse(ev.data || '{}');
+                                if (!data || !data.zoneId || !data.best) return;
+                                const best = data.best.snapshot ? data.best.snapshot : data.best;
+                                if (!best || !best.id) return;
+                                window.gridContent = window.gridContent || {};
+                                window.gridContent['shared-posts'] = window.gridContent['shared-posts'] || [];
+                                window.gridContent['shared-posts'] = window.gridContent['shared-posts'].filter(p => !p || !p.id || String(p.id) !== String(best.id));
+                                window.gridContent['shared-posts'].unshift(best);
+                                if (window.gridContent['shared-posts'].length > 200) window.gridContent['shared-posts'].length = 200;
+                                try { requestGridUpdate('best-post-sse'); } catch(e){}
+                            } catch (e) { /* ignore */ }
+                        });
+                        es.onopen = () => { window._bestPostSSEState.connected = true; };
+                        es.onerror = () => { try { es.close(); } catch(e){}; window._bestPostSSEState.es = null; window._bestPostSSEState.connected = false; };
+                        window._bestPostSSEState.es = es;
+                        return true;
+                    } catch (e) { return false; }
+                };
+                window.startBestPostPoll = function() {
+                    try {
+                        if (window._bestPostPollState.timer) return;
+                        window._bestPostPollState.timer = setInterval(async () => {
+                            try {
+                                const zid = currentZoneTag || (window.currentZoneTag || null);
+                                if (!zid) return;
+                                const best = await window.fetchBestPostForZone(zid);
+                                if (!best || !best.id) return;
+                                if (window._bestPostPollState.lastBestId === best.id) return;
+                                window._bestPostPollState.lastBestId = best.id;
+                                // Merge into shared-posts at front so viewers see authoritative best
+                                try {
+                                    window.gridContent = window.gridContent || {};
+                                    window.gridContent['shared-posts'] = window.gridContent['shared-posts'] || [];
+                                    // remove existing instance
+                                    window.gridContent['shared-posts'] = window.gridContent['shared-posts'].filter(p => !p || !p.id || String(p.id) !== String(best.id));
+                                    window.gridContent['shared-posts'].unshift(best);
+                                    // cap size
+                                    if (window.gridContent['shared-posts'].length > 200) window.gridContent['shared-posts'].length = 200;
+                                    // Trigger a gentle incremental update
+                                    try { requestGridUpdate('best-post-poll'); } catch(e){}
+                                } catch (e) { /* ignore merge failures */ }
+                            } catch (e) { /* ignore poll errors */ }
+                        }, window._bestPostPollState.intervalMs);
+                    } catch (e) { /* ignore start errors */ }
+                };
+
+                try {
+                    const sseOk = startBestPostSSE();
+                    if (!sseOk) startBestPostPoll();
+                } catch(e) { try { startBestPostPoll(); } catch(_){} }
                 await update(postRef, updatePayload);
 
                 // Update zone indexes: remove old index if known, add new one
@@ -7952,21 +8030,24 @@
                     }
                 }
                 
-                // STEP 2: No location found - use raw coordinates as fallback
-                console.log('\n🔍 Step 2: No location found - using raw coordinates fallback...');
-                currentZoneTag = `📍 ${userLocation.lat.toFixed(3)}, ${userLocation.lon.toFixed(3)}`;
-                currentGridId = `COORDS_${userLocation.lat.toFixed(3)}_${userLocation.lon.toFixed(3)}`; // Set zone ID
-                currentGridRadius = 0.02;
-                currentContentScope = 'LOCAL';
-                
+                // STEP 2: No location found - derive a friendly neighborhood/zone
+                console.log('\n🔍 Step 2: No nearby location found - deriving neighborhood/zone fallback...');
+                const neighborhood = detectNeighborhood(userLocation.lat, userLocation.lon) || { name: 'Local Area', radius: 0.02, type: 'LOCAL' };
+                // Ensure we NEVER expose raw coordinates as an autogenerated area tag
+                currentZoneTag = neighborhood.name;
+                currentAreaName = neighborhood.name || 'Local Area';
+                currentGridId = `ZONE_${sanitizeZoneId(neighborhood.name)}`;
+                currentGridRadius = (typeof neighborhood.radius === 'number') ? neighborhood.radius : 0.02;
+                currentContentScope = neighborhood.type || 'LOCAL';
+
                 // 📊 UPDATE DIAGNOSTIC DASHBOARD
                 if (diagnosticState) {
                     diagnosticState.gridIdAssigned = true;
                     diagnosticState.gridIdValue = currentGridId;
                 }
-                
+
                 console.log(`\n✅ ZONE SELECTED: ${currentZoneTag}`);
-                console.log(`   Type: Coordinates (Fallback)`);
+                console.log(`   Type: ${currentContentScope} (Derived Neighborhood)`);
                 console.log(`   Radius: ${currentGridRadius.toFixed(4)} km\n`);
                 
             } catch (error) {
@@ -8214,6 +8295,20 @@
             const radius = radiusMap[typeNormalized] || radiusMap['default'];
             console.debug(`📏 getLocationRadius(${type}) → ${radius}km`);
             return radius;
+        }
+
+        // Helper: sanitize a zone name into a safe ID (no coords, no special chars)
+        function sanitizeZoneId(name) {
+            try {
+                if (!name || typeof name !== 'string') return 'local_area';
+                // Remove coordinate patterns like 12.345, -98.765 and any non-alphanum
+                let s = name.replace(/[-+]?\d{1,3}\.\d{1,6}/g, '');
+                s = s.replace(/[^a-zA-Z0-9_\-\s]/g, '');
+                s = s.trim().replace(/\s+/g, '_');
+                if (!s) return 'local_area';
+                // Truncate to reasonable length
+                return s.substring(0, 64);
+            } catch (e) { return 'local_area'; }
         }
         
         // Helper: Get nearby POI category types to enhance neighborhood descriptions
@@ -9912,6 +10007,20 @@
                     onlineUsers.delete(uid);
                 }
             }
+
+            // Batch location-triggered grid updates: don't recompute more than once/sec
+            try {
+                if (typeof window.requestGridUpdate === 'function' && userId === currentUserId) {
+                    window.requestGridUpdate('location');
+                }
+            } catch (e) { /* ignore scheduler errors */ }
+
+            // Enqueue location snapshot for batched uploader (privacy-safe default)
+            try {
+                if (typeof window.enqueueLocationSnapshot === 'function') {
+                    window.enqueueLocationSnapshot({ userId, lat, lon, accuracy: (userLocation && userLocation.accuracy) || null, ts: Date.now(), areaTag: currentZoneTag || null });
+                }
+            } catch (e) { /* ignore */ }
         }
         
         function getNearbyUsers(lat, lon, radiusKm = PROXIMITY_RADIUS_KM) {
@@ -23719,6 +23828,7 @@
                 // 🎯 ADD CLICK HANDLER TO OPEN POST MODAL - THIS WAS MISSING!
                 box.onclick = (e) => {
                     if (e.target.tagName !== 'BUTTON') {
+                        try { if (typeof sendPostClickMetric === 'function') sendPostClickMetric(post.id); } catch(e){}
                         openViewModalByPostId(post.id);
                     }
                 };
@@ -23890,11 +24000,11 @@
                     }
 
                     const changeType = (diffIdx >= target.length) ? 'remove' : (diffIdx >= current.length ? 'add' : 'replace');
-                    console.log(`🔁 Grid reconcile (${changeType}) @ index ${diffIdx} (1 post/sec)`);
+                    console.log(`🔁 Grid reconcile (${changeType}) @ index ${diffIdx}`);
                 } catch (e) {
                     console.warn('⚠️ Grid reconcile tick failed:', e);
                 }
-            }, 1000);
+            }, 3000);
         }
 
         // 📊 ORIGINAL RENDER: Main rendering function now sends posts to scroller
@@ -24302,6 +24412,361 @@
                 } catch (e) { console.warn('rebuildGridScrollerFromGridContent failed', e); }
             }
         }
+
+        // ===== Grid update scheduler =====
+        // Coalesce frequent triggers (location, votes, small updates) and
+        // perform an incremental render at most once per second to avoid
+        // heavy re-renders. Full manual publishes/votes can still force
+        // an immediate full set via `postPublishImmediateRefresh` flag.
+        window._lastIncrementalRender = window._lastIncrementalRender || 0;
+        window.requestGridUpdate = function(reason) {
+            try {
+                const now = Date.now();
+                const MIN_MS = 1000; // max 1 update per second for incremental
+                if (now - (window._lastIncrementalRender || 0) < MIN_MS) {
+                    // schedule a deferred incremental render at MIN_MS boundary
+                    if (window._gridUpdateTimeout) clearTimeout(window._gridUpdateTimeout);
+                    window._gridUpdateTimeout = setTimeout(() => {
+                        window._gridUpdateTimeout = null;
+                        renderGridIncremental(reason || 'deferred');
+                    }, MIN_MS - (now - (window._lastIncrementalRender || 0)));
+                    return;
+                }
+                // perform now
+                renderGridIncremental(reason || 'immediate');
+            } catch (e) { console.warn('requestGridUpdate failed', e); }
+        };
+
+        function renderGridIncremental(reason) {
+            try {
+                const now = Date.now();
+                // enforce 1s throttle as a safety net
+                if (now - (window._lastIncrementalRender || 0) < 900) return;
+                window._lastIncrementalRender = now;
+                console.log(`⚡ incremental render triggered (${reason || 'unspecified'})`);
+
+                // If scroller not initialized, fall back to full render (throttled elsewhere)
+                if (!gridScroller || typeof gridScroller.setItems !== 'function') {
+                    try { renderGrid(); } catch (e) { console.warn('incremental->renderGrid failed', e); }
+                    return;
+                }
+
+                // Preferred path: recompute latestSortedPosts quickly and set pendingSortedPosts
+                try {
+                    // If there's a lightweight recompute function available, use it
+                    if (typeof window.recomputeFeedSnapshot === 'function') {
+                        window.recomputeFeedSnapshot();
+                        // recomputeFeedSnapshot should set window.pendingSortedPosts and call scheduleGridReconcile()
+                        return;
+                    }
+                } catch (e) { /* ignore and fallback to full render below */ }
+
+                // Fallback: call original heavy render but allow incremental frequency
+                try {
+                    renderGrid_Original();
+                } catch (e) {
+                    console.warn('renderGridIncremental fallback failed', e);
+                }
+            } catch (e) { console.warn('renderGridIncremental error', e); }
+        }
+
+        // Lightweight snapshot recompute used by incremental renderer.
+        // Purpose: quickly build a deduped ordered list for the scroller
+        // without running the full heavy ranking algorithms.
+        function recomputeFeedSnapshot() {
+            try {
+                const MAX_POSTS = 2000;
+                const seen = new Set();
+                const out = [];
+
+                // 1) Ensure current user's posts come first (preserve order)
+                if (currentUserId && Array.isArray(gridContent[currentUserId])) {
+                    for (const p of gridContent[currentUserId]) {
+                        if (!p || !p.id) continue;
+                        if (seen.has(p.id)) continue;
+                        seen.add(p.id);
+                        out.push(p);
+                        if (out.length >= MAX_POSTS) break;
+                    }
+                }
+
+                // 2) Then shared-posts (global feed)
+                if (Array.isArray(gridContent['shared-posts'])) {
+                    for (const p of gridContent['shared-posts']) {
+                        if (!p || !p.id) continue;
+                        if (seen.has(p.id)) continue;
+                        seen.add(p.id);
+                        out.push(p);
+                        if (out.length >= MAX_POSTS) break;
+                    }
+                }
+
+                // 3) Finally, sweep other area keys to fill up to MAX_POSTS
+                for (const key of Object.keys(gridContent)) {
+                    if (key === currentUserId || key === 'shared-posts') continue;
+                    const arr = gridContent[key];
+                    if (!Array.isArray(arr)) continue;
+                    for (const p of arr) {
+                        if (!p || !p.id) continue;
+                        if (seen.has(p.id)) continue;
+                        seen.add(p.id);
+                        out.push(p);
+                        if (out.length >= MAX_POSTS) break;
+                    }
+                    if (out.length >= MAX_POSTS) break;
+                }
+
+                // Final safety dedupe and truncate
+                const dedup = [];
+                const _seen2 = new Set();
+                for (const p of out) {
+                    if (!p || !p.id) continue;
+                    if (_seen2.has(p.id)) continue;
+                    _seen2.add(p.id);
+                    dedup.push(p);
+                    if (dedup.length >= MAX_POSTS) break;
+                }
+
+                pendingSortedPosts = dedup;
+                // Kick off the 1/sec reconciler to apply minimal diffs
+                try { scheduleGridReconcile(); } catch (e) { /* ignore */ }
+                console.log(`⚡ recomputeFeedSnapshot: built snapshot of ${pendingSortedPosts.length} posts`);
+            } catch (e) {
+                console.warn('recomputeFeedSnapshot failed', e);
+            }
+        }
+
+        // -------------------------
+        // Impression / Click metrics
+        // -------------------------
+        window._impressionTimers = window._impressionTimers || new Map();
+        window._impressedPostIds = window._impressedPostIds || new Set();
+
+        // IntersectionObserver for impressions (visible >= 1s at 50% threshold)
+        if (typeof window._postImpressionObserver === 'undefined') {
+            try {
+                window._postImpressionObserver = new IntersectionObserver(entries => {
+                    entries.forEach(entry => {
+                        const el = entry.target;
+                        const pid = el && el.getAttribute && el.getAttribute('data-post-id');
+                        if (!pid) return;
+                        if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+                            // start timer
+                            if (window._impressedPostIds.has(pid)) return;
+                            if (window._impressionTimers.has(pid)) return;
+                            const t = setTimeout(() => {
+                                try { sendPostImpressionMetric(pid); } catch(e){}
+                                window._impressionTimers.delete(pid);
+                                window._impressedPostIds.add(pid);
+                                try { window._postImpressionObserver.unobserve(el); } catch(e){}
+                            }, 1000);
+                            window._impressionTimers.set(pid, t);
+                        } else {
+                            // left viewport - clear timer
+                            const t = window._impressionTimers.get(pid);
+                            if (t) { clearTimeout(t); window._impressionTimers.delete(pid); }
+                        }
+                    });
+                }, { threshold: [0.5] });
+            } catch (e) { window._postImpressionObserver = null; }
+        }
+
+        function observeBoxForImpression(box, postId) {
+            try {
+                if (!box || !postId) return;
+                if (window._impressedPostIds.has(postId)) return;
+                if (window._postImpressionObserver && typeof window._postImpressionObserver.observe === 'function') {
+                    window._postImpressionObserver.observe(box);
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        function sendJSONBeacon(url, obj) {
+            try {
+                const body = JSON.stringify(obj || {});
+                if (navigator && typeof navigator.sendBeacon === 'function') {
+                    const blob = new Blob([body], { type: 'application/json' });
+                    return navigator.sendBeacon(url, blob);
+                }
+                // fallback
+                fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+            } catch (e) { /* ignore */ }
+        }
+
+        function sendPostImpressionMetric(postId) {
+            try {
+                if (!postId) return;
+                const payload = {
+                    postId: postId,
+                    userId: currentUserId || null,
+                    gridId: currentGridId || null,
+                    ts: Date.now(),
+                    areaTag: currentZoneTag || null
+                };
+                sendJSONBeacon('/api/metrics/impression', payload);
+                console.log('📈 Impression metric sent for', postId);
+            } catch (e) { console.warn('sendPostImpressionMetric failed', e); }
+        }
+
+        function sendPostClickMetric(postId) {
+            try {
+                if (!postId) return;
+                const payload = {
+                    postId: postId,
+                    userId: currentUserId || null,
+                    gridId: currentGridId || null,
+                    ts: Date.now(),
+                    areaTag: currentZoneTag || null
+                };
+                sendJSONBeacon('/api/metrics/click', payload);
+                console.log('🖱️ Click metric sent for', postId);
+            } catch (e) { console.warn('sendPostClickMetric failed', e); }
+        }
+
+        // -------------------------
+        // Batched Location Uploader
+        // -------------------------
+        window._locationUploadQueue = window._locationUploadQueue || [];
+        window._locationUploaderState = window._locationUploaderState || { intervalMs: 15000, timer: null, lastFlush: 0 };
+
+        function enqueueLocationSnapshot(snapshot) {
+            try {
+                if (!snapshot) return;
+                // minimal fields
+                const s = {
+                    userId: snapshot.userId || currentUserId || null,
+                    lat: snapshot.lat || null,
+                    lon: snapshot.lon || null,
+                    accuracy: snapshot.accuracy || null,
+                    ts: snapshot.ts || Date.now(),
+                    areaTag: snapshot.areaTag || currentZoneTag || null
+                };
+
+                // Privacy: if user has not opted in to precise uploads, drop coordinates
+                try {
+                    const consent = (window.locationUploadConsent === true) || (localStorage && localStorage.getItem && localStorage.getItem('locationUploadConsent') === 'true');
+                    if (!consent) {
+                        // Keep coarse areaTag (already present); remove precise coords
+                        s.lat = null;
+                        s.lon = null;
+                        s.accuracy = null;
+                    }
+                } catch (e) { /* ignore */ }
+                window._locationUploadQueue.push(s);
+                // start uploader if not running
+                if (!window._locationUploaderState.timer) startLocationUploader();
+                // adjust rate if moving quickly (if provided)
+                try { adjustLocationUploaderRateBasedOnMotion(); } catch(e){}
+            } catch (e) { console.warn('enqueueLocationSnapshot failed', e); }
+        }
+
+        // -------------------------
+        // Location Upload Consent UI + Helpers
+        // -------------------------
+        window.locationUploadConsent = (localStorage && localStorage.getItem && localStorage.getItem('locationUploadConsent') === 'true');
+
+        function setLocationUploadConsent(allow) {
+            try {
+                window.locationUploadConsent = !!allow;
+                if (localStorage && localStorage.setItem) localStorage.setItem('locationUploadConsent', allow ? 'true' : 'false');
+                // If user revoked consent, clear queued precise coords
+                if (!allow) {
+                    try {
+                        window._locationUploadQueue = (window._locationUploadQueue || []).map(s => ({ ...s, lat: null, lon: null, accuracy: null }));
+                    } catch (e) {}
+                }
+                // Hide banner if present
+                const el = document.getElementById('location-consent-banner'); if (el) el.style.display = 'none';
+            } catch (e) { console.warn('setLocationUploadConsent failed', e); }
+        }
+
+        function showLocationConsentBannerIfNeeded() {
+            try {
+                if (window.locationUploadConsent) return;
+                if (document.getElementById('location-consent-banner')) return;
+
+                const banner = document.createElement('div');
+                banner.id = 'location-consent-banner';
+                banner.style.position = 'fixed';
+                banner.style.left = '12px';
+                banner.style.right = '12px';
+                banner.style.bottom = '12px';
+                banner.style.zIndex = 99999;
+                banner.style.background = 'rgba(0,0,0,0.85)';
+                banner.style.color = '#fff';
+                banner.style.padding = '12px';
+                banner.style.borderRadius = '8px';
+                banner.style.fontSize = '13px';
+                banner.innerHTML = `
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+                        <div style="flex:1;">Help improve local recommendations — allow uploading precise location (opt-in). You can change this later in settings.</div>
+                        <div style="flex-shrink:0;display:flex;gap:8px;">
+                            <button id="loc-consent-allow" style="background:#36a; color:#fff; border:none; padding:8px 10px; border-radius:6px; cursor:pointer;">Allow</button>
+                            <button id="loc-consent-deny" style="background:transparent; color:#fff; border:1px solid rgba(255,255,255,0.2); padding:8px 10px; border-radius:6px; cursor:pointer;">Use coarse only</button>
+                        </div>
+                    </div>
+                `;
+
+                document.body.appendChild(banner);
+                document.getElementById('loc-consent-allow').addEventListener('click', () => { setLocationUploadConsent(true); });
+                document.getElementById('loc-consent-deny').addEventListener('click', () => { setLocationUploadConsent(false); });
+            } catch (e) { /* ignore */ }
+        }
+
+        // Show consent prompt shortly after UI ready
+        try { setTimeout(showLocationConsentBannerIfNeeded, 2000); } catch (e) {}
+
+        function flushLocationQueue() {
+            try {
+                if (!window._locationUploadQueue || window._locationUploadQueue.length === 0) return;
+                const batch = window._locationUploadQueue.splice(0, 100); // send up to 100 at a time
+                const payload = { snapshots: batch, ts: Date.now() };
+                sendJSONBeacon('/api/metrics/location', payload);
+                window._locationUploaderState.lastFlush = Date.now();
+                console.log(`📡 Flushed ${batch.length} location snaps`);
+            } catch (e) { console.warn('flushLocationQueue failed', e); }
+        }
+
+        function startLocationUploader() {
+            try {
+                if (window._locationUploaderState.timer) return;
+                window._locationUploaderState.timer = setInterval(() => {
+                    try { flushLocationQueue(); } catch(e){}
+                }, window._locationUploaderState.intervalMs);
+                console.log('📡 Location uploader started, interval', window._locationUploaderState.intervalMs);
+            } catch (e) { console.warn('startLocationUploader failed', e); }
+        }
+
+        function stopLocationUploader() {
+            try {
+                if (window._locationUploaderState.timer) {
+                    clearInterval(window._locationUploaderState.timer);
+                    window._locationUploaderState.timer = null;
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        function adjustLocationUploaderRateBasedOnMotion() {
+            try {
+                // Simple heuristic: if user updates location frequently (queue grows), speed up flushing
+                const qlen = window._locationUploadQueue.length || 0;
+                let target = 15000;
+                if (qlen > 40) target = 5000;
+                else if (qlen > 10) target = 8000;
+                else target = 15000;
+                if (window._locationUploaderState.intervalMs !== target) {
+                    window._locationUploaderState.intervalMs = target;
+                    if (window._locationUploaderState.timer) {
+                        clearInterval(window._locationUploaderState.timer);
+                        window._locationUploaderState.timer = null;
+                    }
+                    startLocationUploader();
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        // Expose enqueue helper globally
+        window.enqueueLocationSnapshot = enqueueLocationSnapshot;
         
         // ORIGINAL renderGrid function (renamed)
         function renderGrid_Original() {
@@ -27144,6 +27609,37 @@
                     boostRequested: false,
                     boostIntent: null
                 };
+
+                // --- ORIGIN METADATA: record where the user was when they created the post
+                try {
+                    postData.postOrigin = {
+                        lat: (userLocation && userLocation.lat) ? userLocation.lat : null,
+                        lon: (userLocation && userLocation.lon) ? userLocation.lon : null,
+                        accuracy: (userLocation && userLocation.accuracy) ? userLocation.accuracy : null,
+                        timestamp: Date.now(),
+                        obtainedBy: (userLocation && userLocation.provider) ? userLocation.provider : (('geolocation' in navigator) ? 'browser_geolocation' : 'unknown')
+                    };
+
+                    postData.device = {
+                        userAgent: (typeof navigator !== 'undefined' && navigator.userAgent) ? navigator.userAgent : null,
+                        platform: (typeof navigator !== 'undefined' && navigator.platform) ? navigator.platform : null,
+                        vendor: (typeof navigator !== 'undefined' && navigator.vendor) ? navigator.vendor : null,
+                        hwConcurrency: (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) ? navigator.hardwareConcurrency : null,
+                        language: (typeof navigator !== 'undefined' && navigator.language) ? navigator.language : null
+                    };
+
+                    try {
+                        if (typeof navigator !== 'undefined' && navigator.connection) {
+                            postData.network = {
+                                effectiveType: navigator.connection.effectiveType || null,
+                                downlink: navigator.connection.downlink || null,
+                                rtt: navigator.connection.rtt || null
+                            };
+                        }
+                    } catch (e_net) { /* ignore network read failures */ }
+                } catch (e_meta) {
+                    console.warn('Failed to attach origin/device metadata to post', e_meta);
+                }
 
                 // Expose last created post id for debugging and rendering checks
                 try { window.lastCreatedPostId = postId; } catch (e) {}
