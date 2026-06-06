@@ -17334,7 +17334,7 @@
             try {
                 const customTagInput = document.getElementById('customZoneTag');
                 if (customTagInput && customTagInput.value.trim() === '') {
-                    fetchRefineDefaults();
+                    try { if (typeof populateRefineDefaults === 'function') populateRefineDefaults(); } catch(e) { console.warn('populateRefineDefaults failed', e); }
                     // Ensure the refine dropdown/search UI is visible (helps mobile)
                     try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
                 }
@@ -17389,6 +17389,73 @@
                 const searchInput = document.getElementById('refineLocationSearchInput');
                 if (searchInput) searchInput.focus();
             }, 10);
+        }
+
+        // Populate refine dropdown with defaults (popular cities + cached POIs)
+        async function populateRefineDefaults() {
+            try {
+                const dropdown = document.getElementById('refineLocationDropdown');
+                if (!dropdown) return;
+                // Ensure the dropdown UI is visible
+                try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
+
+                let resultsContainer = document.getElementById('refineLocationResultsContainer');
+                if (!resultsContainer) {
+                    dropdown.innerHTML = '<div id="refineLocationResultsContainer" style="padding: 10px; text-align: center; color: #888; font-size: 13px;"></div>';
+                    resultsContainer = document.getElementById('refineLocationResultsContainer');
+                }
+
+                resultsContainer.innerHTML = '<div style="padding:12px;color:#999">Loading suggestions...</div>';
+
+                // Gather popular city suggestions
+                const citySuggestions = (typeof getPopularCitiesSuggestions === 'function') ? getPopularCitiesSuggestions() : [];
+
+                // Gather cached POIs (fast path)
+                let cachedPOIs = [];
+                try {
+                    if (localStorage && localStorage.getItem) {
+                        const raw = localStorage.getItem('lastPOIs');
+                        if (raw) {
+                            const parsed = JSON.parse(raw);
+                            if (Array.isArray(parsed)) cachedPOIs = parsed.slice(0, 12);
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+
+                // Also take top nearby POIs from globalPOIDatabase if available
+                let nearbyPOIs = [];
+                try {
+                    if (window.globalPOIDatabase && Array.isArray(window.globalPOIDatabase) && window.globalPOIDatabase.length > 0) {
+                        nearbyPOIs = window.globalPOIDatabase.slice(0, 12).map(p => ({ name: p.name, display: p.name, category: p.category || p.type || null }));
+                    }
+                } catch (e) {}
+
+                // Build HTML: Top cities, then cached POIs, then nearby POIs
+                let html = '';
+                if (citySuggestions && citySuggestions.length) {
+                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Popular Cities</div>`;
+                    citySuggestions.slice(0,10).forEach(c => {
+                        const display = c.display || c;
+                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(display).replace(/'/g,"\\'")}', event)">${display}</div>`;
+                    });
+                }
+
+                if (cachedPOIs.length) {
+                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Quick POIs</div>`;
+                    cachedPOIs.forEach(p => { html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(p.name).replace(/'/g,"\\'")}', event)">${p.name}</div>`; });
+                }
+
+                if (nearbyPOIs.length) {
+                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Nearby POIs</div>`;
+                    nearbyPOIs.forEach(p => { html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(p.display||p.name).replace(/'/g,"\\'")}', event)">${p.display||p.name}</div>`; });
+                }
+
+                if (!html) html = '<div style="padding:12px;color:#999;text-align:center">No suggestions available</div>';
+                resultsContainer.innerHTML = html;
+                dropdown.style.display = 'block';
+            } catch (e) {
+                console.warn('populateRefineDefaults error', e);
+            }
         }
 
         /**
