@@ -22409,10 +22409,23 @@
             let serverUsed = false;
             try {
                 if (!uLat || !uLon) throw new Error('no-loc');
-                const s = await Promise.race([
-                    fetch(`/geosearch?lat=${encodeURIComponent(uLat)}&lon=${encodeURIComponent(uLon)}&n=200`).catch(() => null),
-                    new Promise((resolve) => setTimeout(() => resolve(null), 700))
-                ]);
+                // Try configured geosearch endpoint first, then fall back to localhost:3030 for dev
+                const geoBase = (window.GEOSEARCH_URL || '/geosearch').replace(/\/$/, '');
+                const devFallback = 'http://localhost:3030/geosearch';
+                const tryFetch = async (url) => {
+                    try {
+                        const controller = new AbortController();
+                        const to = setTimeout(() => controller.abort(), 1200);
+                        const res = await fetch(url, { signal: controller.signal }).finally(() => clearTimeout(to));
+                        return res && res.ok ? res : null;
+                    } catch (e) { return null; }
+                };
+                let s = null;
+                s = await tryFetch(`${geoBase}?lat=${encodeURIComponent(uLat)}&lon=${encodeURIComponent(uLon)}&n=200`);
+                if (!s && geoBase !== devFallback) {
+                    console.log('🔁 geosearch: primary endpoint failed, trying dev fallback');
+                    s = await tryFetch(`${devFallback}?lat=${encodeURIComponent(uLat)}&lon=${encodeURIComponent(uLon)}&n=200`);
+                }
                 if (s && s.ok) {
                     const payload = await s.json();
                     if (payload && Array.isArray(payload.results) && payload.results.length > 0) {
