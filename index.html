@@ -7112,6 +7112,9 @@
                     if (p && (p.authId !== currentUserId) && p.id) podium.push(p.id);
                 }
 
+                // Cache last visible top-3 for modal mapping consistency
+                try { window.lastVisibleTop3 = podium.slice(0,3); } catch(e) { window.lastVisibleTop3 = podium.slice(0,3); }
+
                 // Determine visible boxes from gridScroller if available, otherwise query DOM
                 let visibleBoxes = [];
                 if (window.gridScroller && typeof gridScroller.getVisibleItems === 'function') {
@@ -7238,6 +7241,37 @@
                                 return `<div class="badge badge--default badge--${b.kind}">${b.label}</div>`;
                         }).join('');
                         badgeContainer.innerHTML = badgeHtml;
+
+                    // ====== GLOW ASSIGNMENT ======
+                    // Remove any existing glow classes and apply unified rules:
+                    // - Boosted posts: only `glow-boost` (remove other glows)
+                    // - Top-3 posts (podium array): all receive `glow-top3` (identical outline)
+                    // - Otherwise: apply per-badge glows for auxiliary states
+                    try {
+                        // remove existing glow-* classes
+                        Array.from(box.classList || []).forEach(c => { if (c && c.indexOf && c.indexOf('glow-') === 0) box.classList.remove(c); });
+
+                        if (hasBoostFlag) {
+                            // Boost overrides all other glows
+                            box.classList.add('glow-boost');
+                            // ensure border-boost exists (already added elsewhere)
+                        } else if (podium.includes(post.id)) {
+                            // Top-3 get identical glow outline
+                            box.classList.add('glow-top3');
+                        } else {
+                            // Apply auxiliary glows based on badge kinds
+                            try {
+                                badges.forEach(b => {
+                                    if (!b || !b.kind) return;
+                                    if (b.kind === 'hot') box.classList.add('glow-hot');
+                                    else if (b.kind === 'disliked' || b.kind === 'review') box.classList.add('glow-disliked');
+                                    else if (b.kind === 'balanced') box.classList.add('glow-balanced');
+                                    else if (b.kind === 'untouched') box.classList.add('glow-untouched');
+                                    else if (b.kind === 'liked') box.classList.add('glow-liked');
+                                });
+                            } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* defensive */ }
                     } catch(e){ console.warn('applyBadge error', e); }
                 });
 
@@ -15463,7 +15497,12 @@
                     box-shadow: inset 0 0 0 8px rgba(100,116,139,0.06), 0 18px 48px rgba(2,6,23,0.18);
                 }
                 /* Modal glow for boost when viewing post */
-                .view-modal-content.glow-boost { box-shadow: 0 12px 40px rgba(0,0,0,0.30), 0 0 30px rgba(0,0,0,0.12); border: 1px solid rgba(100,116,139,0.06); }
+                     .view-modal-content.glow-boost { box-shadow: 0 12px 40px rgba(0,0,0,0.30), 0 0 30px rgba(0,0,0,0.12); border: 1px solid rgba(100,116,139,0.06); }
+
+                     /* Unified top-3 glow: identical outline for slots 1-3 (visual parity across users)
+                         and neutral color to match current theme */
+                     .glow-top3 { box-shadow: inset 0 0 0 6px rgba(59,130,246,0.08), 0 18px 48px rgba(59,130,246,0.06); }
+                     .view-modal-content.glow-top3 { box-shadow: 0 18px 48px rgba(59,130,246,0.14), 0 0 30px rgba(59,130,246,0.04); border: 1px solid rgba(59,130,246,0.06); }
                 /* Responsive: reduce prominent badges on small/mobile screens (~1/4 visual size) */
                 @media (max-width: 420px) {
                     .boost-badge {
@@ -16148,32 +16187,40 @@
             const allPostsForBadges = Object.values(gridContent).flat();
             const badges = calculateBadges(targetPost, allPostsForBadges);
             const modalContent = document.querySelector('.view-modal-content');
-            
+
             // Remove all glow classes
-            modalContent.classList.remove('glow-liked', 'glow-crowned', 'glow-runner-up', 'glow-podium', 'glow-balanced', 'glow-untouched', 'glow-disliked', 'glow-hot', 'glow-rising');
-            
-            // Apply glow based on badge priority (top tier first)
-            if (badges.includes('crowned')) {
-                modalContent.classList.add('glow-crowned');
-            } else if (badges.includes('runner-up')) {
-                modalContent.classList.add('glow-runner-up');
-            } else if (badges.includes('podium')) {
-                modalContent.classList.add('glow-podium');
-            } else if (badges.includes('trending')) {
-                modalContent.classList.add('glow-crowned');
-            } else if (badges.includes('disliked')) {
-                modalContent.classList.add('glow-disliked');
-            } else if (badges.includes('balanced')) {
-                modalContent.classList.add('glow-balanced');
-            } else if (badges.includes('untouched')) {
-                modalContent.classList.add('glow-untouched');
-            } else if (badges.includes('hot')) {
-                modalContent.classList.add('glow-hot');
-            } else if (badges.includes('rising')) {
-                modalContent.classList.add('glow-rising');
-            } else if (badges.includes('liked')) {
-                modalContent.classList.add('glow-liked');
-            }
+            modalContent.classList.remove('glow-liked', 'glow-crowned', 'glow-runner-up', 'glow-podium', 'glow-balanced', 'glow-untouched', 'glow-disliked', 'glow-hot', 'glow-rising', 'glow-top3');
+
+            // If this post is one of the last visible top-3, use the unified top-3 glow
+            try {
+                const top3 = window.lastVisibleTop3 || [];
+                if (top3 && Array.isArray(top3) && top3.includes(targetPost.id)) {
+                    modalContent.classList.add('glow-top3');
+                } else {
+                    // Apply glow based on badge priority (top tier first)
+                    if (badges.includes('crowned')) {
+                        modalContent.classList.add('glow-crowned');
+                    } else if (badges.includes('runner-up')) {
+                        modalContent.classList.add('glow-runner-up');
+                    } else if (badges.includes('podium')) {
+                        modalContent.classList.add('glow-podium');
+                    } else if (badges.includes('trending')) {
+                        modalContent.classList.add('glow-crowned');
+                    } else if (badges.includes('disliked')) {
+                        modalContent.classList.add('glow-disliked');
+                    } else if (badges.includes('balanced')) {
+                        modalContent.classList.add('glow-balanced');
+                    } else if (badges.includes('untouched')) {
+                        modalContent.classList.add('glow-untouched');
+                    } else if (badges.includes('hot')) {
+                        modalContent.classList.add('glow-hot');
+                    } else if (badges.includes('rising')) {
+                        modalContent.classList.add('glow-rising');
+                    } else if (badges.includes('liked')) {
+                        modalContent.classList.add('glow-liked');
+                    }
+                }
+            } catch (e) { /* defensive */ }
             
             // Update vote display
             updateVoteDisplay();
