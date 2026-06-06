@@ -18647,37 +18647,105 @@
                     gridContent[contentKey] = uniquePosts;
                     console.log(`  ✅ gridContent['${contentKey}'] updated with ${uniquePosts.length} posts`);
 
-                    // If the viewer is not fully signed-in, build an anonymous
-                    // view bucket with up to 100 relevant posts so they see a
-                    // rich feed but cannot interact (no likes/dislikes/posts).
+                    // If the viewer is not fully signed-in, build a device-scoped
+                    // personalized read-only feed of up to 100 posts. Composition:
+                    //  - 1x most-liked post (if available)
+                    //  - ~10% boosted posts (best available)
+                    //  - remaining filled with random posts from the global pool
                     try {
                         const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
                         if (!isSignedIn) {
                             window.readOnlyViewer = true;
-                            const curZone = (window.currentZoneTag || window.userDetectedCounty || '').toString().trim();
-                            const matched = [];
-                            // First, prefer posts matching the detected area tag
-                            for (const p of uniquePosts) {
+
+                            // Resolve a stable device-scoped id (prefer existing vars)
+                            const deviceId = (typeof permanentUserId !== 'undefined' && permanentUserId) || window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null) || ('device-' + Date.now());
+                            const deviceKey = String(deviceId);
+
+                            const TARGET = 100;
+                            const BOOST_RATIO = 0.10;
+                            const boostedCount = Math.max(1, Math.floor(TARGET * BOOST_RATIO));
+
+                            // Flatten and sanitize posts list
+                            const posts = uniquePosts.filter(p => p && p.id);
+
+                            // Pick the single most-liked post site-wide (if any)
+                            let mostLiked = null;
+                            try {
+                                mostLiked = posts.reduce((best, cur) => {
+                                    const bLikes = Number(best && best.likes) || 0;
+                                    const cLikes = Number(cur && cur.likes) || 0;
+                                    return (cLikes > bLikes) ? cur : best;
+                                }, null);
+                            } catch (e) { mostLiked = null; }
+
+                            // Identify boosted posts (explicit boost flags or boost expiry)
+                            const boosted = posts.filter(p => {
                                 try {
-                                    const area = (p.displayAreaTag || p.county || p.zoneTag || p.area || p.customTag || p.neighborhood || p.city || p.region || '').toString();
-                                    if (curZone && area && area.toLowerCase().includes(curZone.toLowerCase())) matched.push(p);
-                                } catch (e) { /* ignore per-post parse errors */ }
-                                if (matched.length >= 100) break;
+                                    if (p.boostStatus === 'active') return true;
+                                    if (p.boostExpiresAt && Number(p.boostExpiresAt) > Date.now()) return true;
+                                    if (p.badges && Array.isArray(p.badges) && p.badges.includes && p.badges.includes('boost')) return true;
+                                } catch (e) {}
+                                return false;
+                            }).sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
+
+                            // Random candidates for filler (exclude boosted ones)
+                            const boostedIds = new Set((boosted||[]).map(p => p.id));
+                            const randomCandidates = posts.filter(p => !boostedIds.has(p.id));
+
+                            // Shuffle random candidates (Fisher-Yates)
+                            function shuffle(arr) {
+                                for (let i = arr.length - 1; i > 0; i--) {
+                                    const j = Math.floor(Math.random() * (i + 1));
+                                    const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+                                }
+                                return arr;
                             }
-                            // If we still need more posts, append most recent ones
-                            if (matched.length < 100) {
-                                const remaining = uniquePosts.filter(p => !matched.includes(p)).sort((a,b) => ((b.timestamp||b.createdAt||0) - (a.timestamp||a.createdAt||0)));
-                                for (const p of remaining) {
-                                    matched.push(p);
-                                    if (matched.length >= 100) break;
+
+                            const used = new Set();
+                            const final = [];
+
+                            if (mostLiked && mostLiked.id) {
+                                final.push(mostLiked);
+                                used.add(mostLiked.id);
+                            }
+
+                            // Add up to boostedCount boosted posts (skip duplicates)
+                            for (const b of boosted) {
+                                if (final.length >= TARGET) break;
+                                if (!b || !b.id) continue;
+                                if (used.has(b.id)) continue;
+                                final.push(b);
+                                used.add(b.id);
+                                if (final.length >= (1 + boostedCount)) break; // account for mostLiked already
+                            }
+
+                            // Fill the remainder with random picks
+                            const shuffled = shuffle(randomCandidates.slice());
+                            for (const r of shuffled) {
+                                if (final.length >= TARGET) break;
+                                if (!r || !r.id) continue;
+                                if (used.has(r.id)) continue;
+                                final.push(r);
+                                used.add(r.id);
+                            }
+
+                            // If not enough posts, allow adding remaining boosted posts
+                            if (final.length < TARGET) {
+                                for (const b of boosted) {
+                                    if (final.length >= TARGET) break;
+                                    if (!b || !b.id) continue;
+                                    if (used.has(b.id)) continue;
+                                    final.push(b);
+                                    used.add(b.id);
                                 }
                             }
-                            gridContent['anon-view'] = matched.slice(0,100);
-                            console.log('  ✅ anon-view bucket populated with', (gridContent['anon-view']||[]).length, 'posts for non-signed-in viewer');
+
+                            gridContent[deviceKey] = final.slice(0, TARGET);
+                            console.log(`  ✅ device feed populated for ${deviceKey} with ${ (gridContent[deviceKey]||[]).length } posts (90/10-style composition)`);
                         } else {
                             window.readOnlyViewer = false;
                         }
-                    } catch(e) { console.warn('Failed building anon-view bucket', e); }
+                    } catch(e) { console.warn('Failed building device-scoped read-only feed', e); }
                     
             // 💾 BACKUP CACHE: Only add NEW posts to cache, don't re-add existing ones
                     // This prevents memory explosion from Firebase firing multiple times per second
