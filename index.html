@@ -2441,21 +2441,7 @@
                         box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
                     " type="text" onfocus="this.style.boxShadow='0 8px 20px rgba(102, 126, 234, 0.25)'; handleCustomZoneInputFocus();" oninput="handleCustomZoneInput();" onblur="this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.1)'; setTimeout(() => { const d=document.getElementById('refineLocationDropdown'); if(d) d.style.display='none'; cleanupRefineLocationScroller(); }, 250);"/>
                     
-                    <!-- Browse Nearby POIs Button -->
-                    <button id="showRecommendedAreasBtn" onpointerdown="showNearbyPOIsDropdown(event); return false;" style="
-                        padding: 12px 16px;
-                        border: 2px solid #667eea;
-                        background-color: #1a1a1a;
-                        border-radius: 8px;
-                        color: #667eea;
-                        font-weight: 600;
-                        cursor: pointer;
-                        transition: all 0.2s ease;
-                        white-space: nowrap;
-                        font-size: 13px;
-                    " onmouseover="this.style.borderColor='#8b9aff'; this.style.color='#8b9aff'; this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.3)'" onmouseout="this.style.borderColor='#667eea'; this.style.color='#667eea'; this.style.boxShadow='none'" title="Click to see nearby POIs">
-                        📍 Nearby POIs
-                    </button>
+                    <!-- Nearby POIs button removed per UX decision; Refine field now expands to full width -->
                 </div>
                 
                 <!-- Dedicated dropdown for Refine Location field -->
@@ -17151,6 +17137,13 @@
 
             // Dropdown will only appear when user starts typing
             console.log('📍 Refine location field focused - ready for typing');
+            // If field empty, fetch sensible defaults (top locations + POIs)
+            try {
+                const customTagInput = document.getElementById('customZoneTag');
+                if (customTagInput && customTagInput.value.trim() === '') {
+                    fetchRefineDefaults();
+                }
+            } catch (e) { console.warn('fetchRefineDefaults failed to trigger', e); }
         }
 
         /**
@@ -17302,6 +17295,104 @@
                     window.currentLocationScroller.destroy();
                 } catch (e) {
                     console.warn('Error destroying previous scroller:', e);
+                }
+
+                /**
+                 * Fetch default refine options: top POI + up to 35 locations and 15 other POIs
+                 */
+                async function fetchRefineDefaults() {
+                    const dropdown = document.getElementById('refineLocationDropdown');
+                    if (!dropdown) return;
+                    // Ensure results container exists
+                    if (!document.getElementById('refineLocationResultsContainer')) {
+                        dropdown.innerHTML = '<div id="refineLocationResultsContainer" style="padding: 10px; text-align: center; color: #888; font-size: 13px;"></div>';
+                    }
+                    const resultsContainer = document.getElementById('refineLocationResultsContainer');
+                    resultsContainer.innerHTML = '<div style="padding:12px;color:#999">Loading top locations & POIs...</div>';
+
+                    const uLat = userLocation && (userLocation.lat || userLocation.latitude);
+                    const uLon = userLocation && (userLocation.lon || userLocation.longitude);
+                    // Use server geosearch if available
+                    const geoBase = (window.GEOSEARCH_URL || '/geosearch').replace(/\/$/, '');
+                    const devFallback = 'http://localhost:3030/geosearch';
+                    const urlTry = (lat, lon) => `${geoBase}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&n=200&radiusMi=2000`;
+                    const urlDev = (lat, lon) => `${devFallback}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&n=200&radiusMi=2000`;
+
+                    try {
+                        let payload = null;
+                        if (uLat && uLon) {
+                            try {
+                                const res = await fetch(urlTry(uLat, uLon)).catch(() => null);
+                                if (res && res.ok) payload = await res.json();
+                            } catch (e) {}
+                            if (!payload) {
+                                try { const res2 = await fetch(urlDev(uLat, uLon)).catch(() => null); if (res2 && res2.ok) payload = await res2.json(); } catch(e){}
+                            }
+                        }
+
+                        // Fallback: if server didn't return, try client-side global DBs
+                        let results = [];
+                        if (payload && Array.isArray(payload.results) && payload.results.length > 0) {
+                            results = payload.results.map(r => ({ type: r.category ? 'poi' : 'location', name: r.name, display: r.name + (r.state ? ', ' + r.state : ''), lat: r.lat, lon: r.lon, category: r.category || null, distanceMi: r.distanceMi }));
+                        } else {
+                            // Client-side fallback: use globalLocationDatabase + globalPOIDatabase
+                            if (globalLocationDatabase && globalLocationDatabase.length > 0) {
+                                for (let i=0;i<globalLocationDatabase.length;i++) {
+                                    const loc = globalLocationDatabase[i];
+                                    results.push({ type: 'location', name: loc.name, display: loc.state ? `${loc.name}, ${loc.state}` : loc.name, lat: loc.lat, lon: loc.lon });
+                                }
+                            }
+                            if (globalPOIDatabase && globalPOIDatabase.length > 0) {
+                                for (let i=0;i<globalPOIDatabase.length;i++) {
+                                    const p = globalPOIDatabase[i];
+                                    results.push({ type: 'poi', name: p.name, display: p.name, lat: p.lat, lon: p.lon, category: p.category || null });
+                                }
+                            }
+                        }
+
+                        // Sort by distance if available
+                        if (uLat && uLon) {
+                            results.forEach(r => { if (r.lat && r.lon) r._d = calculateDistance(uLat, uLon, r.lat, r.lon) * 0.621371; else r._d = Infinity; });
+                            results.sort((a,b)=> (a._d||Infinity) - (b._d||Infinity));
+                        }
+
+                        // Partition into locations and pois
+                        const locations = results.filter(r=>r.type==='location');
+                        const pois = results.filter(r=>r.type==='poi');
+
+                        const topPOI = pois.length > 0 ? pois[0] : null;
+                        const takeLocations = locations.slice(0,35);
+                        const takePOIs = (pois.length > 0 ? pois.slice(1) : pois).slice(0,15);
+
+                        // Build HTML
+                        let html = '';
+                        if (topPOI) {
+                            html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#fff;font-weight:700">Top POI</div>`;
+                            html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(topPOI.display||topPOI.name).replace(/'/g,"\\'")}', event)">${topPOI.display||topPOI.name} <span style="color:#777;float:right">${topPOI.distanceMi?topPOI.distanceMi.toFixed(1)+'mi':''}</span></div>`;
+                        }
+
+                        if (takeLocations.length) {
+                            html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Top Locations</div>`;
+                            takeLocations.forEach(loc => {
+                                html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(loc.display||loc.name).replace(/'/g,"\\'")}', event)">${loc.display||loc.name} ${loc._d?`<span style=\"color:#777;float:right\">${(loc._d||0).toFixed(1)}mi</span>`:''}</div>`;
+                            });
+                        }
+
+                        if (takePOIs.length) {
+                            html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Other Nearby POIs</div>`;
+                            takePOIs.forEach(p => {
+                                html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(p.display||p.name).replace(/'/g,"\\'")}', event)">${p.display||p.name} ${p._d?`<span style=\"color:#777;float:right\">${(p._d||0).toFixed(1)}mi</span>`:''}</div>`;
+                            });
+                        }
+
+                        resultsContainer.innerHTML = html || '<div style="padding:12px;color:#999;text-align:center">No nearby locations found</div>';
+                        dropdown.style.display = 'block';
+
+                    } catch (e) {
+                        console.warn('fetchRefineDefaults error', e && e.message);
+                        const resultsContainer = document.getElementById('refineLocationResultsContainer');
+                        if (resultsContainer) resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Unable to load locations</div>';
+                    }
                 }
                 window.currentLocationScroller = null;
             }
