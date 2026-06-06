@@ -17440,50 +17440,83 @@
 
                 resultsContainer.innerHTML = '<div style="padding:12px;color:#999">Loading suggestions...</div>';
 
-                // Gather popular city suggestions
-                const citySuggestions = (typeof getPopularCitiesSuggestions === 'function') ? getPopularCitiesSuggestions() : [];
+                // Build top 35 POIs + top 15 locations (nearest first)
+                const userLat = userLocation && (userLocation.latitude || userLocation.lat);
+                const userLon = userLocation && (userLocation.longitude || userLocation.lon);
 
-                // Gather cached POIs (fast path)
-                let cachedPOIs = [];
-                try {
-                    if (localStorage && localStorage.getItem) {
-                        const raw = localStorage.getItem('lastPOIs');
-                        if (raw) {
-                            const parsed = JSON.parse(raw);
-                            if (Array.isArray(parsed)) cachedPOIs = parsed.slice(0, 12);
+                let poiResults = [];
+                let locationResults = [];
+
+                // Try server geosearch first when we have geolocation
+                const geoBase = (window.GEOSEARCH_URL || '/geosearch').replace(/\/$/, '');
+                const devFallback = 'http://localhost:3030/geosearch';
+                const urlTry = (lat, lon) => `${geoBase}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&n=100&radiusMi=2000`;
+                const urlDev = (lat, lon) => `${devFallback}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&n=100&radiusMi=2000`;
+
+                if (userLat && userLon) {
+                    try {
+                        let payload = null;
+                        try { const res = await fetch(urlTry(userLat, userLon)).catch(() => null); if (res && res.ok) payload = await res.json(); } catch(e){}
+                        if (!payload) { try { const res2 = await fetch(urlDev(userLat, userLon)).catch(()=>null); if (res2 && res2.ok) payload = await res2.json(); } catch(e){} }
+
+                        if (payload && Array.isArray(payload.results) && payload.results.length > 0) {
+                            const mapped = payload.results.map(r => ({ type: r.category ? 'poi' : 'location', name: r.name, display: r.name + (r.state ? ', ' + r.state : ''), lat: r.lat, lon: r.lon, category: r.category || null, distanceMi: r.distanceMi || null }));
+                            poiResults = mapped.filter(m => m.type === 'poi');
+                            locationResults = mapped.filter(m => m.type === 'location');
                         }
+                    } catch (e) {
+                        console.warn('geosearch fetch failed', e);
                     }
-                } catch (e) { /* ignore */ }
+                }
 
-                // Also take top nearby POIs from globalPOIDatabase if available
-                let nearbyPOIs = [];
-                try {
+                // Fallback to client-side nearest selection
+                if (poiResults.length === 0) {
                     if (window.globalPOIDatabase && Array.isArray(window.globalPOIDatabase) && window.globalPOIDatabase.length > 0) {
-                        nearbyPOIs = window.globalPOIDatabase.slice(0, 12).map(p => ({ name: p.name, display: p.name, category: p.category || p.type || null }));
+                        const list = window.globalPOIDatabase.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, category: p.category || p.type || null }));
+                        if (userLat && userLon) {
+                            list.forEach(p => { p._d = (typeof calculateDistance === 'function') ? (calculateDistance(userLat, userLon, p.lat, p.lon) * 0.621371) : Infinity; });
+                            list.sort((a,b)=> (a._d||Infinity) - (b._d||Infinity));
+                        }
+                        poiResults = list.slice(0, 35);
+                    } else {
+                        // Use cached small POIs
+                        try { const raw = localStorage.getItem && localStorage.getItem('lastPOIs'); if (raw) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) poiResults = parsed.slice(0,35).map(p=>({ name: p.name, lat: p.lat, lon: p.lon, category: p.category||null })); } } catch(e){}
                     }
-                } catch (e) {}
+                } else {
+                    poiResults = poiResults.slice(0,35);
+                }
 
-                // Build HTML: Top cities, then cached POIs, then nearby POIs
+                if (locationResults.length === 0) {
+                    if (window.globalLocationDatabase && Array.isArray(window.globalLocationDatabase) && window.globalLocationDatabase.length > 0) {
+                        const list = window.globalLocationDatabase.map(l => ({ name: l.name + (l.state ? ', ' + l.state : ''), lat: l.lat, lon: l.lon }));
+                        if (userLat && userLon) {
+                            list.forEach(p => { p._d = (typeof calculateDistance === 'function') ? (calculateDistance(userLat, userLon, p.lat, p.lon) * 0.621371) : Infinity; });
+                            list.sort((a,b)=> (a._d||Infinity) - (b._d||Infinity));
+                        }
+                        locationResults = list.slice(0,15);
+                    }
+                } else {
+                    locationResults = locationResults.slice(0,15);
+                }
+
+                // Build HTML: POIs then Locations
                 let html = '';
-                if (citySuggestions && citySuggestions.length) {
-                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Popular Cities</div>`;
-                    citySuggestions.slice(0,10).forEach(c => {
-                        const display = c.display || c;
-                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(display).replace(/'/g,"\\'")}', event)">${display}</div>`;
+                if (poiResults && poiResults.length) {
+                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Nearby POIs</div>`;
+                    poiResults.forEach(p => {
+                        const disp = p.display || p.name;
+                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(disp).replace(/'/g,"\\'")}', event)">${disp}${p._d?` <span style=\"color:#777;float:right\">${(p._d||0).toFixed(1)}mi</span>`:''}</div>`;
+                    });
+                }
+                if (locationResults && locationResults.length) {
+                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Nearby Locations</div>`;
+                    locationResults.forEach(p => {
+                        const disp = p.display || p.name;
+                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(disp).replace(/'/g,"\\'")}', event)">${disp}${p._d?` <span style=\"color:#777;float:right\">${(p._d||0).toFixed(1)}mi</span>`:''}</div>`;
                     });
                 }
 
-                if (cachedPOIs.length) {
-                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Quick POIs</div>`;
-                    cachedPOIs.forEach(p => { html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(p.name).replace(/'/g,"\\'")}', event)">${p.name}</div>`; });
-                }
-
-                if (nearbyPOIs.length) {
-                    html += `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Nearby POIs</div>`;
-                    nearbyPOIs.forEach(p => { html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${String(p.display||p.name).replace(/'/g,"\\'")}', event)">${p.display||p.name}</div>`; });
-                }
-
-                if (!html) html = '<div style="padding:12px;color:#999;text-align:center">No suggestions available</div>';
+                if (!html) html = '<div style="padding:12px;color:#999;text-align:center">No nearby suggestions</div>';
                 resultsContainer.innerHTML = html;
                 dropdown.style.display = 'block';
             } catch (e) {
