@@ -9630,6 +9630,17 @@
                     console.log(`  Firebase path: posts (SHARED COLLECTION)`);
                     recordMilestone('Firebase subscription started', Date.now());
                     subscribeToFirebasePostsWithReconnect();
+                    // Fallback: if no Firebase snapshot arrives, attempt a one-time
+                    // direct read from Firebase (or getPostsFromFirebase helper) to
+                    // populate the device-scoped feed so unsigned users see posts.
+                    setTimeout(() => {
+                        try {
+                            const keys = Object.keys(gridContent || {});
+                            if (!keys || keys.length === 0) {
+                                try { if (typeof fallbackPopulateDeviceFeed === 'function') fallbackPopulateDeviceFeed(); } catch(e) { console.warn('fallbackPopulateDeviceFeed call failed', e); }
+                            }
+                        } catch (e) { /* ignore */ }
+                    }, 1500);
                     // Attempt to flush any queued posts now that auth/db are ready
                     try { flushQueuedPosts().catch(e => console.warn('Queued flush error:', e)); } catch(e) { console.warn('flushQueuedPosts not available yet', e); }
                     
@@ -18861,6 +18872,75 @@
                 }
                 renderGrid();
                 // Will try again on next heartbeat
+            }
+        }
+
+        // One-time fallback that fetches posts directly and builds the device feed
+        async function fallbackPopulateDeviceFeed() {
+            try {
+                // If gridContent already populated, skip
+                if (Object.keys(gridContent || {}).length > 0) return;
+
+                let posts = [];
+                if (typeof getPostsFromFirebase === 'function') {
+                    try {
+                        const fetched = await getPostsFromFirebase();
+                        if (Array.isArray(fetched) && fetched.length > 0) posts = fetched;
+                    } catch (e) { console.warn('getPostsFromFirebase failed', e); }
+                }
+
+                // Direct DB GET fallback
+                if (posts.length === 0 && window.database && typeof get === 'function' && typeof ref === 'function') {
+                    try {
+                        const snap = await get(ref(database, 'posts'));
+                        if (snap && snap.exists && snap.exists()) {
+                            const obj = snap.val();
+                            posts = Object.keys(obj || {}).map(k => ({ id: k, ...(obj[k] || {}) }));
+                        }
+                    } catch (e) { console.warn('Direct DB GET for posts failed', e); }
+                }
+
+                if (!posts || posts.length === 0) {
+                    console.warn('fallbackPopulateDeviceFeed: no posts available from fallback sources');
+                    return;
+                }
+
+                // Build device-scoped feed (same 90/10 logic as snapshot handler)
+                const TARGET = 100;
+                const BOOST_RATIO = 0.10;
+                const boostedCount = Math.max(1, Math.floor(TARGET * BOOST_RATIO));
+
+                const allPosts = posts.filter(p => p && p.id);
+                let mostLiked = null;
+                try { mostLiked = allPosts.reduce((best, cur) => { const b = Number(best && best.likes)||0; const c = Number(cur && cur.likes)||0; return c>b?cur:best; }, null); } catch(e) { mostLiked = null; }
+
+                const boosted = allPosts.filter(p => {
+                    try { if (p.boostStatus === 'active') return true; if (p.boostExpiresAt && Number(p.boostExpiresAt) > Date.now()) return true; if (p.badges && Array.isArray(p.badges) && p.badges.includes && p.badges.includes('boost')) return true; } catch(e){}
+                    return false;
+                }).sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
+
+                const boostedIds = new Set((boosted||[]).map(p => p.id));
+                const randomCandidates = allPosts.filter(p => !boostedIds.has(p.id));
+
+                function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp; } return arr; }
+
+                const used = new Set();
+                const final = [];
+                if (mostLiked && mostLiked.id) { final.push(mostLiked); used.add(mostLiked.id); }
+                for (const b of boosted) {
+                    if (final.length >= TARGET) break;
+                    if (!b || !b.id) continue; if (used.has(b.id)) continue; final.push(b); used.add(b.id); if (final.length >= (1 + boostedCount)) break;
+                }
+                const shuffled = shuffle(randomCandidates.slice());
+                for (const r of shuffled) { if (final.length >= TARGET) break; if (!r||!r.id) continue; if (used.has(r.id)) continue; final.push(r); used.add(r.id); }
+                if (final.length < TARGET) { for (const b of boosted) { if (final.length >= TARGET) break; if (!b||!b.id) continue; if (used.has(b.id)) continue; final.push(b); used.add(b.id); } }
+
+                const deviceId = (typeof permanentUserId !== 'undefined' && permanentUserId) || window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null) || ('device-' + Date.now());
+                gridContent[String(deviceId)] = final.slice(0, TARGET);
+                console.log('fallbackPopulateDeviceFeed: populated device feed with', (gridContent[String(deviceId)]||[]).length);
+                try { renderGrid(); } catch(e) {}
+            } catch (e) {
+                console.warn('fallbackPopulateDeviceFeed top-level error', e);
             }
         }
 
