@@ -943,6 +943,41 @@ app.delete('/api/admin/zone/:zoneId', (req, res) => {
     }
 });
 
+// Admin: retag a post (change `zoneTag` and optionally move to a new `zoneId`) - protected
+app.post('/api/admin/retag', (req, res) => {
+    try {
+        if (!isAdminAuthenticated(req)) return res.status(403).json({ error: 'unauthorized' });
+        const { postId, newZoneTag, newZoneId } = req.body || {};
+        if (!postId || (!newZoneTag && !newZoneId)) return res.status(400).json({ error: 'postId and newZoneTag or newZoneId required' });
+
+        for (const zid of Object.keys(postsDatabase)) {
+            const idx = postsDatabase[zid].findIndex(p => String(p.id) === String(postId));
+            if (idx !== -1) {
+                const post = postsDatabase[zid][idx];
+                const before = { zoneTag: post.zoneTag || null, zoneId: zid };
+                if (newZoneTag) post.zoneTag = newZoneTag;
+                // If newZoneId provided and different, move the post between zone arrays
+                if (newZoneId && String(newZoneId) !== String(zid)) {
+                    // remove from old zone
+                    postsDatabase[zid].splice(idx, 1);
+                    if (!postsDatabase[newZoneId]) postsDatabase[newZoneId] = [];
+                    // set zoneId property on post for consistency
+                    post.zoneId = newZoneId;
+                    postsDatabase[newZoneId].push(post);
+                }
+                saveDatabase();
+                sLog(`[admin retag] post=${postId} before=${JSON.stringify(before)} after=${JSON.stringify({ zoneTag: post.zoneTag || null, zoneId: post.zoneId || newZoneId || zid })}`);
+                return res.json({ success: true, post });
+            }
+        }
+
+        return res.status(404).json({ error: 'Post not found' });
+    } catch (e) {
+        sErr('POST /api/admin/retag error', e && e.message);
+        return res.status(500).json({ success: false, error: String(e) });
+    }
+});
+
 // Video Moderation Endpoint
 app.post('/api/moderate-video', async (req, res) => {
     try {
