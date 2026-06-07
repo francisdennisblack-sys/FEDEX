@@ -13799,9 +13799,7 @@
                     if (!tracking) return;
                     const y = ev.touches && ev.touches[0] ? ev.touches[0].clientY : 0;
                     const dy = y - startY;
-                    if (dy > 60) {
-                        showSoftRefreshBanner();
-                    }
+                    // Refresh hint banner disabled by request.
                 }, { passive: true });
 
                 window.addEventListener('touchend', (ev) => {
@@ -15980,11 +15978,26 @@
                     pending.push(deletedPostId);
                     localStorage.setItem('pendingDeletedPosts', JSON.stringify(pending));
                 }
+                // Tombstone locally so realtime snapshots never resurrect this post.
+                window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
+                window.globallyDeletedPostIds.add(deletedPostId);
+                window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
+                window.pendingRemovedPosts.add(deletedPostId);
             } catch(e) { console.warn('pendingDeletedPosts write failed', e); }
 
             // Also hide from memory for immediate UI update
             if (!hiddenPosts[currentUserId]) hiddenPosts[currentUserId] = [];
             if (!hiddenPosts[currentUserId].includes(deletedPostId)) hiddenPosts[currentUserId].push(deletedPostId);
+
+            // Remove from local user ownership trackers so render pass does not re-inject it.
+            try {
+                if (userOwnPostsTracker && currentUserId && userOwnPostsTracker[currentUserId]) {
+                    delete userOwnPostsTracker[currentUserId][deletedPostId];
+                }
+                if (postReachTracker && postReachTracker[deletedPostId]) {
+                    delete postReachTracker[deletedPostId];
+                }
+            } catch (e) { console.warn('Failed to prune ownership trackers on delete', e); }
 
             // Remove from userPostBoxes immediately
             const deleteIndex = userPostBoxes.indexOf(selectedBoxIndex);
@@ -16048,6 +16061,7 @@
 
             // Render and close view now so user sees immediate effect
             try { closeViewModal(); } catch(e){}
+            try { selectedPostId = null; selectedBoxIndex = -1; } catch(e) {}
             try { renderGrid(); } catch(e){}
             try { fillEmptySlotAfterDelay(250); } catch(e){}
             try { fillEmptySlotAfterDelay(250); } catch(e){}
@@ -26259,6 +26273,8 @@
             const userActivePosts = getUserActivePostsWithAreaTags(currentUserId);
             userActivePosts.forEach(userPost => {
                 if (!userPost || !userPost.id) return;
+                // Never re-inject posts that are hidden/deleted/pending deletion.
+                if (pendingDeleted.includes(userPost.id) || deletedOwnPosts.includes(userPost.id) || hiddenForThisPOI.includes(userPost.id)) return;
                 // Check if post already in allPosts (use seenPostIds Set for O(1) lookup)
                 if (!seenPostIds.has(userPost.id)) {
                     console.log(`📍 ENSURING USER POST ON GRID: ${userPost.id.substring(0,8)} (${userPost.areaTag})`);
@@ -26820,7 +26836,8 @@
             let sortedPosts = displayPosts.filter(post => {
                 const isHidden = hiddenForThisPOI.includes(post.id) || 
                                 hiddenReported.includes(post.id) ||
-                                deletedOwnPosts.includes(post.id);
+                                deletedOwnPosts.includes(post.id) ||
+                                pendingDeleted.includes(post.id);
                 return !isHidden;
             });
 
@@ -26837,7 +26854,8 @@
                     if (existingIds.has(post.id)) return false;
                     const isHidden = hiddenForThisPOI.includes(post.id) ||
                                     hiddenReported.includes(post.id) ||
-                                    deletedOwnPosts.includes(post.id);
+                                    deletedOwnPosts.includes(post.id) ||
+                                    pendingDeleted.includes(post.id);
                     return !isHidden;
                 });
 
@@ -26861,7 +26879,7 @@
                     for (const post of gridContent[key]) {
                         if (!post || !post.id) continue;
                         if (existingIds.has(post.id)) continue;
-                        if (hiddenForThisPOI.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) continue;
+                        if (hiddenForThisPOI.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id) || pendingDeleted.includes(post.id)) continue;
                         sortedPosts.push(post);
                         existingIds.add(post.id);
                         if (sortedPosts.length >= FEED_MIN_POSTS) break;
@@ -26875,7 +26893,7 @@
                         const post = postCache[id];
                         if (!post || !post.id) continue;
                         if (existingIds.has(post.id)) continue;
-                        if (hiddenForThisPOI.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) continue;
+                        if (hiddenForThisPOI.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id) || pendingDeleted.includes(post.id)) continue;
                         sortedPosts.push(post);
                         existingIds.add(post.id);
                         if (sortedPosts.length >= FEED_MIN_POSTS) break;
