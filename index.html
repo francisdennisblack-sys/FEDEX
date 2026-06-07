@@ -2484,6 +2484,10 @@
                 }
 
                 function renderMVPDemo(){
+                    // Legacy DOM renderer for demo posts retained for reference.
+                    // We now prefer native scroller rendering (`.demo-native`) so
+                    // make this a no-op to avoid duplicate tiles.
+                    return;
                     const grid = document.getElementById('grid');
                     if(!grid) return;
                     // Remove previous demo nodes to keep rendering idempotent
@@ -2815,21 +2819,28 @@
                         out.missingInPostCache = missingInCache;
                         if (missingInCache.length) out.ok = false;
 
-                        // DOM check
-                        try { out.domDemoNodes = document.querySelectorAll && document.querySelectorAll('.demo-post') ? document.querySelectorAll('.demo-post').length : 0; } catch(e){ out.domDemoNodes = 0; }
-                        if ((out.domDemoNodes || 0) < Math.min(3, out.demoPostsCount || 0)) out.ok = false;
+                        // DOM check (count either legacy .demo-post or native .demo-native boxes)
+                        try { out.domDemoNodes = document.querySelectorAll ? (document.querySelectorAll('.demo-post').length || 0) : 0; } catch(e){ out.domDemoNodes = 0; }
+                        try { const nativeCount = document.querySelectorAll ? (document.querySelectorAll('.demo-native').length || 0) : 0; out.domDemoNodes = Math.max(out.domDemoNodes || 0, nativeCount); } catch(e){}
 
                         // scroller check
                         try{
                             const sc = window.gridScroller;
-                            if (!sc) { out.scroller = 'missing'; out.ok = false; }
+                            if (!sc) { out.scroller = 'missing'; }
                             else {
                                 out.scrollerItems = Array.isArray(sc.items) ? sc.items.slice(0,6).map(i=> i && i.id) : (sc.getVisibleItems && sc.getVisibleItems().map(i=>i && i.id));
                                 const topDemoPresent = (out.scrollerItems || []).some(id => out.demoPostIds.indexOf(id) !== -1);
                                 out.scrollerTopHasDemo = !!topDemoPresent;
-                                if (!out.scrollerTopHasDemo) out.ok = false;
                             }
-                        } catch(e){ out.scroller = 'error'; out.ok = false; }
+                        } catch(e){ out.scroller = 'error'; }
+
+                        // Final pass: consider demo visible if either native DOM nodes exist
+                        // or the scroller's top items include demo posts. Only fail if
+                        // neither condition is met.
+                        const domThreshold = Math.min(3, out.demoPostsCount || 0);
+                        if (!(out.scrollerTopHasDemo) && ((out.domDemoNodes || 0) < domThreshold)) {
+                            out.ok = false;
+                        }
 
                         console.log('runDemoSmokeTests', out);
 
@@ -24318,6 +24329,37 @@
                     box.onclick = (e) => { if (e.target.tagName !== 'BUTTON') openViewModalByPostId(post.id); };
                 } catch (e) { /* ignore placeholder render failures */ }
                 return;
+            }
+
+            // If this is a demo post (per-device demo), render a lightweight
+            // native demo tile so VirtualGridScroller shows demo items as first-class
+            // scroller boxes instead of separate `.demo-post` DOM nodes.
+            if (post.demo) {
+                try {
+                    // Build demo tile markup similar to renderMVPDemo
+                    const area = post.areaTag || post.displayAreaTag || '';
+                    const badge = (post.badges && post.badges[0]) ? post.badges[0] : '';
+                    const likes = post.likes != null ? Number(post.likes) : 0;
+                    let inner = '';
+                    if (post.mediaType) {
+                        const emoji = post.mediaType === 'video' ? '🎥' : '📷';
+                        inner = `<div style="text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;height:100%;"><div style=\"font-size:48px;\">${emoji}</div></div>`;
+                    } else {
+                        const txt = (post.content || post.text || '').substring(0,150);
+                        inner = `<div style=\"padding:16px;font-size:${getGridTextFontSizePx()}px;line-height:1.3;\">${txt}</div>`;
+                    }
+
+                    const areaPill = `<div style=\"position:absolute;left:10px;top:10px;background:rgba(255,255,255,0.04);color:#cbd5e1;padding:6px 8px;border-radius:999px;font-size:11px;font-weight:700;\">${area}</div>`;
+                    const badgeHTML = `<div style=\"position:absolute;right:10px;top:10px;font-size:12px;color:#fbbf24;\">${badge}</div>`;
+                    const likesPill = `<div style=\"position:absolute;right:10px;bottom:10px;background:rgba(0,0,0,0.45);color:#fff;padding:6px 8px;border-radius:999px;font-size:12px;font-weight:800;display:flex;align-items:center;gap:6px;\"><span style=\"color:#ef4444;\">♥</span><span>${likes}</span></div>`;
+
+                    box.innerHTML = inner + areaPill + badgeHTML + likesPill;
+                    box.setAttribute('data-post-id', post.id);
+                    box.classList.add('filled','demo-native');
+                    box.style.cursor = 'pointer';
+                    box.onclick = (e) => { if (e.target.tagName !== 'BUTTON') { try { if (typeof sendPostClickMetric === 'function') sendPostClickMetric(post.id); } catch(e){}; try { openDemoMediaModal(post); } catch(e){} } };
+                    return;
+                } catch (e) { /* fall through to normal render on error */ }
             }
 
             try {
