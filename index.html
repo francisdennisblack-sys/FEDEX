@@ -20774,8 +20774,9 @@
             else if (likes > 5) badgeScore = 10;     // New
             else badgeScore = Math.max(0, likes);     // Linear up to 5 likes
             
-            // Penalize high dislikes
-            if (dislikes > likes) badgeScore *= 0.5;
+            // Penalize high dislikes aggressively so negative posts are less likely
+            // to contend for upper slots before the final hard ordering pass.
+            if (dislikes > likes) badgeScore *= 0.25;
             
             score += badgeScore;
             
@@ -21438,45 +21439,34 @@
             console.log(`   🌟 Website top:              ${websiteTopToAdd.length} (target: ${websiteTopTarget})`);
             console.log(`   🛰️ Distant filler:           ${distantToAdd.length} (target: ${distantFillerTarget})`);
 
-            // Enforce disliked-post placement rule: move any post with more dislikes than likes
-            // to the end of the feed while preserving relative order for both groups.
+            // Enforce strict engagement slot order:
+            // 1) net-positive posts first
+            // 2) neutral posts next
+            // 3) net-negative posts last
+            // This is a hard position rule and applies to all posts.
             try {
-                // Consider a post "disliked" when its net likes < 0. Fall back to likes-dislikes
-                // if `netLikes` is not present on the object.
-                // 🚀 BOOST EXEMPTION: paid boosts are NEVER pushed to the tail by
-                // the disliked-rule — dislikes are the signal that we haven't
-                // found the right audience yet, so we keep their position.
-                const isDisliked = (p) => {
-                    if (isBoost(p)) return false;
-                    const net = (typeof p.netLikes === 'number')
-                        ? Number(p.netLikes)
-                        : (Number(p.likes) || 0) - (Number(p.dislikes) || 0);
-                    return net < 0;
+                const netEngagementOf = (p) => {
+                    if (!p) return 0;
+                    if (typeof p.netLikes === 'number') return Number(p.netLikes);
+                    return (Number(p.likes) || 0) - (Number(p.dislikes) || 0);
                 };
 
-                const nonDisliked = result.filter(p => !isDisliked(p));
-                const disliked = result.filter(isDisliked);
+                const positive = [];
+                const neutral = [];
+                const negative = [];
+                for (const post of result) {
+                    const net = netEngagementOf(post);
+                    if (net > 0) positive.push(post);
+                    else if (net < 0) negative.push(post);
+                    else neutral.push(post);
+                }
 
-                // Determine crowned/top by likes (same rule used elsewhere)
-                const maxLikes = nonDisliked.reduce((m, p) => Math.max(m, Number(p.likes) || 0), 0);
-                const isCrowned = (p) => Number(p.likes || 0) === maxLikes && maxLikes > 0;
-
-                // Helper to get engagement tier safely
-                const tierOf = (p) => {
-                    try { return (getPostEngagementTier(p) || {}).tier; } catch (e) { return null; }
-                };
-
-                // Grouping to ensure top/liked posts always appear above disliked posts
-                const topGroup = nonDisliked.filter(p => isCrowned(p) || tierOf(p) === 'PODIUM');
-                const likedGroup = nonDisliked.filter(p => !topGroup.includes(p) && tierOf(p) === 'LIKED');
-                const neutralGroup = nonDisliked.filter(p => !topGroup.includes(p) && !likedGroup.includes(p));
-
-                const reordered = [...topGroup, ...likedGroup, ...neutralGroup, ...disliked];
-                console.log(`🔀 Reordered feed groups: top=${topGroup.length}, liked=${likedGroup.length}, neutral=${neutralGroup.length}, disliked=${disliked.length}`);
+                const reordered = [...positive, ...neutral, ...negative];
+                console.log(`🔀 Strict engagement ordering: positive=${positive.length}, neutral=${neutral.length}, negative=${negative.length}`);
 
                 return reordered.slice(0, 2000);
             } catch (e) {
-                console.warn('⚠️ Failed to apply disliked-post placement rule:', e);
+                console.warn('⚠️ Failed to apply strict engagement ordering:', e);
                 return result;
             }
         }
