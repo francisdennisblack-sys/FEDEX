@@ -2454,8 +2454,6 @@
                     }catch(e){ window.demoGridKey = 'demo-grid-temp-' + Date.now(); return window.demoGridKey; }
                 };
                 try{ window.ensureDemoGridKey(); }catch(e){}
-                // Default reserved demo slots for signed-out users
-                try { window.DEMO_RESERVED_SLOTS = window.DEMO_RESERVED_SLOTS || 4; } catch (e) {}
 
                 function makeDemoPost(i){
                     const types = ['text','text','photo','video'];
@@ -2631,8 +2629,28 @@
                                 window.gridScroller = sc;
                             }
                         }
-                        // Ensure scroller shows our demo posts immediately
-                        try { if (window.gridScroller && typeof window.gridScroller.setItems === 'function') window.gridScroller.setItems(window.gridContent[targetKey]); else if (window.gridScroller) { window.gridScroller.items = window.gridContent[targetKey]; if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh(); } } catch(e){}
+                        // Ensure scroller shows our demo posts immediately.
+                        // If scroller already has items, inject demo posts at the front
+                        try {
+                            const sc = window.gridScroller;
+                            const demoArr = Array.isArray(window.gridContent[targetKey]) ? window.gridContent[targetKey].slice() : [];
+                            const demoIds = demoArr.map(p => p && p.id).filter(Boolean);
+                            if (sc) {
+                                // Prefer using setItems API when available
+                                if (Array.isArray(sc.items) && sc.items.length > 0) {
+                                    // Build demo objects from postCache if available
+                                    const demoObjs = demoIds.map(id => (window.postCache && window.postCache[id]) || demoArr.find(p=>p.id===id)).filter(Boolean);
+                                    // Remove any existing demo items from current scroller to avoid duplicates
+                                    const existing = Array.isArray(sc.items) ? sc.items.filter(i => !(i && demoIds.indexOf(i.id) !== -1)) : [];
+                                    const newItems = demoObjs.concat(existing);
+                                    try { if (typeof sc.setItems === 'function') sc.setItems(newItems); else sc.items = newItems; } catch(e){}
+                                } else {
+                                    // Scroller empty or not populated yet: set demo array directly
+                                    try { if (typeof sc.setItems === 'function') sc.setItems(demoArr); else sc.items = demoArr; } catch(e){}
+                                }
+                                try { if (typeof sc.refresh === 'function') sc.refresh(); } catch(e){}
+                            }
+                        } catch(e){}
                     } catch(e){}
 
                     if(window.__demoMVPInterval) clearInterval(window.__demoMVPInterval);
@@ -2727,9 +2745,7 @@
                     try{
                         const existingCount = Object.values(window.gridContent || {}).flat().length || 0;
                         const demoActive = (function(){ try { return sessionStorage && sessionStorage.getItem && sessionStorage.getItem('demoActive') === '1'; } catch(e){ return false; } })();
-                        // If user is not signed in, always start the demo so demo posts
-                        // occupy reserved slots at the top of the grid.
-                        if(!window.currentUserId) setTimeout(() => window.startDemoMVP(), 200);
+                        if(!window.currentUserId && (demoActive || existingCount === 0)) setTimeout(() => window.startDemoMVP(), 200);
 
                         // Ensure demo responds to auth state changes. If Firebase `auth`
                         // is available, register a proper listener. Otherwise poll until
@@ -25047,7 +25063,7 @@
                     if (!window.gridScroller) return;
                     const seen = new Set();
                     const all = [];
-                    const DEMO_RESERVED_SLOTS = (window.DEMO_RESERVED_SLOTS && Number(window.DEMO_RESERVED_SLOTS)) || 4;
+                    const DEMO_RESERVED_SLOTS = (window.DEMO_RESERVED_SLOTS && Number(window.DEMO_RESERVED_SLOTS)) || 3;
                     // Prefer user's key first to keep owned posts visible
                     if (currentUserId && Array.isArray(gridContent[currentUserId])) {
                         gridContent[currentUserId].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
