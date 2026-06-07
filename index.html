@@ -7276,7 +7276,7 @@
                         }
 
                         // Boost / Buy badges (persisted flags)
-                        const hasBoostFlag = !!(post.boosted || post.isBoosted || post.boostStatus === 'active' || (post.badges && post.badges.includes('boost')));
+                        const hasBoostFlag = isStrictBoostActive(post);
                         const hasSellFlag = !!(post.sellBadge || post.forSale || post.buyBadge || (post.badges && post.badges.includes('sell')));
                         // We render the BOOST badge as a dedicated prominent element (top-left)
                         // but also include a compact BOOST indicator on the right-side badge
@@ -16385,7 +16385,7 @@
 
             // Centralized glow application for modal (keeps behavior consistent with grid)
             try {
-                const hasBoostFlagModal = !!(targetPost.boosted || targetPost.isBoosted || targetPost.boostStatus === 'active' || (targetPost.badges && targetPost.badges.includes && targetPost.badges.includes('boost')) || (targetPost.boostExpiresAt && targetPost.boostExpiresAt > Date.now()));
+                const hasBoostFlagModal = isStrictBoostActive(targetPost);
                 applyGlowAndBorder(modalContent, targetPost, { podium: window.lastVisibleTop3 || [], badges, hasBoostFlag: hasBoostFlagModal });
             } catch (e) { /* defensive */ }
             
@@ -19277,14 +19277,8 @@
                             } catch (e) { mostLiked = null; }
 
                             // Identify boosted posts (explicit boost flags or boost expiry)
-                            const boosted = posts.filter(p => {
-                                try {
-                                    if (p.boostStatus === 'active') return true;
-                                    if (p.boostExpiresAt && Number(p.boostExpiresAt) > Date.now()) return true;
-                                    if (p.badges && Array.isArray(p.badges) && p.badges.includes && p.badges.includes('boost')) return true;
-                                } catch (e) {}
-                                return false;
-                            }).sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
+                            const boosted = posts.filter(p => isStrictBoostActive(p))
+                                .sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
 
                             // Random candidates for filler (exclude boosted ones)
                             const boostedIds = new Set((boosted||[]).map(p => p.id));
@@ -19501,10 +19495,8 @@
                 let mostLiked = null;
                 try { mostLiked = allPosts.reduce((best, cur) => { const b = Number(best && best.likes)||0; const c = Number(cur && cur.likes)||0; return c>b?cur:best; }, null); } catch(e) { mostLiked = null; }
 
-                const boosted = allPosts.filter(p => {
-                    try { if (p.boostStatus === 'active') return true; if (p.boostExpiresAt && Number(p.boostExpiresAt) > Date.now()) return true; if (p.badges && Array.isArray(p.badges) && p.badges.includes && p.badges.includes('boost')) return true; } catch(e){}
-                    return false;
-                }).sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
+                const boosted = allPosts.filter(p => isStrictBoostActive(p))
+                    .sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
 
                 const boostedIds = new Set((boosted||[]).map(p => p.id));
                 const randomCandidates = allPosts.filter(p => !boostedIds.has(p.id));
@@ -19610,10 +19602,8 @@
                 let mostLiked = null;
                 try { mostLiked = allPosts.reduce((best, cur) => { const b = Number(best && best.likes)||0; const c = Number(cur && cur.likes)||0; return c>b?cur:best; }, null); } catch(e) { mostLiked = null; }
 
-                const boosted = allPosts.filter(p => {
-                    try { if (p.boostStatus === 'active') return true; if (p.boostExpiresAt && Number(p.boostExpiresAt) > Date.now()) return true; if (p.badges && Array.isArray(p.badges) && p.badges.includes && p.badges.includes('boost')) return true; } catch(e){}
-                    return false;
-                }).sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
+                const boosted = allPosts.filter(p => isStrictBoostActive(p))
+                    .sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
 
                 const boostedIds = new Set((boosted||[]).map(p => p.id));
                 const randomCandidates = allPosts.filter(p => !boostedIds.has(p.id));
@@ -20512,6 +20502,55 @@
         window.generateRecommendations = generateRecommendations;
         window.updateMLScores = updateMLScores;
 
+        function hasVerifiedBoostPurchase(post) {
+            if (!post || typeof post !== 'object') return false;
+            try {
+                const intentId = post.boostIntent && post.boostIntent.paymentIntentId;
+                const badgeIntentId = post.boostBadge && post.boostBadge.paymentIntentId;
+                const boostIntentId = post.boost && post.boost.paymentIntentId;
+                const paidAt = Number(post.boostPaidAt) ||
+                    (post.boostBadge && Number(post.boostBadge.purchasedAt)) ||
+                    (post.boostIntent && Number(post.boostIntent.armedAt));
+                return !!(intentId || badgeIntentId || boostIntentId || paidAt);
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function strictBoostStatus(post) {
+            const inactive = { active: false, expired: false };
+            if (!post || typeof post !== 'object') return inactive;
+
+            const hasPurchase = hasVerifiedBoostPurchase(post);
+            if (!hasPurchase && !(post.boost && post.boost.status === 'active')) return inactive;
+
+            try {
+                if (post.boostRequested && window.boostEngine && typeof window.boostEngine.activateIfReady === 'function') {
+                    window.boostEngine.activateIfReady(post);
+                }
+            } catch (_) { /* defensive */ }
+
+            try {
+                if (window.boostEngine && typeof window.boostEngine.status === 'function') {
+                    const engineStatus = window.boostEngine.status(post);
+                    if (engineStatus && (engineStatus.active || engineStatus.expired)) return engineStatus;
+                }
+            } catch (_) { /* defensive */ }
+
+            const now = Date.now();
+            const expiresAt = Number(post.boostExpiresAt) || (post.boost && Number(post.boost.expiresAt)) || 0;
+            const status = (post.boost && post.boost.status) || post.boostStatus || null;
+
+            if (status === 'expired') return { active: false, expired: true };
+            if (expiresAt > 0 && now >= expiresAt) return { active: false, expired: true };
+            if ((status === 'active' || expiresAt > now) && hasPurchase) return { active: true, expired: false };
+            return inactive;
+        }
+
+        function isStrictBoostActive(post) {
+            return !!strictBoostStatus(post).active;
+        }
+
         // ============================================================================
         // 🚀 BOOST ENGINE — paid "guaranteed visibility window" with per-post balance
         // ============================================================================
@@ -21029,7 +21068,7 @@
             // � BOOST-ONLY PRIORITY BUCKET (highest priority for non-owner posts)
             // Sell posts are NOT included — they're not paid promotion and flow
             // through the normal local / near-local / top / fallback path.
-            const isBoost = (p) => p._isBoosted || p.boostPaidAt || p.boostStatus === 'active';
+            const isBoost = (p) => !!(p && (p._isBoosted || isStrictBoostActive(p)));
             const boostPosts = rankedPosts
                 .filter(p => !userPostIds.has(p.id) && isBoost(p));
 
@@ -24199,9 +24238,13 @@
                 
                 // 🚀 BOOST TIMER: Generate boost remaining time display
                 let boostTimerHTML = '';
-                if (post.boostExpiresAt && post.boostStatus !== 'expired') {
+                if (isStrictBoostActive(post)) {
                     const now = Date.now();
-                    const timeRemaining = post.boostExpiresAt - now;
+                    const boostState = strictBoostStatus(post);
+                    const expiresAt = (boostState && boostState.boost && boostState.boost.expiresAt)
+                        ? boostState.boost.expiresAt
+                        : Number(post.boostExpiresAt || 0);
+                    const timeRemaining = expiresAt - now;
                     if (timeRemaining > 0) {
                         const hours = Math.floor(timeRemaining / (60*60*1000));
                         const minutes = Math.floor((timeRemaining % (60*60*1000)) / (60*1000));
@@ -24359,7 +24402,7 @@
                         }
                     });
                     // If this post has a purchased BOOST, ensure boost visuals take precedence
-                    const hasBoostFlag = !!((post.badges && post.badges.includes && post.badges.includes('boost')) || post.boostStatus === 'active' || (post.boostExpiresAt && post.boostExpiresAt > Date.now()));
+                    const hasBoostFlag = isStrictBoostActive(post);
                     if (hasBoostFlag) {
                         try {
                             ['new','hot','trending','rising','untouched','balanced','disliked','sell'].forEach(b => { try { box.classList.remove(`badge-${b}`); } catch(e){} });
@@ -26728,7 +26771,7 @@
                 }
 
                 // KEEP ALWAYS: Boost-paid posts (creator paid to extend reach)
-                if (post.boostPaidAt || post.boostStatus === 'active') {
+                if (isStrictBoostActive(post)) {
                     post._distantFiller = false;
                     post._isBoosted = true;
                     return true;
@@ -27096,10 +27139,8 @@
             // 🚀 MANDATORY BOOST: Ensure boosted posts appear for their creator
             // This is CRITICAL: Creators MUST see their boosted posts in prime positions
             // ========================================================================
-            const userBoostedPosts = sortedPosts.filter(post => 
-                post.boostRequested && 
-                post.boostIntent && 
-                post.boostStatus !== 'expired' &&
+            const userBoostedPosts = sortedPosts.filter(post =>
+                isStrictBoostActive(post) &&
                 (post.authId === currentUserId || post.userId === currentUserId || post.createdBy === currentUserId)
             );
             
@@ -31152,7 +31193,7 @@
                     try {
                         if (!p || !p.id) continue;
                         // If client already has badge info, skip
-                        const hasBadge = !!(p.badges || p.boostBadge || p.sellBadge || p.primaryBadge || p.boostStatus === 'active' || p.boostPaidAt || p.sellPaidAt);
+                        const hasBadge = !!(p.badges || p.boostBadge || p.sellBadge || p.primaryBadge || isStrictBoostActive(p) || p.sellPaidAt);
                         if (hasBadge) continue;
                         const badgeRef = ref(database, `posts/${p.id}/badges`);
                         const snap = await get(badgeRef);
