@@ -18132,6 +18132,8 @@
             }
             
             const queryLower = query.toLowerCase().trim();
+            const locationDb = Array.isArray(window.globalLocationDatabase) ? window.globalLocationDatabase : [];
+            const poiDb = Array.isArray(window.globalPOIDatabase) ? window.globalPOIDatabase : [];
             let results = [];
             
             // Get user location for distance calculation
@@ -18139,9 +18141,9 @@
             const userLon = userLocation && (userLocation.longitude || userLocation.lon);
             
             // Search locations
-            if (globalLocationDatabase && globalLocationDatabase.length > 0) {
-                for (let i = 0; i < globalLocationDatabase.length; i++) {
-                    const loc = globalLocationDatabase[i];
+            if (locationDb.length > 0) {
+                for (let i = 0; i < locationDb.length; i++) {
+                    const loc = locationDb[i];
                     const fullName = `${loc.name}${loc.state ? ', ' + loc.state : ''}`;
                     const searchStr = `${loc.name}${loc.state || ''}`.toLowerCase();
                     
@@ -18638,12 +18640,12 @@
                     window.ensureGlobalPoiSearchIndex();
                 }
                 
-                if (globalPOIDatabase && globalPOIDatabase.length > 0) {
+                if (poiDb.length > 0) {
                     // OPTIMIZATION: Limit to first 100K POIs instead of 50K for better coverage
-                    const searchLimit = Math.min(globalPOIDatabase.length, 100000);
+                    const searchLimit = Math.min(poiDb.length, 100000);
                     let poiMatches = 0;
                     for (let i = 0; i < searchLimit; i++) {
-                        const poi = globalPOIDatabase[i];
+                        const poi = poiDb[i];
                         if (!poi) continue;
                         
                         const poiName = String(poi.name || '').toLowerCase().trim();
@@ -18680,6 +18682,54 @@
                     if (poiMatches > 0) console.log(`✅ POI search complete - found ${poiMatches} POI matches for "${queryLower}"`);
                 } else {
                     console.log('⚠️ POI database not loaded - POIs not available in search');
+                }
+            }
+
+            // Guaranteed fallback pass: if structured ranking found nothing,
+            // do a direct text match over available in-memory DB slices.
+            if (results.length === 0 && queryLower.length > 0) {
+                const fallbackSeen = new Set();
+
+                if (locationDb.length > 0) {
+                    const locationSearchLimit = Math.min(locationDb.length, 30000);
+                    for (let i = 0; i < locationSearchLimit; i++) {
+                        const loc = locationDb[i];
+                        if (!loc || !loc.name) continue;
+                        const display = loc.state ? `${loc.name}, ${loc.state}` : String(loc.name);
+                        const key = String(display).toLowerCase();
+                        if (!key.includes(queryLower)) continue;
+                        if (fallbackSeen.has(`l:${key}`)) continue;
+                        fallbackSeen.add(`l:${key}`);
+                        results.push({
+                            type: 'location',
+                            name: display,
+                            emoji: '📍',
+                            rank: key.startsWith(queryLower) ? 1 : 2
+                        });
+                        if (results.length >= 80) break;
+                    }
+                }
+
+                if (results.length < 80 && poiDb.length > 0) {
+                    const poiSearchLimit = Math.min(poiDb.length, 50000);
+                    for (let i = 0; i < poiSearchLimit; i++) {
+                        const poi = poiDb[i];
+                        if (!poi || !poi.name) continue;
+                        const category = poi.category || poi.type || 'Place';
+                        const key = `${String(poi.name).toLowerCase()} ${String(category).toLowerCase()} ${String(poi.city || '').toLowerCase()}`;
+                        if (!key.includes(queryLower)) continue;
+                        const dedupeKey = `p:${String(poi.name).toLowerCase()}`;
+                        if (fallbackSeen.has(dedupeKey)) continue;
+                        fallbackSeen.add(dedupeKey);
+                        results.push({
+                            type: 'poi',
+                            name: String(poi.name),
+                            category,
+                            emoji: poi.emoji || '🏢',
+                            rank: String(poi.name).toLowerCase().startsWith(queryLower) ? 0.5 : 2
+                        });
+                        if (results.length >= 120) break;
+                    }
                 }
             }
             
