@@ -24477,10 +24477,14 @@
                         }
                     }
 
-                    if (diffIdx >= target.length) {
+                    const currentLenBefore = current.length;
+                    const isRemoveChange = diffIdx >= target.length;
+                    const isAddChange = diffIdx >= currentLenBefore;
+
+                    if (isRemoveChange) {
                         // Target shorter: remove one tail item
                         current.pop();
-                    } else if (diffIdx >= current.length) {
+                    } else if (isAddChange) {
                         // Target longer: add one item
                         current.push(target[diffIdx]);
                     } else {
@@ -24508,14 +24512,15 @@
 
                     gridScroller.items = current;
 
-                    // If we collapsed a duplicate, slot positions after diffIdx
-                    // have shifted, so we MUST do a full repaint — partial
-                    // renderItemsInRange would leave stale tiles behind.
-                    if (removedDuplicate && typeof gridScroller.setItems === 'function') {
+                    // If we collapsed a duplicate OR the operation is add/remove,
+                    // slot positions after diffIdx have shifted, so we MUST do a
+                    // full repaint. Partial render would leave stale tiles behind
+                    // and can look like a duplicate on refresh.
+                    if ((removedDuplicate || isAddChange || isRemoveChange) && typeof gridScroller.setItems === 'function') {
                         gridScroller.setItems(current);
                         applyGridTextFontSizeToVisiblePosts();
                         try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
-                        const changeType = (diffIdx >= target.length) ? 'remove' : (diffIdx >= current.length ? 'add' : 'replace');
+                        const changeType = isRemoveChange ? 'remove' : (isAddChange ? 'add' : 'replace');
                         console.log(`🔁 Grid reconcile (${changeType} +dedupe) @ index ${diffIdx}`);
                         return;
                     }
@@ -24531,7 +24536,7 @@
                         applyGridTextFontSizeToVisiblePosts();
                     }
 
-                    const changeType = (diffIdx >= target.length) ? 'remove' : (diffIdx >= current.length ? 'add' : 'replace');
+                    const changeType = isRemoveChange ? 'remove' : (isAddChange ? 'add' : 'replace');
                     console.log(`🔁 Grid reconcile (${changeType}) @ index ${diffIdx}`);
                 } catch (e) {
                     console.warn('⚠️ Grid reconcile tick failed:', e);
@@ -30473,12 +30478,28 @@
 
         async function _initSellPaymentRequest() {
             const stripe = _getStripe();
-            if (!stripe) return;
+            const mount = document.getElementById('sellPayRequestMount');
+            const wrap = document.getElementById('sellCardWrap');
+            const other = document.getElementById('sellOtherWaysBtn');
+            const status = document.getElementById('sellPayStatus');
+
+            // Re-arm always resets visibility (previous successful payment hides these).
+            if (status) { status.style.display = 'none'; status.textContent = ''; }
+            if (mount) mount.style.display = 'block';
+            if (other) other.style.display = '';
+
+            if (!stripe) {
+                // Stripe unavailable: still expose checkout fallback button.
+                if (mount) {
+                    mount.innerHTML = '<div style="font-size:11px;color:#94a3b8;text-align:center;padding:6px 0;">Wallet unavailable on this device. Use card checkout.</div>';
+                }
+                if (wrap) wrap.style.display = 'block';
+                return;
+            }
             // If Boost is armed we show a note clarifying the combined charge,
             // but still render the Sell payment UI (it will use the combined total).
             if (window.pendingBoost && window.pendingBoost.armed) {
                 try {
-                    const mount = document.getElementById('sellPayRequestMount');
                     if (mount) {
                         // Unmount any existing Sell PR/button before replacing content
                         try { if (_stripeSellPRButton) { _stripeSellPRButton.unmount(); _stripeSellPRButton = null; } } catch(e){}
@@ -30487,8 +30508,8 @@
                         mount.innerHTML = '<div style="font-size:13px;color:#cbd5e1;text-align:center;padding:8px;">Note: Boost is armed — this checkout will charge the combined total.</div>';
                         mount.style.display = 'block';
                     }
-                    const wrap = document.getElementById('sellCardWrap'); if (wrap) wrap.style.display = '';
-                    const other = document.getElementById('sellOtherWaysBtn'); if (other) other.style.display = '';
+                    if (wrap) wrap.style.display = '';
+                    if (other) other.style.display = '';
                 } catch (e) { /* ignore */ }
             }
             // Unmount existing sell PR/button so recreated with fresh totals
@@ -30496,7 +30517,6 @@
             try { if (_stripeSellCardElement) { _stripeSellCardElement.unmount(); _stripeSellCardElement = null; } } catch(e){}
             const priceCents = window.SELL_PRICE_CENTS || 99; // fixed $0.99
             const totalCents = _currentCombinedPrice();
-            const mount = document.getElementById('sellPayRequestMount');
             if (!mount) return;
             mount.innerHTML = '';
             _stripeSellPR = stripe.paymentRequest({
@@ -30618,6 +30638,9 @@
         function toggleSellPurchase() {
             const btn = document.getElementById('sellBtn');
             const hint = document.getElementById('sellHint');
+            const mount = document.getElementById('sellPayRequestMount');
+            const other = document.getElementById('sellOtherWaysBtn');
+            const status = document.getElementById('sellPayStatus');
             if (!btn) return;
             window.pendingSell.armed = !window.pendingSell.armed;
             if (window.pendingSell.armed) {
@@ -30628,6 +30651,9 @@
                 btn.style.borderColor = '#3b82f6';
                 btn.style.boxShadow = '0 6px 20px rgba(59,130,246,0.35)';
                 if (hint) hint.style.display = 'block';
+                if (status) { status.style.display = 'none'; status.textContent = ''; }
+                if (mount) mount.style.display = 'block';
+                if (other) other.style.display = '';
                 _initSellPaymentRequest();
                 // Refresh boost UI labels and payment request so combined total appears ($ boost + $2)
                 try { _updateBoostPriceLabels(); } catch(e){}
