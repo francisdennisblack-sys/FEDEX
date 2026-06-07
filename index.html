@@ -2073,6 +2073,8 @@
                             try { await window.recaptchaVerifier.render(); } catch (e) { console.warn('recaptcha render failed', e); }
                         } catch (e) { console.warn('recaptcha init failed', e); }
                         let appVerifier = window.recaptchaVerifier;
+                        // Diagnostic: log verifier shape to help debug "r.verify" errors
+                        try { console.log('sendSignInCode: verifier initial', { verifier: appVerifier, hasVerify: !!(appVerifier && typeof appVerifier.verify === 'function'), hasExecute: !!(appVerifier && typeof appVerifier.execute === 'function'), childId: window.__recaptchaChildId }); } catch(e){}
                         // Ensure the verifier is a valid object with the expected API
                         if (!appVerifier || typeof appVerifier.verify !== 'function') {
                             console.warn('sendSignInCode: recaptcha verifier missing or invalid', appVerifier);
@@ -2094,6 +2096,27 @@
                                 }
                             } catch (e5) { console.warn('sendSignInCode: verifier re-init error', e5); }
                         }
+                        // If verifier still lacks verify(), attempt to synthesize it from execute()/grecaptcha
+                        try {
+                            if (appVerifier && typeof appVerifier.verify !== 'function') {
+                                console.warn('sendSignInCode: verifier lacks verify(); attempting to wrap execute/grecaptcha');
+                                if (typeof appVerifier.execute === 'function') {
+                                    appVerifier.verify = function(){
+                                        try { return Promise.resolve(appVerifier.execute()); } catch (e) { return Promise.reject(e); }
+                                    };
+                                    console.log('sendSignInCode: wrapped appVerifier.execute -> verify');
+                                } else if (window.grecaptcha && typeof window.grecaptcha.execute === 'function' && window.__recaptchaChildId) {
+                                    appVerifier.verify = function(){
+                                        try {
+                                            const maybe = window.grecaptcha.execute(window.__recaptchaChildId);
+                                            return Promise.resolve(maybe);
+                                        } catch(e){ return Promise.reject(e); }
+                                    };
+                                    console.log('sendSignInCode: wrapped grecaptcha.execute -> verify');
+                                }
+                            }
+                        } catch(e) { console.warn('sendSignInCode: verify wrapper attempt failed', e); }
+
                         if (!appVerifier || typeof appVerifier.verify !== 'function') {
                             throw new Error('recaptcha-initialization-failed: verifier missing or invalid');
                         }
