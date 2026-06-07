@@ -17535,9 +17535,9 @@
             try {
                 const customTagInput = document.getElementById('customZoneTag');
                 if (customTagInput && customTagInput.value.trim() === '') {
-                    fetchRefineDefaults();
                     // Ensure the refine dropdown/search UI is visible (helps mobile)
                     try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
+                    fetchRefineDefaults();
                     // Preload POI search index early so POIs appear quickly when user types 2+ chars
                     try {
                         if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
@@ -17546,6 +17546,96 @@
                     } catch (e) { console.warn('poi preload trigger failed', e); }
                 }
             } catch (e) { console.warn('fetchRefineDefaults failed to trigger', e); }
+        }
+
+        /**
+         * Populate refine dropdown defaults when the field is focused and empty.
+         * Shows nearby/top locations and POIs so the panel never appears blank.
+         */
+        async function fetchRefineDefaults() {
+            const dropdown = document.getElementById('refineLocationDropdown');
+            const resultsContainer = document.getElementById('refineLocationResultsContainer');
+            if (!dropdown || !resultsContainer) return;
+
+            resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Loading top locations and POIs...</div>';
+            dropdown.style.display = 'block';
+
+            try {
+                // Best-effort warmups for fuller results.
+                try {
+                    if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                        await (window._poiIndexPreloadPromise || window.ensureGlobalPoiSearchIndex());
+                    }
+                } catch (e) { /* continue with available data */ }
+                try {
+                    if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
+                        await (window._enhancedLocationsPreloadPromise || window.lazyLoadEnhancedLocationDatabase());
+                    }
+                } catch (e) { /* continue with available data */ }
+
+                const uLat = userLocation && (userLocation.latitude || userLocation.lat);
+                const uLon = userLocation && (userLocation.longitude || userLocation.lon);
+
+                const locationRows = [];
+                if (Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
+                    for (let i = 0; i < globalLocationDatabase.length; i++) {
+                        const loc = globalLocationDatabase[i];
+                        if (!loc || !loc.name) continue;
+                        const display = loc.state ? `${loc.name}, ${loc.state}` : String(loc.name);
+                        let d = Infinity;
+                        if (uLat && uLon && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
+                            d = calculateDistance(uLat, uLon, loc.lat, loc.lon) * 0.621371;
+                        }
+                        locationRows.push({ type: 'location', display, distanceMi: d });
+                    }
+                    locationRows.sort((a, b) => a.distanceMi - b.distanceMi);
+                }
+
+                const poiRows = [];
+                if (Array.isArray(globalPOIDatabase) && globalPOIDatabase.length > 0) {
+                    for (let i = 0; i < globalPOIDatabase.length; i++) {
+                        const poi = globalPOIDatabase[i];
+                        if (!poi || !poi.name) continue;
+                        let d = Infinity;
+                        if (uLat && uLon && typeof poi.lat === 'number' && typeof poi.lon === 'number') {
+                            d = calculateDistance(uLat, uLon, poi.lat, poi.lon) * 0.621371;
+                        }
+                        poiRows.push({ type: 'poi', display: String(poi.name), distanceMi: d });
+                    }
+                    poiRows.sort((a, b) => a.distanceMi - b.distanceMi);
+                }
+
+                const topPOI = poiRows.length ? poiRows[0] : null;
+                const topLocations = locationRows.slice(0, 35);
+                const otherPOIs = (topPOI ? poiRows.slice(1) : poiRows).slice(0, 15);
+
+                const esc = (s) => String(s || '').replace(/'/g, "&#39;");
+                let html = '';
+
+                if (topPOI) {
+                    html += '<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#fff;font-weight:700">Top POI</div>';
+                    html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(topPOI.display)}', event)">🏢 ${topPOI.display}${isFinite(topPOI.distanceMi) ? `<span style="color:#777;float:right">${topPOI.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
+                }
+
+                if (topLocations.length) {
+                    html += '<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Top Locations</div>';
+                    topLocations.forEach(loc => {
+                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(loc.display)}', event)">📍 ${loc.display}${isFinite(loc.distanceMi) ? `<span style="color:#777;float:right">${loc.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
+                    });
+                }
+
+                if (otherPOIs.length) {
+                    html += '<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Other Nearby POIs</div>';
+                    otherPOIs.forEach(poi => {
+                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(poi.display)}', event)">🏢 ${poi.display}${isFinite(poi.distanceMi) ? `<span style="color:#777;float:right">${poi.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
+                    });
+                }
+
+                resultsContainer.innerHTML = html || '<div style="padding:12px;color:#999;text-align:center">No locations available yet. Start typing to search.</div>';
+            } catch (e) {
+                console.warn('fetchRefineDefaults error', e);
+                resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Unable to load locations right now. Try typing to search.</div>';
+            }
         }
 
         /**
@@ -17585,8 +17675,8 @@
                 </div>
             `;
             
-            // Results container - start empty, no prefill
-            html += '<div id="refineLocationResultsContainer" style="padding: 10px; text-align: center; color: #888; font-size: 13px;"></div>';
+            // Results container with immediate guidance so the panel never appears blank.
+            html += '<div id="refineLocationResultsContainer" style="padding: 10px; text-align: center; color: #888; font-size: 13px;">Loading suggestions...</div>';
             
             dropdown.innerHTML = html;
             dropdown.style.display = 'block';
@@ -24016,12 +24106,9 @@
                         voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↑ ${likes > 0 ? likes : ''}</div><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↓ ${dislikes > 0 ? dislikes : ''}</div></div>`;
                     }
 
-                    const enrichedPost = enrichPostWithLocationData(post);
-                    
                     // Generate zone/area tag display (always show immediately, even on first load)
-                    // 🟢 FAST PATH: prefer the author's frozen `displayAreaTag` (saved to
-                    // Firebase at post-creation time). When present, skip all enrichment
-                    // and zone-context work — the badge paints in one read.
+                    // Fast path: avoid expensive enrichment for every card; read directly
+                    // from already-hydrated post fields so the tag paints with first render.
                     const resolvedAreaTag = post.displayAreaTag || post.county || post.zoneTag || post.area || post.customTag ||
                                             post.neighborhood || post.city || post.district ||
                                             post.poiName || post.state || post.region ||
@@ -24031,11 +24118,22 @@
                     if (post.displayAreaTag) {
                         // Author's frozen area tag — render directly, no formatter pass.
                         zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${post.displayAreaTag}</div>`;
-                    } else if (enrichedPost && enrichedPost.zoneContext) {
-                        zoneTagHTML = generateZoneTagHTML(post, enrichedPost.zoneContext);
                     } else {
-                        const formatted = typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(resolvedAreaTag) : resolvedAreaTag;
-                        zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${formatted}</div>`;
+                        // Preserve owner badge progression behavior, but only for the
+                        // owner's own posts to avoid slowing down every visible card.
+                        let renderedTag = resolvedAreaTag;
+                        if (isOwnedByCurrentUser(post)) {
+                            try {
+                                const enrichedOwnPost = enrichPostWithLocationData(post);
+                                if (enrichedOwnPost && enrichedOwnPost.zoneContext) {
+                                    zoneTagHTML = generateZoneTagHTML(post, enrichedOwnPost.zoneContext);
+                                }
+                            } catch (e) { /* keep fast fallback below */ }
+                        }
+                        if (!zoneTagHTML) {
+                            const formatted = typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(renderedTag) : renderedTag;
+                            zoneTagHTML = `<div style="position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background-color: #1a1a1a; display: flex; align-items: center; justify-content: flex-start; font-size: 10px; font-weight: 900; color: #fff; padding: 0 8px 6px 8px; box-sizing: border-box; font-family: 'Segoe UI', 'Helvetica Neue', sans-serif; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">${formatted}</div>`;
+                        }
                     }
                     
                     // Generate badges (self-post text badge intentionally disabled)
