@@ -24224,7 +24224,7 @@
 
                     let voteBadge = '';
                     try {
-                        if (window.readOnlyViewer) {
+                        if (!currentUserId) {
                             voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↑ ${likes > 0 ? likes : ''}</div><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↓ ${dislikes > 0 ? dislikes : ''}</div></div>`;
                         } else {
                             voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;"><span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
@@ -24289,7 +24289,7 @@
                     // Vote buttons sit just above the area tag (28px tall) at the bottom
                     let voteBadge = '';
                     try {
-                        if (window.readOnlyViewer) {
+                        if (!currentUserId) {
                             voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↑ ${likes > 0 ? likes : ''}</div><div style="flex:1;padding:6px;background:#222;color:#888;border-radius:3px;font-size:12px;text-align:center;">↓ ${dislikes > 0 ? dislikes : ''}</div></div>`;
                         } else {
                             voteBadge = `<div style="position: absolute; bottom: 36px; left: 8px; right: 8px; display: flex; gap: 6px; font-size: 12px;"><button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;"><span class="vote-count">${likes > 0 ? likes : ''}</span></button><button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="flex: 1; padding: 6px; background: #333; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">↓ <span class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button></div>`;
@@ -24340,7 +24340,20 @@
                 }
                 
                 if (badgesArray && Array.isArray(badgesArray)) {
-                    badgesArray.forEach(badge => {
+                    // Podium markers must follow CURRENT slot order, not cached post state.
+                    const filteredBadges = badgesArray.filter(b => b !== 'crowned' && b !== 'runner-up' && b !== 'podium');
+                    let livePositionBadge = null;
+                    try {
+                        const liveIndex = (window.gridScroller && Array.isArray(window.gridScroller.items))
+                            ? window.gridScroller.items.findIndex(p => p && p.id === post.id)
+                            : -1;
+                        if (liveIndex === 0) livePositionBadge = 'crowned';
+                        else if (liveIndex === 1) livePositionBadge = 'runner-up';
+                        else if (liveIndex === 2) livePositionBadge = 'podium';
+                    } catch (e) { /* ignore live-position lookup errors */ }
+                    if (livePositionBadge) filteredBadges.unshift(livePositionBadge);
+
+                    filteredBadges.forEach(badge => {
                         if (badge) {
                             box.classList.add(`badge-${badge}`);
                         }
@@ -27183,9 +27196,8 @@
             }
 
             // ========================================================================
-            // OWNER PRIORITY: Ensure current user's own posts appear first (top 20),
-            // ordered by descending likes so the most-liked own posts are most visible.
-            // This enforces the user's request to always see their own content first.
+            // OWNER PRIORITY: Ensure current user's own posts appear first.
+            // Slots 1..N are reserved for posts owned by the current viewer.
             // ========================================================================
             try {
                 if (currentUserId && Array.isArray(sortedPosts) && sortedPosts.length > 0) {
@@ -27208,14 +27220,12 @@
                             return (b.timestamp || 0) - (a.timestamp || 0);
                         });
 
-                        const topOwn = ownPosts.slice(0, 20);
-
-                        // Remove these from the main list while preserving order for others
+                        // Remove own posts from the main list while preserving order for others
                         const remaining = sortedPosts.filter(p => !ownSet.has(p.id));
 
-                        // Prepend topOwn to the sorted list
-                        sortedPosts = [...topOwn, ...remaining];
-                        console.log(`🔰 OWN-FIRST: Placed ${topOwn.length} user posts at top (most liked first)`);
+                        // Prepend ALL own posts to the sorted list (unlimited owner slots)
+                        sortedPosts = [...ownPosts, ...remaining];
+                        console.log(`🔰 OWN-FIRST: Placed ${ownPosts.length} user posts at top (unlimited owner slots)`);
                     }
                 }
             } catch (e) {
@@ -27331,6 +27341,29 @@
             // Content freshness waterfall (feature-flagged):
             // Local -> Nearby -> Regional -> Global top-liked with stale-time fallback injection.
             sortedPosts = applyContentFreshnessWaterfall(sortedPosts, 'full-render');
+
+            // FINAL OWNER-FIRST ENFORCEMENT (hard guarantee):
+            // after all ranking/rotation/freshness passes, keep viewer-owned posts in slots 1..N.
+            try {
+                if (currentUserId && Array.isArray(sortedPosts) && sortedPosts.length > 0) {
+                    const ownPostsFinal = [];
+                    const otherPostsFinal = [];
+                    for (const p of sortedPosts) {
+                        if (!p || !p.id) continue;
+                        if (p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId) {
+                            ownPostsFinal.push(p);
+                        } else {
+                            otherPostsFinal.push(p);
+                        }
+                    }
+                    if (ownPostsFinal.length > 0) {
+                        sortedPosts = [...ownPostsFinal, ...otherPostsFinal];
+                        console.log(`🔒 OWNER-FIRST GUARANTEE: slots 1..${ownPostsFinal.length} reserved for viewer posts`);
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ FINAL OWNER-FIRST enforcement failed:', e);
+            }
 
             // Refresh latest snapshot after position-1 rotation
             window.latestSortedPosts = [...sortedPosts];
@@ -27455,15 +27488,12 @@
                 // so that NEW can be shown alongside a second badge.
             }
             
-            // 2. POSITION & TOP-LIKE BADGES
-            // - `crowned` is reserved for the most-liked post(s) (likes-based), not purely by position.
-            // - `runner-up` and `podium` remain position-based for slots #2 and #3.
+            // 2. POSITION BADGES
+            // Podium markers are strictly slot-based and must follow current order:
+            // #1 => crowned, #2 => runner-up, #3 => podium.
             if (allPosts.length > 0) {
                 const postIndex = allPosts.findIndex(p => p.id === post.id);
-                // Determine max likes in the comparison set (likes-only, not net likes)
-                const maxLikes = allPosts.reduce((m, p) => Math.max(m, Number(p.likes) || 0), 0);
-
-                if (Number(likes) === maxLikes && maxLikes > 0) {
+                if (postIndex === 0) {
                     badges.push('crowned');
                 } else if (postIndex === 1) {
                     badges.push('runner-up');
@@ -27559,12 +27589,8 @@
         function updateTopPositionBadges(postsInGrid) {
             if (!postsInGrid || postsInGrid.length === 0) return;
             
-            // Assign position badges for runner-up/podium, and ensure `crowned` only
-            // decorates the post(s) with the highest like count among postsInGrid.
-            const positionBadges = ['runner-up', 'podium'];
-
-            // Compute max likes (likes-only) for the grid
-            const maxLikesGrid = postsInGrid.reduce((m, p) => Math.max(m, Number(p.likes) || 0), 0);
+            // Position markers are slot-based only.
+            const positionBadges = ['crowned', 'runner-up', 'podium'];
 
             // First remove any existing position badges from all visible posts
             postsInGrid.forEach(post => {
@@ -27573,31 +27599,17 @@
                 if (el) el.classList.remove('badge-crowned', 'badge-runner-up', 'badge-podium');
             });
 
-            // Apply crowned to any post matching maxLikesGrid (only if maxLikesGrid > 0)
-            if (maxLikesGrid > 0) {
-                postsInGrid.forEach(post => {
-                    if (!post || !post.id) return;
-                    if (Number(post.likes || 0) === maxLikesGrid) {
-                        const el = document.querySelector(`[data-post-id="${post.id}"]`);
-                        if (el) {
-                            el.classList.add('badge-crowned');
-                            console.log(`   ✅ Crowned applied to post ${post.id.substring(0,8)} (likes=${post.likes})`);
-                        }
-                    }
-                });
-            }
-
-            // Ensure runner-up/podium badges for positions 2 and 3 (indexes 1 & 2)
-            postsInGrid.slice(1, 3).forEach((post, idx) => {
+            // Apply badges for positions 1, 2, 3 (indexes 0, 1, 2)
+            postsInGrid.slice(0, 3).forEach((post, idx) => {
                 if (!post || !post.id) return;
                 const el = document.querySelector(`[data-post-id="${post.id}"]`);
                 if (el) {
                     el.classList.add(`badge-${positionBadges[idx]}`);
-                    console.log(`   ✅ Post ${post.id.substring(0,8)}: position ${idx + 2} → badge-${positionBadges[idx]}`);
+                    console.log(`   ✅ Post ${post.id.substring(0,8)}: position ${idx + 1} → badge-${positionBadges[idx]}`);
                 }
             });
 
-            console.log(`✅ Top position badges updated: crowned by likes, runner-up/podium by position`);
+            console.log(`✅ Top position badges updated: crowned/runner-up/podium by position`);
         }
         window.getPostBadgesForArea = getPostBadgesForArea;
 
