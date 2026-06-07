@@ -2436,6 +2436,25 @@
                 const DEMO_INTERVAL_MS = 3000;
                 const demoKey = 'demo';
 
+                // Ensure a per-device demo grid key so demo posts are a separate entity
+                window.ensureDemoGridKey = function(){
+                    try{
+                        if(window.demoGridKey) return window.demoGridKey;
+                        // Prefer a stable key tied to demoUserId
+                        window.ensureDemoUserId && window.ensureDemoUserId();
+                        let g = null;
+                        try { g = localStorage.getItem('demoGridKey'); } catch(e){}
+                        if(!g){
+                            const base = window.demoUserId || ('anon-' + Math.random().toString(36).slice(2,8));
+                            g = 'demo-grid-' + base;
+                            try { localStorage.setItem('demoGridKey', g); } catch(e){}
+                        }
+                        window.demoGridKey = g;
+                        return g;
+                    }catch(e){ window.demoGridKey = 'demo-grid-temp-' + Date.now(); return window.demoGridKey; }
+                };
+                try{ window.ensureDemoGridKey(); }catch(e){}
+
                 function makeDemoPost(i){
                     const types = ['text','text','photo','video'];
                     const areas = ['Downtown','Westside','Riverside','Uptown'];
@@ -2469,7 +2488,7 @@
                     if(!grid) return;
                     // Remove previous demo nodes to keep rendering idempotent
                     Array.from(grid.querySelectorAll('.demo-post')).forEach(n=>n.remove());
-                    const posts = (window.gridContent && (window.gridContent[demoKey] || window.gridContent['shared-posts'])) || [];
+                    const posts = (window.gridContent && (window.gridContent[window.demoGridKey] || [])) || [];
                     posts.forEach(p => {
                         const box = document.createElement('div');
                         box.className = 'demo-post';
@@ -2547,7 +2566,8 @@
                     if(!window.gridContent) window.gridContent = {};
                     // Always inject demo posts into shared-posts at the front so the
                     // VirtualGridScroller can reserve the top N demo slots for signed-out users.
-                    const targetKey = 'shared-posts';
+                    // use per-device demo grid key so demo posts remain separate
+                    const targetKey = window.ensureDemoGridKey ? window.ensureDemoGridKey() : ('demo-' + (window.demoUserId || Math.random().toString(36).slice(2,8)));
                     // Preserve existing content for stop restore
                     if (!window._preDemoGridContent) window._preDemoGridContent = Object.assign({}, window.gridContent || {});
                     const demoPosts = [0,1,2,3].map(makeDemoPost).map(p => { p.badges = p.badges || []; return p; });
@@ -2559,10 +2579,10 @@
 
                     // Mirror into postCache so render pipeline can find them
                     window.postCache = window.postCache || {};
-                    demoPosts.forEach(p => { try { p.demo = true; window.postCache[p.id] = p; } catch(e){} });
+                    demoPosts.forEach(p => { try { p.demo = true; p.ownerUid = p.ownerUid || window.demoUserId || null; window.postCache[p.id] = p; } catch(e){} });
 
                     // Persist demo active state so refresh restores demo for signed-out users
-                    try { sessionStorage.setItem('demoActive', '1'); sessionStorage.setItem('demoKey', targetKey); } catch(e){}
+                    try { sessionStorage.setItem('demoActive', '1'); sessionStorage.setItem('demoGridKey', targetKey); } catch(e){}
 
                     renderMVPDemo();
                     try { if (typeof rebuildGridScrollerFromGridContent === 'function') rebuildGridScrollerFromGridContent(); } catch(e){}
@@ -2581,14 +2601,14 @@
                             ['Join the conversation','Watch this space','Top picks','Community highlights']
                         ];
                         window.__demoMVPTick = (window.__demoMVPTick + 1) % texts.length;
-                        const rotatingPosts = (window.gridContent && (window.gridContent[demoKey] || window.gridContent['shared-posts'])) || [];
+                            const rotatingPosts = (window.gridContent && (window.gridContent[window.demoGridKey] || [])) || [];
                         rotatingPosts.forEach((p, idx) => {
                             // treat posts without mediaType as text posts
                             if(!p.mediaType) p.text = texts[idx % texts.length][window.__demoMVPTick % texts[idx % texts.length].length] || '';
                         });
                         // Rotate area tags slowly
                         const areas = ['Downtown','Westside','Riverside','Uptown'];
-                        const areaRotatePosts = (window.gridContent && (window.gridContent[demoKey] || window.gridContent['shared-posts'])) || [];
+                        const areaRotatePosts = (window.gridContent && (window.gridContent[window.demoGridKey] || [])) || [];
                         areaRotatePosts.forEach((p, idx) => { p.areaTag = areas[(window.__demoMVPTick + idx) % areas.length]; });
                         renderMVPDemo();
                         try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
@@ -2599,7 +2619,7 @@
                     window.__demoBadgeInterval = setInterval(() => {
                         const badgeStates = ['Featured','Boost','Buy',''];
                         window.__demoBadgeTick = (window.__demoBadgeTick + 1) % badgeStates.length;
-                        const posts = (window.gridContent && (window.gridContent[demoKey] || window.gridContent['shared-posts'])) || [];
+                        const posts = (window.gridContent && (window.gridContent[window.demoGridKey] || [])) || [];
                         // Assign badge labels from real badge universe and update likes to match
                         const existingNonDemo = (window.gridContent && Array.isArray(window.gridContent['shared-posts'])) ? window.gridContent['shared-posts'].filter(x => !x || !x.demo) : [];
                         const demoPosts = posts.filter(p => p && p.demo);
@@ -2625,7 +2645,8 @@
 
                         // Sort demo posts by likes desc and then rebuild shared-posts preserving demo at front
                         demoPosts.sort((a,b) => (Number(b.likes||0) - Number(a.likes||0)));
-                        window.gridContent['shared-posts'] = demoPosts.concat(existingNonDemo);
+                        // Keep demo posts in their own per-device demo grid key
+                        window.gridContent[window.demoGridKey] = demoPosts.concat(existingNonDemo);
 
                         // Mirror into postCache
                         try { window.postCache = window.postCache || {}; demoPosts.forEach(p => { if (p && p.id) window.postCache[p.id] = p; }); } catch(e){}
