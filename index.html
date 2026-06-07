@@ -2564,18 +2564,14 @@
 
                 window.startDemoMVP = function(){
                     if(!window.gridContent) window.gridContent = {};
-                    // Always inject demo posts into shared-posts at the front so the
-                    // VirtualGridScroller can reserve the top N demo slots for signed-out users.
-                    // use per-device demo grid key so demo posts remain separate
+                    // Use per-device demo grid key and ensure the demo grid contains ONLY demo entries
                     const targetKey = window.ensureDemoGridKey ? window.ensureDemoGridKey() : ('demo-' + (window.demoUserId || Math.random().toString(36).slice(2,8)));
-                    // Preserve existing content for stop restore
+                    // Preserve existing content for stop/restore (shallow copy of keys)
                     if (!window._preDemoGridContent) window._preDemoGridContent = Object.assign({}, window.gridContent || {});
                     const demoPosts = [0,1,2,3].map(makeDemoPost).map(p => { p.badges = p.badges || []; return p; });
 
-                    // Ensure shared-posts exists and doesn't duplicate demo entries
-                    window.gridContent[targetKey] = window.gridContent[targetKey] || [];
-                    const existing = Array.isArray(window.gridContent[targetKey]) ? window.gridContent[targetKey].filter(p => !p || !p.demo) : [];
-                    window.gridContent[targetKey] = demoPosts.concat(existing);
+                    // Replace any existing demo grid content with only demo posts
+                    window.gridContent[targetKey] = demoPosts.slice();
 
                     // Mirror into postCache so render pipeline can find them
                     window.postCache = window.postCache || {};
@@ -2587,6 +2583,48 @@
                     renderMVPDemo();
                     try { if (typeof rebuildGridScrollerFromGridContent === 'function') rebuildGridScrollerFromGridContent(); } catch(e){}
                     try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
+
+                    // Notify fallback scroller (if present) to refresh
+                    try { document.dispatchEvent(new Event('demo-injected')); } catch(e){}
+
+                    // If no primary gridScroller exists yet, create a minimal fallback now
+                    try {
+                        if (!window.gridScroller) {
+                            const grid = document.getElementById('grid');
+                            if (grid) {
+                                const sc = {
+                                    items: [],
+                                    setItems(items){ this.items = Array.isArray(items)?items.slice():[]; this.render(); },
+                                    refresh(){ this.render(); },
+                                    render(){ try{ grid.innerHTML = ''; this.items.forEach((p, idx) => {
+                                            const box = document.createElement('div');
+                                            box.className = 'grid-box';
+                                            box.style.cssText = 'width:220px; height:220px; margin:10px; background:#0b0b0b; border-radius:12px; display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:800; font-size:22px; cursor:pointer; position:relative; padding:12px; box-sizing:border-box;';
+                                            box.setAttribute('data-post-id', p && p.id ? p.id : ('item-' + idx));
+                                            const content = document.createElement('div');
+                                            content.style.cssText = 'text-align:center; display:flex; flex-direction:column; align-items:center; gap:8px; width:100%;';
+                                            if (p && p.mediaType) {
+                                                const mediaBox = document.createElement('div');
+                                                mediaBox.style.cssText = 'width:100%; height:120px; background:#000; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#666; font-size:28px;';
+                                                mediaBox.textContent = p.mediaType === 'video' ? '🎥' : '📷';
+                                                content.appendChild(mediaBox);
+                                            } else {
+                                                const txt = document.createElement('div');
+                                                txt.style.cssText = 'font-size:16px; color:#fff; font-weight:800;';
+                                                txt.textContent = (p && (p.content || p.text)) || '';
+                                                content.appendChild(txt);
+                                            }
+                                            box.appendChild(content);
+                                            grid.appendChild(box);
+                                        }); }catch(e){console.warn('fallback scroller render error', e);} },
+                                    getVisibleItems(){ return this.items.slice(0, Math.min(6, this.items.length)); }
+                                };
+                                window.gridScroller = sc;
+                            }
+                        }
+                        // Ensure scroller shows our demo posts immediately
+                        try { if (window.gridScroller && typeof window.gridScroller.setItems === 'function') window.gridScroller.setItems(window.gridContent[targetKey]); else if (window.gridScroller) { window.gridScroller.items = window.gridContent[targetKey]; if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh(); } } catch(e){}
+                    } catch(e){}
 
                     if(window.__demoMVPInterval) clearInterval(window.__demoMVPInterval);
                     if(window.__demoBadgeInterval) clearInterval(window.__demoBadgeInterval);
@@ -2643,10 +2681,9 @@
                             p.dislikes = Math.floor(Math.random() * Math.min(5, Math.floor(p.likes/10)));
                         });
 
-                        // Sort demo posts by likes desc and then rebuild shared-posts preserving demo at front
+                        // Sort demo posts by likes desc and keep demo posts only in demo grid
                         demoPosts.sort((a,b) => (Number(b.likes||0) - Number(a.likes||0)));
-                        // Keep demo posts in their own per-device demo grid key
-                        window.gridContent[window.demoGridKey] = demoPosts.concat(existingNonDemo);
+                        window.gridContent[window.demoGridKey] = demoPosts.slice();
 
                         // Mirror into postCache
                         try { window.postCache = window.postCache || {}; demoPosts.forEach(p => { if (p && p.id) window.postCache[p.id] = p; }); } catch(e){}
@@ -2818,6 +2855,52 @@
                     }catch(e){ console.warn('runDemoSmokeTests failed', e); out.ok = false; out.error = String(e); }
                     return out;
                 };
+            })();
+        </script>
+
+        <script>
+            // Fallback lightweight gridScroller for demo/testing when primary gridScroller is not initialized.
+            (function ensureGridScrollerFallback(){
+                function createFallback(){
+                    try {
+                        const grid = document.getElementById('grid');
+                        if (!grid) return null;
+                        const sc = {
+                            items: [],
+                            setItems(items){ this.items = Array.isArray(items)?items.slice():[]; this.render(); },
+                            refresh(){ this.render(); },
+                            render(){ try{ grid.innerHTML = ''; this.items.forEach((p, idx) => {
+                                const box = document.createElement('div');
+                                box.className = 'grid-box';
+                                box.style.cssText = 'width:220px; height:220px; margin:10px; background:#0b0b0b; border-radius:12px; display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:800; font-size:22px; cursor:pointer; position:relative; padding:12px; box-sizing:border-box;';
+                                box.setAttribute('data-post-id', p && p.id ? p.id : ('item-' + idx));
+                                const content = document.createElement('div');
+                                content.style.cssText = 'text-align:center; display:flex; flex-direction:column; align-items:center; gap:8px; width:100%;';
+                                if (p && p.mediaType) {
+                                    const mediaBox = document.createElement('div');
+                                    mediaBox.style.cssText = 'width:100%; height:120px; background:#000; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#666; font-size:28px;';
+                                    mediaBox.textContent = p.mediaType === 'video' ? '🎥' : '📷';
+                                    content.appendChild(mediaBox);
+                                } else {
+                                    const txt = document.createElement('div');
+                                    txt.style.cssText = 'font-size:16px; color:#fff; font-weight:800;';
+                                    txt.textContent = (p && (p.content || p.text)) || '';
+                                    content.appendChild(txt);
+                                }
+                                box.appendChild(content);
+                                grid.appendChild(box);
+                            }); }catch(e){console.warn('fallback scroller render error', e);} },
+                            getVisibleItems(){ return this.items.slice(0, Math.min(6, this.items.length)); }
+                        };
+                        return sc;
+                    } catch(e){ return null; }
+                }
+                if (!window.gridScroller) {
+                    const fb = createFallback();
+                    if (fb) window.gridScroller = fb;
+                }
+                // Ensure demo injection after demo start
+                document.addEventListener('demo-injected', () => { try { if (window.gridScroller && typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh(); } catch(e){} });
             })();
         </script>
 
