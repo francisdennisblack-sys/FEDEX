@@ -2444,6 +2444,8 @@
                     return {
                         id: `demo-${i}`,
                         demo: true,
+                        // ownerUid set to per-device demo ID so posts look "real"
+                        ownerUid: window.demoUserId || null,
                         // Schema-compatible fields used by render pipeline
                         mediaType: isMedia ? (kind === 'video' ? 'video' : 'image') : null,
                         photoURL: isMedia ? null : null,
@@ -2695,6 +2697,45 @@
                 // Expose quick test helpers for manual control during QA
                 window.forceStartDemo = function(){ try { window.startDemoMVP(); } catch(e){} };
                 window.forceStopDemo = function(){ try { window.stopDemoMVP(); } catch(e){} };
+
+                // --- Demo device identity helpers ---
+                window.ensureDemoUserId = function(){
+                    try{
+                        if(window.demoUserId) return window.demoUserId;
+                        let id = null;
+                        try { id = localStorage.getItem('demoUserId'); } catch(e){}
+                        if(!id){ id = 'demo-device-' + Math.random().toString(36).slice(2,10); try{ localStorage.setItem('demoUserId', id); }catch(e){} }
+                        window.demoUserId = id;
+                        return id;
+                    }catch(e){ window.demoUserId = 'demo-device-temp-' + Date.now(); return window.demoUserId; }
+                };
+                // Initialize immediately so makeDemoPost can use it
+                try{ window.ensureDemoUserId(); }catch(e){}
+
+                window.showDemoUserId = function(){ try{ window.ensureDemoUserId(); console.log('demoUserId:', window.demoUserId); return window.demoUserId;}catch(e){return null;} };
+
+                // Suppress analytics/metrics for demo posts (owned by demoUserId)
+                (function patchMetricSuppression(){
+                    function isDemoPostObj(p){ return p && (p.demo || (window.demoUserId && p.ownerUid === window.demoUserId)); }
+                    try{
+                        if(typeof window.sendPostImpressionMetric === 'function'){
+                            const _orig = window.sendPostImpressionMetric.bind(window);
+                            window.sendPostImpressionMetric = function(postId){
+                                try{ const p = window.postCache && window.postCache[postId]; if(isDemoPostObj(p)) { console.log('suppressed demo impression', postId); return; } }catch(e){}
+                                return _orig(postId);
+                            };
+                        }
+                    }catch(e){}
+                    try{
+                        if(typeof window.sendPostClickMetric === 'function'){
+                            const _orig2 = window.sendPostClickMetric.bind(window);
+                            window.sendPostClickMetric = function(postId){
+                                try{ const p = window.postCache && window.postCache[postId]; if(isDemoPostObj(p)) { console.log('suppressed demo click', postId); return; } }catch(e){}
+                                return _orig2(postId);
+                            };
+                        }
+                    }catch(e){}
+                })();
             })();
         </script>
 
