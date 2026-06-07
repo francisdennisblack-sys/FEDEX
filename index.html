@@ -1999,6 +1999,98 @@
                 function _smsKey(phone) {
                     try { return 'smsAttempts:' + phone; } catch (e) { return null; }
                 }
+
+                // Ensure grecaptcha script is present and ready. Injects script if missing.
+                function ensureRecaptchaLoaded(timeoutMs = 15000) {
+                    return new Promise((resolve, reject) => {
+                        try {
+                            if (window.grecaptcha && typeof window.grecaptcha.ready === 'function') {
+                                // grecaptcha already present
+                                return window.grecaptcha.ready(() => resolve(true));
+                            }
+
+                            // If a loading process is already in flight, poll for grecaptcha
+                            const existing = Array.from(document.getElementsByTagName('script')).some(s => (s.src || '').indexOf('recaptcha') !== -1);
+                            if (!existing) {
+                                const s = document.createElement('script');
+                                s.src = 'https://www.google.com/recaptcha/api.js?render=explicit';
+                                s.async = true;
+                                s.defer = true;
+                                s.onload = function() {
+                                    try {
+                                        if (window.grecaptcha && typeof window.grecaptcha.ready === 'function') {
+                                            window.grecaptcha.ready(() => resolve(true));
+                                        } else {
+                                            // some builds expose grecaptcha synchronously
+                                            const tryPoll = () => {
+                                                if (window.grecaptcha) return resolve(true);
+                                                setTimeout(() => {
+                                                    if (window.grecaptcha) return resolve(true);
+                                                    reject(new Error('grecaptcha not available after script load'));
+                                                }, 1000);
+                                            };
+                                            tryPoll();
+                                        }
+                                    } catch (e) { reject(e); }
+                                };
+                                s.onerror = function(ev) { reject(new Error('Failed loading recaptcha script')); };
+                                document.head.appendChild(s);
+                            }
+
+                            // Poll until grecaptcha appears or timeout
+                            const start = Date.now();
+                            (function poll() {
+                                if (window.grecaptcha && typeof window.grecaptcha.ready === 'function') {
+                                    try { window.grecaptcha.ready(() => resolve(true)); } catch (e) { resolve(true); }
+                                    return;
+                                }
+                                if (Date.now() - start > timeoutMs) return reject(new Error('grecaptcha load timeout'));
+                                setTimeout(poll, 250);
+                            })();
+                        } catch (e) { reject(e); }
+                    });
+                }
+
+                // Render a visible reCAPTCHA widget as a fallback when invisible fails.
+                // Returns the created RecaptchaVerifier instance.
+                async function renderVisibleRecaptcha(timeoutMs = 30000) {
+                    try {
+                        await ensureRecaptchaLoaded(Math.min(timeoutMs, 15000));
+                    } catch (e) {
+                        throw new Error('grecaptcha-not-available');
+                    }
+                    const container = document.getElementById('recaptcha-container') || (function(){ const d = document.createElement('div'); d.id='recaptcha-container'; document.body.appendChild(d); return d; })();
+                    try {
+                        // make container visible so the widget can be interacted with
+                        container.style.display = '';
+                    } catch(e){}
+                    // remove any previous visible child
+                    try {
+                        if (window.__recaptchaChildId) {
+                            const old = document.getElementById(window.__recaptchaChildId);
+                            if (old && old.parentNode) old.parentNode.removeChild(old);
+                            window.__recaptchaChildId = null;
+                        }
+                    } catch(e){}
+                    const childId = 'recaptcha-visible-' + Date.now() + '-' + Math.floor(Math.random()*10000);
+                    const child = document.createElement('div');
+                    child.id = childId;
+                    // ensure visible styling
+                    child.style.display = 'block';
+                    child.style.margin = '8px 0';
+                    container.appendChild(child);
+                    window.__recaptchaChildId = childId;
+
+                    // Create a visible verifier (normal/visible size)
+                    try {
+                        const verifier = new RecaptchaVerifier(childId, { size: 'normal' }, auth);
+                        // render gives an id; wait briefly for grecaptcha to initialise
+                        try { await verifier.render(); } catch (e) { /* continue — sometimes render is synchronous */ }
+                        return verifier;
+                    } catch (e) {
+                        throw e;
+                    }
+                }
                 function getSmsAttemptData(phone) {
                     try {
                         const k = _smsKey(phone);
@@ -2044,6 +2136,16 @@
 
                         // initialize invisible reCAPTCHA safely (avoid double-render errors)
                         try {
+                            // Ensure grecaptcha script is present and ready before creating verifier
+                            try {
+                                await ensureRecaptchaLoaded(15000);
+                            } catch (e) {
+                                console.warn('ensureRecaptchaLoaded failed', e);
+                                try { window.__lastRecaptchaError = { time: Date.now(), code: 'recaptcha-load-failed', message: String(e && e.message), stack: (e && e.stack) || null }; } catch(_){}
+                                throw new Error('recaptcha-initialization-failed: grecaptcha failed to load');
+                            }
+
+                        try {
                             const container = document.getElementById('recaptcha-container') || (function(){ const d = document.createElement('div'); d.id='recaptcha-container'; document.body.appendChild(d); return d; })();
 
                             // If an old verifier exists, try to clear it and remove its child node
@@ -2078,7 +2180,19 @@
                         // Basic validation: ensure verifier exists and provides `verify` API
                         if (!appVerifier || typeof appVerifier.verify !== 'function') {
                             console.warn('sendSignInCode: recaptcha verifier missing or invalid', appVerifier);
-                            throw new Error('recaptcha-initialization-failed: verifier missing or invalid');
+                            // Attempt visible fallback before giving up
+                            try {
+                                const visibleVerifier = await renderVisibleRecaptcha();
+                                if (visibleVerifier && typeof visibleVerifier.verify === 'function') {
+                                    appVerifier = visibleVerifier;
+                                    // expose it so confirm logic can clear later
+                                    window.recaptchaVerifier = visibleVerifier;
+                                    try { showNotification && showNotification('Please complete the captcha to continue'); } catch(e){}
+                                }
+                            } catch (vfErr) {
+                                console.warn('Visible recaptcha fallback failed', vfErr);
+                                throw new Error('recaptcha-initialization-failed: verifier missing or invalid');
+                            }
                         }
                         // Ensure auth state persists across page reloads in this browser
                         try {
@@ -2102,6 +2216,7 @@
                         return true;
                     } catch (err) {
                         console.error('sendSignInCode failed', err);
+                        try { window.__lastRecaptchaError = { time: Date.now(), code: (err && (err.code || err.message)) || String(err), message: (err && err.message) || '', stack: (err && err.stack) || null, grecaptchaPresent: !!(window.grecaptcha), recaptchaVerifierType: typeof window.recaptchaVerifier, recaptchaChildId: window.__recaptchaChildId || null, location: (typeof location !== 'undefined' ? { origin: location.origin, hostname: location.hostname } : null) }; } catch(e){}
                         // Common cause: too many SMS requests or reCAPTCHA failures. Provide user feedback and a cooldown.
                         const code = err && (err.code || err.message) ? (err.code || err.message) : String(err || 'unknown');
                         if (code === 'auth/too-many-requests' || (typeof code === 'string' && code.includes('too-many-requests'))) {
@@ -2122,6 +2237,17 @@
                                     startButtonCooldown(btn, cooldown);
                                 }
                             } catch (e) { console.warn('Cooldown start failed', e); }
+                        } else if (code === 'auth/captcha-check-failed' || (typeof code === 'string' && (code.indexOf('Hostname match not found') !== -1 || code.indexOf('captcha') !== -1))) {
+                            // Friendly guidance when reCAPTCHA/hostname mismatch occurs
+                            const host = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'unknown-host';
+                            const guidance = `Captcha check failed for host ${host}. Ensure this domain is listed under Firebase Console → Authentication → Authorized domains, and serve the app over http(s) (not file://). For local testing add localhost or 127.0.0.1.`;
+                            try { console.warn('sendSignInCode: captcha-check-failed', guidance, err); } catch(e){}
+                            try { showNotification && showNotification('Sending code failed: captcha check failed. See console for details.'); } catch(e){}
+                            // clear verifier so next attempt recreates cleanly
+                            try { if (window.recaptchaVerifier && typeof window.recaptchaVerifier.clear === 'function') { window.recaptchaVerifier.clear(); } } catch(e){}
+                            window.recaptchaVerifier = null;
+                            // Optionally disable send button briefly to avoid rapid retries
+                            try { const btn = document.getElementById('doSendCode'); if (btn) startButtonCooldown(btn, 30); } catch(e){}
                         }
                         throw err;
                     }
@@ -3722,6 +3848,24 @@
         window.RecaptchaVerifier = RecaptchaVerifier;
         window.signInWithPhoneNumber = signInWithPhoneNumber;
         window.signOut = signOut;
+
+        // Diagnostic capture for recaptcha errors
+        try { window.__lastRecaptchaError = null; } catch(e){}
+        window.dumpRecaptchaDiagnostics = function(){
+            try {
+                return {
+                    time: Date.now(),
+                    origin: (typeof location !== 'undefined' && location.origin) ? location.origin : null,
+                    hostname: (typeof location !== 'undefined' && location.hostname) ? location.hostname : null,
+                    grecaptchaPresent: !!(window.grecaptcha),
+                    grecaptchaExecute: !!(window.grecaptcha && typeof window.grecaptcha.execute === 'function'),
+                    recaptchaVerifierType: typeof window.recaptchaVerifier,
+                    recaptchaChildId: window.__recaptchaChildId || null,
+                    lastRecaptchaError: window.__lastRecaptchaError || null,
+                    scripts: Array.from(document.querySelectorAll('script')).map(s => ({ src: s.src || null, async: !!s.async, defer: !!s.defer }))
+                };
+            } catch (e) { return { error: String(e) }; }
+        };
 
         // ==========================================================================
         // 💳 STRIPE PAYMENT FLOW
