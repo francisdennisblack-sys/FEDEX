@@ -2659,8 +2659,42 @@
                         const existingCount = Object.values(window.gridContent || {}).flat().length || 0;
                         const demoActive = (function(){ try { return sessionStorage && sessionStorage.getItem && sessionStorage.getItem('demoActive') === '1'; } catch(e){ return false; } })();
                         if(!window.currentUserId && (demoActive || existingCount === 0)) setTimeout(() => window.startDemoMVP(), 200);
+
+                        // Ensure demo responds to auth state changes. If Firebase `auth`
+                        // is available, register a proper listener. Otherwise poll until
+                        // auth/currentUserId becomes available and then start/stop demo.
+                        (function ensureDemoAuthWatcher(){
+                            // If explicit API exists, prefer it
+                            try {
+                                if (window.onAuthStateChanged && window.auth) {
+                                    try { window.onAuthStateChanged(window.auth, (user) => { if (!user) { window.startDemoMVP(); } else { window.stopDemoMVP(); } }); } catch(e){}
+                                    return; // listener registered
+                                }
+                            } catch(e){}
+
+                            // Polling fallback (short-lived)
+                            let checks = 0;
+                            const intId = setInterval(() => {
+                                checks++;
+                                try {
+                                    const signedIn = !!(window.currentUserId || (window.auth && window.auth.currentUser));
+                                    if (!signedIn) {
+                                        // Start demo only if not already running
+                                        try { if (!window.__demoMVPInterval) window.startDemoMVP(); } catch(e){}
+                                    } else {
+                                        try { if (window.__demoMVPInterval) window.stopDemoMVP(); } catch(e){}
+                                    }
+                                } catch(e){}
+                                // stop polling after 30 checks (~9s)
+                                if (checks > 30) clearInterval(intId);
+                            }, 300);
+                        })();
                     }catch(e){ /* ignore */ }
                 });
+
+                // Expose quick test helpers for manual control during QA
+                window.forceStartDemo = function(){ try { window.startDemoMVP(); } catch(e){} };
+                window.forceStopDemo = function(){ try { window.stopDemoMVP(); } catch(e){} };
             })();
         </script>
 
