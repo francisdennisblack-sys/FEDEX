@@ -2072,7 +2072,31 @@
                             window.recaptchaVerifier = new RecaptchaVerifier(childId, { size: 'invisible' }, auth);
                             try { await window.recaptchaVerifier.render(); } catch (e) { console.warn('recaptcha render failed', e); }
                         } catch (e) { console.warn('recaptcha init failed', e); }
-                        const appVerifier = window.recaptchaVerifier;
+                        let appVerifier = window.recaptchaVerifier;
+                        // Ensure the verifier is a valid object with the expected API
+                        if (!appVerifier || typeof appVerifier.verify !== 'function') {
+                            console.warn('sendSignInCode: recaptcha verifier missing or invalid', appVerifier);
+                            // Try to (re)create verifier using the known global constructor as a fallback
+                            try {
+                                if (typeof window.RecaptchaVerifier === 'function') {
+                                    try {
+                                        window.recaptchaVerifier = new window.RecaptchaVerifier(childId, { size: 'invisible' }, auth);
+                                    } catch (e2) {
+                                        try {
+                                            // Older signature fallback: (auth, containerOrId, params)
+                                            window.recaptchaVerifier = new window.RecaptchaVerifier(auth, childId, { size: 'invisible' });
+                                        } catch (e3) {
+                                            console.warn('sendSignInCode: RecaptchaVerifier fallback constructors failed', e2, e3);
+                                        }
+                                    }
+                                    try { await window.recaptchaVerifier.render(); } catch (e4) { console.warn('sendSignInCode: recaptcha render fallback failed', e4); }
+                                    appVerifier = window.recaptchaVerifier;
+                                }
+                            } catch (e5) { console.warn('sendSignInCode: verifier re-init error', e5); }
+                        }
+                        if (!appVerifier || typeof appVerifier.verify !== 'function') {
+                            throw new Error('recaptcha-initialization-failed: verifier missing or invalid');
+                        }
                         // Ensure auth state persists across page reloads in this browser
                         try {
                             if (window.setPersistence && window.browserLocalPersistence && window.auth) {
@@ -2096,7 +2120,7 @@
                     } catch (err) {
                         console.error('sendSignInCode failed', err);
                         // Common cause: too many SMS requests or reCAPTCHA failures. Provide user feedback and a cooldown.
-                        const code = err && err.code ? err.code : (err && err.message ? err.message : 'unknown');
+                        const code = err && (err.code || err.message) ? (err.code || err.message) : String(err || 'unknown');
                         if (code === 'auth/too-many-requests' || (typeof code === 'string' && code.includes('too-many-requests'))) {
                             const msg = 'SMS quota exceeded or too many attempts. Try again later or use a test number in Firebase console.';
                             try { showNotification && showNotification('Sending code failed: ' + msg); } catch(e){}
