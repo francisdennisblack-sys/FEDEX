@@ -10529,24 +10529,57 @@
         window.hiddenPosts = hiddenPosts; // Expose for cleanup
         const HIDDEN_POSTS_BY_USER_KEY = 'hiddenPostsByUser';
 
-        function getHiddenPostsViewerKey(viewerId) {
-            if (viewerId) return viewerId;
+        function getHiddenPostsViewerKeys(viewerId) {
+            const keys = [];
+            const pushKey = (v) => {
+                if (!v) return;
+                const key = String(v).trim();
+                if (!key) return;
+                if (!keys.includes(key)) keys.push(key);
+            };
+
+            // Explicit caller-provided key first.
+            pushKey(viewerId);
+
+            // Runtime ids that can vary during bootstrap/auth restore.
+            pushKey(currentUserId);
+            try { pushKey(window.currentUserId); } catch (e) { /* ignore */ }
+
+            // Persisted ids that commonly survive refreshes.
             try {
-                const deviceId = localStorage.getItem('deviceUserId') || localStorage.getItem('deviceId');
-                if (deviceId) return deviceId;
+                pushKey(localStorage.getItem('userId'));
+                pushKey(localStorage.getItem('permanentUserId'));
+                pushKey(localStorage.getItem('deviceUserId'));
+                pushKey(localStorage.getItem('deviceId'));
             } catch (e) { /* ignore */ }
-            return 'anonymous-viewer';
+
+            // Auth uid alias when available.
+            try {
+                if (auth && auth.currentUser && auth.currentUser.uid) pushKey(auth.currentUser.uid);
+            } catch (e) { /* ignore */ }
+
+            if (keys.length === 0) pushKey('anonymous-viewer');
+            return keys;
+        }
+
+        function getHiddenPostsViewerKey(viewerId) {
+            const keys = getHiddenPostsViewerKeys(viewerId);
+            return keys[0] || 'anonymous-viewer';
         }
 
         function getHiddenPostsForViewer(viewerId) {
-            const viewerKey = getHiddenPostsViewerKey(viewerId || currentUserId);
+            const viewerKeys = getHiddenPostsViewerKeys(viewerId || currentUserId);
             let persistedByUser = [];
             let legacyHidden = [];
 
             try {
                 const byUserRaw = JSON.parse(localStorage.getItem(HIDDEN_POSTS_BY_USER_KEY) || '{}');
-                if (byUserRaw && Array.isArray(byUserRaw[viewerKey])) {
-                    persistedByUser = byUserRaw[viewerKey];
+                if (byUserRaw && typeof byUserRaw === 'object') {
+                    viewerKeys.forEach(k => {
+                        if (Array.isArray(byUserRaw[k])) {
+                            persistedByUser = persistedByUser.concat(byUserRaw[k]);
+                        }
+                    });
                 }
             } catch (e) {
                 console.warn('Failed to parse hiddenPostsByUser', e);
@@ -10558,23 +10591,27 @@
                 if (Array.isArray(legacy)) legacyHidden = legacy;
             } catch (e) { /* ignore */ }
 
-            const inMemory = hiddenPosts[viewerKey] || [];
+            let inMemory = [];
+            viewerKeys.forEach(k => {
+                if (Array.isArray(hiddenPosts[k])) inMemory = inMemory.concat(hiddenPosts[k]);
+            });
+
             const merged = Array.from(new Set([...(inMemory || []), ...(persistedByUser || []), ...(legacyHidden || [])]));
-            hiddenPosts[viewerKey] = merged;
+            viewerKeys.forEach(k => { hiddenPosts[k] = merged; });
             return merged;
         }
 
         function persistHiddenPostForViewer(postId, viewerId) {
             if (!postId) return;
-            const viewerKey = getHiddenPostsViewerKey(viewerId || currentUserId);
-            const merged = getHiddenPostsForViewer(viewerKey);
+            const viewerKeys = getHiddenPostsViewerKeys(viewerId || currentUserId);
+            const merged = getHiddenPostsForViewer(viewerId || currentUserId);
 
             if (!merged.includes(postId)) merged.push(postId);
-            hiddenPosts[viewerKey] = merged;
+            viewerKeys.forEach(k => { hiddenPosts[k] = merged; });
 
             try {
                 const byUserRaw = JSON.parse(localStorage.getItem(HIDDEN_POSTS_BY_USER_KEY) || '{}');
-                byUserRaw[viewerKey] = Array.from(new Set(merged));
+                viewerKeys.forEach(k => { byUserRaw[k] = Array.from(new Set(merged)); });
                 localStorage.setItem(HIDDEN_POSTS_BY_USER_KEY, JSON.stringify(byUserRaw));
             } catch (e) {
                 console.warn('Failed to persist hiddenPostsByUser', e);
