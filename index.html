@@ -15965,6 +15965,8 @@
         function deleteOwnPost() {
             if (!selectedPostId) return;
 
+            const deletedPostId = selectedPostId;
+
             console.log('🗑️ DELETE OWN POST - PERMANENT REMOVAL:');
             console.log('  selectedPostId:', selectedPostId);
             console.log('  currentUserId:', currentUserId);
@@ -15974,15 +15976,15 @@
             try {
                 // Add to pendingDeletedPosts so it remains hidden until final deletion
                 let pending = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
-                if (!pending.includes(selectedPostId)) {
-                    pending.push(selectedPostId);
+                if (!pending.includes(deletedPostId)) {
+                    pending.push(deletedPostId);
                     localStorage.setItem('pendingDeletedPosts', JSON.stringify(pending));
                 }
             } catch(e) { console.warn('pendingDeletedPosts write failed', e); }
 
             // Also hide from memory for immediate UI update
             if (!hiddenPosts[currentUserId]) hiddenPosts[currentUserId] = [];
-            if (!hiddenPosts[currentUserId].includes(selectedPostId)) hiddenPosts[currentUserId].push(selectedPostId);
+            if (!hiddenPosts[currentUserId].includes(deletedPostId)) hiddenPosts[currentUserId].push(deletedPostId);
 
             // Remove from userPostBoxes immediately
             const deleteIndex = userPostBoxes.indexOf(selectedBoxIndex);
@@ -15990,7 +15992,7 @@
 
             // Preserve the DOM slot but clear its data so new posts can fill it immediately
             try {
-                const boxEl = document.querySelector(`.grid-box[data-post-id="${selectedPostId}"]`);
+                const boxEl = document.querySelector(`.grid-box[data-post-id="${deletedPostId}"]`);
                 if (boxEl) {
                     try { boxEl.removeAttribute('data-post-id'); } catch(e){}
                     try { boxEl.classList.remove('filled'); } catch(e){}
@@ -16013,22 +16015,16 @@
             // full refresh happens.
             try {
                 // Remove from postCache
-                try { if (postCache && postCache[selectedPostId]) delete postCache[selectedPostId]; } catch(e){}
+                try { if (postCache && postCache[deletedPostId]) delete postCache[deletedPostId]; } catch(e){}
 
                 // Remove from every gridContent bucket
                     try {
                     Object.keys(gridContent).forEach(k => {
                         if (!Array.isArray(gridContent[k])) return;
-                        // Replace the deleted post in-place with a placeholder so array indexes remain stable
-                        for (let i = 0; i < gridContent[k].length; i++) {
-                            const p = gridContent[k][i];
-                            if (p && p.id === selectedPostId) {
-                                gridContent[k][i] = { id: null, __placeholder: true };
-                            }
-                        }
-                        // Do not delete empty buckets here; leave placeholders so the scroller mapping stays stable
+                        // Hard-remove deleted post id from all buckets to avoid resurrection.
+                        gridContent[k] = gridContent[k].filter(p => !(p && p.id === deletedPostId));
                     });
-                    console.log('🧹 Purged deleted post from gridContent and postCache:', selectedPostId);
+                    console.log('🧹 Purged deleted post from gridContent and postCache:', deletedPostId);
                     try { console.log('DEBUG after delete: gridContent keys sizes:', Object.keys(gridContent).map(k=>({k, n: (gridContent[k]||[]).length}))); } catch(e){}
                     try { console.log('DEBUG after delete: gridScroller.items length:', window.gridScroller && gridScroller.items ? gridScroller.items.length : '(no scroller)'); } catch(e){}
                     try {
@@ -16042,7 +16038,7 @@
             // If using VirtualGridScroller, remove the item from its cache for instant disappearance
             try {
                 if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
-                    window.gridScroller.items = (window.gridScroller.items || []).filter(i => i && i.id !== selectedPostId);
+                    window.gridScroller.items = (window.gridScroller.items || []).filter(i => i && i.id !== deletedPostId);
                     if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh();
                 }
             } catch (e) { console.warn('gridScroller purge failed', e); }
@@ -16057,11 +16053,11 @@
             try { fillEmptySlotAfterDelay(250); } catch(e){}
 
             // Perform deletion in background with retries (non-blocking)
-            backgroundDeletePostWithRetry(selectedPostId).then(success => {
+            backgroundDeletePostWithRetry(deletedPostId).then(success => {
                 if (success) {
-                    console.log('✅ Background deletion completed for', selectedPostId);
+                    console.log('✅ Background deletion completed for', deletedPostId);
                 } else {
-                    console.warn('⚠️ Background deletion could not confirm removal for', selectedPostId);
+                    console.warn('⚠️ Background deletion could not confirm removal for', deletedPostId);
                 }
             });
         }
@@ -24910,19 +24906,35 @@
             function rebuildGridScrollerFromGridContent() {
                 try {
                     if (!window.gridScroller) return;
+                    const hiddenReported = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
+                    const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
+                    const pendingDeleted = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
+                    const hiddenForThisUser = (hiddenPosts && currentUserId && Array.isArray(hiddenPosts[currentUserId]))
+                        ? hiddenPosts[currentUserId]
+                        : [];
+
+                    const isVisiblePost = (p) => {
+                        if (!p || !p.id) return false;
+                        if (hiddenForThisUser.includes(p.id)) return false;
+                        if (hiddenReported.includes(p.id)) return false;
+                        if (deletedOwnPosts.includes(p.id)) return false;
+                        if (pendingDeleted.includes(p.id)) return false;
+                        return true;
+                    };
+
                     const seen = new Set();
                     const all = [];
                     // Prefer user's key first to keep owned posts visible
                     if (currentUserId && Array.isArray(gridContent[currentUserId])) {
-                        gridContent[currentUserId].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
+                        gridContent[currentUserId].forEach(p => { if (isVisiblePost(p) && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
                     }
                     if (Array.isArray(gridContent['shared-posts'])) {
-                        gridContent['shared-posts'].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
+                        gridContent['shared-posts'].forEach(p => { if (isVisiblePost(p) && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
                     }
                     Object.keys(gridContent).forEach(k => {
                         if (!Array.isArray(gridContent[k])) return;
                         if (k === currentUserId || k === 'shared-posts') return;
-                        gridContent[k].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
+                        gridContent[k].forEach(p => { if (isVisiblePost(p) && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
                     });
 
                     try {
