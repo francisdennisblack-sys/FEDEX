@@ -2757,6 +2757,67 @@
                         }
                     }catch(e){}
                 })();
+
+                // --- Demo smoke-test and autofix helper ---
+                window.runDemoSmokeTests = function(opts = {}){
+                    const out = { ok: true, checks: [] };
+                    const fix = opts && opts.fix;
+                    try{
+                        window.ensureDemoUserId && window.ensureDemoUserId();
+                        window.ensureDemoGridKey && window.ensureDemoGridKey();
+                        const demoKey = window.demoGridKey || (sessionStorage && sessionStorage.getItem && sessionStorage.getItem('demoGridKey')) || null;
+                        out.demoKey = demoKey || null;
+
+                        const demoPosts = (window.gridContent && demoKey && Array.isArray(window.gridContent[demoKey])) ? window.gridContent[demoKey] : [];
+                        out.demoPostsCount = demoPosts.length;
+                        out.demoPostIds = demoPosts.map(p => p && p.id).filter(Boolean);
+
+                        // postCache checks
+                        const missingInCache = [];
+                        (out.demoPostIds || []).forEach(id => { if (!window.postCache || !window.postCache[id]) missingInCache.push(id); });
+                        out.missingInPostCache = missingInCache;
+                        if (missingInCache.length) out.ok = false;
+
+                        // DOM check
+                        try { out.domDemoNodes = document.querySelectorAll && document.querySelectorAll('.demo-post') ? document.querySelectorAll('.demo-post').length : 0; } catch(e){ out.domDemoNodes = 0; }
+                        if ((out.domDemoNodes || 0) < Math.min(3, out.demoPostsCount || 0)) out.ok = false;
+
+                        // scroller check
+                        try{
+                            const sc = window.gridScroller;
+                            if (!sc) { out.scroller = 'missing'; out.ok = false; }
+                            else {
+                                out.scrollerItems = Array.isArray(sc.items) ? sc.items.slice(0,6).map(i=> i && i.id) : (sc.getVisibleItems && sc.getVisibleItems().map(i=>i && i.id));
+                                const topDemoPresent = (out.scrollerItems || []).some(id => out.demoPostIds.indexOf(id) !== -1);
+                                out.scrollerTopHasDemo = !!topDemoPresent;
+                                if (!out.scrollerTopHasDemo) out.ok = false;
+                            }
+                        } catch(e){ out.scroller = 'error'; out.ok = false; }
+
+                        console.log('runDemoSmokeTests', out);
+
+                        if (!out.ok && fix && window.gridScroller) {
+                            // Attempt autofix: ensure demo posts are at top of scroller.items
+                            try{
+                                const sc = window.gridScroller;
+                                const demoObjs = (out.demoPostIds || []).map(id => (window.postCache && window.postCache[id]) || null).filter(Boolean);
+                                if (demoObjs.length) {
+                                    // Build a new items array with demo first, then existing unique items
+                                    const existing = Array.isArray(sc.items) ? sc.items.filter(i=> i && demoObjs.indexOf(i)===-1 && out.demoPostIds.indexOf(i.id)===-1) : [];
+                                    const newItems = demoObjs.concat(existing);
+                                    try { if (typeof sc.setItems === 'function') sc.setItems(newItems); else sc.items = newItems; } catch(e){}
+                                    try { if (typeof sc.refresh === 'function') sc.refresh(); } catch(e){}
+                                    try { if (typeof rebuildGridScrollerFromGridContent === 'function') rebuildGridScrollerFromGridContent(); } catch(e){}
+                                    console.log('runDemoSmokeTests: autofix applied - demo posts injected into scroller items');
+                                    out.autofix = 'applied';
+                                } else {
+                                    out.autofix = 'no-demo-objects';
+                                }
+                            }catch(e){ console.warn('runDemoSmokeTests.autofix failed', e); out.autofix = 'failed'; }
+                        }
+                    }catch(e){ console.warn('runDemoSmokeTests failed', e); out.ok = false; out.error = String(e); }
+                    return out;
+                };
             })();
         </script>
 
