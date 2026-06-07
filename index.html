@@ -10529,6 +10529,11 @@
         window.hiddenPosts = hiddenPosts; // Expose for cleanup
         const HIDDEN_POSTS_BY_USER_KEY = 'hiddenPostsByUser';
 
+        function normalizePostId(id) {
+            if (id === null || id === undefined) return '';
+            return String(id).trim();
+        }
+
         function getHiddenPostsViewerKeys(viewerId) {
             const keys = [];
             const pushKey = (v) => {
@@ -10596,22 +10601,64 @@
                 if (Array.isArray(hiddenPosts[k])) inMemory = inMemory.concat(hiddenPosts[k]);
             });
 
-            const merged = Array.from(new Set([...(inMemory || []), ...(persistedByUser || []), ...(legacyHidden || [])]));
+            const merged = Array.from(new Set([...(inMemory || []), ...(persistedByUser || []), ...(legacyHidden || [])].map(normalizePostId).filter(Boolean)));
             viewerKeys.forEach(k => { hiddenPosts[k] = merged; });
             return merged;
         }
 
+        function getHiddenReportedPosts() {
+            try {
+                const list = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
+                return Array.isArray(list) ? Array.from(new Set(list.map(normalizePostId).filter(Boolean))) : [];
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function getDeletedOwnPosts() {
+            try {
+                const list = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
+                return Array.isArray(list) ? Array.from(new Set(list.map(normalizePostId).filter(Boolean))) : [];
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function getPendingDeletedPosts() {
+            try {
+                const list = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
+                return Array.isArray(list) ? Array.from(new Set(list.map(normalizePostId).filter(Boolean))) : [];
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function isPostHiddenForViewer(postOrId, viewerId) {
+            const id = normalizePostId(postOrId && typeof postOrId === 'object' ? postOrId.id : postOrId);
+            if (!id) return true;
+
+            const hiddenForViewer = new Set(getHiddenPostsForViewer(viewerId));
+            if (hiddenForViewer.has(id)) return true;
+
+            if (new Set(getHiddenReportedPosts()).has(id)) return true;
+            if (new Set(getDeletedOwnPosts()).has(id)) return true;
+            if (new Set(getPendingDeletedPosts()).has(id)) return true;
+
+            return false;
+        }
+
         function persistHiddenPostForViewer(postId, viewerId) {
-            if (!postId) return;
+            const normalizedId = normalizePostId(postId);
+            if (!normalizedId) return;
             const viewerKeys = getHiddenPostsViewerKeys(viewerId || currentUserId);
             const merged = getHiddenPostsForViewer(viewerId || currentUserId);
 
-            if (!merged.includes(postId)) merged.push(postId);
+            if (!merged.includes(normalizedId)) merged.push(normalizedId);
             viewerKeys.forEach(k => { hiddenPosts[k] = merged; });
 
             try {
                 const byUserRaw = JSON.parse(localStorage.getItem(HIDDEN_POSTS_BY_USER_KEY) || '{}');
-                viewerKeys.forEach(k => { byUserRaw[k] = Array.from(new Set(merged)); });
+                viewerKeys.forEach(k => { byUserRaw[k] = Array.from(new Set(merged.map(normalizePostId).filter(Boolean))); });
                 localStorage.setItem(HIDDEN_POSTS_BY_USER_KEY, JSON.stringify(byUserRaw));
             } catch (e) {
                 console.warn('Failed to persist hiddenPostsByUser', e);
@@ -10621,7 +10668,7 @@
             try {
                 const legacy = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
                 const legacyArr = Array.isArray(legacy) ? legacy : [];
-                if (!legacyArr.includes(postId)) legacyArr.push(postId);
+                if (!legacyArr.includes(normalizedId)) legacyArr.push(normalizedId);
                 localStorage.setItem('hiddenPosts', JSON.stringify(legacyArr));
             } catch (e) { /* ignore */ }
         }
@@ -15995,8 +16042,9 @@
                 console.log(`💾 Saving report to Firebase: ${reportId}`);
                 
                 // Always attempt to save report, even if we couldn't find the full post locally.
+                const normalizedSelectedPostId = normalizePostId(selectedPostId);
                 const reportPayload = {
-                    postId: selectedPostId,
+                    postId: normalizedSelectedPostId,
                     authId: currentUserId,
                     reason: reason,
                     reportedAt: new Date().getTime(),
@@ -16008,23 +16056,24 @@
                     console.log(`✅ Report submitted successfully - Reason: ${reason}, Score: ${Math.round(postScore)}`);
                     
                     // Hide the post from this user's view only (using localStorage)
-                    console.log(`🙈 Hiding reported post from this user's view: ${selectedPostId}`);
-                    let hiddenReported = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
-                    if (!hiddenReported.includes(selectedPostId)) {
-                        hiddenReported.push(selectedPostId);
+                    console.log(`🙈 Hiding reported post from this user's view: ${normalizedSelectedPostId}`);
+                    let hiddenReported = getHiddenReportedPosts();
+                    if (!hiddenReported.includes(normalizedSelectedPostId)) {
+                        hiddenReported.push(normalizedSelectedPostId);
                         try { localStorage.setItem('hiddenReportedPosts', JSON.stringify(hiddenReported)); } catch (e) { /* ignore */ }
                         console.log(`✅ Post added to user's hiddenReported list. Total hiddenReported: ${hiddenReported.length}`);
                     }
+                    try { persistHiddenPostForViewer(normalizedSelectedPostId, currentUserId); } catch (e) { console.warn('Failed to persist report-hide viewer state', e); }
 
                     // Also remove any rendered DOM node and purge virtual scroller cache immediately
                     try {
-                        const boxEl = document.querySelector(`.grid-box[data-post-id="${selectedPostId}"]`);
+                        const boxEl = document.querySelector(`.grid-box[data-post-id="${normalizedSelectedPostId}"]`);
                         if (boxEl && boxEl.parentNode) boxEl.parentNode.removeChild(boxEl);
                     } catch (e) { console.warn('Immediate DOM removal failed during report', e); }
 
                     try {
                         if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
-                            window.gridScroller.items = (window.gridScroller.items || []).filter(i => i && i.id !== selectedPostId);
+                            window.gridScroller.items = (window.gridScroller.items || []).filter(i => normalizePostId(i && i.id) !== normalizedSelectedPostId);
                             if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh();
                         }
                     } catch (e) { console.warn('gridScroller purge failed during report', e); }
@@ -16187,26 +16236,27 @@
 
             const viewerKey = getHiddenPostsViewerKey(currentUserId);
             const hiddenForViewer = getHiddenPostsForViewer(viewerKey);
+            const normalizedSelectedPostId = normalizePostId(selectedPostId);
             
             // Add to hidden list if not already there
-            if (!hiddenForViewer.includes(selectedPostId)) {
-                hiddenForViewer.push(selectedPostId);
+            if (!hiddenForViewer.includes(normalizedSelectedPostId)) {
+                hiddenForViewer.push(normalizedSelectedPostId);
                 hiddenPosts[viewerKey] = hiddenForViewer;
                 console.log(`✅ Post hidden from user's view. Total hidden: ${hiddenForViewer.length}`);
             }
             
             // Track in localStorage for persistence (scoped to current viewer)
-            persistHiddenPostForViewer(selectedPostId, viewerKey);
+            persistHiddenPostForViewer(normalizedSelectedPostId, viewerKey);
 
             // Remove DOM node and virtual scroller entry immediately
             try {
-                const boxEl = document.querySelector(`.grid-box[data-post-id="${selectedPostId}"]`);
+                const boxEl = document.querySelector(`.grid-box[data-post-id="${normalizedSelectedPostId}"]`);
                 if (boxEl && boxEl.parentNode) boxEl.parentNode.removeChild(boxEl);
             } catch (e) { console.warn('Immediate DOM removal failed in hidePostFromMyView', e); }
 
             try {
                 if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
-                    window.gridScroller.items = (window.gridScroller.items || []).filter(i => i && i.id !== selectedPostId);
+                    window.gridScroller.items = (window.gridScroller.items || []).filter(i => normalizePostId(i && i.id) !== normalizedSelectedPostId);
                     if (typeof window.gridScroller.refresh === 'function') window.gridScroller.refresh();
                 }
             } catch (e) { console.warn('gridScroller purge failed in hidePostFromMyView', e); }
@@ -19345,9 +19395,11 @@
                     // Store shared posts under a global key (shared-posts) so they are not
                     // attributed to the viewing user. Grid ownership checks still use
                     // post.authId / post.userId to determine true creator.
+                    // Filter hidden/reported/deleted posts before storing so they cannot
+                    // re-enter any render path from this point onward.
                     const contentKey = 'shared-posts';
-                    gridContent[contentKey] = uniquePosts;
-                    console.log(`  ✅ gridContent['${contentKey}'] updated with ${uniquePosts.length} posts`);
+                    gridContent[contentKey] = uniquePosts.filter(p => !isPostHiddenForViewer(p, currentUserId));
+                    console.log(`  ✅ gridContent['${contentKey}'] updated with ${gridContent[contentKey].length} posts (${uniquePosts.length - gridContent[contentKey].length} hidden filtered)`);
 
                     // If the viewer is not fully signed-in, build a device-scoped
                     // personalized read-only feed of up to 100 posts. Composition:
@@ -24842,12 +24894,7 @@
                 // 🎯 CAP AT 2000 POSTS MAX - don't load more than that
                 const MAX_POSTS = 2000;
                 // Filter out posts that should not be shown (pending deletes, hidden or reported)
-                const hiddenForThisUser = getHiddenPostsForViewer(currentUserId);
-                const hiddenReported = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
-                const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
-                const pendingDeleted = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
-
-                const filteredAll = (allFirebasePosts || []).filter(p => p && p.id && !hiddenForThisUser.includes(p.id) && !hiddenReported.includes(p.id) && !deletedOwnPosts.includes(p.id) && !pendingDeleted.includes(p.id));
+                const filteredAll = (allFirebasePosts || []).filter(p => p && p.id && !isPostHiddenForViewer(p, currentUserId));
 
                 const nextBatch = filteredAll.slice(postBatchOffset, Math.min(postBatchOffset + POST_BATCH_SIZE, MAX_POSTS));
                 
@@ -24897,6 +24944,17 @@
          */
         function renderGridItem(box, item) {
             if (!item || !item.id) return;
+
+            // Last-mile guard: even if an upstream list missed filtering,
+            // never render a post that this viewer has hidden/reported/deleted.
+            if (isPostHiddenForViewer(item, currentUserId)) {
+                try {
+                    box.removeAttribute('data-post-id');
+                    box.classList.remove('filled');
+                    box.innerHTML = '';
+                } catch (e) { /* ignore */ }
+                return;
+            }
             
             try {
                 // This calls the same full rendering logic as before
@@ -24923,8 +24981,14 @@
         function safeAddItemsToGridScroller(items) {
             if (!gridScroller || !Array.isArray(items) || items.length === 0) return 0;
             try {
-                const existingIds = new Set((gridScroller.items || []).map(i => i && i.id).filter(Boolean));
-                const filtered = items.filter(i => i && i.id && !existingIds.has(i.id));
+                const existingIds = new Set((gridScroller.items || []).map(i => normalizePostId(i && i.id)).filter(Boolean));
+                const filtered = items.filter(i => {
+                    const id = normalizePostId(i && i.id);
+                    if (!id) return false;
+                    if (existingIds.has(id)) return false;
+                    if (isPostHiddenForViewer(i, currentUserId)) return false;
+                    return true;
+                });
                 if (filtered.length === 0) return 0;
                 if (typeof gridScroller.addItems === 'function') gridScroller.addItems(filtered);
                 else if (typeof gridScroller.setItems === 'function') gridScroller.setItems([...(gridScroller.items||[]), ...filtered]);
@@ -25013,18 +25077,9 @@
             function rebuildGridScrollerFromGridContent() {
                 try {
                     if (!window.gridScroller) return;
-                    const hiddenReported = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
-                    const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
-                    const pendingDeleted = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
-                    const hiddenForThisUser = getHiddenPostsForViewer(currentUserId);
-
                     const isVisiblePost = (p) => {
                         if (!p || !p.id) return false;
-                        if (hiddenForThisUser.includes(p.id)) return false;
-                        if (hiddenReported.includes(p.id)) return false;
-                        if (deletedOwnPosts.includes(p.id)) return false;
-                        if (pendingDeleted.includes(p.id)) return false;
-                        return true;
+                        return !isPostHiddenForViewer(p, currentUserId);
                     };
 
                     const seen = new Set();
@@ -25893,6 +25948,8 @@
                 for (const p of out) {
                     if (!p || !p.id) continue;
                     if (_seen2.has(p.id)) continue;
+                    // Skip posts hidden/reported/deleted for this viewer.
+                    if (isPostHiddenForViewer(p, currentUserId)) continue;
                     _seen2.add(p.id);
                     dedup.push(p);
                     if (dedup.length >= MAX_POSTS) break;
@@ -26309,6 +26366,7 @@
                 console.log(`✅ FOUND POSTS AT gridContent["${contentKey}"]: ${gridContent[contentKey].length} posts`);
                 gridContent[contentKey].forEach(post => {
                     if (!seenPostIds.has(post.id)) {
+                        if (isPostHiddenForViewer(post, currentUserId)) return;
                         seenPostIds.add(post.id);
                         allPosts.push(post);
                     } else {
@@ -26326,6 +26384,7 @@
             if (gridContent['shared-posts'] && Array.isArray(gridContent['shared-posts'])) {
                 gridContent['shared-posts'].forEach(post => {
                     if (!post || !post.id) return;
+                    if (isPostHiddenForViewer(post, currentUserId)) return;
                     if (!seenPostIds.has(post.id)) {
                         seenPostIds.add(post.id);
                         // Mark contentSource so downstream algorithms can prefer local posts
@@ -26342,8 +26401,8 @@
                     gridContent[key].forEach(post => {
                         if (!post || !post.id) return;
                         if (!seenPostIds.has(post.id)) {
-                            // Filter out posts pending deletion or explicitly hidden/deleted
-                            if (pendingDeleted.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id)) {
+                            // Filter out posts hidden for this viewer across all hide/report/delete sources.
+                            if (isPostHiddenForViewer(post, currentUserId)) {
                                 // skip
                             } else {
                                 seenPostIds.add(post.id);
@@ -26361,7 +26420,7 @@
             userActivePosts.forEach(userPost => {
                 if (!userPost || !userPost.id) return;
                 // Never re-inject posts that are hidden/deleted/pending deletion.
-                if (pendingDeleted.includes(userPost.id) || deletedOwnPosts.includes(userPost.id) || hiddenForThisPOI.includes(userPost.id)) return;
+                if (isPostHiddenForViewer(userPost.id, currentUserId)) return;
                 // Check if post already in allPosts (use seenPostIds Set for O(1) lookup)
                 if (!seenPostIds.has(userPost.id)) {
                     console.log(`📍 ENSURING USER POST ON GRID: ${userPost.id.substring(0,8)} (${userPost.areaTag})`);
@@ -26921,13 +26980,7 @@
             console.log(`✅ Unified ranking applied - posts reordered by relevance`);
             
             // Filter hidden/deleted posts from display list
-            let sortedPosts = displayPosts.filter(post => {
-                const isHidden = hiddenForThisPOI.includes(post.id) || 
-                                hiddenReported.includes(post.id) ||
-                                deletedOwnPosts.includes(post.id) ||
-                                pendingDeleted.includes(post.id);
-                return !isHidden;
-            });
+            let sortedPosts = displayPosts.filter(post => !isPostHiddenForViewer(post, currentUserId));
 
             // FEED VOLUME TARGET: Show maximum posts to all users
             // Simple: Show all available posts up to grid size
@@ -26940,11 +26993,7 @@
                 const fallbackPool = allPosts.filter(post => {
                     if (!post || !post.id) return false;
                     if (existingIds.has(post.id)) return false;
-                    const isHidden = hiddenForThisPOI.includes(post.id) ||
-                                    hiddenReported.includes(post.id) ||
-                                    deletedOwnPosts.includes(post.id) ||
-                                    pendingDeleted.includes(post.id);
-                    return !isHidden;
+                    return !isPostHiddenForViewer(post, currentUserId);
                 });
 
                 for (const post of fallbackPool) {
@@ -26967,7 +27016,7 @@
                     for (const post of gridContent[key]) {
                         if (!post || !post.id) continue;
                         if (existingIds.has(post.id)) continue;
-                        if (hiddenForThisPOI.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id) || pendingDeleted.includes(post.id)) continue;
+                        if (isPostHiddenForViewer(post, currentUserId)) continue;
                         sortedPosts.push(post);
                         existingIds.add(post.id);
                         if (sortedPosts.length >= FEED_MIN_POSTS) break;
@@ -26981,7 +27030,7 @@
                         const post = postCache[id];
                         if (!post || !post.id) continue;
                         if (existingIds.has(post.id)) continue;
-                        if (hiddenForThisPOI.includes(post.id) || hiddenReported.includes(post.id) || deletedOwnPosts.includes(post.id) || pendingDeleted.includes(post.id)) continue;
+                        if (isPostHiddenForViewer(post, currentUserId)) continue;
                         sortedPosts.push(post);
                         existingIds.add(post.id);
                         if (sortedPosts.length >= FEED_MIN_POSTS) break;
