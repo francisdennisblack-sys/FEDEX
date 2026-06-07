@@ -17703,7 +17703,8 @@
                         }
                     } catch (e) { console.warn('poi preload trigger failed', e); }
                 } else {
-                    filterRefineLocationSearch(customTagInput.value.trim());
+                    const requestId = nextRefineLocationRequestId();
+                    filterRefineLocationSearch(customTagInput.value.trim(), requestId);
                 }
             } catch (e) { console.warn('fetchRefineDefaults failed to trigger', e); }
         }
@@ -17716,6 +17717,7 @@
             const dropdown = document.getElementById('refineLocationDropdown');
             const resultsContainer = document.getElementById('refineLocationResultsContainer');
             if (!dropdown || !resultsContainer) return;
+            const requestId = nextRefineLocationRequestId();
 
             resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Loading top locations and POIs...</div>';
             dropdown.style.display = 'block';
@@ -17888,9 +17890,19 @@
                     }
                 }
 
+                const inputEl = document.getElementById('customZoneTag');
+                const hasTypedQuery = !!(inputEl && String(inputEl.value || '').trim().length > 0);
+                if (!isRefineLocationRequestActive(requestId) || hasTypedQuery) {
+                    return;
+                }
                 resultsContainer.innerHTML = html || '<div style="padding:12px;color:#999;text-align:center">No nearby suggestions yet. Start typing to search all locations and POIs.</div>';
             } catch (e) {
                 console.warn('fetchRefineDefaults error', e);
+                const inputEl = document.getElementById('customZoneTag');
+                const hasTypedQuery = !!(inputEl && String(inputEl.value || '').trim().length > 0);
+                if (!isRefineLocationRequestActive(requestId) || hasTypedQuery) {
+                    return;
+                }
                 resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Unable to load locations right now. Try typing to search.</div>';
             }
         }
@@ -18380,6 +18392,16 @@
 
         let refineLocationSearchTimeout;
         let lastRefineLocationSearchQuery = '';
+        let refineLocationRequestSeq = 0;
+
+        function nextRefineLocationRequestId() {
+            refineLocationRequestSeq += 1;
+            return refineLocationRequestSeq;
+        }
+
+        function isRefineLocationRequestActive(requestId) {
+            return requestId === refineLocationRequestSeq;
+        }
 
         function handleCustomZoneInput() {
             const customTagInput = document.getElementById('customZoneTag');
@@ -18416,7 +18438,8 @@
             clearTimeout(refineLocationSearchTimeout);
             refineLocationSearchTimeout = setTimeout(() => {
                 // Show dropdown results - does NOT affect SENDING TO field
-                filterRefineLocationSearch(val);
+                const requestId = nextRefineLocationRequestId();
+                filterRefineLocationSearch(val, requestId);
             }, 200); // Wait 200ms after user stops typing
         }
 
@@ -18454,10 +18477,11 @@
          * IMPORTANT: This function ONLY shows dropdown results and does NOT update the SENDING TO field
          * The SENDING TO field is only updated when user clicks selectLocationFromSpecifyField()
          */
-        async function filterRefineLocationSearch(query) {
+        async function filterRefineLocationSearch(query, requestId) {
             const dropdown = document.getElementById('refineLocationDropdown');
             const resultsContainer = document.getElementById('refineLocationResultsContainer');
             if (!resultsContainer || !dropdown) return;
+            const activeRequestId = requestId || nextRefineLocationRequestId();
             
             // CRITICAL: Destroy previous scroller if it exists (cleanup)
             cleanupRefineLocationScroller();
@@ -18664,6 +18688,11 @@
             
             // Limit to 300 results
             results = results.slice(0, 300);
+
+            // Drop stale async responses if a newer query has started.
+            if (!isRefineLocationRequestActive(activeRequestId)) {
+                return;
+            }
             
             // Render results
             if (results.length === 0) {
