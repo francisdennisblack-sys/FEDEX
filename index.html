@@ -1806,9 +1806,7 @@
                                             <button id="doSendCode" style="flex:1; padding:10px; background:#4ade80; border:none; border-radius:6px;">Send Code</button>
                                             <button id="doConfirmCode" style="flex:1; padding:10px; background:#0ea5e9; border:none; border-radius:6px; display:none;">Confirm Code</button>
                                         </div>
-                                        <div style="margin-top:8px; text-align:center;">
-                                            <button id="doAnonSignIn" style="padding:8px 12px; background:#374151; color:#fff; border:none; border-radius:6px; font-weight:700; cursor:pointer;">Continue anonymously</button>
-                                        </div>
+                                        
                                     </div>
                                     <div id="profileMsg" style="font-size:12px;color:#888;margin-top:8px;"></div>
                                 </div>
@@ -1848,29 +1846,7 @@
                             document.getElementById('profileModal').style.display = 'none';
                         } catch (err) { alert('Code confirmation failed: ' + (err && err.message)); }
                     });
-                    document.getElementById('doAnonSignIn').addEventListener('click', async () => {
-                        try {
-                            // Prefer modular API if exposed on window
-                            if (window.signInAnonymously && window.auth) {
-                                try {
-                                    const res = await window.signInAnonymously(window.auth);
-                                    const u = res && res.user && res.user.uid ? res.user.uid : null;
-                                    window.currentUserId = u;
-                                    try { localStorage.setItem('lastSignedInFirebaseUid', u || ''); localStorage.setItem('isSignedIn', '1'); } catch(e){}
-                                    updateAccountUI();
-                                    showNotification && showNotification('Signed in anonymously');
-                                    // Restart grid as signed-in
-                                    gridContent = {}; postCache = {};
-                                    try { if (typeof renderGrid === 'function') setTimeout(() => renderGrid(), 100); } catch(e){}
-                                } catch (e) {
-                                    console.warn('Anonymous sign-in failed', e);
-                                    alert('Anonymous sign-in failed: ' + (e && e.message));
-                                }
-                            } else {
-                                alert('Anonymous sign-in not available in this build');
-                            }
-                        } catch (e) { console.warn('doAnonSignIn handler failed', e); }
-                    });
+                    
                 }
 
                 // Resolve a stable username for UI (avoid generic "User" for signed-in users)
@@ -2099,51 +2075,9 @@
                             try { await window.recaptchaVerifier.render(); } catch (e) { console.warn('recaptcha render failed', e); }
                         } catch (e) { console.warn('recaptcha init failed', e); }
                         let appVerifier = window.recaptchaVerifier;
-                        // Diagnostic: log verifier shape to help debug "r.verify" errors
-                        try { console.log('sendSignInCode: verifier initial', { verifier: appVerifier, hasVerify: !!(appVerifier && typeof appVerifier.verify === 'function'), hasExecute: !!(appVerifier && typeof appVerifier.execute === 'function'), childId: window.__recaptchaChildId }); } catch(e){}
-                        // Ensure the verifier is a valid object with the expected API
+                        // Basic validation: ensure verifier exists and provides `verify` API
                         if (!appVerifier || typeof appVerifier.verify !== 'function') {
                             console.warn('sendSignInCode: recaptcha verifier missing or invalid', appVerifier);
-                            // Try to (re)create verifier using the known global constructor as a fallback
-                            try {
-                                if (typeof window.RecaptchaVerifier === 'function') {
-                                    try {
-                                        window.recaptchaVerifier = new window.RecaptchaVerifier(childId, { size: 'invisible' }, auth);
-                                    } catch (e2) {
-                                        try {
-                                            // Older signature fallback: (auth, containerOrId, params)
-                                            window.recaptchaVerifier = new window.RecaptchaVerifier(auth, childId, { size: 'invisible' });
-                                        } catch (e3) {
-                                            console.warn('sendSignInCode: RecaptchaVerifier fallback constructors failed', e2, e3);
-                                        }
-                                    }
-                                    try { await window.recaptchaVerifier.render(); } catch (e4) { console.warn('sendSignInCode: recaptcha render fallback failed', e4); }
-                                    appVerifier = window.recaptchaVerifier;
-                                }
-                            } catch (e5) { console.warn('sendSignInCode: verifier re-init error', e5); }
-                        }
-                        // If verifier still lacks verify(), attempt to synthesize it from execute()/grecaptcha
-                        try {
-                            if (appVerifier && typeof appVerifier.verify !== 'function') {
-                                console.warn('sendSignInCode: verifier lacks verify(); attempting to wrap execute/grecaptcha');
-                                if (typeof appVerifier.execute === 'function') {
-                                    appVerifier.verify = function(){
-                                        try { return Promise.resolve(appVerifier.execute()); } catch (e) { return Promise.reject(e); }
-                                    };
-                                    console.log('sendSignInCode: wrapped appVerifier.execute -> verify');
-                                } else if (window.grecaptcha && typeof window.grecaptcha.execute === 'function' && window.__recaptchaChildId) {
-                                    appVerifier.verify = function(){
-                                        try {
-                                            const maybe = window.grecaptcha.execute(window.__recaptchaChildId);
-                                            return Promise.resolve(maybe);
-                                        } catch(e){ return Promise.reject(e); }
-                                    };
-                                    console.log('sendSignInCode: wrapped grecaptcha.execute -> verify');
-                                }
-                            }
-                        } catch(e) { console.warn('sendSignInCode: verify wrapper attempt failed', e); }
-
-                        if (!appVerifier || typeof appVerifier.verify !== 'function') {
                             throw new Error('recaptcha-initialization-failed: verifier missing or invalid');
                         }
                         // Ensure auth state persists across page reloads in this browser
@@ -3625,7 +3559,7 @@
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
         import { getDatabase, ref, set, get, update, remove, onValue, runTransaction } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
         import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
-        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, RecaptchaVerifier, signInWithPhoneNumber, signOut, connectAuthEmulator } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
+        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, RecaptchaVerifier, signInWithPhoneNumber, signOut } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
 
         const firebaseConfig = {
             apiKey: "AIzaSyD5A_MF7gRvqnHd_DD3lReYpEkRph6msX4",
@@ -3773,21 +3707,7 @@
             return null;
         };
         window.auth = auth;
-        // If running locally or an emulator URL is provided, connect to the Auth emulator
-        try {
-            const isLocal = (location && (location.hostname === 'localhost' || location.hostname === '127.0.0.1'));
-            const emuUrl = window.FIREBASE_AUTH_EMULATOR_URL || (isLocal ? 'http://localhost:9099' : null);
-            if (emuUrl && typeof connectAuthEmulator === 'function') {
-                try {
-                    connectAuthEmulator(auth, emuUrl);
-                    window.__authEmulatorConnected = true;
-                    // Allow effectively unlimited client-side attempts when using emulator
-                    window.SMS_SIGNIN_SETTINGS = window.SMS_SIGNIN_SETTINGS || {};
-                    window.SMS_SIGNIN_SETTINGS.maxAttempts = 999999;
-                    console.log('✅ Connected to Firebase Auth emulator at', emuUrl);
-                } catch (e) { console.warn('Could not connect to Auth emulator', e); }
-            }
-        } catch(e) { console.warn('Auth emulator connect check failed', e); }
+        // No automatic emulator connect in production build.
         window.ref = ref;
         window.set = set;
         window.get = get;
