@@ -375,7 +375,11 @@
             regionalPercent: 10,
             globalPercent: 5,
             maxRecentInjectedTrack: 200,
-            recentInjectCooldownMs: 30 * 60 * 1000
+            recentInjectCooldownMs: 30 * 60 * 1000,
+            top15EngagementLockEnabled: true,
+            top15WindowSize: 15,
+            top15MinInteractionRatio: 0.5,
+            top15LockDurationMs: 30 * 60 * 1000
         };
 
         // Data source configuration: default to using small local samples for development.
@@ -9450,6 +9454,7 @@
                 userVotes[userVoteKey] = null;
             } else {
                 userVotes[userVoteKey] = newVoteType;
+                try { recordTop15VoteInteraction(postId, newVoteType); } catch (e) { /* ignore model errors */ }
             }
             
             // Update all references to this post
@@ -24719,7 +24724,11 @@
                 regionalPercent: Number(cfg.regionalPercent || 10),
                 globalPercent: Number(cfg.globalPercent || 5),
                 maxRecentInjectedTrack: Number(cfg.maxRecentInjectedTrack || 200),
-                recentInjectCooldownMs: Number(cfg.recentInjectCooldownMs || (30 * 60 * 1000))
+                recentInjectCooldownMs: Number(cfg.recentInjectCooldownMs || (30 * 60 * 1000)),
+                top15EngagementLockEnabled: cfg.top15EngagementLockEnabled !== false,
+                top15WindowSize: Number(cfg.top15WindowSize || 15),
+                top15MinInteractionRatio: Number(cfg.top15MinInteractionRatio || 0.5),
+                top15LockDurationMs: Number(cfg.top15LockDurationMs || (30 * 60 * 1000))
             };
         }
 
@@ -24760,6 +24769,173 @@
                 };
             }
             return window._contentFreshnessState;
+        }
+
+        function getTop15LockStorageKey(uid) {
+            return `top15_engagement_lock_${uid || 'anon'}`;
+        }
+
+        function getTop15EngagementModelState() {
+            const cfg = getFreshnessConfig();
+            const uid = currentUserId || permanentUid || firebaseUid || 'anon';
+            const storageKey = getTop15LockStorageKey(uid);
+
+            if (!window._top15EngagementModelState || window._top15EngagementModelState.uid !== uid) {
+                let restored = null;
+                try {
+                    const raw = localStorage.getItem(storageKey);
+                    if (raw) restored = JSON.parse(raw);
+                } catch (e) {
+                    restored = null;
+                }
+
+                const interacted = Array.isArray(restored && restored.interactedPostIds) ? restored.interactedPostIds : [];
+                const lockedTop = Array.isArray(restored && restored.lockedTopIds) ? restored.lockedTopIds : [];
+
+                window._top15EngagementModelState = {
+                    uid,
+                    storageKey,
+                    interactedPostIds: interacted.slice(0, 300),
+                    lockedTopIds: lockedTop.slice(0, Math.max(15, cfg.top15WindowSize || 15)),
+                    lockUntilMs: Number((restored && restored.lockUntilMs) || 0),
+                    lockStartedAtMs: Number((restored && restored.lockStartedAtMs) || 0),
+                    lastUpdatedMs: Number((restored && restored.lastUpdatedMs) || Date.now())
+                };
+            }
+
+            return window._top15EngagementModelState;
+        }
+
+        function persistTop15EngagementModelState(state) {
+            if (!state || !state.storageKey) return;
+            try {
+                const payload = {
+                    interactedPostIds: Array.isArray(state.interactedPostIds) ? state.interactedPostIds.slice(0, 300) : [],
+                    lockedTopIds: Array.isArray(state.lockedTopIds) ? state.lockedTopIds.slice(0, 30) : [],
+                    lockUntilMs: Number(state.lockUntilMs || 0),
+                    lockStartedAtMs: Number(state.lockStartedAtMs || 0),
+                    lastUpdatedMs: Date.now()
+                };
+                localStorage.setItem(state.storageKey, JSON.stringify(payload));
+            } catch (e) {
+                // Ignore localStorage issues.
+            }
+        }
+
+        function getCurrentTopWindowIds(windowSize = 15) {
+            const feed = (Array.isArray(pendingSortedPosts) && pendingSortedPosts.length > 0)
+                ? pendingSortedPosts
+                : ((Array.isArray(window.latestSortedPosts) && window.latestSortedPosts.length > 0)
+                    ? window.latestSortedPosts
+                    : ((window.gridScroller && Array.isArray(window.gridScroller.items)) ? window.gridScroller.items : []));
+            return feed.slice(0, Math.max(1, windowSize)).map(p => p && p.id).filter(Boolean);
+        }
+
+        function recordTop15VoteInteraction(postId, voteType) {
+            try {
+                const cfg = getFreshnessConfig();
+                if (!cfg.top15EngagementLockEnabled) return;
+                if (!postId) return;
+                if (voteType !== 'like' && voteType !== 'dislike') return;
+
+                const model = getTop15EngagementModelState();
+                const topIds = new Set(getCurrentTopWindowIds(cfg.top15WindowSize));
+                if (!topIds.has(postId)) return;
+
+                const list = Array.isArray(model.interactedPostIds) ? model.interactedPostIds : [];
+                if (!list.includes(postId)) {
+                    list.push(postId);
+                    model.interactedPostIds = list.slice(-300);
+                    model.lastUpdatedMs = Date.now();
+                    persistTop15EngagementModelState(model);
+                    console.log(`🧠 Top15 ML: tracked interaction for ${postId.slice(0, 8)} (${voteType})`);
+                }
+            } catch (e) {
+                console.warn('recordTop15VoteInteraction failed:', e);
+            }
+        }
+
+        function applyTop15EngagementLock(posts, sourceLabel = 'unknown') {
+            try {
+                const cfg = getFreshnessConfig();
+                if (!cfg.top15EngagementLockEnabled) return Array.isArray(posts) ? posts : [];
+
+                const list = Array.isArray(posts) ? posts.filter(p => p && p.id) : [];
+                if (list.length === 0) return list;
+
+                const model = getTop15EngagementModelState();
+                const now = Date.now();
+                const topWindowSize = Math.max(1, cfg.top15WindowSize || 15);
+                const threshold = Math.max(1, Math.ceil(topWindowSize * Math.max(0.1, Math.min(1, cfg.top15MinInteractionRatio || 0.5))));
+
+                const topNow = list.slice(0, topWindowSize).map(p => p.id).filter(Boolean);
+                const topSet = new Set(topNow);
+
+                // Keep only interactions that still matter for current top window.
+                model.interactedPostIds = (Array.isArray(model.interactedPostIds) ? model.interactedPostIds : []).filter(id => topSet.has(id));
+
+                const interactedCount = model.interactedPostIds.length;
+
+                // Activate lock when user has interacted with at least half of top window.
+                if ((!model.lockUntilMs || model.lockUntilMs <= now) && interactedCount >= threshold) {
+                    model.lockStartedAtMs = now;
+                    model.lockUntilMs = now + Math.max(60 * 1000, cfg.top15LockDurationMs || (30 * 60 * 1000));
+                    model.lockedTopIds = topNow.slice(0, topWindowSize);
+                    console.log(`🧠 Top15 ML LOCK ON (${sourceLabel}): ${interactedCount}/${topWindowSize} interacted; lock for ${Math.round((model.lockUntilMs - now) / 60000)}m`);
+                    persistTop15EngagementModelState(model);
+                }
+
+                // If lock expired, clear lock and interactions to start a new learning cycle.
+                if (model.lockUntilMs && model.lockUntilMs <= now) {
+                    if (model.lockedTopIds && model.lockedTopIds.length > 0) {
+                        console.log(`🧠 Top15 ML LOCK OFF (${sourceLabel}): lock window elapsed, allowing top-${topWindowSize} refresh`);
+                    }
+                    model.lockUntilMs = 0;
+                    model.lockStartedAtMs = 0;
+                    model.lockedTopIds = [];
+                    model.interactedPostIds = [];
+                    persistTop15EngagementModelState(model);
+                    return list;
+                }
+
+                // While lock is active, pin top-window membership/order to learned snapshot.
+                if (model.lockUntilMs && model.lockUntilMs > now && Array.isArray(model.lockedTopIds) && model.lockedTopIds.length > 0) {
+                    const byId = new Map(list.map(p => [p.id, p]));
+                    const pinned = [];
+                    const used = new Set();
+
+                    for (const id of model.lockedTopIds.slice(0, topWindowSize)) {
+                        const p = byId.get(id);
+                        if (!p) continue;
+                        pinned.push(p);
+                        used.add(id);
+                    }
+
+                    // Fill missing locked slots from current top window to avoid short header.
+                    for (const p of list) {
+                        if (pinned.length >= topWindowSize) break;
+                        if (!p || !p.id || used.has(p.id)) continue;
+                        pinned.push(p);
+                        used.add(p.id);
+                    }
+
+                    const rest = [];
+                    for (const p of list) {
+                        if (!p || !p.id || used.has(p.id)) continue;
+                        rest.push(p);
+                    }
+
+                    model.lastUpdatedMs = now;
+                    persistTop15EngagementModelState(model);
+                    return [...pinned, ...rest];
+                }
+
+                persistTop15EngagementModelState(model);
+                return list;
+            } catch (e) {
+                console.warn('applyTop15EngagementLock failed:', e);
+                return Array.isArray(posts) ? posts : [];
+            }
         }
 
         function buildAllFeedCandidates(seedPosts) {
@@ -24941,7 +25117,7 @@
                     }
                 }
 
-                return merged;
+                return applyTop15EngagementLock(merged, sourceLabel);
             } catch (e) {
                 console.warn('applyContentFreshnessWaterfall failed:', e);
                 return Array.isArray(basePosts) ? basePosts : [];
