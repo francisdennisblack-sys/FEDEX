@@ -17575,35 +17575,102 @@
 
                 const uLat = userLocation && (userLocation.latitude || userLocation.lat);
                 const uLon = userLocation && (userLocation.longitude || userLocation.lon);
+                const hasUserLoc = typeof uLat === 'number' && typeof uLon === 'number';
+
+                // Ensure places fallback is available even when heavy DBs are not loaded yet.
+                if (!Array.isArray(window.osmPlaces) || window.osmPlaces.length === 0) {
+                    try {
+                        const placesPayload = await (window._osmPlacesPreloadPromise || poisFetch('/pois/places.json').then(r => r.ok ? r.json() : null));
+                        if (placesPayload && Array.isArray(placesPayload.places)) {
+                            window.osmPlaces = placesPayload.places;
+                        } else if (Array.isArray(placesPayload)) {
+                            window.osmPlaces = placesPayload;
+                        }
+                    } catch (e) { /* keep going */ }
+                }
 
                 const locationRows = [];
+                const poiRows = [];
+                const seen = new Set();
+
+                function addUnique(row, bucket) {
+                    if (!row || !row.display) return;
+                    const key = `${String(row.display).toLowerCase()}|${bucket}`;
+                    if (seen.has(key)) return;
+                    seen.add(key);
+                    if (bucket === 'poi') poiRows.push(row);
+                    else locationRows.push(row);
+                }
+
+                // Source 1: geosearch server (best nearby quality when location is known).
+                if (hasUserLoc) {
+                    try {
+                        const geoBase = (window.GEOSEARCH_URL || '/geosearch').replace(/\/$/, '');
+                        const devFallback = 'http://localhost:3030/geosearch';
+                        let resp = null;
+                        try { resp = await fetch(`${geoBase}?lat=${encodeURIComponent(uLat)}&lon=${encodeURIComponent(uLon)}&n=220`); } catch (_) {}
+                        if (!resp || !resp.ok) {
+                            try { resp = await fetch(`${devFallback}?lat=${encodeURIComponent(uLat)}&lon=${encodeURIComponent(uLon)}&n=220`); } catch (_) {}
+                        }
+                        if (resp && resp.ok) {
+                            const payload = await resp.json();
+                            if (payload && Array.isArray(payload.results)) {
+                                payload.results.forEach(r => {
+                                    const isPoi = !!(r.category && String(r.category).trim());
+                                    const display = r.state ? `${r.name}, ${r.state}` : String(r.name || '');
+                                    const d = (typeof r.distanceMi === 'number') ? r.distanceMi : Infinity;
+                                    addUnique({ type: isPoi ? 'poi' : 'location', display, distanceMi: d }, isPoi ? 'poi' : 'location');
+                                });
+                            }
+                        }
+                    } catch (e) { /* continue with local sources */ }
+                }
+
+                // Source 2: in-memory location DB.
                 if (Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
                     for (let i = 0; i < globalLocationDatabase.length; i++) {
                         const loc = globalLocationDatabase[i];
                         if (!loc || !loc.name) continue;
                         const display = loc.state ? `${loc.name}, ${loc.state}` : String(loc.name);
                         let d = Infinity;
-                        if (uLat && uLon && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
+                        if (hasUserLoc && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
                             d = calculateDistance(uLat, uLon, loc.lat, loc.lon) * 0.621371;
                         }
-                        locationRows.push({ type: 'location', display, distanceMi: d });
+                        addUnique({ type: 'location', display, distanceMi: d }, 'location');
                     }
-                    locationRows.sort((a, b) => a.distanceMi - b.distanceMi);
                 }
 
-                const poiRows = [];
+                // Source 3: OSM places fallback.
+                if (Array.isArray(window.osmPlaces) && window.osmPlaces.length > 0) {
+                    for (let i = 0; i < window.osmPlaces.length; i++) {
+                        const p = window.osmPlaces[i];
+                        if (!p || !p.name) continue;
+                        const display = p.state ? `${p.name}, ${p.state}` : String(p.name);
+                        const lat = p.lat || p.latitude;
+                        const lon = p.lon || p.longitude;
+                        let d = Infinity;
+                        if (hasUserLoc && typeof lat === 'number' && typeof lon === 'number') {
+                            d = calculateDistance(uLat, uLon, lat, lon) * 0.621371;
+                        }
+                        addUnique({ type: 'location', display, distanceMi: d }, 'location');
+                    }
+                }
+
+                // Source 4: in-memory POI DB.
                 if (Array.isArray(globalPOIDatabase) && globalPOIDatabase.length > 0) {
                     for (let i = 0; i < globalPOIDatabase.length; i++) {
                         const poi = globalPOIDatabase[i];
                         if (!poi || !poi.name) continue;
                         let d = Infinity;
-                        if (uLat && uLon && typeof poi.lat === 'number' && typeof poi.lon === 'number') {
+                        if (hasUserLoc && typeof poi.lat === 'number' && typeof poi.lon === 'number') {
                             d = calculateDistance(uLat, uLon, poi.lat, poi.lon) * 0.621371;
                         }
-                        poiRows.push({ type: 'poi', display: String(poi.name), distanceMi: d });
+                        addUnique({ type: 'poi', display: String(poi.name), distanceMi: d }, 'poi');
                     }
-                    poiRows.sort((a, b) => a.distanceMi - b.distanceMi);
                 }
+
+                locationRows.sort((a, b) => a.distanceMi - b.distanceMi);
+                poiRows.sort((a, b) => a.distanceMi - b.distanceMi);
 
                 const topPOI = poiRows.length ? poiRows[0] : null;
                 const topLocations = locationRows.slice(0, 35);
@@ -17631,7 +17698,37 @@
                     });
                 }
 
-                resultsContainer.innerHTML = html || '<div style="padding:12px;color:#999;text-align:center">No locations available yet. Start typing to search.</div>';
+                if (!html) {
+                    const fallback = [];
+                    const seenFallback = new Set();
+                    const addFallback = (name) => {
+                        const v = String(name || '').trim();
+                        if (!v) return;
+                        const k = v.toLowerCase();
+                        if (seenFallback.has(k)) return;
+                        seenFallback.add(k);
+                        fallback.push(v);
+                    };
+
+                    addFallback(currentZoneTag);
+                    addFallback(window.latestUserAreaTag);
+                    addFallback(currentAreaName);
+                    addFallback(window.userDetectedCounty);
+                    ['New York, NY','Los Angeles, CA','Chicago, IL','Houston, TX','Miami, FL','Seattle, WA','Boston, MA','Austin, TX'].forEach(addFallback);
+                    if (Array.isArray(window.availableZones)) {
+                        window.availableZones.slice(0, 20).forEach(addFallback);
+                    }
+
+                    if (fallback.length > 0) {
+                        html += '<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-weight:700">Quick Picks</div>';
+                        fallback.slice(0, 20).forEach(name => {
+                            const safe = String(name).replace(/'/g, '&#39;');
+                            html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${safe}', event)">📍 ${name}</div>`;
+                        });
+                    }
+                }
+
+                resultsContainer.innerHTML = html || '<div style="padding:12px;color:#999;text-align:center">No nearby suggestions yet. Start typing to search all locations and POIs.</div>';
             } catch (e) {
                 console.warn('fetchRefineDefaults error', e);
                 resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Unable to load locations right now. Try typing to search.</div>';
@@ -17965,6 +18062,36 @@
             
             // Render results
             if (results.length === 0) {
+                const quickPicks = [];
+                const seenPicks = new Set();
+                const addPick = (name) => {
+                    const v = String(name || '').trim();
+                    if (!v) return;
+                    if (!v.toLowerCase().includes(queryLower)) return;
+                    const k = v.toLowerCase();
+                    if (seenPicks.has(k)) return;
+                    seenPicks.add(k);
+                    quickPicks.push(v);
+                };
+
+                addPick(currentZoneTag);
+                addPick(window.latestUserAreaTag);
+                addPick(currentAreaName);
+                addPick(window.userDetectedCounty);
+                ['New York, NY','Los Angeles, CA','Chicago, IL','Houston, TX','Miami, FL','Seattle, WA','Boston, MA','Austin, TX','San Diego, CA','San Francisco, CA'].forEach(addPick);
+                if (Array.isArray(window.availableZones)) {
+                    window.availableZones.slice(0, 100).forEach(addPick);
+                }
+
+                if (quickPicks.length > 0) {
+                    const quickRows = quickPicks.slice(0, 25).map(name => {
+                        const safe = String(name).replace(/'/g, '&#39;');
+                        return `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${safe}', event)">📍 ${name}</div>`;
+                    }).join('');
+                    resultsContainer.innerHTML = `<div style="padding:8px 12px;background:#0f1419;border-bottom:1px solid #222;color:#888;font-size:11px;text-transform:uppercase;font-weight:700;">Quick Picks</div>${quickRows}`;
+                    return;
+                }
+
                 resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">No matches found for "${query}"</div>`;
                 return;
             }
