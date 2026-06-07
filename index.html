@@ -355,7 +355,27 @@
             LOAD_MEGA_POI: false,          // disable loading 1.5M+ location/POI chunks
             ENABLE_POI_LOADING: true,      // allow minimal POI loads; set false to skip all POI work
             ENABLE_VERBOSE_SW: false,      // disable verbose service-worker console logs
-            RUN_BACKGROUND_TRACKING: false // disable continuous location tracking loops
+            RUN_BACKGROUND_TRACKING: false, // disable continuous location tracking loops
+            ENABLE_CONTENT_FRESHNESS: true // enable feed freshness waterfall and stale fallback injection
+        };
+
+        // Feed freshness controls. Kept separate so rollout/risk can be tuned live.
+        window.CONTENT_FRESHNESS_CONFIG = window.CONTENT_FRESHNESS_CONFIG || {
+            enabled: true,
+            rolloutPercent: 100,
+            feedWindowSize: 90,
+            topGlobalPoolSize: 500,
+            minStaleMs: 60 * 1000,
+            maxStaleMs: 120 * 1000,
+            staleInjectMin: 1,
+            staleInjectMax: 5,
+            immediateTopInjectCount: 1,
+            localPercent: 70,
+            nearbyPercent: 15,
+            regionalPercent: 10,
+            globalPercent: 5,
+            maxRecentInjectedTrack: 200,
+            recentInjectCooldownMs: 30 * 60 * 1000
         };
 
         // Data source configuration: default to using small local samples for development.
@@ -24682,6 +24702,252 @@
             } catch (e) { console.warn('renderGridIncremental error', e); }
         }
 
+        function getFreshnessConfig() {
+            const cfg = window.CONTENT_FRESHNESS_CONFIG || {};
+            return {
+                enabled: cfg.enabled !== false,
+                rolloutPercent: Number(cfg.rolloutPercent || 100),
+                feedWindowSize: Number(cfg.feedWindowSize || 90),
+                topGlobalPoolSize: Number(cfg.topGlobalPoolSize || 500),
+                minStaleMs: Number(cfg.minStaleMs || (60 * 1000)),
+                maxStaleMs: Number(cfg.maxStaleMs || (120 * 1000)),
+                staleInjectMin: Number(cfg.staleInjectMin || 1),
+                staleInjectMax: Number(cfg.staleInjectMax || 5),
+                immediateTopInjectCount: Number(cfg.immediateTopInjectCount || 1),
+                localPercent: Number(cfg.localPercent || 70),
+                nearbyPercent: Number(cfg.nearbyPercent || 15),
+                regionalPercent: Number(cfg.regionalPercent || 10),
+                globalPercent: Number(cfg.globalPercent || 5),
+                maxRecentInjectedTrack: Number(cfg.maxRecentInjectedTrack || 200),
+                recentInjectCooldownMs: Number(cfg.recentInjectCooldownMs || (30 * 60 * 1000))
+            };
+        }
+
+        function freshnessRandomInt(min, max) {
+            const a = Math.floor(Math.min(min, max));
+            const b = Math.floor(Math.max(min, max));
+            return a + Math.floor(Math.random() * (b - a + 1));
+        }
+
+        function freshnessHashPercent(input) {
+            const str = String(input || 'anon');
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                hash |= 0;
+            }
+            return Math.abs(hash) % 100;
+        }
+
+        function isContentFreshnessEnabled() {
+            if (!window.CLEANUP_FLAGS || window.CLEANUP_FLAGS.ENABLE_CONTENT_FRESHNESS === false) return false;
+            const cfg = getFreshnessConfig();
+            if (!cfg.enabled) return false;
+            if (cfg.rolloutPercent >= 100) return true;
+            const id = currentUserId || permanentUid || firebaseUid || 'anon';
+            return freshnessHashPercent(id) < Math.max(0, Math.min(100, cfg.rolloutPercent));
+        }
+
+        function getContentFreshnessState() {
+            if (!window._contentFreshnessState) {
+                const cfg = getFreshnessConfig();
+                const now = Date.now();
+                window._contentFreshnessState = {
+                    lastTopSignature: '',
+                    lastMeaningfulFreshAt: now,
+                    nextTopFallbackAt: now + freshnessRandomInt(cfg.minStaleMs, cfg.maxStaleMs),
+                    recentInjected: {}
+                };
+            }
+            return window._contentFreshnessState;
+        }
+
+        function buildAllFeedCandidates(seedPosts) {
+            const out = [];
+            const seen = new Set();
+
+            const addPost = (p) => {
+                if (!p || !p.id) return;
+                if (seen.has(p.id)) return;
+                seen.add(p.id);
+                out.push(p);
+            };
+
+            if (Array.isArray(seedPosts)) {
+                seedPosts.forEach(addPost);
+            }
+
+            for (const key of Object.keys(gridContent || {})) {
+                const arr = gridContent[key];
+                if (!Array.isArray(arr)) continue;
+                arr.forEach(addPost);
+            }
+
+            if (Array.isArray(window.latestSortedPosts)) {
+                window.latestSortedPosts.forEach(addPost);
+            }
+
+            return out;
+        }
+
+        function getEngagementScore(post) {
+            const likes = Number(post && post.likes) || 0;
+            const dislikes = Number(post && post.dislikes) || 0;
+            const net = likes - dislikes;
+            const ts = Number(post && post.timestamp) || 0;
+            return (net * 1000) + likes * 50 - dislikes * 20 + Math.floor(ts / 1000);
+        }
+
+        function mergeUniquePosts(...arrays) {
+            const out = [];
+            const seen = new Set();
+            for (const arr of arrays) {
+                if (!Array.isArray(arr)) continue;
+                for (const p of arr) {
+                    if (!p || !p.id) continue;
+                    if (seen.has(p.id)) continue;
+                    seen.add(p.id);
+                    out.push(p);
+                }
+            }
+            return out;
+        }
+
+        function applyContentFreshnessWaterfall(basePosts, sourceLabel = 'unknown') {
+            try {
+                if (!isContentFreshnessEnabled()) return Array.isArray(basePosts) ? basePosts : [];
+
+                const cfg = getFreshnessConfig();
+                const state = getContentFreshnessState();
+                const now = Date.now();
+
+                const base = Array.isArray(basePosts) ? basePosts.filter(p => p && p.id) : [];
+                if (base.length === 0) return base;
+
+                const allCandidates = buildAllFeedCandidates(base);
+                if (allCandidates.length === 0) return base;
+
+                const topGlobalPool = [...allCandidates]
+                    .sort((a, b) => getEngagementScore(b) - getEngagementScore(a))
+                    .slice(0, Math.max(10, cfg.topGlobalPoolSize));
+
+                const topSignature = topGlobalPool.slice(0, 20).map(p => p.id).join('|');
+                const topChanged = topSignature && topSignature !== state.lastTopSignature;
+                state.lastTopSignature = topSignature;
+
+                // Bucket candidates for waterfall blend
+                const localKey = String(window.latestUserAreaTag || currentZoneTag || currentAreaName || '').trim();
+                const loadedAreas = new Set(Array.from(currentAreasLoaded || []).map(v => String(v)));
+                if (localKey) loadedAreas.delete(localKey);
+
+                const isLocal = (p) => {
+                    const area = String((p && (p.county || p.zoneTag || p.area || p.region)) || '');
+                    if (localKey && area === localKey) return true;
+                    return p && (p.proximityClass === 'local' || p.proximityClass === 'community' || p.proximityClass === 'nearby');
+                };
+                const isNearby = (p) => {
+                    const area = String((p && (p.county || p.zoneTag || p.area || p.region)) || '');
+                    if (loadedAreas.size > 0 && area && loadedAreas.has(area)) return true;
+                    return p && p.proximityClass === 'nearby';
+                };
+
+                const localPool = mergeUniquePosts(
+                    base.filter(isLocal),
+                    allCandidates.filter(isLocal)
+                );
+                const nearbyPool = mergeUniquePosts(
+                    base.filter(p => !isLocal(p) && isNearby(p)),
+                    allCandidates.filter(p => !isLocal(p) && isNearby(p))
+                );
+                const regionalPool = mergeUniquePosts(
+                    base.filter(p => !isLocal(p) && !isNearby(p)),
+                    allCandidates.filter(p => !isLocal(p) && !isNearby(p))
+                );
+
+                const windowSize = Math.max(30, Math.min(cfg.feedWindowSize, base.length));
+                const targetLocal = Math.floor(windowSize * (cfg.localPercent / 100));
+                const targetNearby = Math.floor(windowSize * (cfg.nearbyPercent / 100));
+                const targetRegional = Math.floor(windowSize * (cfg.regionalPercent / 100));
+                const targetGlobal = Math.max(1, Math.floor(windowSize * (cfg.globalPercent / 100)));
+
+                const selected = [];
+                const selectedIds = new Set();
+                const takeFrom = (pool, count) => {
+                    let taken = 0;
+                    for (const p of pool) {
+                        if (taken >= count) break;
+                        if (!p || !p.id || selectedIds.has(p.id)) continue;
+                        selected.push(p);
+                        selectedIds.add(p.id);
+                        taken++;
+                    }
+                };
+
+                takeFrom(localPool, targetLocal);
+                takeFrom(nearbyPool, targetNearby);
+                takeFrom(regionalPool, targetRegional);
+                takeFrom(topGlobalPool, targetGlobal);
+                takeFrom(base, windowSize - selected.length);
+
+                let merged = mergeUniquePosts(selected, base);
+
+                // Freshness stale detection / top-liked injection
+                const topWindow = new Set(merged.slice(0, windowSize).map(p => p.id));
+                const topWindowHasTopLiked = topGlobalPool.slice(0, 20).some(p => p && topWindow.has(p.id));
+                if (topChanged || topWindowHasTopLiked) {
+                    state.lastMeaningfulFreshAt = now;
+                    state.nextTopFallbackAt = now + freshnessRandomInt(cfg.minStaleMs, cfg.maxStaleMs);
+                }
+
+                // Prune aged injected memory
+                const recentEntries = Object.entries(state.recentInjected || {});
+                for (const [id, ts] of recentEntries) {
+                    if ((now - Number(ts || 0)) > cfg.recentInjectCooldownMs) {
+                        delete state.recentInjected[id];
+                    }
+                }
+
+                let injectCount = 0;
+                if (topChanged) {
+                    injectCount = Math.max(1, cfg.immediateTopInjectCount);
+                } else if (now >= (state.nextTopFallbackAt || 0) && (now - (state.lastMeaningfulFreshAt || 0)) >= cfg.minStaleMs) {
+                    injectCount = freshnessRandomInt(cfg.staleInjectMin, cfg.staleInjectMax);
+                }
+
+                if (injectCount > 0) {
+                    const inject = [];
+                    for (const p of topGlobalPool) {
+                        if (inject.length >= injectCount) break;
+                        if (!p || !p.id) continue;
+                        if (topWindow.has(p.id)) continue;
+                        if (state.recentInjected[p.id]) continue;
+                        inject.push(p);
+                    }
+
+                    if (inject.length > 0) {
+                        inject.forEach(p => { state.recentInjected[p.id] = now; });
+                        // Keep recentInjected bounded
+                        const keys = Object.keys(state.recentInjected);
+                        if (keys.length > cfg.maxRecentInjectedTrack) {
+                            keys.sort((a, b) => Number(state.recentInjected[a]) - Number(state.recentInjected[b]));
+                            const removeN = keys.length - cfg.maxRecentInjectedTrack;
+                            for (let i = 0; i < removeN; i++) delete state.recentInjected[keys[i]];
+                        }
+
+                        merged = mergeUniquePosts(inject, merged);
+                        state.lastMeaningfulFreshAt = now;
+                        state.nextTopFallbackAt = now + freshnessRandomInt(cfg.minStaleMs, cfg.maxStaleMs);
+                        console.log(`✨ Freshness(${sourceLabel}): injected ${inject.length} top-liked post(s) from top-${cfg.topGlobalPoolSize}`);
+                    }
+                }
+
+                return merged;
+            } catch (e) {
+                console.warn('applyContentFreshnessWaterfall failed:', e);
+                return Array.isArray(basePosts) ? basePosts : [];
+            }
+        }
+
         // Lightweight snapshot recompute used by incremental renderer.
         // Purpose: quickly build a deduped ordered list for the scroller
         // without running the full heavy ranking algorithms.
@@ -24739,7 +25005,7 @@
                     if (dedup.length >= MAX_POSTS) break;
                 }
 
-                pendingSortedPosts = dedup;
+                pendingSortedPosts = applyContentFreshnessWaterfall(dedup, 'incremental');
                 // Kick off the 1/sec reconciler to apply minimal diffs
                 try { scheduleGridReconcile(); } catch (e) { /* ignore */ }
                 console.log(`⚡ recomputeFeedSnapshot: built snapshot of ${pendingSortedPosts.length} posts`);
@@ -26336,6 +26602,10 @@
                 window.activeGoldMedalPostId = null;
                 window.goldMedalRotationBucket = Math.floor(Date.now() / (5 * 60 * 1000));
             }
+
+            // Content freshness waterfall (feature-flagged):
+            // Local -> Nearby -> Regional -> Global top-liked with stale-time fallback injection.
+            sortedPosts = applyContentFreshnessWaterfall(sortedPosts, 'full-render');
 
             // Refresh latest snapshot after position-1 rotation
             window.latestSortedPosts = [...sortedPosts];
