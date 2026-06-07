@@ -10527,6 +10527,68 @@
         window.userVotes = userVotes; // Expose for cleanup
         let hiddenPosts = {};
         window.hiddenPosts = hiddenPosts; // Expose for cleanup
+        const HIDDEN_POSTS_BY_USER_KEY = 'hiddenPostsByUser';
+
+        function getHiddenPostsViewerKey(viewerId) {
+            if (viewerId) return viewerId;
+            try {
+                const deviceId = localStorage.getItem('deviceUserId') || localStorage.getItem('deviceId');
+                if (deviceId) return deviceId;
+            } catch (e) { /* ignore */ }
+            return 'anonymous-viewer';
+        }
+
+        function getHiddenPostsForViewer(viewerId) {
+            const viewerKey = getHiddenPostsViewerKey(viewerId || currentUserId);
+            let persistedByUser = [];
+            let legacyHidden = [];
+
+            try {
+                const byUserRaw = JSON.parse(localStorage.getItem(HIDDEN_POSTS_BY_USER_KEY) || '{}');
+                if (byUserRaw && Array.isArray(byUserRaw[viewerKey])) {
+                    persistedByUser = byUserRaw[viewerKey];
+                }
+            } catch (e) {
+                console.warn('Failed to parse hiddenPostsByUser', e);
+            }
+
+            // Backward compatibility with older builds that persisted one flat array.
+            try {
+                const legacy = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
+                if (Array.isArray(legacy)) legacyHidden = legacy;
+            } catch (e) { /* ignore */ }
+
+            const inMemory = hiddenPosts[viewerKey] || [];
+            const merged = Array.from(new Set([...(inMemory || []), ...(persistedByUser || []), ...(legacyHidden || [])]));
+            hiddenPosts[viewerKey] = merged;
+            return merged;
+        }
+
+        function persistHiddenPostForViewer(postId, viewerId) {
+            if (!postId) return;
+            const viewerKey = getHiddenPostsViewerKey(viewerId || currentUserId);
+            const merged = getHiddenPostsForViewer(viewerKey);
+
+            if (!merged.includes(postId)) merged.push(postId);
+            hiddenPosts[viewerKey] = merged;
+
+            try {
+                const byUserRaw = JSON.parse(localStorage.getItem(HIDDEN_POSTS_BY_USER_KEY) || '{}');
+                byUserRaw[viewerKey] = Array.from(new Set(merged));
+                localStorage.setItem(HIDDEN_POSTS_BY_USER_KEY, JSON.stringify(byUserRaw));
+            } catch (e) {
+                console.warn('Failed to persist hiddenPostsByUser', e);
+            }
+
+            // Keep legacy key updated for compatibility with older running sessions.
+            try {
+                const legacy = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
+                const legacyArr = Array.isArray(legacy) ? legacy : [];
+                if (!legacyArr.includes(postId)) legacyArr.push(postId);
+                localStorage.setItem('hiddenPosts', JSON.stringify(legacyArr));
+            } catch (e) { /* ignore */ }
+        }
+
         let selectedPostId = null;
         let adminLongPressTimer = null;
         let refreshInterval = null;
@@ -15986,8 +16048,7 @@
             } catch(e) { console.warn('pendingDeletedPosts write failed', e); }
 
             // Also hide from memory for immediate UI update
-            if (!hiddenPosts[currentUserId]) hiddenPosts[currentUserId] = [];
-            if (!hiddenPosts[currentUserId].includes(deletedPostId)) hiddenPosts[currentUserId].push(deletedPostId);
+            try { persistHiddenPostForViewer(deletedPostId, currentUserId); } catch (e) { console.warn('Failed to persist delete hide state', e); }
 
             // Remove from local user ownership trackers so render pass does not re-inject it.
             try {
@@ -16087,22 +16148,18 @@
             console.log('  selectedPostId:', selectedPostId);
             console.log('  Will only hide for:', currentUserId);
 
-            if (!hiddenPosts[currentUserId]) {
-                hiddenPosts[currentUserId] = [];
-            }
+            const viewerKey = getHiddenPostsViewerKey(currentUserId);
+            const hiddenForViewer = getHiddenPostsForViewer(viewerKey);
             
             // Add to hidden list if not already there
-            if (!hiddenPosts[currentUserId].includes(selectedPostId)) {
-                hiddenPosts[currentUserId].push(selectedPostId);
-                console.log(`✅ Post hidden from user's view. Total hidden: ${hiddenPosts[currentUserId].length}`);
+            if (!hiddenForViewer.includes(selectedPostId)) {
+                hiddenForViewer.push(selectedPostId);
+                hiddenPosts[viewerKey] = hiddenForViewer;
+                console.log(`✅ Post hidden from user's view. Total hidden: ${hiddenForViewer.length}`);
             }
             
-            // Track in localStorage for persistence
-            let hiddenPostsList = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
-            if (!hiddenPostsList.includes(selectedPostId)) {
-                hiddenPostsList.push(selectedPostId);
-                try { localStorage.setItem('hiddenPosts', JSON.stringify(hiddenPostsList)); } catch (e) { /* ignore */ }
-            }
+            // Track in localStorage for persistence (scoped to current viewer)
+            persistHiddenPostForViewer(selectedPostId, viewerKey);
 
             // Remove DOM node and virtual scroller entry immediately
             try {
@@ -24748,8 +24805,7 @@
                 // 🎯 CAP AT 2000 POSTS MAX - don't load more than that
                 const MAX_POSTS = 2000;
                 // Filter out posts that should not be shown (pending deletes, hidden or reported)
-                const persistedHidden = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
-                const hiddenForThisUser = Array.isArray(persistedHidden) ? persistedHidden : [];
+                const hiddenForThisUser = getHiddenPostsForViewer(currentUserId);
                 const hiddenReported = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
                 const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
                 const pendingDeleted = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
@@ -24923,9 +24979,7 @@
                     const hiddenReported = JSON.parse(localStorage.getItem('hiddenReportedPosts') || '[]');
                     const deletedOwnPosts = JSON.parse(localStorage.getItem('deletedOwnPosts') || '[]');
                     const pendingDeleted = JSON.parse(localStorage.getItem('pendingDeletedPosts') || '[]');
-                    const hiddenForThisUser = (hiddenPosts && currentUserId && Array.isArray(hiddenPosts[currentUserId]))
-                        ? hiddenPosts[currentUserId]
-                        : [];
+                    const hiddenForThisUser = getHiddenPostsForViewer(currentUserId);
 
                     const isVisiblePost = (p) => {
                         if (!p || !p.id) return false;
@@ -26167,14 +26221,10 @@
             // Merge in persisted hidden posts from localStorage so hides persist
             // across reloads and immediately affect rendering for this user.
             try {
-                const persistedHidden = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
-                const inMemory = hiddenPosts[currentUserId] || [];
-                // Deduplicate while preserving both sources
-                const merged = Array.from(new Set([...(inMemory || []), ...(Array.isArray(persistedHidden) ? persistedHidden : [])]));
-                var hiddenForThisPOI = merged;
+                var hiddenForThisPOI = getHiddenPostsForViewer(currentUserId);
             } catch (e) {
                 console.warn('Failed to parse persisted hiddenPosts from localStorage', e);
-                var hiddenForThisPOI = hiddenPosts[currentUserId] || [];
+                var hiddenForThisPOI = hiddenPosts[getHiddenPostsViewerKey(currentUserId)] || [];
             }
             
             // Get posts hidden by this user (reported)
@@ -26718,14 +26768,15 @@
                     }
                     if (toAutoHide.length > 0) {
                         // Update in-memory map
-                        if (!hiddenPosts[currentUserId]) hiddenPosts[currentUserId] = [];
-                        const persistedHidden = JSON.parse(localStorage.getItem('hiddenPosts') || '[]');
+                        const viewerKey = getHiddenPostsViewerKey(currentUserId);
+                        const persistedHidden = getHiddenPostsForViewer(viewerKey);
                         for (const hid of toAutoHide) {
-                            if (!hiddenPosts[currentUserId].includes(hid)) hiddenPosts[currentUserId].push(hid);
-                            if (!persistedHidden.includes(hid)) persistedHidden.push(hid);
+                            if (!persistedHidden.includes(hid)) {
+                                persistedHidden.push(hid);
+                                persistHiddenPostForViewer(hid, viewerKey);
+                            }
                         }
-                        // Persist so the hide survives reloads
-                        try { localStorage.setItem('hiddenPosts', JSON.stringify(persistedHidden)); } catch (e) { /* ignore */ }
+                        hiddenPosts[viewerKey] = persistedHidden;
                         // Ensure immediate render-time filter sees the new hides
                         hiddenForThisPOI = Array.from(new Set([...(hiddenForThisPOI || []), ...toAutoHide]));
                         console.log(`🔕 autoHideDisliked: hid ${toAutoHide.length} posts for user ${currentUserId}`);
