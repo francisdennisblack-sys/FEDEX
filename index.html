@@ -25062,7 +25062,7 @@
                 try {
                     if (!window.gridScroller) return;
                     const seen = new Set();
-                    const all = [];
+                    let all = [];
                     const DEMO_RESERVED_SLOTS = (window.DEMO_RESERVED_SLOTS && Number(window.DEMO_RESERVED_SLOTS)) || 3;
                     // Prefer user's key first to keep owned posts visible
                     if (currentUserId && Array.isArray(gridContent[currentUserId])) {
@@ -25114,6 +25114,48 @@
                         if (k === currentUserId || k === 'shared-posts') return;
                         gridContent[k].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
                     });
+
+                    // Ensure demo posts remain at the top for signed-out viewers.
+                    // Collect demo candidates from demo grid, postCache, and shared-posts
+                    try {
+                        if (!currentUserId && DEMO_RESERVED_SLOTS > 0) {
+                            const demoCandidates = [];
+                            try {
+                                let demoKey = null;
+                                if (typeof window.ensureDemoGridKey === 'function') demoKey = window.ensureDemoGridKey();
+                                demoKey = demoKey || window.demoGridKey || (sessionStorage && sessionStorage.getItem && sessionStorage.getItem('demoGridKey')) || null;
+                                if (demoKey && Array.isArray(gridContent[demoKey])) {
+                                    gridContent[demoKey].forEach(p => { if (p && p.id && !demoCandidates.some(d => d.id === p.id)) demoCandidates.push(p); });
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            try {
+                                if (window.postCache) {
+                                    Object.keys(window.postCache).forEach(id => {
+                                        const p = window.postCache[id];
+                                        if (p && p.demo && p.id && !demoCandidates.some(d => d.id === p.id)) demoCandidates.push(p);
+                                    });
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            try {
+                                if (Array.isArray(gridContent['shared-posts'])) {
+                                    gridContent['shared-posts'].forEach(p => { if (p && p.demo && p.id && !demoCandidates.some(d => d.id === p.id)) demoCandidates.push(p); });
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            if (demoCandidates.length) {
+                                const keep = [];
+                                for (let i = 0; i < demoCandidates.length && keep.length < DEMO_RESERVED_SLOTS; i++) {
+                                    const p = demoCandidates[i];
+                                    if (p && p.id && !seen.has(p.id)) { seen.add(p.id); keep.push(p); }
+                                }
+                                // Remove any kept demo items from their current positions in `all` and prepend them
+                                const remaining = all.filter(a => !keep.some(k => k.id === a.id));
+                                all = keep.concat(remaining);
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
 
                     try {
                         // Force-clear the scroller internal items before setting new ones to avoid
