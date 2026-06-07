@@ -2439,13 +2439,25 @@
                 function makeDemoPost(i){
                     const types = ['text','text','photo','video'];
                     const areas = ['Downtown','Westside','Riverside','Uptown'];
+                    const kind = types[i % types.length];
+                    const isMedia = kind === 'photo' || kind === 'video';
                     return {
                         id: `demo-${i}`,
                         demo: true,
-                        type: types[i % types.length],
-                        text: '',
+                        // Schema-compatible fields used by render pipeline
+                        mediaType: isMedia ? (kind === 'video' ? 'video' : 'image') : null,
+                        photoURL: isMedia ? null : null,
+                        content: isMedia ? (kind === 'photo' ? '📷' : '🎥') : '',
+                        text: isMedia ? '' : '',
+                        likes: 0,
+                        dislikes: 0,
+                        displayAreaTag: areas[i % areas.length],
                         areaTag: areas[i % areas.length],
                         badges: [],
+                        boostStatus: null,
+                        forSale: false,
+                        engagementTier: 'NORMAL',
+                        ownerUid: null,
                         createdAt: Date.now() - (i * 1000)
                     };
                 }
@@ -2455,7 +2467,7 @@
                     if(!grid) return;
                     // Remove previous demo nodes to keep rendering idempotent
                     Array.from(grid.querySelectorAll('.demo-post')).forEach(n=>n.remove());
-                    const posts = (window.gridContent && window.gridContent[demoKey]) || [];
+                    const posts = (window.gridContent && (window.gridContent[demoKey] || window.gridContent['shared-posts'])) || [];
                     posts.forEach(p => {
                         const box = document.createElement('div');
                         box.className = 'demo-post';
@@ -2474,33 +2486,90 @@
                         badgeSlot.textContent = (p.badges && p.badges[0]) ? p.badges[0] : '';
                         box.appendChild(badgeSlot);
 
-                        // Main content
+                        // Main content (schema-compatible)
                         const content = document.createElement('div');
-                        content.style.cssText = 'text-align:center; display:flex; flex-direction:column; align-items:center; gap:8px;';
-                        if(p.type === 'text'){
+                        content.style.cssText = 'text-align:center; display:flex; flex-direction:column; align-items:center; gap:8px; width:100%;';
+                        if(!p.mediaType){
                             const txt = document.createElement('div');
-                            txt.style.cssText = 'font-size:20px; color:#fff; font-weight:800;';
-                            txt.textContent = p.text || ' ';
+                            txt.style.cssText = 'font-size:16px; color:#fff; font-weight:800;';
+                            txt.textContent = p.content || p.text || ' ';
                             content.appendChild(txt);
                         } else {
-                            const icon = document.createElement('div');
-                            icon.style.cssText = 'font-size:40px;';
-                            icon.textContent = p.type === 'photo' ? '📷' : '🎥';
-                            content.appendChild(icon);
+                            // Black-box placeholder for media
+                            const mediaBox = document.createElement('div');
+                            mediaBox.style.cssText = 'width:100%; height:120px; background:#000; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#666; font-size:28px;';
+                            mediaBox.textContent = p.mediaType === 'video' ? '🎥' : '📷';
+                            content.appendChild(mediaBox);
                         }
                         box.appendChild(content);
 
-                        box.onclick = () => { try { console.log('demo-open', p); if(typeof openViewModalByPostId === 'function') openViewModalByPostId(p.id); } catch(e){} };
+                        // Likes pill (bottom-right)
+                        const likesPill = document.createElement('div');
+                        likesPill.style.cssText = 'position:absolute; right:10px; bottom:10px; background:rgba(0,0,0,0.45); color:#fff; padding:6px 8px; border-radius:999px; font-size:12px; font-weight:800; display:flex; align-items:center; gap:6px;';
+                        const likeIcon = document.createElement('span'); likeIcon.textContent = '♥'; likeIcon.style.color = '#ef4444';
+                        const likeCount = document.createElement('span'); likeCount.textContent = (p.likes != null) ? String(p.likes) : '0';
+                        likesPill.appendChild(likeIcon);
+                        likesPill.appendChild(likeCount);
+                        box.appendChild(likesPill);
+                        // Store reference for dynamic updates
+                        box._demoLikeNode = likeCount;
+
+                        box.onclick = () => { try { console.log('demo-open', p); if(typeof openViewModalByPostId === 'function') openViewModalByPostId(p.id); else openDemoMediaModal(p); } catch(e){} };
                         grid.appendChild(box);
+                    
+                        // Update likes pill if node exists (for dynamic updates from sorting)
+                        if (box._demoLikeNode && p.likes != null) box._demoLikeNode.textContent = String(p.likes);
                     });
+                }
+
+                // Fallback modal opener for demo media if the real handler isn't available
+                function openDemoMediaModal(p){
+                    try{
+                        const vm = document.getElementById('viewModal');
+                        const viewMedia = document.getElementById('viewMedia');
+                        const viewText = document.getElementById('viewText');
+                        if(vm && viewMedia){
+                            // Full black area for media
+                            viewMedia.innerHTML = '';
+                            const el = document.createElement('div');
+                            el.style.cssText = 'width:100%; height:70vh; background:#000; display:flex; align-items:center; justify-content:center; color:#fff; font-size:48px;';
+                            el.textContent = p.mediaType === 'video' ? '🎥' : (p.mediaType === 'image' ? '📷' : '');
+                            viewMedia.appendChild(el);
+                        }
+                        if(viewText) viewText.textContent = p.content || p.text || '';
+                        if(vm) vm.style.display = 'flex';
+                    }catch(e){/* ignore */}
                 }
 
                 window.startDemoMVP = function(){
                     if(!window.gridContent) window.gridContent = {};
-                    window.gridContent[demoKey] = [0,1,2,3].map(makeDemoPost);
+                    // Always inject demo posts into shared-posts at the front so the
+                    // VirtualGridScroller can reserve the top N demo slots for signed-out users.
+                    const targetKey = 'shared-posts';
+                    // Preserve existing content for stop restore
+                    if (!window._preDemoGridContent) window._preDemoGridContent = Object.assign({}, window.gridContent || {});
+                    const demoPosts = [0,1,2,3].map(makeDemoPost).map(p => { p.badges = p.badges || []; return p; });
+
+                    // Ensure shared-posts exists and doesn't duplicate demo entries
+                    window.gridContent[targetKey] = window.gridContent[targetKey] || [];
+                    const existing = Array.isArray(window.gridContent[targetKey]) ? window.gridContent[targetKey].filter(p => !p || !p.demo) : [];
+                    window.gridContent[targetKey] = demoPosts.concat(existing);
+
+                    // Mirror into postCache so render pipeline can find them
+                    window.postCache = window.postCache || {};
+                    demoPosts.forEach(p => { try { p.demo = true; window.postCache[p.id] = p; } catch(e){} });
+
+                    // Persist demo active state so refresh restores demo for signed-out users
+                    try { sessionStorage.setItem('demoActive', '1'); sessionStorage.setItem('demoKey', targetKey); } catch(e){}
+
                     renderMVPDemo();
+                    try { if (typeof rebuildGridScrollerFromGridContent === 'function') rebuildGridScrollerFromGridContent(); } catch(e){}
+                    try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
+
                     if(window.__demoMVPInterval) clearInterval(window.__demoMVPInterval);
-                    // Rotating text content state
+                    if(window.__demoBadgeInterval) clearInterval(window.__demoBadgeInterval);
+
+                    // Rotating text content state (every DEMO_INTERVAL_MS)
                     if(!window.__demoMVPTick) window.__demoMVPTick = 0;
                     window.__demoMVPInterval = setInterval(() => {
                         const texts = [
@@ -2510,26 +2579,86 @@
                             ['Join the conversation','Watch this space','Top picks','Community highlights']
                         ];
                         window.__demoMVPTick = (window.__demoMVPTick + 1) % texts.length;
-                        (window.gridContent[demoKey] || []).forEach((p, idx) => {
-                            if(p.type === 'text') p.text = texts[idx % texts.length][window.__demoMVPTick % texts[idx % texts.length].length] || '';
+                        const rotatingPosts = (window.gridContent && (window.gridContent[demoKey] || window.gridContent['shared-posts'])) || [];
+                        rotatingPosts.forEach((p, idx) => {
+                            // treat posts without mediaType as text posts
+                            if(!p.mediaType) p.text = texts[idx % texts.length][window.__demoMVPTick % texts[idx % texts.length].length] || '';
                         });
                         // Rotate area tags slowly
                         const areas = ['Downtown','Westside','Riverside','Uptown'];
-                        (window.gridContent[demoKey] || []).forEach((p, idx) => { p.areaTag = areas[(window.__demoMVPTick + idx) % areas.length]; });
+                        const areaRotatePosts = (window.gridContent && (window.gridContent[demoKey] || window.gridContent['shared-posts'])) || [];
+                        areaRotatePosts.forEach((p, idx) => { p.areaTag = areas[(window.__demoMVPTick + idx) % areas.length]; });
                         renderMVPDemo();
+                        try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
                     }, DEMO_INTERVAL_MS);
+
+                    // Badge/boost/sell rotation every 10s (per-request requirement)
+                    window.__demoBadgeTick = window.__demoBadgeTick || 0;
+                    window.__demoBadgeInterval = setInterval(() => {
+                        const badgeStates = ['Featured','Boost','Buy',''];
+                        window.__demoBadgeTick = (window.__demoBadgeTick + 1) % badgeStates.length;
+                        const posts = (window.gridContent && (window.gridContent[demoKey] || window.gridContent['shared-posts'])) || [];
+                        // Assign badge labels from real badge universe and update likes to match
+                        const existingNonDemo = (window.gridContent && Array.isArray(window.gridContent['shared-posts'])) ? window.gridContent['shared-posts'].filter(x => !x || !x.demo) : [];
+                        const demoPosts = posts.filter(p => p && p.demo);
+
+                        demoPosts.forEach((p, idx) => {
+                            const state = badgeStates[(window.__demoBadgeTick + idx) % badgeStates.length];
+                            // Map visual state names to actual badge labels used by calculateBadges()
+                            const mapped = (state === 'Featured') ? 'crowned' : (state === 'Boost' ? 'boost' : (state === 'Buy' ? 'sell' : ''));
+                            p.badges = mapped ? [mapped] : [];
+                            // Set likes according to badge to simulate realistic ranking
+                            if (mapped === 'crowned') {
+                                p.likes = 150 + Math.floor(Math.random() * 80); // top
+                            } else if (mapped === 'boost') {
+                                p.likes = 80 + Math.floor(Math.random() * 50);
+                            } else if (mapped === 'sell') {
+                                p.likes = 40 + Math.floor(Math.random() * 40);
+                            } else {
+                                p.likes = Math.floor(Math.random() * 30);
+                            }
+                            // small variability for realism
+                            p.dislikes = Math.floor(Math.random() * Math.min(5, Math.floor(p.likes/10)));
+                        });
+
+                        // Sort demo posts by likes desc and then rebuild shared-posts preserving demo at front
+                        demoPosts.sort((a,b) => (Number(b.likes||0) - Number(a.likes||0)));
+                        window.gridContent['shared-posts'] = demoPosts.concat(existingNonDemo);
+
+                        // Mirror into postCache
+                        try { window.postCache = window.postCache || {}; demoPosts.forEach(p => { if (p && p.id) window.postCache[p.id] = p; }); } catch(e){}
+
+                        // Recompute cached badges and top positions for the grid
+                        try { if (typeof recalculateBadgesForCurrentGrid === 'function') recalculateBadgesForCurrentGrid(); } catch(e){}
+
+                        renderMVPDemo();
+                        try { if (typeof rebuildGridScrollerFromGridContent === 'function') rebuildGridScrollerFromGridContent(); } catch(e){}
+                        try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
+                    }, 10000);
                 };
 
                 window.stopDemoMVP = function(){
                     if(window.__demoMVPInterval){ clearInterval(window.__demoMVPInterval); window.__demoMVPInterval = null; }
-                    if(window.gridContent) delete window.gridContent[demoKey];
+                    if(window.__demoBadgeInterval){ clearInterval(window.__demoBadgeInterval); window.__demoBadgeInterval = null; }
+                    // Restore any previous gridContent state if we saved one
+                    if (window._preDemoGridContent) {
+                        try { window.gridContent = window._preDemoGridContent; } catch(e) { /* ignore */ }
+                        window._preDemoGridContent = null;
+                    } else {
+                        if(window.gridContent) delete window.gridContent[demoKey];
+                    }
+                    try { sessionStorage.removeItem('demoActive'); sessionStorage.removeItem('demoKey'); } catch(e){}
+                    // Rebuild scroller to reflect restored content
+                    try { if (typeof rebuildGridScrollerFromGridContent === 'function') rebuildGridScrollerFromGridContent(); } catch(e){}
                     renderMVPDemo();
+                    try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
                 };
 
                 document.addEventListener('DOMContentLoaded', () => {
                     try{
                         const existingCount = Object.values(window.gridContent || {}).flat().length || 0;
-                        if(!window.currentUserId && existingCount === 0) setTimeout(() => window.startDemoMVP(), 200);
+                        const demoActive = (function(){ try { return sessionStorage && sessionStorage.getItem && sessionStorage.getItem('demoActive') === '1'; } catch(e){ return false; } })();
+                        if(!window.currentUserId && (demoActive || existingCount === 0)) setTimeout(() => window.startDemoMVP(), 200);
                     }catch(e){ /* ignore */ }
                 });
             })();
@@ -24629,12 +24758,32 @@
                     if (!window.gridScroller) return;
                     const seen = new Set();
                     const all = [];
+                    const DEMO_RESERVED_SLOTS = (window.DEMO_RESERVED_SLOTS && Number(window.DEMO_RESERVED_SLOTS)) || 3;
                     // Prefer user's key first to keep owned posts visible
                     if (currentUserId && Array.isArray(gridContent[currentUserId])) {
                         gridContent[currentUserId].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
                     }
-                    if (Array.isArray(gridContent['shared-posts'])) {
-                        gridContent['shared-posts'].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
+
+                    // If user is signed-out, reserve the first N demo slots at the top
+                    if (!currentUserId && DEMO_RESERVED_SLOTS > 0 && Array.isArray(gridContent['shared-posts'])) {
+                        // Collect demo posts first (up to reserved count)
+                        const shared = gridContent['shared-posts'];
+                        for (let i = 0; i < shared.length && all.length < DEMO_RESERVED_SLOTS; i++) {
+                            const p = shared[i];
+                            if (p && p.id && p.demo && !seen.has(p.id)) { seen.add(p.id); all.push(p); }
+                        }
+                        // Then append the rest of shared-posts (non-demo and remaining)
+                        for (let i = 0; i < shared.length; i++) {
+                            const p = shared[i];
+                            if (!p || !p.id) continue;
+                            if (seen.has(p.id)) continue; // skip already-reserved demo items
+                            seen.add(p.id);
+                            all.push(p);
+                        }
+                    } else {
+                        if (Array.isArray(gridContent['shared-posts'])) {
+                            gridContent['shared-posts'].forEach(p => { if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); } });
+                        }
                     }
                     Object.keys(gridContent).forEach(k => {
                         if (!Array.isArray(gridContent[k])) return;
@@ -24850,6 +24999,14 @@
         function sendPostImpressionMetric(postId) {
             try {
                 if (!postId) return;
+                // Do not send production metrics for demo posts
+                try {
+                    const cached = (window.postCache && window.postCache[postId]) || null;
+                    if ((cached && cached.demo) || (typeof postId === 'string' && postId.startsWith && postId.startsWith('demo-'))) {
+                        console.log('📈 Impression suppressed for demo post', postId);
+                        return;
+                    }
+                } catch(e) {}
                 const payload = {
                     postId: postId,
                     userId: currentUserId || null,
@@ -24865,6 +25022,14 @@
         function sendPostClickMetric(postId) {
             try {
                 if (!postId) return;
+                // Do not send production click metrics for demo posts
+                try {
+                    const cached = (window.postCache && window.postCache[postId]) || null;
+                    if ((cached && cached.demo) || (typeof postId === 'string' && postId.startsWith && postId.startsWith('demo-'))) {
+                        console.log('🖱️ Click suppressed for demo post', postId);
+                        return;
+                    }
+                } catch(e) {}
                 const payload = {
                     postId: postId,
                     userId: currentUserId || null,
@@ -30628,7 +30793,14 @@
                 if (!window._preDemoGridContent) window._preDemoGridContent = Object.assign({}, window.gridContent || {});
                 const demoPosts = [makeDemoPost(1), makeDemoPost(2), makeDemoPost(3), makeDemoPost(4)];
                 console.log('demo: injecting demoPosts', demoPosts.map(p => p.id));
-                window.gridContent = { demo: demoPosts };
+                // Prefer shared-posts when empty so scroller treats demos as primary feed
+                const useShared = (!Array.isArray(window.gridContent['shared-posts']) || window.gridContent['shared-posts'].length === 0) && !window.currentUserId;
+                if (!window.gridContent) window.gridContent = {};
+                if (useShared) {
+                    window.gridContent['shared-posts'] = demoPosts;
+                } else {
+                    window.gridContent['demo'] = demoPosts;
+                }
                 window.postCache = window.postCache || {};
                 demoPosts.forEach(p => window.postCache[p.id] = p);
 
@@ -30677,7 +30849,7 @@
             function stopDemo(){
                 console.log('demo: stopDemo called');
                 if (window.__demoInterval) { clearInterval(window.__demoInterval); window.__demoInterval = null; }
-                if (window._preDemoGridContent) { window.gridContent = window._preDemoGridContent; window._preDemoGridContent = null; }
+                if (window._preDemoGridContent) { try { window.gridContent = window._preDemoGridContent; } catch(e){} window._preDemoGridContent = null; }
                 try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){ console.warn('demo: renderGrid failed on stop', e); }
             }
 
