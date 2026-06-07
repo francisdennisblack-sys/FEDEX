@@ -17738,6 +17738,8 @@
                 const uLat = userLocation && (userLocation.latitude || userLocation.lat);
                 const uLon = userLocation && (userLocation.longitude || userLocation.lon);
                 const hasUserLoc = typeof uLat === 'number' && typeof uLon === 'number';
+                let locationDb = Array.isArray(window.globalLocationDatabase) ? window.globalLocationDatabase : [];
+                let poiDb = Array.isArray(window.globalPOIDatabase) ? window.globalPOIDatabase : [];
 
                 // Ensure places fallback is available even when heavy DBs are not loaded yet.
                 if (!Array.isArray(window.osmPlaces) || window.osmPlaces.length === 0) {
@@ -17749,6 +17751,39 @@
                             window.osmPlaces = placesPayload;
                         }
                     } catch (e) { /* keep going */ }
+                }
+
+                // If heavy DBs are still empty, try a one-time fallback load so the
+                // opened dropdown can show real locations/POIs instead of quick picks.
+                if (locationDb.length === 0 && poiDb.length === 0) {
+                    try {
+                        window._refineDefaultsDbPromise = window._refineDefaultsDbPromise || poisFetch('/pois/poi_database_expanded.json').then(r => r.ok ? r.json() : null);
+                        const expandedPayload = await window._refineDefaultsDbPromise;
+                        if (Array.isArray(expandedPayload) && expandedPayload.length > 0) {
+                            const mapped = expandedPayload
+                                .filter(x => x && x.name)
+                                .map(x => ({
+                                    name: x.name,
+                                    lat: x.lat,
+                                    lon: x.lon,
+                                    state: x.state || '',
+                                    city: x.city || '',
+                                    category: x.category || x.type || '',
+                                    type: x.type || (x.category ? 'poi' : 'location')
+                                }));
+
+                            if (!Array.isArray(window.globalLocationDatabase) || window.globalLocationDatabase.length === 0) {
+                                window.globalLocationDatabase = mapped;
+                            }
+                            if (!Array.isArray(window.globalPOIDatabase) || window.globalPOIDatabase.length === 0) {
+                                window.globalPOIDatabase = mapped.filter(x => x.type === 'poi' || !!x.category);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Refine defaults fallback DB load failed', e);
+                    }
+                    locationDb = Array.isArray(window.globalLocationDatabase) ? window.globalLocationDatabase : [];
+                    poiDb = Array.isArray(window.globalPOIDatabase) ? window.globalPOIDatabase : [];
                 }
 
                 const locationRows = [];
@@ -17789,9 +17824,9 @@
                 }
 
                 // Source 2: in-memory location DB.
-                if (Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) {
-                    for (let i = 0; i < globalLocationDatabase.length; i++) {
-                        const loc = globalLocationDatabase[i];
+                if (locationDb.length > 0) {
+                    for (let i = 0; i < locationDb.length; i++) {
+                        const loc = locationDb[i];
                         if (!loc || !loc.name) continue;
                         const display = loc.state ? `${loc.name}, ${loc.state}` : String(loc.name);
                         let d = Infinity;
@@ -17819,9 +17854,9 @@
                 }
 
                 // Source 4: in-memory POI DB.
-                if (Array.isArray(globalPOIDatabase) && globalPOIDatabase.length > 0) {
-                    for (let i = 0; i < globalPOIDatabase.length; i++) {
-                        const poi = globalPOIDatabase[i];
+                if (poiDb.length > 0) {
+                    for (let i = 0; i < poiDb.length; i++) {
+                        const poi = poiDb[i];
                         if (!poi || !poi.name) continue;
                         let d = Infinity;
                         if (hasUserLoc && typeof poi.lat === 'number' && typeof poi.lon === 'number') {
