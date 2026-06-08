@@ -18555,6 +18555,90 @@
             return requestId === refineLocationRequestSeq;
         }
 
+        function isRefineSearchDebugEnabled() {
+            try {
+                if (window.REFINE_SEARCH_DEBUG === true) return true;
+                if (window.localStorage && localStorage.getItem('refineSearchDebug') === '1') return true;
+                if (window.location && /[?&]refineDebug=1\b/i.test(window.location.search || '')) return true;
+            } catch (e) {}
+            return false;
+        }
+
+        function refineSearchDebugLog(message, details) {
+            if (!isRefineSearchDebugEnabled()) return;
+            if (details !== undefined) {
+                console.log(`[REFINE-DEBUG] ${message}`, details);
+                return;
+            }
+            console.log(`[REFINE-DEBUG] ${message}`);
+        }
+
+        function initRefineSearchDiagnostics() {
+            try {
+                // Default ON so the next launch immediately emits diagnostics.
+                if (window.localStorage && localStorage.getItem('refineSearchDebug') === null) {
+                    localStorage.setItem('refineSearchDebug', '1');
+                }
+                window.REFINE_SEARCH_DEBUG = isRefineSearchDebugEnabled();
+            } catch (e) {
+                window.REFINE_SEARCH_DEBUG = true;
+            }
+
+            refineSearchDebugLog('Diagnostics initialized', {
+                href: window.location && window.location.href,
+                userAgent: navigator && navigator.userAgent,
+                timestamp: new Date().toISOString()
+            });
+
+            if (!window.__refineGlobalErrorHookInstalled) {
+                window.__refineGlobalErrorHookInstalled = true;
+                window.addEventListener('error', function(event) {
+                    refineSearchDebugLog('Global error', {
+                        message: event && event.message,
+                        source: event && event.filename,
+                        line: event && event.lineno,
+                        column: event && event.colno
+                    });
+                });
+                window.addEventListener('unhandledrejection', function(event) {
+                    const reason = event && event.reason;
+                    refineSearchDebugLog('Unhandled promise rejection', {
+                        reason: reason && reason.message ? reason.message : String(reason)
+                    });
+                });
+            }
+
+            // Startup readiness snapshot for quick triage.
+            refineSearchDebugLog('Startup readiness', {
+                hasAutocompleteFn: typeof getAutocompleteSuggestions === 'function',
+                hasRemoteDropdownFactory: typeof ensureRemoteGeocodeDropdown === 'function',
+                hasGlobalLocationDb: Array.isArray(window.globalLocationDatabase) && window.globalLocationDatabase.length > 0,
+                locationDbCount: Array.isArray(window.globalLocationDatabase) ? window.globalLocationDatabase.length : 0,
+                hasGlobalPoiDb: Array.isArray(window.globalPOIDatabase) && window.globalPOIDatabase.length > 0,
+                poiDbCount: Array.isArray(window.globalPOIDatabase) ? window.globalPOIDatabase.length : 0,
+                hasPoiSearchIndex: !!(window.globalPoiSearchIndex && Array.isArray(window.globalPoiSearchIndex.rows)),
+                poiSearchIndexRows: (window.globalPoiSearchIndex && Array.isArray(window.globalPoiSearchIndex.rows)) ? window.globalPoiSearchIndex.rows.length : 0
+            });
+
+            const refineInput = document.getElementById('customZoneTag');
+            if (refineInput && !window.__refineTypeTraceHookInstalled) {
+                window.__refineTypeTraceHookInstalled = true;
+                refineInput.addEventListener('input', function(ev) {
+                    const raw = String((ev && ev.target && ev.target.value) || '');
+                    // Always-on trace so typing activity is visible even if debug toggles fail.
+                    console.log('[REFINE-TRACE] typing in refine field', {
+                        value: raw,
+                        length: raw.length,
+                        ts: Date.now()
+                    });
+                    refineSearchDebugLog('Refine field input event observed', {
+                        value: raw,
+                        length: raw.length
+                    });
+                });
+            }
+        }
+
         function renderRefineDatabaseSuggestions(suggestions, query) {
             const resultsContainer = document.getElementById('refineLocationResultsContainer');
             if (!resultsContainer) return 0;
@@ -18563,6 +18647,7 @@
             cleanupRefineLocationScroller();
 
             if (!Array.isArray(suggestions) || suggestions.length === 0) {
+                refineSearchDebugLog('DB render: no suggestions', { query });
                 const safeQuery = String(query || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">No database matches found for "${safeQuery}"</div>`;
                 return 0;
@@ -18573,10 +18658,18 @@
                 .slice(0, 350);
 
             if (visibleRows.length === 0) {
+                refineSearchDebugLog('DB render: suggestions existed but no selectable rows', { query, totalSuggestions: suggestions.length });
                 const safeQuery = String(query || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">No selectable database matches for "${safeQuery}"</div>`;
                 return 0;
             }
+
+            refineSearchDebugLog('DB render: selectable rows ready', {
+                query,
+                totalSuggestions: suggestions.length,
+                selectableRows: visibleRows.length,
+                usesVirtualScroller: visibleRows.length > 80 && typeof VirtualScroller === 'function'
+            });
 
             if (visibleRows.length > 80 && typeof VirtualScroller === 'function') {
                 const wrapperId = 'refineDbScroller_' + Date.now();
@@ -18594,11 +18687,13 @@
                     div.onmousedown = (e) => {
                         e.preventDefault();
                         e.stopPropagation();
+                        refineSearchDebugLog('DB select (virtual list)', { query, selected: clickValue, itemType: item.type || 'unknown' });
                         selectLocationFromSpecifyField(clickValue, e, { preserveInputValue: true, zoneLabel: clickValue });
                     };
                     div.ontouchstart = (e) => {
                         e.preventDefault();
                         e.stopPropagation();
+                        refineSearchDebugLog('DB select (virtual list touch)', { query, selected: clickValue, itemType: item.type || 'unknown' });
                         selectLocationFromSpecifyField(clickValue, e, { preserveInputValue: true, zoneLabel: clickValue });
                     };
                     div.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
@@ -18621,13 +18716,26 @@
         function filterRefineLocationSearch(query) {
             const q = String(query || '').trim();
             if (!q) return 0;
-            if (typeof getAutocompleteSuggestions !== 'function') return 0;
+            if (typeof getAutocompleteSuggestions !== 'function') {
+                refineSearchDebugLog('DB search unavailable: getAutocompleteSuggestions missing');
+                return 0;
+            }
 
             try {
+                const startedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                 const suggestions = getAutocompleteSuggestions(q);
-                return renderRefineDatabaseSuggestions(suggestions, q);
+                const rendered = renderRefineDatabaseSuggestions(suggestions, q);
+                const endedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                refineSearchDebugLog('DB search finished', {
+                    query: q,
+                    rendered,
+                    rawSuggestionCount: Array.isArray(suggestions) ? suggestions.length : 0,
+                    elapsedMs: Number((endedAt - startedAt).toFixed(1))
+                });
+                return rendered;
             } catch (e) {
                 console.warn('filterRefineLocationSearch failed', e);
+                refineSearchDebugLog('DB search failed', { query: q, error: e && e.message ? e.message : String(e) });
                 return 0;
             }
         }
@@ -18635,7 +18743,19 @@
         function handleCustomZoneInput() {
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
-            const remoteDropdown = ensureRemoteGeocodeDropdown();
+            const val = String(customTagInput.value || '').trim();
+            // Always log handler entry so we can verify the inline oninput is firing.
+            console.log('[REFINE-TRACE] handleCustomZoneInput fired', { value: val, length: val.length });
+
+            let remoteDropdown = null;
+            try {
+                remoteDropdown = ensureRemoteGeocodeDropdown();
+            } catch (e) {
+                console.error('[REFINE-TRACE] ensureRemoteGeocodeDropdown failed', e);
+                refineSearchDebugLog('ensureRemoteGeocodeDropdown threw', {
+                    error: e && e.message ? e.message : String(e)
+                });
+            }
 
             // IMPORTANT: Typing in the refine location field does NOT update the SENDING TO field
             // The SENDING TO field only updates when user SELECTS a location from the dropdown
@@ -18644,10 +18764,15 @@
             if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
                 window.ensureGlobalPoiSearchIndex();
             }
-            const val = customTagInput.value.trim();
+            refineSearchDebugLog('Input changed', {
+                value: val,
+                length: val.length,
+                previousQuery: lastRefineLocationSearchQuery
+            });
             if (val.length === 0) {
                 lastRefineLocationSearchQuery = '';
                 try { if (remoteDropdown) remoteDropdown.close(); } catch (e) {}
+                refineSearchDebugLog('Input empty: reset to prompt mode');
                 // Search-only mode: keep dropdown open with prompt, but do not show defaults.
                 try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
                 return;
@@ -18661,6 +18786,7 @@
 
             // Skip search if query hasn't changed
             if (val === lastRefineLocationSearchQuery) {
+                refineSearchDebugLog('Skipping duplicate query', { query: val });
                 return;
             }
             lastRefineLocationSearchQuery = val;
@@ -18671,9 +18797,22 @@
                 // Local database search is primary; remote geocode is fallback.
                 const dbCount = filterRefineLocationSearch(val);
                 if (dbCount <= 0) {
-                    remoteDropdown.handleInput(val);
+                    refineSearchDebugLog('DB returned 0: using remote fallback', { query: val });
+                    if (remoteDropdown && typeof remoteDropdown.handleInput === 'function') {
+                        remoteDropdown.handleInput(val);
+                    } else {
+                        console.warn('[REFINE-TRACE] remote fallback unavailable', { query: val });
+                    }
+                } else {
+                    refineSearchDebugLog('Using DB results only', { query: val, dbCount });
                 }
             }, 320); // Wait 320ms after user stops typing
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initRefineSearchDiagnostics, { once: true });
+        } else {
+            initRefineSearchDiagnostics();
         }
 
         /**
@@ -18911,6 +19050,7 @@
             async remoteSearch(query) {
                 const seq = ++this.requestSeq;
                 const url = this.buildRequestUrl(query);
+                refineSearchDebugLog('Remote search start', { query, seq, url });
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeoutMs);
                 let response;
@@ -18926,6 +19066,7 @@
                 }
 
                 if (!response.ok) {
+                    refineSearchDebugLog('Remote search HTTP error', { query, seq, status: response.status });
                     if (response.status === 429) {
                         throw new Error('Too many searches right now. Please wait a moment.');
                     }
@@ -18937,6 +19078,7 @@
                     this.lastAttribution = String(payload.attribution);
                 }
                 const rows = Array.isArray(payload && payload.results) ? payload.results : [];
+                refineSearchDebugLog('Remote search success', { query, seq, resultCount: rows.length });
                 return rows.map((r) => this.normalizeRemoteResult(r)).filter(Boolean).slice(0, this.limit);
             }
 
