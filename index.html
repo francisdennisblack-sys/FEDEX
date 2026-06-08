@@ -3226,13 +3226,28 @@
         window.database = database;
         window.storage = storage;
         // Persist and restore the user's selected area tag so selections survive navigation
-        window.persistZoneTagForUser = function(tag) {
+        window.persistZoneTagForUser = function(tag, options = {}) {
             try {
                 const uid = window.currentUserId || 'anon';
                 const key = `currentZoneTag_${uid}`;
                 if (tag && tag.trim()) {
-                    localStorage.setItem(key, String(tag));
-                    console.log(`✅ Persisted zone tag for ${uid}:`, tag);
+                    const manual = !!(options && options.manual === true);
+                    if (!manual) {
+                        // Smart fix: never persist auto-generated tags. Only explicit user picks
+                        // survive reload, preventing sticky incorrect area labels.
+                        console.log(`ℹ️ Skipped auto-persist zone tag for ${uid}:`, tag);
+                        return false;
+                    }
+                    const coords = (typeof getCanonicalUserCoords === 'function') ? getCanonicalUserCoords({ maxAgeMs: 30 * 60 * 1000 }) : null;
+                    const payload = {
+                        tag: String(tag),
+                        manual: true,
+                        timestamp: Date.now(),
+                        lat: coords && Number.isFinite(coords.lat) ? coords.lat : null,
+                        lon: coords && Number.isFinite(coords.lon) ? coords.lon : null
+                    };
+                    localStorage.setItem(key, JSON.stringify(payload));
+                    console.log(`✅ Persisted MANUAL zone tag for ${uid}:`, tag);
                 } else {
                     localStorage.removeItem(key);
                     console.log(`✅ Cleared persisted zone tag for ${uid}`);
@@ -3244,19 +3259,43 @@
             try {
                 const uid = window.currentUserId || 'anon';
                 const key = `currentZoneTag_${uid}`;
-                const v = localStorage.getItem(key);
-                if (v && v.trim()) {
-                    currentZoneTag = v;
+                const raw = localStorage.getItem(key);
+                if (!raw || !String(raw).trim()) return false;
+
+                let tag = null;
+                let manual = false;
+                try {
+                    const parsed = JSON.parse(raw);
+                    if (parsed && typeof parsed === 'object') {
+                        tag = String(parsed.tag || '').trim();
+                        manual = !!parsed.manual;
+                    }
+                } catch (e) {
+                    // Legacy string format: treat as non-manual and clear so wrong auto tags don't stick.
+                    tag = String(raw || '').trim();
+                    manual = false;
+                }
+
+                if (!tag) return false;
+                if (!manual) {
+                    localStorage.removeItem(key);
+                    console.log(`🧹 Ignored non-manual persisted zone tag for ${uid}:`, tag);
+                    return false;
+                }
+
+                if (tag && tag.trim()) {
+                    currentZoneTag = tag;
+                    userSelectedZone = true;
                     const zp = document.getElementById('zonePredictor');
                     if (zp) {
-                        zp.textContent = v;
+                        zp.textContent = tag;
                         zp.classList.remove('zone-predictor-loading');
                         zp.style.color = '#fff';
                         zp.style.background = '#1a1a1a';
                     }
                     const clearZoneBtn = document.getElementById('clearZoneBtn');
                     if (clearZoneBtn) clearZoneBtn.style.display = 'inline-block';
-                    console.log(`✅ Restored persisted zone tag for ${uid}:`, v);
+                    console.log(`✅ Restored MANUAL persisted zone tag for ${uid}:`, tag);
                     return true;
                 }
             } catch (e) { console.warn('restoreZoneTagForUser failed', e); }
@@ -5196,6 +5235,9 @@
             const coords = getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000, ...(options || {}) });
             if (!coords) return null;
 
+            const maxDistanceKm = Number(options.maxDistanceKm || 0)
+                || ((Number.isFinite(Number(coords.accuracy)) && Number(coords.accuracy) > 2500) ? 180 : 75);
+
             let best = null;
             const maybeTake = (candidate) => {
                 if (!candidate || !candidate.name) return;
@@ -5236,6 +5278,17 @@
                     }
                 }
             } catch (e) { /* ignore */ }
+
+            if (best && Number.isFinite(best.distanceKm) && best.distanceKm > maxDistanceKm) {
+                window.lastRejectedNearestArea = {
+                    name: best.name,
+                    distanceKm: best.distanceKm,
+                    source: best.source,
+                    rejectedAt: Date.now(),
+                    reason: `too-far>${maxDistanceKm}km`
+                };
+                return null;
+            }
 
             return best;
         }
@@ -5322,15 +5375,34 @@
         function updateNearbyPOIsFromPolling() {
             try {
                 const nearestArea = resolveNearestAreaFromLiveLocation({ maxAgeMs: 15 * 60 * 1000 });
-                if (nearestArea && nearestArea.name) {
-                    // Only update if nearest area changed
-                    if (lastPollPOIName !== nearestArea.name) {
-                        lastPollPOIName = nearestArea.name;
-                        currentAreaName = nearestArea.name;
-                        currentZoneTag = nearestArea.name;
+                let resolvedName = nearestArea && nearestArea.name ? nearestArea.name : null;
+                let resolvedSource = nearestArea && nearestArea.source ? nearestArea.source : null;
+                let resolvedMeters = nearestArea && Number.isFinite(nearestArea.distanceKm) ? nearestArea.distanceKm * 1000 : null;
 
-                        const meters = nearestArea.distanceKm * 1000;
-                        console.log(`🎯 Area updated (${nearestArea.source}): ${nearestArea.name} (${formatDistanceMeters(meters)})`);
+                // If nearest db match is rejected as too far, fall back to cloud reverse label.
+                if (!resolvedName) {
+                    try {
+                        const coords = getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 });
+                        if (coords) {
+                            const cloud = resolveCloudBackedAreaTag(coords.lat, coords.lon);
+                            if (cloud && cloud.name) {
+                                resolvedName = cloud.name;
+                                resolvedSource = cloud.source || 'cloud-fallback';
+                                resolvedMeters = Number(cloud.distanceKm || 0) * 1000;
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
+                if (resolvedName) {
+                    // Only update if nearest area changed
+                    if (lastPollPOIName !== resolvedName) {
+                        lastPollPOIName = resolvedName;
+                        currentAreaName = resolvedName;
+                        if (!userSelectedZone) currentZoneTag = resolvedName;
+
+                        const meters = Number.isFinite(resolvedMeters) ? resolvedMeters : 0;
+                        console.log(`🎯 Area updated (${resolvedSource || 'unknown'}): ${resolvedName} (${formatDistanceMeters(meters)})`);
                         console.log(`📍 Area name synced from live location without forcing grid rerender`);
                     }
                 }
@@ -9072,7 +9144,7 @@
             
             console.log(`🔀 MANUAL ZONE SWITCH: ${zone}`);
             console.log(`📊 Filtering posts to show only zone: ${currentZoneTag}`);
-            try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag); } catch(e) {}
+            try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag, { manual: true }); } catch(e) {}
             
             // Re-render grid with new zone
             renderGrid();
@@ -19021,7 +19093,7 @@
             }
             
             console.log(`   ✅ STEP 3: Global currentZoneTag updated: "${oldZoneTag}" → "${currentZoneTag}"`);
-            try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag); } catch(e) {}
+            try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag, { manual: true }); } catch(e) {}
             console.log(`   ✅ STEP 3b: User selection flag set - will not auto-detect over this`);
             console.log(`   ✅ STEP 3c: Area tracking updated (${currentAreasLoaded.size} areas loaded for ${currentPageMode})`);
             
@@ -20257,7 +20329,7 @@
                 console.log(`   🔄 UPDATING currentZoneTag from "${currentZoneTag}" to "${displayText}"`);
                 currentZoneTag = displayText;
                 console.log(`   ✅ currentZoneTag updated: "${currentZoneTag}"`);
-                try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag); } catch (e) {}
+                try { window.persistZoneTagForUser && window.persistZoneTagForUser(currentZoneTag, { manual: true }); } catch (e) {}
                 
                 if (clearZoneBtn) {
                     clearZoneBtn.style.display = 'inline-block';
