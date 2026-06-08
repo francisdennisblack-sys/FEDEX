@@ -8504,6 +8504,14 @@
                 console.timeEnd('Geolocation');
                 console.log(`✅ Location acquired: ${userLocation.lat.toFixed(4)}°N, ${userLocation.lon.toFixed(4)}°E`);
 
+                // Preload cloud-backed area datasets briefly so auto-generated
+                // tags use the same source of truth as refine location search.
+                try {
+                    await ensureCloudAreaTagDataReady(900);
+                } catch (e) {
+                    console.warn('Cloud area-tag preload warning:', e);
+                }
+
                 // Immediately resolve a real area tag so SENDING TO never stays on "Detecting".
                 try {
                     const immediateArea = autoDetectClosestArea(userLocation) || getLocationName(userLocation.lat, userLocation.lon);
@@ -11073,7 +11081,11 @@
                 // STEP 1: Load US locations database (75K+ cities/towns)
                 console.log('📍 STEP 1: Loading US locations database...');
                 try {
-                    const usResponse = await fetch('/us_locations_database_small.json');
+                    let usResponse = null;
+                    try { usResponse = await poisFetch('/pois/us_locations_database_small.json'); } catch (_) {}
+                    if (!usResponse || !usResponse.ok) {
+                        usResponse = await fetch('/us_locations_database_small.json');
+                    }
                     if (usResponse.ok) {
                         const usData = await usResponse.json();
                         let usLocations = [];
@@ -11299,7 +11311,11 @@
                 // STEP 3: Load expanded POI database (300K+ locations)
                 console.log('🌐 STEP 3: Loading expanded POI database...');
                 try {
-                    const expandedResponse = await fetch(resolveDataPath('poi_database_expanded.json', true));
+                    let expandedResponse = null;
+                    try { expandedResponse = await poisFetch('/pois/poi_database_expanded.json'); } catch (_) {}
+                    if (!expandedResponse || !expandedResponse.ok) {
+                        expandedResponse = await fetch(resolveDataPath('poi_database_expanded.json', true));
+                    }
                     if (expandedResponse.ok) {
                         const expandedData = await expandedResponse.json();
                         let expandedLocations = [];
@@ -17700,6 +17716,17 @@
                 return;
             }
 
+            // First try unified cloud-backed area resolver.
+            try {
+                const cloudMatch = resolveCloudBackedAreaTag(userLocation.lat, userLocation.lon);
+                if (cloudMatch && cloudMatch.name) {
+                    updateZonePredictorWithCustom(cloudMatch.name);
+                    const miles = (Number(cloudMatch.distanceKm) || 0) * 0.621371;
+                    console.log(`📍 Auto-populated (cloud): ${cloudMatch.name} (${miles.toFixed(1)}mi away)`);
+                    return;
+                }
+            } catch (e) { console.warn('autoPopulateNearestArea cloud resolver warning:', e); }
+
             let nearestName = null;
             let nearestDistance = Infinity;
 
@@ -24058,6 +24085,80 @@
         // ============================================
         // FAST ML AREA RECOMMENDATION UI FUNCTIONS
         // ============================================
+
+        async function ensureCloudAreaTagDataReady(timeoutMs = 900) {
+            try {
+                const hasLocations = Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0;
+                const hasPois = Array.isArray(globalPOIDatabase) && globalPOIDatabase.length > 0;
+                if (hasLocations || hasPois) return true;
+
+                if (!window._cloudAreaTagDataPromise && typeof loadWorldwideLocationsAndPOIs === 'function') {
+                    window._cloudAreaTagDataPromise = loadWorldwideLocationsAndPOIs().catch((e) => {
+                        console.warn('ensureCloudAreaTagDataReady load failed:', e);
+                        return false;
+                    });
+                }
+
+                if (!window._cloudAreaTagDataPromise) return false;
+
+                const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs));
+                await Promise.race([window._cloudAreaTagDataPromise, timeoutPromise]);
+
+                return (Array.isArray(globalLocationDatabase) && globalLocationDatabase.length > 0) ||
+                       (Array.isArray(globalPOIDatabase) && globalPOIDatabase.length > 0);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function resolveCloudBackedAreaTag(lat, lon) {
+            if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+
+            try {
+                if (window.GeoIndex && typeof window.GeoIndex.nearby === 'function') {
+                    const hits = window.GeoIndex.nearby(lat, lon, 31); // ~50km
+                    if (hits && hits.length) {
+                        const pick = hits.find(h => h && h.poi && h.poi.name) || hits[0];
+                        const name = pick && pick.poi && (pick.poi.name || pick.poi.city) ? String(pick.poi.name || pick.poi.city).trim() : '';
+                        if (name) {
+                            return {
+                                name,
+                                distanceKm: (Number(pick.distanceMi) || 0) * 1.60934,
+                                source: 'geoindex'
+                            };
+                        }
+                    }
+                }
+            } catch (e) { /* ignore */ }
+
+            try {
+                if (typeof findClosestPOIInZone === 'function') {
+                    const poiResult = findClosestPOIInZone(lat, lon);
+                    if (poiResult && poiResult.poi && poiResult.poi.name) {
+                        return {
+                            name: String(poiResult.poi.name).trim(),
+                            distanceKm: Number(poiResult.distance) || 0,
+                            source: 'cloud-poi'
+                        };
+                    }
+                }
+            } catch (e) { /* ignore */ }
+
+            try {
+                if (typeof findClosestLocation === 'function') {
+                    const closest = findClosestLocation(lat, lon);
+                    if (closest && closest.location && closest.location.name) {
+                        return {
+                            name: String(closest.location.name).trim(),
+                            distanceKm: Number(closest.distance) || 0,
+                            source: 'cloud-location'
+                        };
+                    }
+                }
+            } catch (e) { /* ignore */ }
+
+            return null;
+        }
         
         /**
          * INSTANT: Auto-generate closest area with zero delay
@@ -24076,6 +24177,21 @@
             }
             
             console.log(`🎯 AUTO-DETECT START: User at (${userLocation.lat}, ${userLocation.lon}) accuracy: ${userLocation.accuracy}m`);
+
+            // PRIMARY: unified cloud-backed resolver (same data family as refine location search).
+            try {
+                const cloudMatch = resolveCloudBackedAreaTag(userLocation.lat, userLocation.lon);
+                if (cloudMatch && cloudMatch.name) {
+                    const distMiles = (Number(cloudMatch.distanceKm) || 0) * 0.621371;
+                    const autoDisplay = document.getElementById('autoAreaText');
+                    if (autoDisplay) {
+                        autoDisplay.textContent = `✓ ${cloudMatch.name} (${distMiles.toFixed(1)}mi)`;
+                        autoDisplay.style.color = '#fff';
+                    }
+                    console.log(`☁️ Cloud area-tag match: ${cloudMatch.name} via ${cloudMatch.source}`);
+                    return cloudMatch.name;
+                }
+            } catch (e) { console.warn('Cloud area-tag resolver failed:', e); }
             
             // FAST PATH: If a spatial GeoIndex is available, use it (O(1)) instead of scanning
             // the large `globalLocationDatabase` array which can be very slow on mobile.
@@ -24211,12 +24327,12 @@
                 }
             }
             
-            // PRIORITY 2: Fall back to POI database (may be inaccurate due to random scatter)
-            if (poiDatabase && poiDatabase.length > 0) {
+            // PRIORITY 2: Fall back to cloud POI database if unified resolver did not match
+            if (globalPOIDatabase && globalPOIDatabase.length > 0) {
                 let closest = null;
                 let minDistance = Infinity;
                 
-                poiDatabase.forEach(poi => {
+                globalPOIDatabase.forEach(poi => {
                     const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
                     if (dist < minDistance) {
                         minDistance = dist;
@@ -29600,7 +29716,17 @@
             if (!userLocation || !userLocation.lat || !userLocation.lon) return null;
             let resolved = null;
 
+            // Primary: cloud-backed resolver used by refine-location datasets.
             try {
+                const cloudMatch = resolveCloudBackedAreaTag(userLocation.lat, userLocation.lon);
+                if (cloudMatch && cloudMatch.name && !__isStaleAreaTag(cloudMatch.name)) {
+                    resolved = String(cloudMatch.name).trim();
+                }
+            } catch (e) {
+                console.warn('resolveCloudBackedAreaTag failed during pre-post refresh:', e);
+            }
+
+            if (!resolved) try {
                 if (typeof autoDetectClosestArea === 'function') {
                     const detected = autoDetectClosestArea(userLocation);
                     if (detected && !__isStaleAreaTag(detected)) resolved = String(detected).trim();
