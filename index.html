@@ -18501,6 +18501,7 @@
                 this.maxCacheEntries = Number(config.maxCacheEntries || 120);
                 this.cacheStorageKey = config.cacheStorageKey || 'search_dropdown_cache_v1';
                 this.onSelect = typeof config.onSelect === 'function' ? config.onSelect : () => {};
+                this.getSearchContext = typeof config.getSearchContext === 'function' ? config.getSearchContext : null;
 
                 this.cache = new Map();
                 this.results = [];
@@ -18603,21 +18604,60 @@
                 const lat = Number(row.latitude ?? row.lat);
                 const lon = Number(row.longitude ?? row.lon);
                 if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+                const bboxRaw = row.boundingBox || row.bbox || null;
+                let boundingBox = null;
+                if (Array.isArray(bboxRaw) && bboxRaw.length >= 4) {
+                    const parsed = bboxRaw.slice(0, 4).map((v) => Number(v));
+                    if (parsed.every(Number.isFinite) && parsed[0] <= parsed[2] && parsed[1] <= parsed[3]) {
+                        boundingBox = parsed;
+                    }
+                }
                 return {
+                    id: row.id || row.locationId || null,
                     locationId: row.locationId || row.id || null,
                     displayName: row.displayName || row.name || 'Unknown',
+                    name: row.name || row.displayName || 'Unknown',
                     city: row.city || '',
                     stateOrProvince: row.stateOrProvince || row.state || '',
                     country: row.country || '',
                     latitude: lat,
                     longitude: lon,
-                    type: row.type || row.class || ''
+                    type: row.type || row.hierarchyType || row.class || '',
+                    hierarchyType: row.hierarchyType || row.type || '',
+                    boundingBox,
+                    importance: Number.isFinite(Number(row.importance)) ? Number(row.importance) : 0,
+                    population: Number.isFinite(Number(row.population)) ? Number(row.population) : null,
+                    adminLevel: Number.isFinite(Number(row.adminLevel)) ? Number(row.adminLevel) : null,
+                    rankScore: Number.isFinite(Number(row.rankScore)) ? Number(row.rankScore) : null
                 };
+            }
+
+            buildRequestUrl(query) {
+                const params = new URLSearchParams();
+                params.set('q', String(query || '').trim());
+                params.set('limit', String(this.limit));
+
+                try {
+                    const context = this.getSearchContext ? this.getSearchContext() : null;
+                    if (context && Number.isFinite(Number(context.zoom))) {
+                        params.set('zoom', String(Number(context.zoom)));
+                    }
+                    if (context && Array.isArray(context.viewport) && context.viewport.length >= 4) {
+                        const vp = context.viewport.slice(0, 4).map((v) => Number(v));
+                        if (vp.every(Number.isFinite)) {
+                            params.set('viewport', vp.join(','));
+                        }
+                    }
+                } catch (e) {
+                    // Optional context only; ignore integration errors.
+                }
+
+                return `${this.endpoint}?${params.toString()}`;
             }
 
             async remoteSearch(query) {
                 const seq = ++this.requestSeq;
-                const url = `${this.endpoint}?q=${encodeURIComponent(query)}&limit=${this.limit}`;
+                const url = this.buildRequestUrl(query);
                 const response = await fetch(url, { method: 'GET' });
                 if (!response.ok) throw new Error(`remote search failed (${response.status})`);
                 const payload = await response.json();
@@ -18719,10 +18759,14 @@
                 const primary = String(item.displayName || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 const locationLine = [item.city, item.stateOrProvince, item.country].filter(Boolean).join(', ');
                 const coords = `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`;
+                const labelType = String(item.hierarchyType || item.type || 'location').replace(/_/g, ' ');
                 const secondary = String(locationLine || item.country || 'Location').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 return `
                     <div style="display:flex;flex-direction:column;gap:2px;">
-                        <div style="color:#f3f4f6;font-size:13px;font-weight:600;">${primary}</div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <div style="color:#f3f4f6;font-size:13px;font-weight:600;">${primary}</div>
+                            <div style="color:#94a3b8;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;">${labelType}</div>
+                        </div>
                         <div style="color:#93a0b4;font-size:11px;">${secondary}</div>
                         <div style="color:#64748b;font-size:10px;">${coords}</div>
                     </div>
@@ -18782,6 +18826,19 @@
             const selectedInputName = selectedResult.displayName || selectedResult.name || '';
             if (!selectedInputName) return;
 
+            const selectedBoundingBox = Array.isArray(selectedResult.boundingBox)
+                ? selectedResult.boundingBox.slice(0, 4).map((v) => Number(v))
+                : null;
+            const hasValidBoundingBox = Array.isArray(selectedBoundingBox)
+                && selectedBoundingBox.length === 4
+                && selectedBoundingBox.every(Number.isFinite)
+                && selectedBoundingBox[0] <= selectedBoundingBox[2]
+                && selectedBoundingBox[1] <= selectedBoundingBox[3];
+            const bboxAreaDeg = hasValidBoundingBox
+                ? Math.abs((selectedBoundingBox[2] - selectedBoundingBox[0]) * (selectedBoundingBox[3] - selectedBoundingBox[1]))
+                : 0;
+            const navigationMode = (hasValidBoundingBox && bboxAreaDeg > 0.08) ? 'fit-bounds' : 'center-point';
+
             const zoneLabelParts = [selectedResult.name || '', selectedResult.stateOrProvince || '']
                 .map((v) => String(v || '').trim())
                 .filter(Boolean);
@@ -18791,10 +18848,16 @@
             }
 
             const selectedMeta = {
+                id: selectedResult.id || selectedResult.locationId || null,
                 locationId: selectedResult.locationId || null,
                 latitude: Number(selectedResult.latitude),
                 longitude: Number(selectedResult.longitude),
                 displayName: selectedInputName,
+                type: selectedResult.hierarchyType || selectedResult.type || '',
+                hierarchyType: selectedResult.hierarchyType || selectedResult.type || '',
+                boundingBox: hasValidBoundingBox ? selectedBoundingBox : null,
+                navigationMode,
+                importance: Number.isFinite(Number(selectedResult.importance)) ? Number(selectedResult.importance) : 0,
                 city: selectedResult.city || '',
                 stateOrProvince: selectedResult.stateOrProvince || '',
                 country: selectedResult.country || '',
@@ -18815,6 +18878,20 @@
 
         function ensureRemoteGeocodeDropdown() {
             if (window.remoteGeocodeDropdown) return window.remoteGeocodeDropdown;
+
+            if (typeof window.getLocationSearchContext !== 'function') {
+                window.getLocationSearchContext = function getLocationSearchContext() {
+                    const context = window.locationSearchContext;
+                    if (!context || typeof context !== 'object') return null;
+                    const zoom = Number(context.zoom);
+                    const viewport = Array.isArray(context.viewport) ? context.viewport.slice(0, 4).map((v) => Number(v)) : null;
+                    return {
+                        zoom: Number.isFinite(zoom) ? zoom : null,
+                        viewport: (viewport && viewport.length === 4 && viewport.every(Number.isFinite)) ? viewport : null
+                    };
+                };
+            }
+
             window.remoteGeocodeDropdown = new SearchDropdown({
                 inputId: 'customZoneTag',
                 dropdownId: 'refineLocationDropdown',
@@ -18824,10 +18901,75 @@
                 debounceMs: 320,
                 limit: 15,
                 cacheStorageKey: 'remote_geocode_refine_cache_v1',
+                getSearchContext: () => {
+                    if (typeof window.getLocationSearchContext === 'function') {
+                        return window.getLocationSearchContext();
+                    }
+                    const fallback = window.locationSearchContext;
+                    return fallback && typeof fallback === 'object' ? fallback : null;
+                },
                 onSelect: (selected, event) => applyNormalizedLocationSelection(selected, event)
             });
             window.remoteGeocodeDropdown.attach();
             return window.remoteGeocodeDropdown;
+        }
+
+        // LocationHierarchy service: provides zoom-aware context and selection behavior
+        // for map integrations without coupling this UI to a specific map library.
+        if (!window.LocationHierarchy) {
+            window.LocationHierarchy = {
+                setMapContext(context) {
+                    if (!context || typeof context !== 'object') return;
+                    const zoom = Number(context.zoom);
+                    const viewport = Array.isArray(context.viewport) ? context.viewport.slice(0, 4).map((v) => Number(v)) : null;
+                    window.locationSearchContext = {
+                        zoom: Number.isFinite(zoom) ? zoom : null,
+                        viewport: (viewport && viewport.length === 4 && viewport.every(Number.isFinite)) ? viewport : null
+                    };
+                },
+
+                getMapContext() {
+                    return (typeof window.getLocationSearchContext === 'function')
+                        ? window.getLocationSearchContext()
+                        : (window.locationSearchContext || null);
+                },
+
+                getSelectionNavigationAction(result) {
+                    if (!result) return { mode: 'center-point' };
+                    const bbox = Array.isArray(result.boundingBox) ? result.boundingBox.slice(0, 4).map((v) => Number(v)) : null;
+                    const hasBBox = bbox && bbox.length === 4 && bbox.every(Number.isFinite) && bbox[0] <= bbox[2] && bbox[1] <= bbox[3];
+                    if (!hasBBox) {
+                        return {
+                            mode: 'center-point',
+                            center: [Number(result.longitude), Number(result.latitude)]
+                        };
+                    }
+                    const areaDeg = Math.abs((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]));
+                    if (areaDeg > 0.08) {
+                        return { mode: 'fit-bounds', boundingBox: bbox };
+                    }
+                    return {
+                        mode: 'center-point',
+                        center: [Number(result.longitude), Number(result.latitude)],
+                        boundingBox: bbox
+                    };
+                },
+
+                getZoomLabelTypes(zoom) {
+                    const z = Number(zoom);
+                    if (!Number.isFinite(z)) return ['country', 'state', 'county', 'city', 'neighborhood', 'road', 'landmark'];
+                    if (z <= 4) return ['continent', 'ocean', 'sea', 'country', 'state'];
+                    if (z <= 8) return ['state', 'province', 'region', 'county', 'city'];
+                    if (z <= 12) return ['city', 'town', 'village', 'county', 'neighborhood'];
+                    return ['neighborhood', 'community', 'road', 'building', 'business', 'landmark', 'park'];
+                },
+
+                filterVisibleLabels(results, zoom) {
+                    const allowed = new Set(this.getZoomLabelTypes(zoom));
+                    const rows = Array.isArray(results) ? results : [];
+                    return rows.filter((r) => allowed.has(String(r.type || r.hierarchyType || '').toLowerCase()));
+                }
+            };
         }
 
         // Get popular cities for initial recommendations

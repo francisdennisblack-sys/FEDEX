@@ -1357,6 +1357,317 @@ function httpsGetJson(requestUrl, headers = {}, timeoutMs = 7000) {
     });
 }
 
+function parseBoundingBoxValue(rawBbox) {
+    if (!rawBbox) return null;
+    if (Array.isArray(rawBbox) && rawBbox.length >= 4) {
+        const n0 = Number(rawBbox[0]);
+        const n1 = Number(rawBbox[1]);
+        const n2 = Number(rawBbox[2]);
+        const n3 = Number(rawBbox[3]);
+        if ([n0, n1, n2, n3].every(Number.isFinite)) {
+            // Nominatim: [south, north, west, east]
+            if (n0 <= n1 && n2 <= n3) {
+                return [n2, n0, n3, n1];
+            }
+            // Photon-like fallback: [minLon, minLat, maxLon, maxLat]
+            if (n0 <= n2 && n1 <= n3) {
+                return [n0, n1, n2, n3];
+            }
+        }
+    }
+    if (typeof rawBbox === 'string') {
+        const parts = rawBbox.split(',').map((v) => Number(v.trim()));
+        if (parts.length >= 4 && parts.every(Number.isFinite)) {
+            return parseBoundingBoxValue(parts.slice(0, 4));
+        }
+    }
+    return null;
+}
+
+function classifyHierarchyType({ clazz, type, adminLevel, placeRank }) {
+    const c = String(clazz || '').toLowerCase();
+    const t = String(type || '').toLowerCase();
+    const a = Number(adminLevel);
+    const p = Number(placeRank);
+
+    if (t === 'administrative') {
+        if (Number.isFinite(a)) {
+            if (a <= 2) return 'country';
+            if (a <= 4) return 'state';
+            if (a <= 6) return 'county';
+            if (a <= 8) return 'city';
+            return 'neighborhood';
+        }
+        if (Number.isFinite(p)) {
+            if (p <= 8) return 'country';
+            if (p <= 12) return 'state';
+            if (p <= 16) return 'county';
+            return 'city';
+        }
+        return 'region';
+    }
+
+    if (c === 'place') {
+        if (t === 'continent') return 'continent';
+        if (t === 'country') return 'country';
+        if (t === 'state') return 'state';
+        if (t === 'region') return 'region';
+        if (t === 'county') return 'county';
+        if (t === 'city') return 'city';
+        if (t === 'town') return 'town';
+        if (t === 'village' || t === 'hamlet' || t === 'locality') return 'village';
+        if (['suburb', 'neighbourhood', 'neighborhood', 'quarter', 'borough', 'district'].includes(t)) return 'neighborhood';
+    }
+
+    if (c === 'boundary' && t === 'administrative') {
+        if (Number.isFinite(a)) {
+            if (a <= 2) return 'country';
+            if (a <= 4) return 'state';
+            if (a <= 6) return 'county';
+            if (a <= 8) return 'city';
+            return 'neighborhood';
+        }
+        if (Number.isFinite(p)) {
+            if (p <= 8) return 'country';
+            if (p <= 12) return 'state';
+            if (p <= 16) return 'county';
+            return 'city';
+        }
+        return 'region';
+    }
+
+    if (c === 'water' || c === 'natural') {
+        if (['ocean'].includes(t)) return 'ocean';
+        if (['sea'].includes(t)) return 'sea';
+        if (['bay', 'strait', 'fjord', 'water'].includes(t)) return 'sea';
+        if (t === 'park') return 'park';
+    }
+
+    if (c === 'highway' || c === 'railway') return 'road';
+    if (c === 'building') return 'building';
+    if (c === 'leisure' && t === 'park') return 'park';
+    if (c === 'tourism' || c === 'historic' || c === 'natural') return 'landmark';
+    if (c === 'shop' || c === 'amenity') return 'business';
+
+    return 'landmark';
+}
+
+function hierarchyScaleRank(hierarchyType) {
+    const h = String(hierarchyType || 'landmark').toLowerCase();
+    const ranks = {
+        continent: 1,
+        ocean: 1,
+        sea: 1,
+        country: 2,
+        territory: 2,
+        state: 3,
+        province: 3,
+        region: 3,
+        county: 4,
+        district: 4,
+        borough: 4,
+        city: 5,
+        town: 5,
+        village: 5,
+        neighborhood: 6,
+        community: 6,
+        road: 7,
+        park: 7,
+        building: 8,
+        business: 8,
+        landmark: 8
+    };
+    return ranks[h] || 8;
+}
+
+function refineHierarchyType(initialType, hints) {
+    const t = String(initialType || '').toLowerCase();
+    const name = String(hints && hints.name || '').toLowerCase();
+    const city = String(hints && hints.city || '').toLowerCase();
+    const stateOrProvince = String(hints && hints.stateOrProvince || '').toLowerCase();
+    const county = String(hints && hints.county || '').toLowerCase();
+    const neighborhood = String(hints && hints.neighborhood || '').toLowerCase();
+    const rawType = String(hints && hints.rawType || '').toLowerCase();
+
+    if (name && stateOrProvince && name === stateOrProvince) return 'state';
+    if (name && county && name === county) return 'county';
+    if (name && city && name === city) return 'city';
+    if (name && neighborhood && name === neighborhood) return 'neighborhood';
+
+    if (['county', 'district', 'borough'].includes(rawType)) return rawType;
+    if (['city', 'town', 'village', 'hamlet'].includes(rawType)) return rawType === 'hamlet' ? 'village' : rawType;
+    if (['suburb', 'neighbourhood', 'neighborhood', 'quarter'].includes(rawType)) return 'neighborhood';
+    if (rawType.includes('district') || name.includes('downtown')) return 'neighborhood';
+    if (['road', 'street', 'residential', 'pedestrian', 'footway', 'path', 'avenue'].includes(rawType)) return 'road';
+    if (rawType === 'state') return 'state';
+    if (rawType === 'country') return 'country';
+
+    return t || 'landmark';
+}
+
+function parseViewportBounds(raw) {
+    if (!raw) return null;
+    const parts = String(raw).split(',').map((v) => Number(v.trim()));
+    if (parts.length < 4 || !parts.every(Number.isFinite)) return null;
+    const [minLon, minLat, maxLon, maxLat] = parts;
+    if (minLon > maxLon || minLat > maxLat) return null;
+    return [minLon, minLat, maxLon, maxLat];
+}
+
+function parseSearchContext(req) {
+    const zoom = Number(req.query.zoom);
+    const viewport = parseViewportBounds(req.query.viewport)
+        || ((req.query.minLon != null && req.query.minLat != null && req.query.maxLon != null && req.query.maxLat != null)
+            ? parseViewportBounds([req.query.minLon, req.query.minLat, req.query.maxLon, req.query.maxLat].join(','))
+            : null);
+    return {
+        zoom: Number.isFinite(zoom) ? zoom : null,
+        viewport
+    };
+}
+
+function serializeSearchContext(searchContext) {
+    if (!searchContext) return 'noctx';
+    const zoomPart = Number.isFinite(searchContext.zoom) ? `z:${searchContext.zoom.toFixed(1)}` : 'z:none';
+    const vp = Array.isArray(searchContext.viewport) ? searchContext.viewport : null;
+    const viewportPart = vp
+        ? `v:${vp.map((n) => Number(n).toFixed(2)).join(',')}`
+        : 'v:none';
+    return `${zoomPart}|${viewportPart}`;
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+    const toRad = (d) => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+        + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2))
+        * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return 6371 * c;
+}
+
+function bboxContainsPoint(bbox, lon, lat) {
+    if (!Array.isArray(bbox) || bbox.length < 4) return false;
+    return lon >= bbox[0] && lon <= bbox[2] && lat >= bbox[1] && lat <= bbox[3];
+}
+
+function bboxesIntersect(a, b) {
+    if (!Array.isArray(a) || a.length < 4 || !Array.isArray(b) || b.length < 4) return false;
+    return !(a[0] > b[2] || a[2] < b[0] || a[1] > b[3] || a[3] < b[1]);
+}
+
+function viewportProximityScore(result, viewport) {
+    if (!Array.isArray(viewport) || viewport.length < 4) return 0;
+    const lon = Number(result.longitude);
+    const lat = Number(result.latitude);
+    const bbox = Array.isArray(result.boundingBox) ? result.boundingBox : null;
+    if (Number.isFinite(lon) && Number.isFinite(lat) && bboxContainsPoint(viewport, lon, lat)) return 1;
+    if (bbox && bboxesIntersect(viewport, bbox)) return 0.85;
+
+    const centerLon = (viewport[0] + viewport[2]) / 2;
+    const centerLat = (viewport[1] + viewport[3]) / 2;
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return 0;
+    const km = haversineKm(centerLat, centerLon, lat, lon);
+    return Math.max(0, 1 - (km / 3000));
+}
+
+function textRelevanceScore(query, result) {
+    const q = String(query || '').toLowerCase().trim();
+    if (!q) return 0;
+    const name = String(result.name || '').toLowerCase();
+    const display = String(result.displayName || '').toLowerCase();
+    if (name === q) return 1;
+    if (display === q) return 0.98;
+    if (name.startsWith(q)) return 0.9;
+    if (display.startsWith(q)) return 0.82;
+    if (name.includes(q)) return 0.72;
+    if (display.includes(q)) return 0.6;
+    return 0.2;
+}
+
+function zoomScaleAffinityScore(zoom, hierarchyType) {
+    if (!Number.isFinite(zoom)) return 0.5;
+    const scale = hierarchyScaleRank(hierarchyType);
+    if (zoom <= 4) {
+        return scale <= 3 ? 1 : (scale <= 5 ? 0.65 : 0.25);
+    }
+    if (zoom <= 8) {
+        if (scale >= 3 && scale <= 5) return 1;
+        if (scale <= 2 || scale === 6) return 0.65;
+        return 0.3;
+    }
+    if (zoom <= 12) {
+        if (scale >= 5 && scale <= 7) return 1;
+        if (scale === 4 || scale === 8) return 0.6;
+        return 0.25;
+    }
+    return scale >= 7 ? 1 : (scale === 6 ? 0.8 : 0.2);
+}
+
+function populationScore(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.min(1, Math.log10(n + 1) / 7);
+}
+
+function inferQueryIntentType(query) {
+    const q = String(query || '').toLowerCase();
+    if (!q) return null;
+    if (/\b(continent|ocean|sea)\b/.test(q)) return 'continent';
+    if (/\b(country|territory)\b/.test(q)) return 'country';
+    if (/\b(state|province|region)\b/.test(q)) return 'state';
+    if (/\b(county|district|borough)\b/.test(q)) return 'county';
+    if (/\b(city|town|village)\b/.test(q)) return 'city';
+    if (/\b(neighborhood|neighbourhood|community|downtown|quarter)\b/.test(q)) return 'neighborhood';
+    if (/\b(street|road|avenue|ave|blvd|boulevard|lane|drive|dr)\b/.test(q)) return 'road';
+    if (/\b(park)\b/.test(q)) return 'park';
+    return null;
+}
+
+function intentTypeBonus(intentType, resultType) {
+    if (!intentType) return 0;
+    const i = String(intentType);
+    const r = String(resultType || '');
+    if (i === r) return 1;
+    const compatible = {
+        country: new Set(['country', 'territory', 'state']),
+        state: new Set(['state', 'province', 'region']),
+        county: new Set(['county', 'district', 'borough']),
+        city: new Set(['city', 'town', 'village']),
+        neighborhood: new Set(['neighborhood', 'community', 'district']),
+        road: new Set(['road']),
+        park: new Set(['park', 'landmark']),
+        continent: new Set(['continent', 'ocean', 'sea'])
+    };
+    return compatible[i] && compatible[i].has(r) ? 0.7 : 0;
+}
+
+function rankSearchResults(results, query, searchContext) {
+    const zoom = searchContext && searchContext.zoom;
+    const viewport = searchContext && searchContext.viewport;
+    const intentType = inferQueryIntentType(query);
+    return (Array.isArray(results) ? results : [])
+        .map((r) => {
+            const relevance = textRelevanceScore(query, r);
+            const viewportBias = viewportProximityScore(r, viewport);
+            const zoomAffinity = zoomScaleAffinityScore(zoom, r.type);
+            const importance = Math.max(0, Math.min(1, Number(r.importance) || 0));
+            const popScore = populationScore(r.population);
+            const adminWeight = 1 - (Math.min(12, Number(r.adminLevel) || 12) / 12);
+            const intentBonus = intentTypeBonus(intentType, r.type);
+            const score = (relevance * 4)
+                + (viewportBias * 3)
+                + (zoomAffinity * 2)
+                + (importance * 1.5)
+                + (popScore * 1)
+                + (adminWeight * 0.75)
+                + (intentBonus * 2.25);
+            return { ...r, rankScore: Number(score.toFixed(6)) };
+        })
+        .sort((a, b) => b.rankScore - a.rankScore);
+}
+
 function normalizeNominatimResult(item) {
     if (!item || typeof item !== 'object') return null;
 
@@ -1374,20 +1685,46 @@ function normalizeNominatimResult(item) {
     const locationId = item.place_id != null
         ? `nominatim:${item.place_id}`
         : `${String(item.osm_type || 'osm')}:${String(item.osm_id || shortName)}`;
+    let hierarchyType = classifyHierarchyType({
+        clazz: item.class || item.category,
+        type: item.type || item.addresstype,
+        adminLevel: item.address && item.address.admin_level,
+        placeRank: item.place_rank
+    });
+    hierarchyType = refineHierarchyType(hierarchyType, {
+        name: shortName,
+        city: address.city || address.town || address.village,
+        stateOrProvince,
+        county: address.county,
+        neighborhood: address.neighbourhood || address.neighborhood || address.suburb || address.quarter,
+        rawType: item.type || item.addresstype
+    });
+    const boundingBox = parseBoundingBoxValue(item.boundingbox);
+    const importance = Number(item.importance);
+    const population = Number(address.population || address.city_population || address.town_population);
+    const adminLevel = Number(address.admin_level || item.admin_level);
 
     return {
+        id: locationId,
+        name: shortName,
+        type: hierarchyType,
+        latitude: lat,
+        longitude: lon,
+        boundingBox,
+        importance: Number.isFinite(importance) ? importance : 0,
+        population: Number.isFinite(population) ? population : null,
+        adminLevel: Number.isFinite(adminLevel) ? adminLevel : null,
+
         locationId,
         displayName,
-        name: shortName,
+        hierarchyType,
         city,
         stateOrProvince,
         country,
-        latitude: lat,
-        longitude: lon,
         osmType: item.osm_type || null,
         osmId: item.osm_id || null,
         class: item.class || null,
-        type: item.type || null
+        rawType: item.type || null
     };
 }
 
@@ -1404,22 +1741,49 @@ function normalizePhotonFeature(feature) {
     const country = props.country || '';
     const shortName = props.name || props.street || props.housenumber || props.osm_value || 'Unknown';
     const displayName = [shortName, city, stateOrProvince, country].filter(Boolean).join(', ');
+    let hierarchyType = classifyHierarchyType({
+        clazz: props.osm_key,
+        type: props.osm_value,
+        adminLevel: props.admin_level,
+        placeRank: props.rank
+    });
+    hierarchyType = refineHierarchyType(hierarchyType, {
+        name: shortName,
+        city: props.city || props.town || props.village,
+        stateOrProvince,
+        county: props.county || props.district,
+        neighborhood: props.neighbourhood || props.neighborhood || props.suburb || props.quarter,
+        rawType: props.osm_value
+    });
+    const locationId = feature.properties.osm_id != null
+        ? `photon:${feature.properties.osm_id}`
+        : `photon:${shortName}:${lat.toFixed(5)},${lon.toFixed(5)}`;
+    const importance = Number(props.importance || props.weight || 0);
+    const population = Number(props.population);
+    const adminLevel = Number(props.admin_level);
+    const boundingBox = parseBoundingBoxValue(props.extent || props.boundingbox || feature.bbox);
 
     return {
-        locationId: feature.properties.osm_id != null
-            ? `photon:${feature.properties.osm_id}`
-            : `photon:${shortName}:${lat.toFixed(5)},${lon.toFixed(5)}`,
-        displayName: displayName || 'Unknown',
+        id: locationId,
         name: shortName,
+        type: hierarchyType,
+        latitude: lat,
+        longitude: lon,
+        boundingBox,
+        importance: Number.isFinite(importance) ? importance : 0,
+        population: Number.isFinite(population) ? population : null,
+        adminLevel: Number.isFinite(adminLevel) ? adminLevel : null,
+
+        locationId,
+        displayName: displayName || 'Unknown',
+        hierarchyType,
         city,
         stateOrProvince,
         country,
-        latitude: lat,
-        longitude: lon,
         osmType: feature.properties.osm_type || null,
         osmId: feature.properties.osm_id || null,
         class: feature.properties.osm_key || null,
-        type: feature.properties.osm_value || null
+        rawType: feature.properties.osm_value || null
     };
 }
 
@@ -1429,27 +1793,46 @@ function parseSearchProviders() {
     return providers.length > 0 ? providers : ['nominatim'];
 }
 
-async function searchProvider(provider, query, limit, lang, timeoutMs) {
+async function searchProvider(provider, query, limit, lang, timeoutMs, searchContext) {
     const ua = process.env.GEOCODE_USER_AGENT || 'FEDEX-WiFi-App/1.0';
+    const viewport = searchContext && Array.isArray(searchContext.viewport) ? searchContext.viewport : null;
+    const fetchLimit = Math.min(60, Math.max(limit * 4, 25));
     if (provider === 'photon') {
         const photonEndpoint = process.env.GEOCODE_SEARCH_PHOTON_URL || 'https://photon.komoot.io/api';
-        const url = `${photonEndpoint}?q=${encodeURIComponent(query)}&limit=${limit}&lang=${encodeURIComponent(lang)}`;
+        const queryParams = [
+            `q=${encodeURIComponent(query)}`,
+            `limit=${fetchLimit}`,
+            `lang=${encodeURIComponent(lang)}`
+        ];
+        if (viewport) {
+            queryParams.push(`bbox=${viewport.join(',')}`);
+        }
+        const url = `${photonEndpoint}?${queryParams.join('&')}`;
         const payload = await httpsGetJson(url, {
             'User-Agent': ua,
             'Accept-Language': lang
         }, timeoutMs);
         const features = Array.isArray(payload && payload.features) ? payload.features : [];
-        return features.map(normalizePhotonFeature).filter(Boolean).slice(0, limit);
+        return features.map(normalizePhotonFeature).filter(Boolean);
     }
 
     const nominatimEndpoint = process.env.GEOCODE_SEARCH_URL || 'https://nominatim.openstreetmap.org/search';
-    const url = `${nominatimEndpoint}?format=jsonv2&addressdetails=1&limit=${limit}&q=${encodeURIComponent(query)}`;
+    const queryParams = [
+        'format=jsonv2',
+        'addressdetails=1',
+        `limit=${fetchLimit}`,
+        `q=${encodeURIComponent(query)}`
+    ];
+    if (viewport) {
+        queryParams.push(`viewbox=${viewport[0]},${viewport[3]},${viewport[2]},${viewport[1]}`);
+    }
+    const url = `${nominatimEndpoint}?${queryParams.join('&')}`;
     const payload = await httpsGetJson(url, {
         'User-Agent': ua,
         'Accept-Language': lang
     }, timeoutMs);
     const rows = Array.isArray(payload) ? payload : [];
-    return rows.map(normalizeNominatimResult).filter(Boolean).slice(0, limit);
+    return rows.map(normalizeNominatimResult).filter(Boolean);
 }
 
 app.get('/api/geocode/search', async (req, res) => {
@@ -1471,7 +1854,8 @@ app.get('/api/geocode/search', async (req, res) => {
         const lang = String(req.query.lang || 'en').trim();
         const timeoutMs = Number(process.env.GEOCODE_SEARCH_TIMEOUT_MS || 7000);
         const providers = parseSearchProviders();
-        const cacheKey = `${query.toLowerCase()}|${limit}|${lang}`;
+        const searchContext = parseSearchContext(req);
+        const cacheKey = `${query.toLowerCase()}|${limit}|${lang}|${serializeSearchContext(searchContext)}`;
 
         const cachedResults = getGeocodeSearchCache(cacheKey);
         if (cachedResults) {
@@ -1491,9 +1875,9 @@ app.get('/api/geocode/search', async (req, res) => {
 
         for (const provider of providers) {
             try {
-                const result = await searchProvider(provider, query, limit, lang, timeoutMs);
+                const result = await searchProvider(provider, query, limit, lang, timeoutMs, searchContext);
                 if (Array.isArray(result) && result.length > 0) {
-                    normalized = result;
+                    normalized = rankSearchResults(result, query, searchContext).slice(0, limit);
                     providerUsed = provider;
                     break;
                 }
@@ -1514,6 +1898,10 @@ app.get('/api/geocode/search', async (req, res) => {
             success: true,
             source: providerUsed || 'none',
             query,
+            context: {
+                zoom: searchContext.zoom,
+                viewport: searchContext.viewport || null
+            },
             count: normalized.length,
             results: normalized,
             timestamp: Date.now()
