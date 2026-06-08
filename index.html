@@ -17679,6 +17679,46 @@
             } catch (e) { console.warn('fetchRefineDefaults failed to trigger', e); }
         }
 
+        const RECENT_LOCATION_SEARCHES_KEY = 'recent_location_searches_v1';
+
+        function getRecentLocationSearches(limit = 8) {
+            try {
+                const raw = localStorage.getItem(RECENT_LOCATION_SEARCHES_KEY);
+                if (!raw) return [];
+                const parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) return [];
+                return parsed
+                    .filter((x) => x && typeof x === 'object' && x.displayName)
+                    .slice(0, limit);
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function rememberRecentLocationSearch(entry) {
+            if (!entry || !entry.displayName) return;
+            const normalized = {
+                id: entry.id || entry.locationId || null,
+                displayName: String(entry.displayName || '').trim(),
+                type: String(entry.type || entry.hierarchyType || 'location'),
+                latitude: Number(entry.latitude),
+                longitude: Number(entry.longitude),
+                timestamp: Date.now()
+            };
+            if (!normalized.displayName) return;
+
+            try {
+                const existing = getRecentLocationSearches(20);
+                const key = `${String(normalized.id || '').toLowerCase()}|${normalized.displayName.toLowerCase()}`;
+                const deduped = [normalized].concat(
+                    existing.filter((x) => `${String(x.id || '').toLowerCase()}|${String(x.displayName || '').toLowerCase()}` !== key)
+                ).slice(0, 10);
+                localStorage.setItem(RECENT_LOCATION_SEARCHES_KEY, JSON.stringify(deduped));
+            } catch (e) {
+                /* ignore storage errors */
+            }
+        }
+
         /**
          * Populate refine dropdown defaults when the field is focused and empty.
          * Shows nearby/top locations and POIs so the panel never appears blank.
@@ -17760,6 +17800,34 @@
                 const poiRows = [];
                 const seen = new Set();
 
+                const getSearchViewport = () => {
+                    try {
+                        if (typeof window.getLocationSearchContext === 'function') {
+                            const ctx = window.getLocationSearchContext();
+                            if (ctx && Array.isArray(ctx.viewport) && ctx.viewport.length >= 4) {
+                                const vp = ctx.viewport.slice(0, 4).map((n) => Number(n));
+                                if (vp.every(Number.isFinite) && vp[0] <= vp[2] && vp[1] <= vp[3]) return vp;
+                            }
+                        }
+                    } catch (e) {}
+                    const fallback = window.locationSearchContext;
+                    if (fallback && Array.isArray(fallback.viewport) && fallback.viewport.length >= 4) {
+                        const vp = fallback.viewport.slice(0, 4).map((n) => Number(n));
+                        if (vp.every(Number.isFinite) && vp[0] <= vp[2] && vp[1] <= vp[3]) return vp;
+                    }
+                    return null;
+                };
+
+                const searchViewport = getSearchViewport();
+
+                const inViewport = (lat, lon) => {
+                    if (!searchViewport) return false;
+                    const la = Number(lat);
+                    const lo = Number(lon);
+                    if (!Number.isFinite(la) || !Number.isFinite(lo)) return false;
+                    return lo >= searchViewport[0] && lo <= searchViewport[2] && la >= searchViewport[1] && la <= searchViewport[3];
+                };
+
                 function addUnique(row, bucket) {
                     if (!row || !row.display) return;
                     const key = `${String(row.display).toLowerCase()}|${bucket}`;
@@ -17786,7 +17854,14 @@
                                     const isPoi = !!(r.category && String(r.category).trim());
                                     const display = r.state ? `${r.name}, ${r.state}` : String(r.name || '');
                                     const d = (typeof r.distanceMi === 'number') ? r.distanceMi : Infinity;
-                                    addUnique({ type: isPoi ? 'poi' : 'location', display, distanceMi: d }, isPoi ? 'poi' : 'location');
+                                    addUnique({
+                                        type: isPoi ? 'poi' : 'location',
+                                        display,
+                                        distanceMi: d,
+                                        lat: Number(r.lat),
+                                        lon: Number(r.lon),
+                                        category: r.category || ''
+                                    }, isPoi ? 'poi' : 'location');
                                 });
                             }
                         }
@@ -17803,7 +17878,14 @@
                         if (hasUserLoc && typeof loc.lat === 'number' && typeof loc.lon === 'number') {
                             d = calculateDistance(uLat, uLon, loc.lat, loc.lon) * 0.621371;
                         }
-                        addUnique({ type: 'location', display, distanceMi: d }, 'location');
+                        addUnique({
+                            type: 'location',
+                            display,
+                            distanceMi: d,
+                            lat: Number(loc.lat),
+                            lon: Number(loc.lon),
+                            category: loc.type || ''
+                        }, 'location');
                     }
                 }
 
@@ -17819,7 +17901,14 @@
                         if (hasUserLoc && typeof lat === 'number' && typeof lon === 'number') {
                             d = calculateDistance(uLat, uLon, lat, lon) * 0.621371;
                         }
-                        addUnique({ type: 'location', display, distanceMi: d }, 'location');
+                        addUnique({
+                            type: 'location',
+                            display,
+                            distanceMi: d,
+                            lat: Number(lat),
+                            lon: Number(lon),
+                            category: p.type || ''
+                        }, 'location');
                     }
                 }
 
@@ -17832,7 +17921,14 @@
                         if (hasUserLoc && typeof poi.lat === 'number' && typeof poi.lon === 'number') {
                             d = calculateDistance(uLat, uLon, poi.lat, poi.lon) * 0.621371;
                         }
-                        addUnique({ type: 'poi', display: String(poi.name), distanceMi: d }, 'poi');
+                        addUnique({
+                            type: 'poi',
+                            display: String(poi.name),
+                            distanceMi: d,
+                            lat: Number(poi.lat),
+                            lon: Number(poi.lon),
+                            category: poi.category || poi.type || ''
+                        }, 'poi');
                     }
                 }
 
@@ -17862,7 +17958,14 @@
 
                         const typeMeta = getOsmSearchTypeMeta(rowTypeCode);
                         const bucket = typeMeta.isLocation ? 'location' : 'poi';
-                        addUnique({ type: bucket, display, distanceMi: d }, bucket);
+                        addUnique({
+                            type: bucket,
+                            display,
+                            distanceMi: d,
+                            lat: Number(rowLat),
+                            lon: Number(rowLon),
+                            category: typeMeta.label || ''
+                        }, bucket);
 
                         if (hasUserLoc && locationRows.length >= 300 && poiRows.length >= 220) break;
                         if (!hasUserLoc && locationRows.length >= 180 && poiRows.length >= 140) break;
@@ -17872,28 +17975,59 @@
                 locationRows.sort((a, b) => a.distanceMi - b.distanceMi);
                 poiRows.sort((a, b) => a.distanceMi - b.distanceMi);
 
-                const topPOI = poiRows.length ? poiRows[0] : null;
-                const topLocations = locationRows.slice(0, 35);
-                const otherPOIs = (topPOI ? poiRows.slice(1) : poiRows).slice(0, 15);
-
                 const esc = (s) => String(s || '').replace(/'/g, "&#39;");
+                const currentLocationLabel = String(currentAreaName || currentZoneTag || window.latestUserAreaTag || 'Current Location').trim();
+
+                const nearbyCities = locationRows
+                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi <= 120)
+                    .slice(0, 10);
+
+                const nearbyPOIs = poiRows
+                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi <= 35)
+                    .slice(0, 12);
+
+                const recentSearches = getRecentLocationSearches(8).map((r) => ({
+                    display: r.displayName,
+                    type: r.type || 'location',
+                    distanceMi: Infinity,
+                    lat: Number(r.latitude),
+                    lon: Number(r.longitude)
+                }));
+
+                const popularLocalDestinations = poiRows
+                    .filter((x) => {
+                        if (inViewport(x.lat, x.lon)) return true;
+                        return isFinite(x.distanceMi) && x.distanceMi <= 25;
+                    })
+                    .map((x) => {
+                        const categoryText = String(x.category || '').toLowerCase();
+                        let popularityBoost = 0;
+                        if (/(park|museum|stadium|mall|center|beach|downtown|airport|station|university|college|landmark)/.test(categoryText)) popularityBoost += 2;
+                        if (inViewport(x.lat, x.lon)) popularityBoost += 2.5;
+                        if (isFinite(x.distanceMi)) popularityBoost += Math.max(0, 3 - (x.distanceMi / 10));
+                        return { ...x, _popularityBoost: popularityBoost };
+                    })
+                    .sort((a, b) => b._popularityBoost - a._popularityBoost)
+                    .slice(0, 10);
+
+                const renderSection = (title, rows) => {
+                    if (!Array.isArray(rows) || rows.length === 0) return '';
+                    let sectionHtml = `<div style="padding:7px 12px;background:#0f1419;border-bottom:1px solid #1e293b;color:#9ca3af;font-size:10px;text-transform:uppercase;font-weight:700;letter-spacing:0.06em;">${title}</div>`;
+                    rows.forEach((row) => {
+                        const label = String(row.display || '').trim();
+                        if (!label) return;
+                        const dist = isFinite(row.distanceMi) ? `<span style="color:#64748b;float:right">${row.distanceMi.toFixed(1)}mi</span>` : '';
+                        sectionHtml += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #1f2937;" onclick="selectLocationFromSpecifyField('${esc(label)}', event)">${label}${dist}</div>`;
+                    });
+                    return sectionHtml;
+                };
+
                 let html = '';
-
-                if (topPOI) {
-                    html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(topPOI.display)}', event)">${topPOI.display}${isFinite(topPOI.distanceMi) ? `<span style="color:#777;float:right">${topPOI.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
-                }
-
-                if (topLocations.length) {
-                    topLocations.forEach(loc => {
-                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(loc.display)}', event)">${loc.display}${isFinite(loc.distanceMi) ? `<span style="color:#777;float:right">${loc.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
-                    });
-                }
-
-                if (otherPOIs.length) {
-                    otherPOIs.forEach(poi => {
-                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(poi.display)}', event)">${poi.display}${isFinite(poi.distanceMi) ? `<span style="color:#777;float:right">${poi.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
-                    });
-                }
+                html += renderSection('Current Location', [{ display: currentLocationLabel, distanceMi: Infinity }]);
+                html += renderSection('Nearby Cities', nearbyCities);
+                html += renderSection('Nearby POIs', nearbyPOIs);
+                html += renderSection('Recent Searches', recentSearches);
+                html += renderSection('Popular Local Destinations', popularLocalDestinations);
 
                 if (!html) {
                     const fallback = [];
@@ -18309,6 +18443,19 @@
                 } catch (e) {
                     console.warn('   ⚠️ Failed to persist selected location metadata', e);
                 }
+            }
+
+            try {
+                rememberRecentLocationSearch({
+                    id: selectedMeta && (selectedMeta.id || selectedMeta.locationId),
+                    locationId: selectedMeta && selectedMeta.locationId,
+                    displayName: zoneLabel || locationName,
+                    type: selectedMeta && (selectedMeta.type || selectedMeta.hierarchyType) || 'location',
+                    latitude: selectedMeta && selectedMeta.latitude,
+                    longitude: selectedMeta && selectedMeta.longitude
+                });
+            } catch (e) {
+                console.warn('   ⚠️ Failed to update recent searches', e);
             }
             
             // STEP 3: Update global currentZoneTag variable (used by post creation)
