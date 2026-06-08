@@ -8502,6 +8502,19 @@
                 await requestGeolocation();
                 console.timeEnd('Geolocation');
                 console.log(`✅ Location acquired: ${userLocation.lat.toFixed(4)}°N, ${userLocation.lon.toFixed(4)}°E`);
+
+                // Immediately resolve a real area tag so SENDING TO never stays on "Detecting".
+                try {
+                    const immediateArea = autoDetectClosestArea(userLocation) || getLocationName(userLocation.lat, userLocation.lon);
+                    if (immediateArea && !String(immediateArea).includes('Detecting') && !String(immediateArea).includes('Loading')) {
+                        currentZoneTag = immediateArea;
+                        console.log(`✅ Immediate area resolved on load: ${currentZoneTag}`);
+                    }
+                    updateZonePredictor();
+                } catch (e) {
+                    console.warn('Immediate area resolution failed:', e);
+                    updateZonePredictor();
+                }
                 
                 // STEP 2: Load POI database IN BACKGROUND (non-blocking with aggressive timeout)
                 console.log('\n📥 STEP 2: Loading POI database (219 cities, 38K+ POIs)...');
@@ -8576,7 +8589,11 @@
                 
                 // INSTANT: Initialize area selector with real location
                 console.log('⚡ Initializing area selector with real-time location...');
-                autoDetectClosestArea(userLocation);
+                const finalDetectedArea = autoDetectClosestArea(userLocation);
+                if (finalDetectedArea && !String(finalDetectedArea).includes('Detecting') && !String(finalDetectedArea).includes('Loading')) {
+                    currentZoneTag = finalDetectedArea;
+                }
+                updateZonePredictor();
                 console.log('✅ Area selector ready');
                 
             } catch (error) {
@@ -8599,6 +8616,8 @@
                         label.style.color = '#fbbf24';
                     }
                 }
+
+                updateZonePredictor();
                 
                 console.log('\n⚠️ PHASE 0 COMPLETED WITH FALLBACKS\n');
             }
@@ -17675,11 +17694,11 @@
             console.log('📍 Refine location field focused - search-only mode');
             try {
                 const customTagInput = document.getElementById('customZoneTag');
-                try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
                 const currentValue = customTagInput ? customTagInput.value.trim() : '';
-                if (customTagInput && currentValue !== '') {
+                if (customTagInput && currentValue.length >= 2) {
                     remoteDropdown.handleInput(currentValue);
                 } else {
+                    try { if (remoteDropdown) remoteDropdown.close(); } catch (e) {}
                     // Preload search data in the background only; no visible pre-picked list.
                     try {
                         if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
@@ -18863,8 +18882,12 @@
                 lastRefineLocationSearchQuery = '';
                 try { if (remoteDropdown) remoteDropdown.close(); } catch (e) {}
                 refineSearchDebugLog('Input empty: reset to prompt mode');
-                // Search-only mode: keep dropdown open with prompt, but do not show defaults.
-                try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
+                return;
+            }
+
+            if (val.length < 2) {
+                try { if (remoteDropdown) remoteDropdown.close(); } catch (e) {}
+                refineSearchDebugLog('Waiting for 2+ chars before showing dropdown', { query: val });
                 return;
             }
 
@@ -19323,13 +19346,6 @@
                         this.selectIndex(idx, e);
                     });
                 });
-
-                if (this.lastAttribution) {
-                    const attributionEl = document.createElement('div');
-                    attributionEl.style.cssText = 'padding:6px 10px;color:#64748b;font-size:10px;border-top:1px solid #1f2937;background:#0b1118;';
-                    attributionEl.textContent = this.lastAttribution;
-                    container.appendChild(attributionEl);
-                }
             }
 
             renderRowHtml(item) {
