@@ -976,6 +976,7 @@
                 );
                 this.ensureBoxesUpTo(initialTarget);
                 this.renderItemsInRange(0, initialCount);
+                this.clearBoxesBeyondItemCount(initialCount + 1);
             }
 
             addItems(items) {
@@ -1032,10 +1033,13 @@
                 
                 for (let i = startIdx; i < actualEnd; i++) {
                     const item = this.items[i];
-                    if (!item || !item.id) continue;
+                    const box = document.getElementById(`box-${i + 1}`);
+                    if (!item || !item.id) {
+                        if (box) this.clearBoxElement(box);
+                        continue;
+                    }
                     
                     // Box i+1 because box-0 is add-content
-                    const box = document.getElementById(`box-${i + 1}`);
                     if (!box) continue;
                     
                     // Skip if same item already rendered there
@@ -1043,6 +1047,38 @@
                     
                     this.onRenderItem(box, item);
                 }
+
+                // If the visible list shrank, clear any stale tail boxes so old
+                // glow/outline/content cannot remain from the previous longer list.
+                if (startIdx === 0 && actualEnd >= 0) {
+                    this.clearBoxesBeyondItemCount(actualEnd + 1);
+                }
+            }
+
+            clearBoxElement(box) {
+                if (!box) return;
+                try {
+                    box.removeAttribute('data-post-id');
+                    box.classList.remove('filled', 'placeholder');
+                    const removeClasses = [];
+                    box.classList.forEach(cls => {
+                        if (/^(badge-|border-|glow-)/.test(cls)) removeClasses.push(cls);
+                    });
+                    removeClasses.forEach(cls => box.classList.remove(cls));
+                    box.style.boxShadow = 'none';
+                    box.style.borderColor = '';
+                    box.innerHTML = '';
+                } catch (e) { /* ignore */ }
+            }
+
+            clearBoxesBeyondItemCount(startBoxIndex = 1) {
+                try {
+                    for (let i = startBoxIndex; i < 2001; i++) {
+                        const box = document.getElementById(`box-${i}`);
+                        if (!box) break;
+                        this.clearBoxElement(box);
+                    }
+                } catch (e) { /* ignore */ }
             }
 
             onScroll(e) {
@@ -26459,39 +26495,10 @@
                     insertAt++;
                 }
 
-                // If there are empty reserved slots (e.g., box elements missing), prefer to fill them by
-                // inserting into the first empty slot (preserve array length and scroller indexes).
-                // Fallback to splice insertion which shifts indexes.
-                try {
-                    const gridEl = document.getElementById('grid');
-                    if (gridEl) {
-                        const nodes = Array.from(gridEl.querySelectorAll('.grid-box'));
-                        for (let i = 1; i < nodes.length; i++) {
-                            const n = nodes[i];
-                            if (!n) continue;
-                            const pid = n.getAttribute('data-post-id');
-                            if (!pid || pid.trim() === '') {
-                                // prefer to fill this DOM-empty slot if it maps into our intended content array
-                                insertAt = Math.min(insertAt, i);
-                                break;
-                            }
-                        }
-                    }
-                } catch (e) { /* ignore DOM probing failures */ }
-
-                // Prefer to fill an existing empty slot in gridContent rather than splicing which
-                // shifts indexes and can confuse the virtual scroller's mapping.
-                let filled = false;
-                try {
-                    const emptyIndex = gridContent[contentKey].findIndex(p => !p || !p.id);
-                    if (emptyIndex !== -1) {
-                        gridContent[contentKey][emptyIndex] = postData;
-                        insertAt = emptyIndex;
-                        filled = true;
-                    }
-                } catch (e) { /* ignore */ }
-
-                if (!filled) gridContent[contentKey].splice(insertAt, 0, postData);
+                // Keep the list compact and ordered: splice at the insertion point.
+                // We intentionally avoid leaving sparse holes in the array because
+                // the virtual scroller renders by index.
+                gridContent[contentKey].splice(insertAt, 0, postData);
                 try { console.log(`➕ insertNewPostIntoGrid: inserted ${postData.id} at index ${insertAt} in ${contentKey}`); } catch(e){}
 
                 // Dump debug state: gridContent sizes, scroller items, and first DOM boxes
@@ -26517,6 +26524,15 @@
                         if (!p || !p.id) return false;
                         return !isPostHiddenForViewer(p, currentUserId);
                     };
+
+                    const compactList = (arr) => Array.isArray(arr) ? arr.filter(p => p && p.id) : [];
+
+                    // Compact arrays first so holes can't survive from deletes or partial merges.
+                    Object.keys(gridContent).forEach(k => {
+                        if (Array.isArray(gridContent[k])) {
+                            gridContent[k] = compactList(gridContent[k]);
+                        }
+                    });
 
                     const seen = new Set();
                     const all = [];
@@ -26546,6 +26562,11 @@
                         } else if (Array.isArray(gridScroller.items)) {
                             gridScroller.items = all;
                         }
+                        try {
+                            if (typeof gridScroller.clearBoxesBeyondItemCount === 'function') {
+                                gridScroller.clearBoxesBeyondItemCount(all.length + 1);
+                            }
+                        } catch (e) { /* ignore */ }
                         // Force multiple refresh strategies to ensure internal indexes sync
                         try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
                         try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
