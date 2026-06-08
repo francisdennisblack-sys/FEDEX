@@ -17678,6 +17678,7 @@
         function handleCustomZoneInputFocus() {
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
+            const remoteDropdown = ensureRemoteGeocodeDropdown();
 
             // Lazy-load the global POI search index and enhanced locations
             if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
@@ -17694,7 +17695,8 @@
             try {
                 const customTagInput = document.getElementById('customZoneTag');
                 try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
-                if (customTagInput && customTagInput.value.trim() === '') {
+                const currentValue = customTagInput ? customTagInput.value.trim() : '';
+                if (customTagInput && currentValue === '') {
                     fetchRefineDefaults();
                     // Preload POI search index early so POIs appear quickly when user types 2+ chars
                     try {
@@ -17703,8 +17705,7 @@
                         }
                     } catch (e) { console.warn('poi preload trigger failed', e); }
                 } else {
-                    const requestId = nextRefineLocationRequestId();
-                    filterRefineLocationSearch(customTagInput.value.trim(), requestId);
+                    remoteDropdown.handleInput(currentValue);
                 }
             } catch (e) { console.warn('fetchRefineDefaults failed to trigger', e); }
         }
@@ -17866,6 +17867,39 @@
                     }
                 }
 
+                // Source 5: OSM global search index fallback for complete cross-state coverage.
+                const osmIndex = window.globalPoiSearchIndex;
+                if (osmIndex && Array.isArray(osmIndex.rows) && (locationRows.length < 35 || poiRows.length < 20)) {
+                    const stateCodes = Array.isArray(osmIndex.stateCodes) ? osmIndex.stateCodes : [];
+                    for (let i = 0; i < osmIndex.rows.length; i++) {
+                        const row = osmIndex.rows[i];
+                        const rowName = Array.isArray(row) ? row[0] : row && row.name;
+                        const rowLat = Array.isArray(row) ? Number(row[1]) : Number(row && row.lat);
+                        const rowLon = Array.isArray(row) ? Number(row[2]) : Number(row && row.lon);
+                        const rowStateRaw = Array.isArray(row) ? row[3] : row && row.state;
+                        const rowTypeCode = Array.isArray(row) ? row[4] : (row && (row.typeCode || row.type));
+                        if (!rowName) continue;
+
+                        const stateName = (typeof rowStateRaw === 'number' && stateCodes[rowStateRaw])
+                            ? stateCodes[rowStateRaw]
+                            : (typeof rowStateRaw === 'string' ? rowStateRaw : '');
+                        const display = stateName ? `${rowName}, ${stateName}` : String(rowName);
+
+                        let d = Infinity;
+                        if (hasUserLoc && Number.isFinite(rowLat) && Number.isFinite(rowLon)) {
+                            d = calculateDistance(uLat, uLon, rowLat, rowLon) * 0.621371;
+                            if (!Number.isFinite(d) || d > 120) continue;
+                        }
+
+                        const typeMeta = getOsmSearchTypeMeta(rowTypeCode);
+                        const bucket = typeMeta.isLocation ? 'location' : 'poi';
+                        addUnique({ type: bucket, display, distanceMi: d }, bucket);
+
+                        if (hasUserLoc && locationRows.length >= 300 && poiRows.length >= 220) break;
+                        if (!hasUserLoc && locationRows.length >= 180 && poiRows.length >= 140) break;
+                    }
+                }
+
                 locationRows.sort((a, b) => a.distanceMi - b.distanceMi);
                 poiRows.sort((a, b) => a.distanceMi - b.distanceMi);
 
@@ -17877,18 +17911,18 @@
                 let html = '';
 
                 if (topPOI) {
-                    html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(topPOI.display)}', event)">🏢 ${topPOI.display}${isFinite(topPOI.distanceMi) ? `<span style="color:#777;float:right">${topPOI.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
+                    html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(topPOI.display)}', event)">${topPOI.display}${isFinite(topPOI.distanceMi) ? `<span style="color:#777;float:right">${topPOI.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
                 }
 
                 if (topLocations.length) {
                     topLocations.forEach(loc => {
-                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(loc.display)}', event)">📍 ${loc.display}${isFinite(loc.distanceMi) ? `<span style="color:#777;float:right">${loc.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
+                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(loc.display)}', event)">${loc.display}${isFinite(loc.distanceMi) ? `<span style="color:#777;float:right">${loc.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
                     });
                 }
 
                 if (otherPOIs.length) {
                     otherPOIs.forEach(poi => {
-                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(poi.display)}', event)">🏢 ${poi.display}${isFinite(poi.distanceMi) ? `<span style="color:#777;float:right">${poi.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
+                        html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${esc(poi.display)}', event)">${poi.display}${isFinite(poi.distanceMi) ? `<span style="color:#777;float:right">${poi.distanceMi.toFixed(1)}mi</span>` : ''}</div>`;
                     });
                 }
 
@@ -17939,7 +17973,7 @@
                     if (fallback.length > 0) {
                         fallback.slice(0, 20).forEach(name => {
                             const safe = String(name).replace(/'/g, '&#39;');
-                            html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${safe}', event)">📍 ${name}</div>`;
+                            html += `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onclick="selectLocationFromSpecifyField('${safe}', event)">${name}</div>`;
                         });
                     }
                 }
@@ -18351,11 +18385,15 @@
         /**
          * Select location from the specify area field dropdown
          */
-        function selectLocationFromSpecifyField(locationName, event) {
+        function selectLocationFromSpecifyField(locationName, event, options) {
             if (event) event.stopPropagation();
+            const opts = options || {};
+            const preserveInputValue = !!opts.preserveInputValue;
+            const selectedMeta = opts.selectedMeta || null;
             
             // Cleanup scroller when selection is made
             cleanupLocationScroller();
+            cleanupRefineLocationScroller();
             
             console.log(`\n🎯 LOCATION/POI SELECTION INITIATED`);
             console.log(`   Selected: "${locationName}"`);
@@ -18376,8 +18414,18 @@
             // The user made their selection, so we clear the field and show their selection in SENDING TO
             const customTagInput = document.getElementById('customZoneTag');
             if (customTagInput) {
-                customTagInput.value = '';
-                console.log(`   ✅ STEP 2: Refine Location input field cleared`);
+                customTagInput.value = preserveInputValue ? locationName : '';
+                console.log(`   ✅ STEP 2: Refine Location input field ${preserveInputValue ? 'updated with selection' : 'cleared'}`);
+            }
+
+            if (selectedMeta) {
+                try {
+                    window.lastSelectedSearchLocationMeta = selectedMeta;
+                    localStorage.setItem('lastSelectedSearchLocationMeta', JSON.stringify(selectedMeta));
+                    console.log(`   ✅ STEP 2b: Saved location metadata (${selectedMeta.locationId || 'no-id'})`);
+                } catch (e) {
+                    console.warn('   ⚠️ Failed to persist selected location metadata', e);
+                }
             }
             
             // STEP 3: Update global currentZoneTag variable (used by post creation)
@@ -18460,6 +18508,7 @@
         function handleCustomZoneInput() {
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
+            const remoteDropdown = ensureRemoteGeocodeDropdown();
 
             // IMPORTANT: Typing in the refine location field does NOT update the SENDING TO field
             // The SENDING TO field only updates when user SELECTS a location from the dropdown
@@ -18471,6 +18520,7 @@
             const val = customTagInput.value.trim();
             if (val.length === 0) {
                 lastRefineLocationSearchQuery = '';
+                try { if (remoteDropdown) remoteDropdown.close(); } catch (e) {}
                 // Unified behavior: show default nearby/top suggestions when empty.
                 try { if (typeof showRefineLocationSearch === 'function') showRefineLocationSearch(); } catch(e) {}
                 fetchRefineDefaults();
@@ -18492,10 +18542,8 @@
             // DEBOUNCE: Clear existing timeout and set new one
             clearTimeout(refineLocationSearchTimeout);
             refineLocationSearchTimeout = setTimeout(() => {
-                // Show dropdown results - does NOT affect SENDING TO field
-                const requestId = nextRefineLocationRequestId();
-                filterRefineLocationSearch(val, requestId);
-            }, 200); // Wait 200ms after user stops typing
+                remoteDropdown.handleInput(val);
+            }, 320); // Wait 320ms after user stops typing
         }
 
         /**
@@ -18525,6 +18573,368 @@
             }
             
             return nearest;
+        }
+
+        function getOsmSearchTypeMeta(typeCode) {
+            const code = String(typeCode || 'o');
+            const locationCodes = new Set(['L', 'H', 'V', 'T', 'B', 'Y', 'N']);
+            if (locationCodes.has(code)) {
+                const labelMap = {
+                    L: 'Locality',
+                    H: 'Hamlet',
+                    V: 'Village',
+                    T: 'Town',
+                    B: 'Suburb',
+                    Y: 'City',
+                    N: 'Neighborhood'
+                };
+                return { isLocation: true, label: labelMap[code] || 'Place' };
+            }
+            const poiLabelMap = {
+                h: 'High School',
+                m: 'Middle School',
+                e: 'Elementary School',
+                l: 'School',
+                c: 'College',
+                u: 'University',
+                r: 'Restaurant',
+                k: 'Cafe',
+                s: 'Shopping',
+                o: 'POI'
+            };
+            return { isLocation: false, label: poiLabelMap[code] || 'POI' };
+        }
+
+        class SearchDropdown {
+            constructor(config) {
+                this.inputId = config.inputId;
+                this.dropdownId = config.dropdownId;
+                this.resultsContainerId = config.resultsContainerId;
+                this.endpoint = config.endpoint || '/api/geocode/search';
+                this.minChars = Number(config.minChars || 2);
+                this.debounceMs = Number(config.debounceMs || 320);
+                this.limit = Number(config.limit || 12);
+                this.cacheTtlMs = Number(config.cacheTtlMs || 10 * 60 * 1000);
+                this.maxCacheEntries = Number(config.maxCacheEntries || 120);
+                this.cacheStorageKey = config.cacheStorageKey || 'search_dropdown_cache_v1';
+                this.onSelect = typeof config.onSelect === 'function' ? config.onSelect : () => {};
+
+                this.cache = new Map();
+                this.results = [];
+                this.activeIndex = -1;
+                this.debounceTimer = null;
+                this.requestSeq = 0;
+                this.boundKeydown = (e) => this.handleKeyDown(e);
+                this.loadCacheFromSession();
+            }
+
+            getInputEl() {
+                return document.getElementById(this.inputId);
+            }
+
+            getDropdownEl() {
+                return document.getElementById(this.dropdownId);
+            }
+
+            getResultsContainerEl() {
+                return document.getElementById(this.resultsContainerId);
+            }
+
+            ensureContainer() {
+                const dropdown = this.getDropdownEl();
+                if (!dropdown) return null;
+                let container = this.getResultsContainerEl();
+                if (!container) {
+                    dropdown.innerHTML = '<div id="' + this.resultsContainerId + '" style="padding: 10px; color: #888; font-size: 13px;"></div>';
+                    container = this.getResultsContainerEl();
+                }
+                return container;
+            }
+
+            attach() {
+                const input = this.getInputEl();
+                if (!input) return;
+                input.removeEventListener('keydown', this.boundKeydown);
+                input.addEventListener('keydown', this.boundKeydown);
+            }
+
+            open() {
+                const dropdown = this.getDropdownEl();
+                if (dropdown) dropdown.style.display = 'block';
+            }
+
+            close() {
+                const dropdown = this.getDropdownEl();
+                if (dropdown) dropdown.style.display = 'none';
+                this.activeIndex = -1;
+                this.results = [];
+            }
+
+            loadCacheFromSession() {
+                try {
+                    const raw = sessionStorage.getItem(this.cacheStorageKey);
+                    if (!raw) return;
+                    const parsed = JSON.parse(raw);
+                    if (!Array.isArray(parsed)) return;
+                    parsed.forEach(([key, value]) => {
+                        if (!value || typeof value !== 'object') return;
+                        this.cache.set(key, value);
+                    });
+                } catch (e) {
+                    console.warn('SearchDropdown cache restore failed', e);
+                }
+            }
+
+            persistCacheToSession() {
+                try {
+                    const arr = Array.from(this.cache.entries()).slice(-this.maxCacheEntries);
+                    sessionStorage.setItem(this.cacheStorageKey, JSON.stringify(arr));
+                } catch (e) {
+                    /* ignore storage quota errors */
+                }
+            }
+
+            getCached(query) {
+                const key = String(query || '').toLowerCase();
+                const item = this.cache.get(key);
+                if (!item) return null;
+                if (Date.now() - Number(item.ts || 0) > this.cacheTtlMs) {
+                    this.cache.delete(key);
+                    return null;
+                }
+                return Array.isArray(item.results) ? item.results : null;
+            }
+
+            setCached(query, results) {
+                const key = String(query || '').toLowerCase();
+                this.cache.set(key, { ts: Date.now(), results: Array.isArray(results) ? results : [] });
+                while (this.cache.size > this.maxCacheEntries) {
+                    const firstKey = this.cache.keys().next().value;
+                    this.cache.delete(firstKey);
+                }
+                this.persistCacheToSession();
+            }
+
+            normalizeRemoteResult(row) {
+                if (!row) return null;
+                const lat = Number(row.latitude ?? row.lat);
+                const lon = Number(row.longitude ?? row.lon);
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+                return {
+                    locationId: row.locationId || row.id || null,
+                    displayName: row.displayName || row.name || 'Unknown',
+                    city: row.city || '',
+                    stateOrProvince: row.stateOrProvince || row.state || '',
+                    country: row.country || '',
+                    latitude: lat,
+                    longitude: lon,
+                    type: row.type || row.class || ''
+                };
+            }
+
+            async remoteSearch(query) {
+                const seq = ++this.requestSeq;
+                const url = `${this.endpoint}?q=${encodeURIComponent(query)}&limit=${this.limit}`;
+                const response = await fetch(url, { method: 'GET' });
+                if (!response.ok) throw new Error(`remote search failed (${response.status})`);
+                const payload = await response.json();
+                if (seq !== this.requestSeq) return null;
+                const rows = Array.isArray(payload && payload.results) ? payload.results : [];
+                return rows.map((r) => this.normalizeRemoteResult(r)).filter(Boolean).slice(0, this.limit);
+            }
+
+            handleInput(query) {
+                const q = String(query || '').trim();
+                const container = this.ensureContainer();
+                if (!container) return;
+                this.open();
+
+                if (q.length < this.minChars) {
+                    this.results = [];
+                    this.activeIndex = -1;
+                    container.innerHTML = '<div style="padding: 12px; text-align: center; color: #888; font-size: 13px;">Type at least ' + this.minChars + ' characters to search globally...</div>';
+                    return;
+                }
+
+                if (this.debounceTimer) clearTimeout(this.debounceTimer);
+                this.debounceTimer = setTimeout(async () => {
+                    const cached = this.getCached(q);
+                    if (cached) {
+                        this.results = cached;
+                        this.activeIndex = this.results.length > 0 ? 0 : -1;
+                        this.renderResults();
+                        return;
+                    }
+
+                    const liveContainer = this.ensureContainer();
+                    if (liveContainer) {
+                        liveContainer.innerHTML = '<div style="padding: 12px; text-align: center; color: #888; font-size: 13px;">Searching global OpenStreetMap locations...</div>';
+                    }
+
+                    try {
+                        const remoteResults = await this.remoteSearch(q);
+                        if (!remoteResults) return;
+                        this.setCached(q, remoteResults);
+                        this.results = remoteResults;
+                        this.activeIndex = this.results.length > 0 ? 0 : -1;
+                        this.renderResults();
+                    } catch (e) {
+                        const errContainer = this.ensureContainer();
+                        if (errContainer) {
+                            errContainer.innerHTML = '<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">Global search unavailable. Try again.</div>';
+                        }
+                    }
+                }, this.debounceMs);
+            }
+
+            renderResults() {
+                const container = this.ensureContainer();
+                if (!container) return;
+                if (!Array.isArray(this.results) || this.results.length === 0) {
+                    container.innerHTML = '<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">No global matches found</div>';
+                    return;
+                }
+
+                if (Array.isArray(this.results) && this.results.length > 40 && typeof VirtualScroller === 'function') {
+                    cleanupRefineLocationScroller();
+                    container.innerHTML = '';
+                    const scrollerDiv = document.createElement('div');
+                    scrollerDiv.id = 'remoteGeoScroller_' + Date.now();
+                    container.appendChild(scrollerDiv);
+                    const scroller = new VirtualScroller('#' + scrollerDiv.id, this.results, 64, 20);
+                    window.currentRefineLocationScroller = scroller;
+                    scroller.onRenderItem = (div, item, index) => {
+                        const isActive = index === this.activeIndex;
+                        div.style.background = isActive ? 'rgba(102,126,234,0.22)' : 'transparent';
+                        div.innerHTML = this.renderRowHtml(item);
+                        div.onmousedown = (e) => {
+                            e.preventDefault();
+                            this.selectIndex(index, e);
+                        };
+                    };
+                    scroller.render();
+                    return;
+                }
+
+                const html = this.results.map((item, index) => {
+                    const active = index === this.activeIndex ? 'background: rgba(102,126,234,0.22);' : '';
+                    return `<div data-idx="${index}" style="padding:10px 12px;border-bottom:1px solid #222;cursor:pointer;${active}">${this.renderRowHtml(item)}</div>`;
+                }).join('');
+                container.innerHTML = html;
+
+                const rows = container.querySelectorAll('[data-idx]');
+                rows.forEach((row) => {
+                    row.addEventListener('mousedown', (e) => {
+                        e.preventDefault();
+                        const idx = Number(row.getAttribute('data-idx'));
+                        this.selectIndex(idx, e);
+                    });
+                });
+            }
+
+            renderRowHtml(item) {
+                const primary = String(item.displayName || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const locationLine = [item.city, item.stateOrProvince, item.country].filter(Boolean).join(', ');
+                const coords = `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`;
+                const secondary = String(locationLine || item.country || 'Location').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `
+                    <div style="display:flex;flex-direction:column;gap:2px;">
+                        <div style="color:#f3f4f6;font-size:13px;font-weight:600;">${primary}</div>
+                        <div style="color:#93a0b4;font-size:11px;">${secondary}</div>
+                        <div style="color:#64748b;font-size:10px;">${coords}</div>
+                    </div>
+                `;
+            }
+
+            moveActive(delta) {
+                if (!this.results.length) return;
+                const next = this.activeIndex + delta;
+                if (next < 0) this.activeIndex = this.results.length - 1;
+                else if (next >= this.results.length) this.activeIndex = 0;
+                else this.activeIndex = next;
+                this.renderResults();
+            }
+
+            selectIndex(index, event) {
+                if (!Array.isArray(this.results) || !this.results[index]) return;
+                const selected = this.results[index];
+                this.activeIndex = index;
+                const input = this.getInputEl();
+                if (input) {
+                    input.value = selected.displayName;
+                }
+                try {
+                    window.lastSelectedSearchLocation = selected;
+                    localStorage.setItem('lastSelectedSearchLocation', JSON.stringify(selected));
+                } catch (e) {}
+                this.onSelect(selected, event);
+                this.close();
+            }
+
+            handleKeyDown(event) {
+                const key = event.key;
+                const isOpen = this.getDropdownEl() && this.getDropdownEl().style.display === 'block';
+                if (!isOpen) return;
+
+                if (key === 'ArrowDown') {
+                    event.preventDefault();
+                    this.moveActive(1);
+                } else if (key === 'ArrowUp') {
+                    event.preventDefault();
+                    this.moveActive(-1);
+                } else if (key === 'Enter') {
+                    if (this.activeIndex >= 0) {
+                        event.preventDefault();
+                        this.selectIndex(this.activeIndex, event);
+                    }
+                } else if (key === 'Escape') {
+                    event.preventDefault();
+                    this.close();
+                }
+            }
+        }
+
+        function applyNormalizedLocationSelection(selectedResult, event) {
+            if (!selectedResult) return;
+            const selectedName = selectedResult.displayName || selectedResult.name || '';
+            if (!selectedName) return;
+
+            const selectedMeta = {
+                locationId: selectedResult.locationId || null,
+                latitude: Number(selectedResult.latitude),
+                longitude: Number(selectedResult.longitude),
+                city: selectedResult.city || '',
+                stateOrProvince: selectedResult.stateOrProvince || '',
+                country: selectedResult.country || '',
+                source: 'remote-geocode'
+            };
+
+            try {
+                window.lastSelectedSearchLocationMeta = selectedMeta;
+                localStorage.setItem('lastSelectedSearchLocationMeta', JSON.stringify(selectedMeta));
+            } catch (e) {}
+
+            selectLocationFromSpecifyField(selectedName, event, {
+                preserveInputValue: true,
+                selectedMeta
+            });
+        }
+
+        function ensureRemoteGeocodeDropdown() {
+            if (window.remoteGeocodeDropdown) return window.remoteGeocodeDropdown;
+            window.remoteGeocodeDropdown = new SearchDropdown({
+                inputId: 'customZoneTag',
+                dropdownId: 'refineLocationDropdown',
+                resultsContainerId: 'refineLocationResultsContainer',
+                endpoint: '/api/geocode/search',
+                minChars: 2,
+                debounceMs: 320,
+                limit: 15,
+                cacheStorageKey: 'remote_geocode_refine_cache_v1',
+                onSelect: (selected, event) => applyNormalizedLocationSelection(selected, event)
+            });
+            window.remoteGeocodeDropdown.attach();
+            return window.remoteGeocodeDropdown;
         }
 
         /**
@@ -18587,6 +18997,10 @@
                     console.warn(`⚠️ Failed to load OSM places:`, e);
                 }
             }
+
+            const locationDb = Array.isArray(window.globalLocationDatabase) ? window.globalLocationDatabase : [];
+            const poiDb = Array.isArray(window.globalPOIDatabase) ? window.globalPOIDatabase : [];
+            const osmIndex = window.globalPoiSearchIndex;
             
             const queryLower = query.toLowerCase().trim();
             let results = [];
@@ -18738,6 +19152,56 @@
                 }
             }
 
+            // Full OSM integration: query compact cross-state search-index directly
+            // so refine results include all OSM locations + POIs even when in-memory shards are partial.
+            if (osmIndex && Array.isArray(osmIndex.rows) && queryLower.length > 0) {
+                const stateCodes = Array.isArray(osmIndex.stateCodes) ? osmIndex.stateCodes : [];
+                const seenRefine = new Set(results.map(r => `${String(r.type || '').toLowerCase()}|${String(r.name || '').toLowerCase()}`));
+                const maxRowsToScan = queryLower.length <= 2 ? Math.min(osmIndex.rows.length, 120000) : osmIndex.rows.length;
+                let addedFromIndex = 0;
+
+                for (let i = 0; i < maxRowsToScan; i++) {
+                    const row = osmIndex.rows[i];
+                    const rowName = Array.isArray(row) ? row[0] : row && row.name;
+                    const rowStateRaw = Array.isArray(row) ? row[3] : row && row.state;
+                    const rowTypeCode = Array.isArray(row) ? row[4] : (row && (row.typeCode || row.type));
+                    if (!rowName) continue;
+
+                    const stateName = (typeof rowStateRaw === 'number' && stateCodes[rowStateRaw])
+                        ? stateCodes[rowStateRaw]
+                        : (typeof rowStateRaw === 'string' ? rowStateRaw : '');
+                    const typeMeta = getOsmSearchTypeMeta(rowTypeCode);
+                    const fullName = stateName ? `${rowName}, ${stateName}` : String(rowName);
+                    const haystack = `${String(rowName)} ${String(stateName)} ${String(typeMeta.label)}`.toLowerCase();
+                    if (!haystack.includes(queryLower)) continue;
+
+                    const resultType = typeMeta.isLocation ? 'location' : 'poi';
+                    const dedupeKey = `${resultType}|${String(fullName).toLowerCase()}`;
+                    if (seenRefine.has(dedupeKey)) continue;
+                    seenRefine.add(dedupeKey);
+
+                    let rankScore = 2;
+                    const nameLower = String(rowName).toLowerCase();
+                    if (nameLower === queryLower) rankScore = -0.25;
+                    else if (nameLower.startsWith(queryLower)) rankScore = 0.75;
+                    else if (String(typeMeta.label).toLowerCase().includes(queryLower)) rankScore = 1.25;
+
+                    results.push({
+                        type: resultType,
+                        name: fullName,
+                        category: typeMeta.isLocation ? '' : typeMeta.label,
+                        rank: rankScore
+                    });
+
+                    addedFromIndex++;
+                    if (addedFromIndex >= 220) break;
+                }
+
+                if (addedFromIndex > 0) {
+                    console.log(`✅ OSM search-index fallback added ${addedFromIndex} refine matches for "${queryLower}"`);
+                }
+            }
+
             // Guaranteed fallback pass: if structured ranking found nothing,
             // do a direct text match over available in-memory DB slices.
             if (results.length === 0 && queryLower.length > 0) {
@@ -18821,17 +19285,17 @@
                 // Format display with location type label
                 let displayLabel = '';
                 if (item.type === 'location') {
-                    displayLabel = '<span style="color: #667eea; font-size: 11px; margin-right: 6px;">📍 City/Area</span>';
+                    displayLabel = '<span style="color: #667eea; font-size: 11px; margin-right: 6px;">City/Area</span>';
                 } else if (item.type === 'osm_place') {
-                    displayLabel = '<span style="color: #06b6d4; font-size: 11px; margin-right: 6px;">🌍 Place</span>';
+                    displayLabel = '<span style="color: #06b6d4; font-size: 11px; margin-right: 6px;">Place</span>';
                 } else if (item.type === 'poi') {
                     const category = item.category || 'Place';
-                    displayLabel = `<span style="color: #22c55e; font-size: 11px; margin-right: 6px;">🏢 ${category}</span>`;
+                    displayLabel = `<span style="color: #22c55e; font-size: 11px; margin-right: 6px;">${category}</span>`;
                 }
                 
                 div.innerHTML = `
                     <div style="display: flex; align-items: center; gap: 8px; width: 100%;">
-                        <span style="font-weight: 500; flex: 1;">${item.emoji} ${item.name}</span>
+                        <span style="font-weight: 500; flex: 1;">${item.name}</span>
                         ${displayLabel}
                     </div>
                 `;
