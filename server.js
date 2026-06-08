@@ -626,8 +626,55 @@ const metricsCounters = {
     clicks: 0,
     locations: 0,
     best_recomputes: 0,
-    top_liked_recomputes: 0
+    top_liked_recomputes: 0,
+    geocode_search_requests: 0,
+    geocode_search_cache_hits: 0,
+    geocode_search_errors: 0,
+    geocode_search_rate_limited: 0,
+    geocode_provider_nominatim: 0,
+    geocode_provider_photon: 0,
+    geocode_search_latency_ms_total: 0
 };
+
+const OSM_ATTRIBUTION = 'Data © OpenStreetMap contributors (ODbL)';
+
+const geocodeRateLimitMap = new Map();
+const GEOCODE_RATE_LIMIT_WINDOW_MS = Number(process.env.GEOCODE_RATE_LIMIT_WINDOW_MS || 60 * 1000);
+const GEOCODE_RATE_LIMIT_MAX = Number(process.env.GEOCODE_RATE_LIMIT_MAX || 30);
+
+function getClientIp(req) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.length > 0) {
+        return forwarded.split(',')[0].trim();
+    }
+    return req.headers['x-real-ip'] || req.connection.remoteAddress || req.socket.remoteAddress || 'unknown';
+}
+
+function checkGeocodeRateLimit(ip) {
+    const now = Date.now();
+    const key = String(ip || 'unknown');
+    const record = geocodeRateLimitMap.get(key) || { count: 0, windowStart: now };
+    if (now - record.windowStart >= GEOCODE_RATE_LIMIT_WINDOW_MS) {
+        record.count = 0;
+        record.windowStart = now;
+    }
+    record.count += 1;
+    geocodeRateLimitMap.set(key, record);
+
+    // Simple periodic cleanup so this map does not grow forever.
+    if (geocodeRateLimitMap.size > 5000) {
+        for (const [k, v] of geocodeRateLimitMap.entries()) {
+            if (now - v.windowStart > GEOCODE_RATE_LIMIT_WINDOW_MS * 3) {
+                geocodeRateLimitMap.delete(k);
+            }
+        }
+    }
+
+    return {
+        allowed: record.count <= GEOCODE_RATE_LIMIT_MAX,
+        retryAfterSec: Math.max(1, Math.ceil((GEOCODE_RATE_LIMIT_WINDOW_MS - (now - record.windowStart)) / 1000))
+    };
+}
 
 // Admin authentication helper
 function isAdminAuthenticated(req) {
@@ -666,6 +713,25 @@ app.get('/metrics', (req, res) => {
         lines.push(`# HELP fedex_top_liked_recomputes_total Number of top-liked recomputes`);
         lines.push(`# TYPE fedex_top_liked_recomputes_total counter`);
         lines.push(`fedex_top_liked_recomputes_total ${metricsCounters.top_liked_recomputes}`);
+        lines.push(`# HELP fedex_geocode_search_requests_total Number of geocode search requests`);
+        lines.push(`# TYPE fedex_geocode_search_requests_total counter`);
+        lines.push(`fedex_geocode_search_requests_total ${metricsCounters.geocode_search_requests}`);
+        lines.push(`# HELP fedex_geocode_search_cache_hits_total Number of geocode search cache hits`);
+        lines.push(`# TYPE fedex_geocode_search_cache_hits_total counter`);
+        lines.push(`fedex_geocode_search_cache_hits_total ${metricsCounters.geocode_search_cache_hits}`);
+        lines.push(`# HELP fedex_geocode_search_errors_total Number of geocode search errors`);
+        lines.push(`# TYPE fedex_geocode_search_errors_total counter`);
+        lines.push(`fedex_geocode_search_errors_total ${metricsCounters.geocode_search_errors}`);
+        lines.push(`# HELP fedex_geocode_search_rate_limited_total Number of rate-limited geocode requests`);
+        lines.push(`# TYPE fedex_geocode_search_rate_limited_total counter`);
+        lines.push(`fedex_geocode_search_rate_limited_total ${metricsCounters.geocode_search_rate_limited}`);
+        lines.push(`# HELP fedex_geocode_provider_requests_total Number of geocode provider attempts`);
+        lines.push(`# TYPE fedex_geocode_provider_requests_total counter`);
+        lines.push(`fedex_geocode_provider_requests_total{provider="nominatim"} ${metricsCounters.geocode_provider_nominatim}`);
+        lines.push(`fedex_geocode_provider_requests_total{provider="photon"} ${metricsCounters.geocode_provider_photon}`);
+        lines.push(`# HELP fedex_geocode_search_latency_ms_total Total geocode search latency in milliseconds`);
+        lines.push(`# TYPE fedex_geocode_search_latency_ms_total counter`);
+        lines.push(`fedex_geocode_search_latency_ms_total ${metricsCounters.geocode_search_latency_ms_total}`);
         res.send(lines.join('\n') + '\n');
     } catch (e) { res.status(500).send('error'); }
 });
@@ -1836,7 +1902,30 @@ async function searchProvider(provider, query, limit, lang, timeoutMs, searchCon
 }
 
 app.get('/api/geocode/search', async (req, res) => {
+    const startedAt = Date.now();
+    const finishMetric = (eventLabel) => {
+        const elapsedMs = Date.now() - startedAt;
+        metricsCounters.geocode_search_latency_ms_total += elapsedMs;
+        sLog(`[Geocode Search] ${eventLabel} (${elapsedMs}ms)`);
+    };
+
     try {
+        metricsCounters.geocode_search_requests += 1;
+        const ip = getClientIp(req);
+        const geocodeRate = checkGeocodeRateLimit(ip);
+        if (!geocodeRate.allowed) {
+            metricsCounters.geocode_search_rate_limited += 1;
+            res.setHeader('Retry-After', String(geocodeRate.retryAfterSec));
+            finishMetric('rate-limited');
+            return res.status(429).json({
+                success: false,
+                error: 'Rate limit exceeded. Please retry shortly.',
+                source: 'rate-limit',
+                retryAfterSec: geocodeRate.retryAfterSec,
+                attribution: OSM_ATTRIBUTION
+            });
+        }
+
         const rawQuery = String(req.query.q || '').trim();
         const query = rawQuery.replace(/\s+/g, ' ');
         const minChars = Math.max(2, Number(req.query.minChars || 2));
@@ -1859,12 +1948,15 @@ app.get('/api/geocode/search', async (req, res) => {
 
         const cachedResults = getGeocodeSearchCache(cacheKey);
         if (cachedResults) {
+            metricsCounters.geocode_search_cache_hits += 1;
+            finishMetric('cache-hit');
             return res.json({
                 success: true,
                 source: 'cache',
                 query,
                 count: cachedResults.length,
                 results: cachedResults,
+                attribution: OSM_ATTRIBUTION,
                 timestamp: Date.now()
             });
         }
@@ -1875,6 +1967,8 @@ app.get('/api/geocode/search', async (req, res) => {
 
         for (const provider of providers) {
             try {
+                if (provider === 'nominatim') metricsCounters.geocode_provider_nominatim += 1;
+                if (provider === 'photon') metricsCounters.geocode_provider_photon += 1;
                 const result = await searchProvider(provider, query, limit, lang, timeoutMs, searchContext);
                 if (Array.isArray(result) && result.length > 0) {
                     normalized = rankSearchResults(result, query, searchContext).slice(0, limit);
@@ -1893,6 +1987,7 @@ app.get('/api/geocode/search', async (req, res) => {
         }
 
         setGeocodeSearchCache(cacheKey, normalized);
+        finishMetric(`provider:${providerUsed || 'none'} count:${normalized.length}`);
 
         return res.json({
             success: true,
@@ -1904,14 +1999,18 @@ app.get('/api/geocode/search', async (req, res) => {
             },
             count: normalized.length,
             results: normalized,
+            attribution: OSM_ATTRIBUTION,
             timestamp: Date.now()
         });
     } catch (error) {
+        metricsCounters.geocode_search_errors += 1;
+        finishMetric('error');
         console.error('[Geocode Search Error]', error.message);
         return res.status(502).json({
             success: false,
             error: error.message,
-            source: 'error'
+            source: 'error',
+            attribution: OSM_ATTRIBUTION
         });
     }
 });
@@ -1937,7 +2036,8 @@ app.get('/api/reverse-geocode', (req, res) => {
             sLog(`[Geocode Cache] HIT: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`);
             return res.json({
                 ...cachedResult,
-                source: 'cache'
+                source: 'cache',
+                attribution: OSM_ATTRIBUTION
             });
         }
         
@@ -1992,6 +2092,7 @@ app.get('/api/reverse-geocode', (req, res) => {
                     res.json({
                         ...result,
                         source: 'nominatim',
+                        attribution: OSM_ATTRIBUTION,
                         timestamp: Date.now()
                     });
                     
@@ -2001,7 +2102,8 @@ app.get('/api/reverse-geocode', (req, res) => {
                         name: `Region (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`,
                         success: false,
                         error: parseError.message,
-                        source: 'error'
+                        source: 'error',
+                        attribution: OSM_ATTRIBUTION
                     });
                 }
             });
@@ -2011,7 +2113,8 @@ app.get('/api/reverse-geocode', (req, res) => {
                 name: `Region (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`,
                 success: false,
                 error: error.message,
-                source: 'error'
+                source: 'error',
+                attribution: OSM_ATTRIBUTION
             });
         });
         
@@ -2030,7 +2133,8 @@ app.get('/api/reverse-geocode', (req, res) => {
             country: 'Unknown',
             success: false,
             error: error.message,
-            source: 'fallback'
+            source: 'fallback',
+            attribution: OSM_ATTRIBUTION
         });
     }
 });
