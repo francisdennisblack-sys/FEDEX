@@ -27660,6 +27660,70 @@
             return (net * 1000) + likes * 50 - dislikes * 20 + Math.floor(ts / 1000);
         }
 
+        function haveSamePostMembershipById(a, b) {
+            try {
+                const listA = Array.isArray(a) ? a.filter(p => p && p.id) : [];
+                const listB = Array.isArray(b) ? b.filter(p => p && p.id) : [];
+                if (listA.length !== listB.length) return false;
+                const ids = new Set(listA.map(p => String(p.id)));
+                if (ids.size !== listA.length) return false;
+                for (const p of listB) {
+                    if (!ids.has(String(p.id))) return false;
+                }
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function stabilizeNonInteractiveTopWindow(nextList, previousList, options = {}) {
+            try {
+                const next = Array.isArray(nextList) ? nextList.filter(p => p && p.id) : [];
+                const prev = Array.isArray(previousList) ? previousList.filter(p => p && p.id) : [];
+                if (next.length === 0 || prev.length === 0) return next;
+
+                // A user vote is an explicit movement trigger; do not lock it.
+                if (window.voteTriggeredRerank && isVoteReorderStabilizationActive()) return next;
+
+                // Only lock order when the feed membership is unchanged.
+                // If posts were added/removed, allow the new ranking to land.
+                if (!haveSamePostMembershipById(next, prev)) return next;
+
+                const lockSlots = Math.max(0, Number(options.lockSlots) || 12);
+                if (lockSlots <= 0) return next;
+
+                const nextById = new Map(next.map(p => [String(p.id), p]));
+                const lockedIds = [];
+                const lockedSet = new Set();
+
+                for (let i = 0; i < Math.min(lockSlots, prev.length); i++) {
+                    const id = prev[i] && prev[i].id ? String(prev[i].id) : null;
+                    if (!id || !nextById.has(id) || lockedSet.has(id)) continue;
+                    lockedIds.push(id);
+                    lockedSet.add(id);
+                }
+
+                if (lockedIds.length === 0) return next;
+
+                const stabilized = [];
+                for (const id of lockedIds) {
+                    const p = nextById.get(id);
+                    if (p) stabilized.push(p);
+                }
+                for (const p of next) {
+                    const id = String(p.id);
+                    if (lockedSet.has(id)) continue;
+                    stabilized.push(p);
+                }
+
+                console.log(`🧱 ML stability lock: preserved top ${lockedIds.length} slot(s) while feed membership was unchanged`);
+                return stabilized;
+            } catch (e) {
+                console.warn('stabilizeNonInteractiveTopWindow failed:', e);
+                return Array.isArray(nextList) ? nextList : [];
+            }
+        }
+
         function isVoteReorderStabilizationActive() {
             try {
                 const last = Number(window.lastVoteRerankAt || 0);
@@ -29697,6 +29761,17 @@
                 }
             } catch (e) {
                 console.warn('⚠️ Vote stability pass failed:', e);
+            }
+
+            // Prevent timer-only ML logic from shuffling posts users are actively viewing.
+            // Keep the top viewport stable unless membership changed (new/remove posts)
+            // or an explicit vote-triggered reorder is active.
+            try {
+                sortedPosts = stabilizeNonInteractiveTopWindow(sortedPosts, previousSortedPostsSnapshot, {
+                    lockSlots: Number(window.mlStableViewportSlots || 12)
+                });
+            } catch (e) {
+                console.warn('⚠️ Non-interactive top-window stability pass failed:', e);
             }
 
             // Refresh latest snapshot after position-1 rotation
