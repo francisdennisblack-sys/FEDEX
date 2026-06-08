@@ -28,18 +28,195 @@
     <script>
         /* Script moved out of style block to avoid CSS/JS mixing */
         async function updatePostZoneOnServer(postId, newZone, oldZone = null) {
-            /**
-             * Search-only refine mode: keep the panel open, but never preload default locations.
-             * This preserves the typed-search flow and avoids silently surfacing stale quick picks.
-             */
-            async function fetchRefineDefaults() {
-                const dropdown = document.getElementById('refineLocationDropdown');
-                const resultsContainer = document.getElementById('refineLocationResultsContainer');
-                if (!dropdown || !resultsContainer) return;
-                nextRefineLocationRequestId();
-                resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Start typing to search locations and POIs...</div>';
-                dropdown.style.display = 'block';
+            try {
+                // Diagnostic: if this is the post we just created, log its fields
+                try {
+                    if (window.lastCreatedPostId && post && post.id === window.lastCreatedPostId) {
+                        console.log('🔔 renderGridItemFull: Rendering newly created post:', post.id);
+                        console.log('   has photoURL:', !!post.photoURL, 'has imageData:', !!post.imageData, 'mediaType:', post.mediaType, 'content length:', (post.content || '').length);
+                    }
+                } catch (e) { /* ignore diag errors */ }
+                if (!postId || !database) return;
+                const postRef = ref(database, `posts/${postId}`);
+
+                // Persist display name and local identifiers so UI can remain signed-in
+                try {
+                    const display = window.__pendingUsername || phoneNumber || '';
+                    if (display) {
+                        localStorage.setItem('displayName', display);
+                        window.currentDisplayName = display;
+                    }
+                    // Derive a stable grid ID from permanentUid or firebaseUid
+                    const gridId = permanentUid || firebaseUid || ('local-' + (Date.now()));
+                    localStorage.setItem('userGridId', gridId);
+                    window.currentGridId = gridId;
+                    // Ensure there's at least one local post id for the user to reference
+                    let storedPostId = localStorage.getItem('userPostId');
+                    if (!storedPostId) {
+                        storedPostId = 'post-' + gridId + '-' + Date.now();
+                        localStorage.setItem('userPostId', storedPostId);
+                    }
+                    window.currentPostId = storedPostId;
+                } catch (e3) { console.warn('Could not persist displayName/grid/post ids', e3); }
+
+                const updatePayload = {
+                    county: newZone,
+                    zoneTag: newZone,
+                    area: newZone,
+                    region: newZone,
+                    updatedAt: Date.now()
+                };
+
+                // Fetch authoritative best post for a zone from server API
+                window.fetchBestPostForZone = async function(zoneId) {
+                    try {
+                        if (!zoneId) return null;
+                        const url = `/api/posts/best/${encodeURIComponent(zoneId)}`;
+                        const resp = await fetch(url, { cache: 'no-cache' });
+                        if (!resp.ok) return null;
+                        const json = await resp.json();
+                        const best = (json && json.best && json.best.snapshot) ? json.best.snapshot : (json && json.best) || null;
+                        return best || null;
+                    } catch (e) { return null; }
+                };
+
+                // Periodically poll the server for the best post in the current zone
+                window._bestPostPollState = window._bestPostPollState || { timer: null, intervalMs: 60*1000, lastBestId: null };
+                // Try Server-Sent Events per-zone subscription first
+                window._bestPostSSEState = window._bestPostSSEState || { es: null, connected: false };
+                window.startBestPostSSE = function() {
+                    try {
+                        if (window._bestPostSSEState.es) return;
+                        const zid = currentZoneTag || (window.currentZoneTag || null) || '';
+                        // Only run in browsers that support EventSource
+                        if (typeof EventSource === 'undefined') return false;
+                        const url = `/api/posts/best/stream${zid?('?zoneId='+encodeURIComponent(zid)) : ''}`;
+                        const es = new EventSource(url);
+                        es.addEventListener('best_post_update', (ev) => {
+                            try {
+                                const data = JSON.parse(ev.data || '{}');
+                                if (!data || !data.zoneId || !data.best) return;
+                                const best = data.best.snapshot ? data.best.snapshot : data.best;
+                                if (!best || !best.id) return;
+                                window.gridContent = window.gridContent || {};
+                                window.gridContent['shared-posts'] = window.gridContent['shared-posts'] || [];
+                                window.gridContent['shared-posts'] = window.gridContent['shared-posts'].filter(p => !p || !p.id || String(p.id) !== String(best.id));
+                                window.gridContent['shared-posts'].unshift(best);
+                                if (window.gridContent['shared-posts'].length > 200) window.gridContent['shared-posts'].length = 200;
+                                try { requestGridUpdate('best-post-sse'); } catch(e){}
+                            } catch (e) { /* ignore */ }
+                        });
+                        es.onopen = () => { window._bestPostSSEState.connected = true; };
+                        es.onerror = () => { try { es.close(); } catch(e){}; window._bestPostSSEState.es = null; window._bestPostSSEState.connected = false; };
+                        window._bestPostSSEState.es = es;
+                        return true;
+                    } catch (e) { return false; }
+                };
+                window.startBestPostPoll = function() {
+                    try {
+                        if (window._bestPostPollState.timer) return;
+                        window._bestPostPollState.timer = setInterval(async () => {
+                            try {
+                                const zid = currentZoneTag || (window.currentZoneTag || null);
+                                if (!zid) return;
+                                const best = await window.fetchBestPostForZone(zid);
+                                if (!best || !best.id) return;
+                                if (window._bestPostPollState.lastBestId === best.id) return;
+                                window._bestPostPollState.lastBestId = best.id;
+                                // Merge into shared-posts at front so viewers see authoritative best
+                                try {
+                                    window.gridContent = window.gridContent || {};
+                                    window.gridContent['shared-posts'] = window.gridContent['shared-posts'] || [];
+                                    // remove existing instance
+                                    window.gridContent['shared-posts'] = window.gridContent['shared-posts'].filter(p => !p || !p.id || String(p.id) !== String(best.id));
+                                    window.gridContent['shared-posts'].unshift(best);
+                                    // cap size
+                                    if (window.gridContent['shared-posts'].length > 200) window.gridContent['shared-posts'].length = 200;
+                                    // Trigger a gentle incremental update
+                                    try { requestGridUpdate('best-post-poll'); } catch(e){}
+                                } catch (e) { /* ignore merge failures */ }
+                            } catch (e) { /* ignore poll errors */ }
+                        }, window._bestPostPollState.intervalMs);
+                    } catch (e) { /* ignore start errors */ }
+                };
+
+                try {
+                    const sseOk = startBestPostSSE();
+                    if (!sseOk) startBestPostPoll();
+                } catch(e) { try { startBestPostPoll(); } catch(_){} }
+                await update(postRef, updatePayload);
+
+                // Update zone indexes: remove old index if known, add new one
+                try {
+                    if (oldZone) {
+                        const oldIdxRef = ref(database, `posts_by_zone/${oldZone}/${postId}`);
+                        await remove(oldIdxRef);
+                    }
+                } catch (e) { console.warn('Failed removing old zone index', e); }
+
+                try {
+                    const zoneKey = newZone || 'unknown_zone';
+                    const zonePostRef = ref(database, `posts_by_zone/${zoneKey}/${postId}`);
+                    await set(zonePostRef, { id: postId, timestamp: Date.now(), author: currentUserId || null });
+                } catch (e) { console.warn('Failed writing new zone index', e); }
+
+                console.log(`✅ Post ${postId} re-tagged on server to zone: ${newZone}`);
+            } catch (error) {
+                console.error('❌ Failed to update post zone on server for', postId, error);
             }
+        }
+
+        /**
+         * Re-tag recent posts authored by the current user when they move zones.
+         * Looks for posts created within the last N minutes that are not locked.
+         */
+        async function retagRecentUserPosts() {
+            try {
+                if (!currentUserId) return;
+                const userPosts = userOwnPostsTracker[currentUserId] || {};
+                const now = Date.now();
+                const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+                for (const [postId, tracked] of Object.entries(userPosts)) {
+                    if (!tracked || !tracked.created) continue;
+                    if (now - tracked.created > WINDOW_MS) continue; // only recent posts
+
+                    // Skip locked posts
+                    if (tracked.areaTagLocked) continue;
+
+                    // Compute best new zone for current location
+                    let newZone = currentZoneTag || tracked.areaTag || tracked.originalAreaTag;
+                    if (userLocation && userLocation.lat && userLocation.lon) {
+                        const poiResult = findClosestPOIInZone(userLocation.lat, userLocation.lon);
+                        if (poiResult && poiResult.poi) {
+                            newZone = poiResult.poi.name;
+                        } else {
+                            const closestLoc = findClosestLocation(userLocation.lat, userLocation.lon);
+                            if (closestLoc && closestLoc.location) newZone = closestLoc.location.name;
+                        }
+                    }
+
+                    if (!newZone) continue;
+
+                    // If the new zone differs from tracked area, update server and tracker
+                    if (String(newZone) !== String(tracked.areaTag)) {
+                        const oldZone = tracked.areaTag || tracked.originalAreaTag || null;
+                        console.log(`🔁 Retagging recent post ${postId} ${oldZone} → ${newZone}`);
+                        // Update server copy
+                        await updatePostZoneOnServer(postId, newZone, oldZone);
+
+                        // Update local tracker
+                        tracked.areaTag = newZone;
+                        if (!tracked.areaHistory) tracked.areaHistory = [];
+                        tracked.areaHistory.push(newZone);
+                    }
+                }
+            } catch (e) {
+                console.warn('retagRecentUserPosts failed', e);
+            }
+        }
+    </script>
+
     <link rel="stylesheet" href="style.css">
     <!-- 🚀 Stripe.js v3 — needed for inline Apple Pay / Google Pay one-tap on boost -->
     <script src="https://js.stripe.com/v3/"></script>
