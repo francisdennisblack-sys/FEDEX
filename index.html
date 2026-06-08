@@ -5113,6 +5113,77 @@
         let currentGridId = null; // Zone/grid ID for post tracking (derived from currentZoneTag)
         let geolocationRequested = false; // Flag to prevent multiple geolocation requests
 
+        function normalizeCoords(rawLocation, options = {}) {
+            if (!rawLocation || typeof rawLocation !== 'object') return null;
+            const allowSwap = options.allowSwap !== false;
+            let lat = Number(rawLocation.lat);
+            let lon = Number(rawLocation.lon);
+
+            if (!Number.isFinite(lat) && Number.isFinite(Number(rawLocation.latitude))) {
+                lat = Number(rawLocation.latitude);
+            }
+            if (!Number.isFinite(lon) && Number.isFinite(Number(rawLocation.longitude))) {
+                lon = Number(rawLocation.longitude);
+            }
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+            let swapped = false;
+            const looksSwapped = (Math.abs(lat) > 90 && Math.abs(lon) <= 90)
+                || (Math.abs(lon) > 180 && Math.abs(lat) <= 180);
+            if (allowSwap && looksSwapped) {
+                const swappedLat = lon;
+                const swappedLon = lat;
+                if (Math.abs(swappedLat) <= 90 && Math.abs(swappedLon) <= 180) {
+                    lat = swappedLat;
+                    lon = swappedLon;
+                    swapped = true;
+                }
+            }
+
+            if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+
+            return {
+                lat,
+                lon,
+                accuracy: Number(rawLocation.accuracy),
+                timestamp: Number(rawLocation.timestamp || rawLocation.updatedAt || rawLocation.ts || 0),
+                swapped
+            };
+        }
+
+        function getCanonicalUserCoords(options = {}) {
+            const normalized = normalizeCoords(options.location || userLocation, options);
+            if (!normalized) return null;
+
+            let timestamp = Number.isFinite(normalized.timestamp) && normalized.timestamp > 0 ? normalized.timestamp : 0;
+            if (!timestamp) {
+                const cachedTs = Number(localStorage.getItem('lastLocationTimestamp'));
+                if (Number.isFinite(cachedTs) && cachedTs > 0) timestamp = cachedTs;
+            }
+
+            const maxAgeMs = Number(options.maxAgeMs || 0);
+            if (maxAgeMs > 0 && timestamp > 0 && (Date.now() - timestamp) > maxAgeMs) {
+                return null;
+            }
+
+            if (userLocation && typeof userLocation === 'object') {
+                userLocation.lat = normalized.lat;
+                userLocation.lon = normalized.lon;
+                userLocation.latitude = normalized.lat;
+                userLocation.longitude = normalized.lon;
+                if (Number.isFinite(normalized.accuracy)) userLocation.accuracy = normalized.accuracy;
+                if (timestamp > 0) userLocation.timestamp = timestamp;
+            }
+
+            return {
+                lat: normalized.lat,
+                lon: normalized.lon,
+                accuracy: normalized.accuracy,
+                timestamp,
+                swapped: normalized.swapped
+            };
+        }
+
         // ============================================
         // 📍 REAL-TIME LOCATION & POI POLLING
         // Refresh user location and nearby POIs every 1 second
@@ -8239,9 +8310,10 @@
         // ============================================
         function detectUserGrid() {
             console.log('\n🚀 ZONE DETECTION STARTING...');
-            console.log(`📍 User location: ${userLocation?.lat.toFixed(4)}, ${userLocation?.lon.toFixed(4)}`);
+            const coords = getCanonicalUserCoords({ maxAgeMs: 10 * 60 * 1000 });
+            console.log(`📍 User location: ${coords ? `${coords.lat.toFixed(4)}, ${coords.lon.toFixed(4)}` : 'unavailable'}`);
             
-            if (!userLocation) {
+            if (!coords) {
                 console.error('❌ No geolocation - will use nearest location when available');
                 currentZoneTag = '🔍 Detecting...';
                 currentGridRadius = 0.02;
@@ -8252,7 +8324,7 @@
             try {
                 // STEP 1: FIND CLOSEST LOCATION FROM DATABASE (PRIMARY)
                 console.log('🔍 Step 1: Searching for CLOSEST location from 5,478+ location database...');
-                const closestLocationData = findClosestLocation(userLocation.lat, userLocation.lon);
+                const closestLocationData = findClosestLocation(coords.lat, coords.lon);
                 
                 if (closestLocationData && closestLocationData.location) {
                     const distanceToLocKm = closestLocationData.distance;
@@ -8311,7 +8383,7 @@
                 
                 // STEP 2: No location found - derive a friendly neighborhood/zone
                 console.log('\n🔍 Step 2: No nearby location found - deriving neighborhood/zone fallback...');
-                const neighborhood = detectNeighborhood(userLocation.lat, userLocation.lon) || { name: (getLocationName(userLocation.lat, userLocation.lon) || 'Nearby POI'), radius: 0.02, type: 'LOCAL' };
+                const neighborhood = detectNeighborhood(coords.lat, coords.lon) || { name: (getLocationName(coords.lat, coords.lon) || 'Nearby POI'), radius: 0.02, type: 'LOCAL' };
                 // Ensure we NEVER expose raw coordinates as an autogenerated area tag
                 currentZoneTag = neighborhood.name;
                 currentAreaName = neighborhood.name || 'Nearby POI';
@@ -8331,8 +8403,8 @@
                 
             } catch (error) {
                 console.error('❌ Critical error in detectUserGrid:', error);
-                currentZoneTag = (userLocation && userLocation.lat && userLocation.lon)
-                    ? (getLocationName(userLocation.lat, userLocation.lon) || 'Nearby POI')
+                currentZoneTag = (coords && Number.isFinite(Number(coords.lat)) && Number.isFinite(Number(coords.lon)))
+                    ? (getLocationName(coords.lat, coords.lon) || 'Nearby POI')
                     : 'Current Location';
                 currentGridRadius = 0.02;
                 currentContentScope = 'LOCAL';
@@ -8633,7 +8705,10 @@
                 console.time('Geolocation');
                 await requestGeolocation();
                 console.timeEnd('Geolocation');
-                console.log(`✅ Location acquired: ${userLocation.lat.toFixed(4)}°N, ${userLocation.lon.toFixed(4)}°E`);
+                const initCoords = getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 });
+                if (initCoords) {
+                    console.log(`✅ Location acquired: ${initCoords.lat.toFixed(4)}°N, ${initCoords.lon.toFixed(4)}°E`);
+                }
 
                 // Preload cloud-backed area datasets briefly so auto-generated
                 // tags use the same source of truth as refine location search.
@@ -8645,7 +8720,9 @@
 
                 // Immediately resolve a real area tag so SENDING TO never stays on "Detecting".
                 try {
-                    const immediateArea = autoDetectClosestArea(userLocation) || getLocationName(userLocation.lat, userLocation.lon);
+                    const immediateArea = autoDetectClosestArea(initCoords || userLocation)
+                        || (initCoords ? getLocationName(initCoords.lat, initCoords.lon) : null)
+                        || currentZoneTag;
                     if (immediateArea && !String(immediateArea).includes('Detecting') && !String(immediateArea).includes('Loading')) {
                         currentZoneTag = immediateArea;
                         console.log(`✅ Immediate area resolved on load: ${currentZoneTag}`);
@@ -8729,7 +8806,7 @@
                 
                 // INSTANT: Initialize area selector with real location
                 console.log('⚡ Initializing area selector with real-time location...');
-                const finalDetectedArea = autoDetectClosestArea(userLocation);
+                const finalDetectedArea = autoDetectClosestArea(getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 }) || userLocation);
                 if (finalDetectedArea && !String(finalDetectedArea).includes('Detecting') && !String(finalDetectedArea).includes('Loading')) {
                     currentZoneTag = finalDetectedArea;
                 }
@@ -8744,8 +8821,9 @@
                     detectUserGrid();
                 } catch (gridError) {
                     console.error('❌ Emergency detection failed:', gridError);
-                    if (userLocation && Number.isFinite(Number(userLocation.lat)) && Number.isFinite(Number(userLocation.lon))) {
-                        currentZoneTag = getLocationName(userLocation.lat, userLocation.lon) || 'Nearby POI';
+                    const fallbackCoords = getCanonicalUserCoords({ maxAgeMs: 30 * 60 * 1000 });
+                    if (fallbackCoords) {
+                        currentZoneTag = getLocationName(fallbackCoords.lat, fallbackCoords.lon) || 'Nearby POI';
                     } else {
                         currentZoneTag = 'Current Location';
                     }
@@ -8833,13 +8911,14 @@
         // Periodic grid check: detect if user has moved between POI or AREA
         async function checkGridUpdate() {
             // Only run if we have valid location
-            if (!userLocation || typeof userLocation.lat !== 'number' || typeof userLocation.lon !== 'number') {
+            const coords = getCanonicalUserCoords({ maxAgeMs: 10 * 60 * 1000 });
+            if (!coords) {
                 return;
             }
             
             try {
                 // Check if user has moved to different POI or AREA
-                const newGrid = getGridForUser(userLocation.lat, userLocation.lon);
+                const newGrid = getGridForUser(coords.lat, coords.lon);
                 
                 if (!newGrid) {
                     return;
@@ -8961,6 +9040,7 @@
         function updateZonePredictor() {
             const zonePredictorElement = document.getElementById('zonePredictor');
             if (zonePredictorElement) {
+                const coords = getCanonicalUserCoords({ maxAgeMs: 10 * 60 * 1000 });
                 // Display zone tag with POI info
                 let displayZone = currentZoneTag || 'Local Zone';
 
@@ -8981,9 +9061,9 @@
                     // No user selection yet - try auto-detection
                     
                     // Strategy 1: Try auto-detection
-                    if (userLocation && typeof autoDetectClosestArea === 'function') {
+                    if (coords && typeof autoDetectClosestArea === 'function') {
                         console.log(`⚡ AUTO-DETECT: Calling autoDetectClosestArea`);
-                        const detectedArea = autoDetectClosestArea(userLocation);
+                        const detectedArea = autoDetectClosestArea(coords);
                         if (detectedArea && detectedArea !== 'Detecting location...' && detectedArea !== currentZoneTag) {
                             currentZoneTag = detectedArea;
                             displayZone = detectedArea;
@@ -8992,12 +9072,12 @@
                     
                     // Strategy 2: Try to find nearest POI from database
                     if (displayZone.includes('Loading') || displayZone.includes('Detecting') || !displayZone) {
-                        if (userLocation && userLocation.lat && userLocation.lon && poiDatabase && poiDatabase.length > 0) {
+                        if (coords && poiDatabase && poiDatabase.length > 0) {
                             let nearestPOI = null;
                             let minDistance = Infinity;
                             
                             poiDatabase.forEach(poi => {
-                                const distance = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                                const distance = calculateDistance(coords.lat, coords.lon, poi.lat, poi.lon);
                                 if (distance < minDistance) {
                                     minDistance = distance;
                                     nearestPOI = poi;
@@ -9013,17 +9093,17 @@
                     
                     // Strategy 3: Use getLocationName with location coordinates
                     if (displayZone.includes('Loading') || displayZone.includes('Detecting') || !displayZone) {
-                        if (userLocation && userLocation.lat && userLocation.lon) {
-                            displayZone = getLocationName(userLocation.lat, userLocation.lon);
+                        if (coords) {
+                            displayZone = getLocationName(coords.lat, coords.lon);
                             console.log(`🌍 Used getLocationName: ${displayZone}`);
                         }
                     }
                     
                     // Strategy 4: Final fallback (never show generic "Local Area")
                     if (!displayZone || displayZone.includes('Loading') || displayZone.includes('Detecting')) {
-                        if (userLocation && Number.isFinite(Number(userLocation.lat)) && Number.isFinite(Number(userLocation.lon))) {
+                        if (coords) {
                             try {
-                                const fallbackName = String(getLocationName(userLocation.lat, userLocation.lon) || '').trim();
+                                const fallbackName = String(getLocationName(coords.lat, coords.lon) || '').trim();
                                 displayZone = fallbackName || 'Nearby POI';
                             } catch (e) {
                                 displayZone = 'Nearby POI';
@@ -24464,8 +24544,9 @@
          * Called synchronously - no waiting
          * Safe to call even if DOM elements don't exist yet
          */
-        function autoDetectClosestArea(userLocation) {
-            if (!userLocation) {
+        function autoDetectClosestArea(locationInput) {
+            const coords = getCanonicalUserCoords({ location: locationInput, maxAgeMs: 15 * 60 * 1000 });
+            if (!coords) {
                 const autoDisplay = document.getElementById('autoAreaText');
                 if (autoDisplay) {
                     autoDisplay.textContent = currentZoneTag || '📍 Current location';
@@ -24475,11 +24556,11 @@
                 return currentZoneTag;
             }
             
-            console.log(`🎯 AUTO-DETECT START: User at (${userLocation.lat}, ${userLocation.lon}) accuracy: ${userLocation.accuracy}m`);
+            console.log(`🎯 AUTO-DETECT START: User at (${coords.lat}, ${coords.lon}) accuracy: ${coords.accuracy}m`);
 
             // Use cached cloud reverse-geocode first when available.
             try {
-                const cached = getCloudReverseAreaTagFromCache(userLocation.lat, userLocation.lon);
+                const cached = getCloudReverseAreaTagFromCache(coords.lat, coords.lon);
                 if (cached && cached.name) {
                     const autoDisplay = document.getElementById('autoAreaText');
                     if (autoDisplay) {
@@ -24493,9 +24574,18 @@
             // Kick cloud reverse geocode in the background so subsequent calls
             // use authoritative OSM naming instead of local-only nearest matches.
             try {
-                resolveCloudBackedAreaTagLive(userLocation.lat, userLocation.lon, 1400).then((liveMatch) => {
+                const requestLat = coords.lat;
+                const requestLon = coords.lon;
+                resolveCloudBackedAreaTagLive(requestLat, requestLon, 1400).then((liveMatch) => {
                     if (!liveMatch || !liveMatch.name) return;
                     if (userSelectedZone) return; // never overwrite explicit user choice
+                    const latest = getCanonicalUserCoords({ maxAgeMs: 10 * 60 * 1000 });
+                    if (!latest) return;
+                    const driftKm = calculateDistance(requestLat, requestLon, latest.lat, latest.lon);
+                    if (driftKm > 5) {
+                        console.log(`⚠️ Ignoring stale cloud reverse result due to movement drift (${driftKm.toFixed(2)}km)`);
+                        return;
+                    }
                     currentZoneTag = liveMatch.name;
                     const autoDisplay = document.getElementById('autoAreaText');
                     if (autoDisplay) {
@@ -24510,7 +24600,7 @@
 
             // PRIMARY: unified cloud-backed resolver (same data family as refine location search).
             try {
-                const cloudMatch = resolveCloudBackedAreaTag(userLocation.lat, userLocation.lon);
+                const cloudMatch = resolveCloudBackedAreaTag(coords.lat, coords.lon);
                 if (cloudMatch && cloudMatch.name) {
                     const distMiles = (Number(cloudMatch.distanceKm) || 0) * 0.621371;
                     const autoDisplay = document.getElementById('autoAreaText');
@@ -24529,7 +24619,7 @@
                 if (window.GeoIndex && typeof window.GeoIndex.nearby === 'function') {
                     const tGeo = performance.now();
                     // GeoIndex.nearby expects miles; request ~31 miles ~= 50km radius
-                    const hits = window.GeoIndex.nearby(userLocation.lat, userLocation.lon, 31);
+                    const hits = window.GeoIndex.nearby(coords.lat, coords.lon, 31);
                     if (hits && hits.length) {
                         // Prefer POIs/locations that look like neighbourhoods or cities
                         const pick = hits.find(h => h && h.poi && h.poi.type && /(neighborhood|city|town|village|suburb)/i.test(String(h.poi.type))) || hits[0];
@@ -24561,7 +24651,7 @@
                 // EXPANDED SEARCH: Start with 50km, then fall back to 100km if needed
                 let BOUNDING_BOX_KM = 50;
                 let LAT_OFFSET = BOUNDING_BOX_KM / 111;
-                let LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(userLocation.lat * Math.PI / 180));
+                let LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(coords.lat * Math.PI / 180));
                 
                 // Sample first 5 locations to debug
                 console.log(`   Sample DB locations: ${globalLocationDatabase.slice(0, 5).map(l => `${l.name} (${l.lat}, ${l.lon})`).join(' | ')}`);
@@ -24572,8 +24662,8 @@
                     const locLon = parseFloat(loc.lon);
                     
                     if (!isNaN(locLat) && !isNaN(locLon)) {
-                        const latDiff = Math.abs(locLat - userLocation.lat);
-                        const lonDiff = Math.abs(locLon - userLocation.lon);
+                        const latDiff = Math.abs(locLat - coords.lat);
+                        const lonDiff = Math.abs(locLon - coords.lon);
                         
                         if (latDiff < LAT_OFFSET && lonDiff < LON_OFFSET) {
                             candidates.push({...loc, lat: locLat, lon: locLon});
@@ -24588,15 +24678,15 @@
                     console.log(`   ⚠️ No candidates in 50km, expanding to 100km...`);
                     BOUNDING_BOX_KM = 100;
                     LAT_OFFSET = BOUNDING_BOX_KM / 111;
-                    LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(userLocation.lat * Math.PI / 180));
+                    LON_OFFSET = BOUNDING_BOX_KM / (111 * Math.cos(coords.lat * Math.PI / 180));
                     
                     globalLocationDatabase.forEach(loc => {
                         const locLat = parseFloat(loc.lat);
                         const locLon = parseFloat(loc.lon);
                         
                         if (!isNaN(locLat) && !isNaN(locLon)) {
-                            const latDiff = Math.abs(locLat - userLocation.lat);
-                            const lonDiff = Math.abs(locLon - userLocation.lon);
+                            const latDiff = Math.abs(locLat - coords.lat);
+                            const lonDiff = Math.abs(locLon - coords.lon);
                             
                             if (latDiff < LAT_OFFSET && lonDiff < LON_OFFSET) {
                                 candidates.push({...loc, lat: locLat, lon: locLon});
@@ -24611,7 +24701,7 @@
                 let minDistance = Infinity;
                 
                 candidates.forEach(loc => {
-                    const dist = calculateDistance(userLocation.lat, userLocation.lon, loc.lat, loc.lon);
+                    const dist = calculateDistance(coords.lat, coords.lon, loc.lat, loc.lon);
                     if (dist < minDistance) {
                         minDistance = dist;
                         closestLoc = loc;
@@ -24663,7 +24753,7 @@
                 let minDistance = Infinity;
                 
                 globalPOIDatabase.forEach(poi => {
-                    const dist = calculateDistance(userLocation.lat, userLocation.lon, poi.lat, poi.lon);
+                    const dist = calculateDistance(coords.lat, coords.lon, poi.lat, poi.lon);
                     if (dist < minDistance) {
                         minDistance = dist;
                         closest = poi;
@@ -24695,7 +24785,7 @@
                 let minDistance = Infinity;
                 
                 globalDensityData.forEach(city => {
-                    const dist = calculateDistance(userLocation.lat, userLocation.lon, city.lat, city.lon);
+                    const dist = calculateDistance(coords.lat, coords.lon, city.lat, city.lon);
                     if (dist < minDistance) {
                         minDistance = dist;
                         nearestCity = city;
@@ -24726,7 +24816,7 @@
             let fallbackArea = String(currentZoneTag || '').trim();
             if (!fallbackArea || __isStaleAreaTag(fallbackArea)) {
                 try {
-                    fallbackArea = String(getLocationName(userLocation.lat, userLocation.lon) || '').trim();
+                    fallbackArea = String(getLocationName(coords.lat, coords.lon) || '').trim();
                 } catch (e) {
                     fallbackArea = '';
                 }
