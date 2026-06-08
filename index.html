@@ -26403,6 +26403,71 @@
             } catch (e) { /* ignore */ }
         }
 
+        function hasMembershipChangeById(current, target) {
+            try {
+                const cur = Array.isArray(current) ? current.filter(p => p && p.id) : [];
+                const tgt = Array.isArray(target) ? target.filter(p => p && p.id) : [];
+                if (cur.length !== tgt.length) return true;
+                const curIds = new Set(cur.map(p => String(p.id)));
+                if (curIds.size !== cur.length) return true;
+                for (const p of tgt) {
+                    if (!curIds.has(String(p.id))) return true;
+                }
+                return false;
+            } catch (e) {
+                return true;
+            }
+        }
+
+        function shouldAllowNonInteractiveMove(diffIdx, current, target) {
+            try {
+                const now = Date.now();
+                const lockSlots = Math.max(0, Number(window.mlStableViewportSlots || 12));
+                const moveCooldownMs = Math.max(0, Number(window.nonInteractiveMoveCooldownMs || 20000));
+                const state = window.__nonInteractiveMoveState || {
+                    lastMoveAt: 0,
+                    minuteWindowStart: now,
+                    movesInMinute: 0
+                };
+
+                // If feed membership changed (new/removed posts), allow reconcile.
+                const membershipChanged = hasMembershipChangeById(current, target);
+                if (membershipChanged) {
+                    window.__nonInteractiveMoveState = state;
+                    return true;
+                }
+
+                // Never auto-move items in the visible lock window.
+                if (diffIdx >= 0 && diffIdx < lockSlots) {
+                    window.__nonInteractiveMoveState = state;
+                    return false;
+                }
+
+                if ((now - state.minuteWindowStart) > 60000) {
+                    state.minuteWindowStart = now;
+                    state.movesInMinute = 0;
+                }
+
+                const maxPerMinute = Math.max(1, Number(window.maxNonInteractiveMovesPerMinute || 3));
+                if (state.movesInMinute >= maxPerMinute) {
+                    window.__nonInteractiveMoveState = state;
+                    return false;
+                }
+
+                if ((now - Number(state.lastMoveAt || 0)) < moveCooldownMs) {
+                    window.__nonInteractiveMoveState = state;
+                    return false;
+                }
+
+                state.lastMoveAt = now;
+                state.movesInMinute += 1;
+                window.__nonInteractiveMoveState = state;
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
         function stabilizeReconcileTargetForRecovery(target, current) {
             try {
                 const now = Date.now();
@@ -26493,6 +26558,18 @@
                     }
 
                     if (diffIdx === -1) return; // already aligned
+
+                    // Second-layer movement guard: outside explicit vote actions,
+                    // strongly limit automatic ML reshuffles so posts don't drift while reading.
+                    try {
+                        const voteActive = !!(window.voteTriggeredRerank && isVoteReorderStabilizationActive());
+                        if (!voteActive) {
+                            const allowMove = shouldAllowNonInteractiveMove(diffIdx, current, target);
+                            if (!allowMove) {
+                                return;
+                            }
+                        }
+                    } catch (e) { /* defensive */ }
 
                     // 🛡️ DUPLICATE PREVENTION: When we insert/replace with
                     // target[diffIdx], remove any existing copy of that same post
