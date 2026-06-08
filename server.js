@@ -1357,7 +1357,7 @@ function httpsGetJson(requestUrl, headers = {}, timeoutMs = 7000) {
     });
 }
 
-function normalizeSearchResult(item) {
+function normalizeNominatimResult(item) {
     if (!item || typeof item !== 'object') return null;
 
     const address = item.address || {};
@@ -1391,6 +1391,67 @@ function normalizeSearchResult(item) {
     };
 }
 
+function normalizePhotonFeature(feature) {
+    if (!feature || typeof feature !== 'object' || !feature.geometry || !feature.properties) return null;
+    const coords = Array.isArray(feature.geometry.coordinates) ? feature.geometry.coordinates : [];
+    const lon = Number(coords[0]);
+    const lat = Number(coords[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+    const props = feature.properties || {};
+    const city = props.city || props.county || props.district || '';
+    const stateOrProvince = props.state || '';
+    const country = props.country || '';
+    const shortName = props.name || props.street || props.housenumber || props.osm_value || 'Unknown';
+    const displayName = [shortName, city, stateOrProvince, country].filter(Boolean).join(', ');
+
+    return {
+        locationId: feature.properties.osm_id != null
+            ? `photon:${feature.properties.osm_id}`
+            : `photon:${shortName}:${lat.toFixed(5)},${lon.toFixed(5)}`,
+        displayName: displayName || 'Unknown',
+        name: shortName,
+        city,
+        stateOrProvince,
+        country,
+        latitude: lat,
+        longitude: lon,
+        osmType: feature.properties.osm_type || null,
+        osmId: feature.properties.osm_id || null,
+        class: feature.properties.osm_key || null,
+        type: feature.properties.osm_value || null
+    };
+}
+
+function parseSearchProviders() {
+    const raw = String(process.env.GEOCODE_SEARCH_PROVIDERS || 'nominatim,photon').trim();
+    const providers = raw.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
+    return providers.length > 0 ? providers : ['nominatim'];
+}
+
+async function searchProvider(provider, query, limit, lang, timeoutMs) {
+    const ua = process.env.GEOCODE_USER_AGENT || 'FEDEX-WiFi-App/1.0';
+    if (provider === 'photon') {
+        const photonEndpoint = process.env.GEOCODE_SEARCH_PHOTON_URL || 'https://photon.komoot.io/api';
+        const url = `${photonEndpoint}?q=${encodeURIComponent(query)}&limit=${limit}&lang=${encodeURIComponent(lang)}`;
+        const payload = await httpsGetJson(url, {
+            'User-Agent': ua,
+            'Accept-Language': lang
+        }, timeoutMs);
+        const features = Array.isArray(payload && payload.features) ? payload.features : [];
+        return features.map(normalizePhotonFeature).filter(Boolean).slice(0, limit);
+    }
+
+    const nominatimEndpoint = process.env.GEOCODE_SEARCH_URL || 'https://nominatim.openstreetmap.org/search';
+    const url = `${nominatimEndpoint}?format=jsonv2&addressdetails=1&limit=${limit}&q=${encodeURIComponent(query)}`;
+    const payload = await httpsGetJson(url, {
+        'User-Agent': ua,
+        'Accept-Language': lang
+    }, timeoutMs);
+    const rows = Array.isArray(payload) ? payload : [];
+    return rows.map(normalizeNominatimResult).filter(Boolean).slice(0, limit);
+}
+
 app.get('/api/geocode/search', async (req, res) => {
     try {
         const rawQuery = String(req.query.q || '').trim();
@@ -1408,7 +1469,8 @@ app.get('/api/geocode/search', async (req, res) => {
 
         const limit = Math.min(20, Math.max(1, Number(req.query.limit || 12)));
         const lang = String(req.query.lang || 'en').trim();
-        const endpoint = process.env.GEOCODE_SEARCH_URL || 'https://nominatim.openstreetmap.org/search';
+        const timeoutMs = Number(process.env.GEOCODE_SEARCH_TIMEOUT_MS || 7000);
+        const providers = parseSearchProviders();
         const cacheKey = `${query.toLowerCase()}|${limit}|${lang}`;
 
         const cachedResults = getGeocodeSearchCache(cacheKey);
@@ -1423,23 +1485,34 @@ app.get('/api/geocode/search', async (req, res) => {
             });
         }
 
-        const searchUrl = `${endpoint}?format=jsonv2&addressdetails=1&limit=${limit}&q=${encodeURIComponent(query)}`;
-        const payload = await httpsGetJson(searchUrl, {
-            'User-Agent': process.env.GEOCODE_USER_AGENT || 'FEDEX-WiFi-App/1.0',
-            'Accept-Language': lang
-        }, Number(process.env.GEOCODE_SEARCH_TIMEOUT_MS || 7000));
+        let normalized = [];
+        let providerUsed = null;
+        let lastError = null;
 
-        const rows = Array.isArray(payload) ? payload : [];
-        const normalized = rows
-            .map(normalizeSearchResult)
-            .filter(Boolean)
-            .slice(0, limit);
+        for (const provider of providers) {
+            try {
+                const result = await searchProvider(provider, query, limit, lang, timeoutMs);
+                if (Array.isArray(result) && result.length > 0) {
+                    normalized = result;
+                    providerUsed = provider;
+                    break;
+                }
+                if (!providerUsed) providerUsed = provider;
+            } catch (e) {
+                lastError = e;
+                console.warn(`[Geocode Search] provider ${provider} failed:`, e.message);
+            }
+        }
+
+        if (!providerUsed && lastError) {
+            throw lastError;
+        }
 
         setGeocodeSearchCache(cacheKey, normalized);
 
         return res.json({
             success: true,
-            source: 'nominatim',
+            source: providerUsed || 'none',
             query,
             count: normalized.length,
             results: normalized,
