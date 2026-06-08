@@ -8359,24 +8359,24 @@
                 }
             }
             
-            // FALLBACK: Use quadrant system only if no locations found
-            console.log(`   ⚠️  No nearby locations found - using quadrant fallback`);
-            const quadrants = [
-                { name: 'Northeast', emoji: '↗️' },
-                { name: 'Northwest', emoji: '↖️' },
-                { name: 'Southeast', emoji: '↘️' },
-                { name: 'Southwest', emoji: '↙️' }
-            ];
-            
-            const quad = lat >= 0 && lon >= 0 ? quadrants[0] : 
-                         lat >= 0 && lon < 0 ? quadrants[1] :
-                         lat < 0 && lon >= 0 ? quadrants[2] : quadrants[3];
-            
-            console.log(`   ℹ️  Using quadrant: ${quad.name}`);
+            // FALLBACK (NO LEGACY QUADRANTS): Never emit "Northwest Zone" style tags.
+            // Try a real friendly name from coordinate mapping; otherwise use Local Area.
+            let fallbackName = null;
+            try {
+                if (typeof getLocationName === 'function') {
+                    const candidate = String(getLocationName(lat, lon) || '').trim();
+                    if (candidate && !/unknown location/i.test(candidate) && !/\b(north|south)(east|west)\s+zone\b/i.test(candidate)) {
+                        fallbackName = candidate;
+                    }
+                }
+            } catch (e) { /* ignore */ }
+
+            if (!fallbackName) fallbackName = 'Local Area';
+            console.warn(`   ⚠️  No nearby locations found - using non-quadrant fallback: ${fallbackName}`);
             return {
-                name: `${quad.name} Zone`,
-                emoji: quad.emoji,
-                type: 'ZONE',
+                name: fallbackName,
+                emoji: '📍',
+                type: 'LOCAL',
                 radius: 0.03
             };
         }
@@ -8828,6 +8828,14 @@
             if (zonePredictorElement) {
                 // Display zone tag with POI info
                 let displayZone = currentZoneTag || 'Local Zone';
+
+                // Legacy cleanup: old builds could persist quadrant labels like
+                // "Northwest Zone". Treat them as stale immediately.
+                try {
+                    if (__isStaleAreaTag(displayZone)) {
+                        displayZone = '';
+                    }
+                } catch (e) { /* ignore */ }
                 
                 // CRITICAL: If user has explicitly selected a zone, NEVER override it
                 // Only auto-detect if no user selection has been made yet
@@ -30030,7 +30038,11 @@
                    t === 'local area' ||
                    t === 'local zone' ||
                    t === '📍 local area' ||
-                   t === '🔍 detecting...';
+                   t === '🔍 detecting...' ||
+                   t === 'northwest zone' ||
+                   t === 'northeast zone' ||
+                   t === 'southwest zone' ||
+                   t === 'southeast zone';
         }
 
         function __getVisibleAreaTagFromPredictor() {
