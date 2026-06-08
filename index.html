@@ -9566,6 +9566,8 @@
                     // 2) Re-run ranking so post can move to new position
                         // Defensive dedupe before re-render to avoid duplicate artifacts
                         try { if (typeof dedupeGridContent === 'function') dedupeGridContent(); } catch (e) {}
+                    window.lastVoteRerankAt = Date.now();
+                    window.lastVoteRerankPostId = postId;
                     window.lastRenderGridTime = 0; // bypass throttle for deliberate vote action
                     window.voteTriggeredRerank = true; // signal immediate apply to scroller
                     renderGrid();
@@ -26610,6 +26612,12 @@
 
         function getPostBadgeKind(post) {
             try {
+                // Position law: net-negative engagement always classifies as disliked
+                // for ranking/caps/composition, even when cosmetic badges include NEW.
+                const likes = Number(post && post.likes) || 0;
+                const dislikes = Number(post && post.dislikes) || 0;
+                if (dislikes > likes) return 'disliked';
+
                 if (post && Array.isArray(post.cachedBadges) && post.cachedBadges.length > 0) {
                     const first = post.cachedBadges[0];
                     const kind = String((first && (first.kind || first.label)) || '').toLowerCase();
@@ -26916,6 +26924,78 @@
             const net = likes - dislikes;
             const ts = Number(post && post.timestamp) || 0;
             return (net * 1000) + likes * 50 - dislikes * 20 + Math.floor(ts / 1000);
+        }
+
+        function isVoteReorderStabilizationActive() {
+            try {
+                const last = Number(window.lastVoteRerankAt || 0);
+                if (!last) return false;
+                return (Date.now() - last) <= 12000;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function stabilizeVoteDrivenReorder(newList, previousList, votedPostId) {
+            try {
+                const next = Array.isArray(newList) ? newList.filter(p => p && p.id) : [];
+                const prev = Array.isArray(previousList) ? previousList.filter(p => p && p.id) : [];
+                if (next.length === 0 || prev.length === 0 || !votedPostId) return next;
+
+                const byId = new Map(next.map(p => [p.id, p]));
+                if (!byId.has(votedPostId)) return next;
+
+                // Keep everyone in prior order first, then only reposition voted post.
+                const baseIds = [];
+                const seen = new Set();
+                for (const p of prev) {
+                    if (!p || !p.id) continue;
+                    if (!byId.has(p.id)) continue;
+                    if (p.id === votedPostId) continue;
+                    if (seen.has(p.id)) continue;
+                    seen.add(p.id);
+                    baseIds.push(p.id);
+                }
+                for (const p of next) {
+                    if (!p || !p.id) continue;
+                    if (p.id === votedPostId) continue;
+                    if (seen.has(p.id)) continue;
+                    seen.add(p.id);
+                    baseIds.push(p.id);
+                }
+
+                // Desired index from fresh ranking, but clamp movement so one vote
+                // cannot teleport a post through large portions of the feed.
+                const desiredIndex = Math.max(0, next.findIndex(p => p && p.id === votedPostId));
+                const oldIndex = Math.max(0, prev.findIndex(p => p && p.id === votedPostId));
+                const MAX_STEP = 2;
+                const minAllowed = Math.max(0, oldIndex - MAX_STEP);
+                const maxAllowed = Math.min(baseIds.length, oldIndex + MAX_STEP);
+                const targetIndex = Math.max(minAllowed, Math.min(maxAllowed, desiredIndex));
+
+                const finalIds = baseIds.slice();
+                finalIds.splice(targetIndex, 0, votedPostId);
+
+                const stabilized = [];
+                for (const id of finalIds) {
+                    const p = byId.get(id);
+                    if (p) stabilized.push(p);
+                }
+
+                if (stabilized.length < next.length) {
+                    const used = new Set(stabilized.map(p => p.id));
+                    for (const p of next) {
+                        if (!p || !p.id || used.has(p.id)) continue;
+                        stabilized.push(p);
+                    }
+                }
+
+                console.log(`🧊 Vote reorder stabilization: voted post step-limited old=${oldIndex} desired=${desiredIndex} final=${targetIndex}`);
+                return stabilized;
+            } catch (e) {
+                console.warn('stabilizeVoteDrivenReorder failed:', e);
+                return Array.isArray(newList) ? newList : [];
+            }
         }
 
         function mergeUniquePosts(...arrays) {
@@ -27373,6 +27453,7 @@
         // ORIGINAL renderGrid function (renamed)
         function renderGrid_Original() {
             try {
+                const previousSortedPostsSnapshot = Array.isArray(window.latestSortedPosts) ? window.latestSortedPosts.slice() : [];
                 // 🛡️ POST-ID INTEGRITY GUARD
                 let _idFixed = 0, _idDropped = 0;
                 for (const key of Object.keys(gridContent)) {
@@ -28786,6 +28867,19 @@
                 console.warn('⚠️ FINAL OWNER-FIRST enforcement failed:', e);
             }
 
+            // Vote-specific stability pass: update vote counts immediately but avoid
+            // large feed reshuffles from a single vote event.
+            try {
+                if (window.voteTriggeredRerank && isVoteReorderStabilizationActive()) {
+                    const votedId = String(window.lastVoteRerankPostId || '').trim();
+                    if (votedId) {
+                        sortedPosts = stabilizeVoteDrivenReorder(sortedPosts, previousSortedPostsSnapshot, votedId);
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ Vote stability pass failed:', e);
+            }
+
             // Refresh latest snapshot after position-1 rotation
             window.latestSortedPosts = [...sortedPosts];
             
@@ -28835,9 +28929,9 @@
                     // First paint: load immediately so user sees content quickly.
                     gridScroller.setItems(pendingSortedPosts);
                     applyGridTextFontSizeToVisiblePosts();
-                } else if ((window.voteTriggeredRerank || window.postPublishImmediateRefresh) && pendingSortedPosts.length > 0) {
-                    // Vote/new-post action: apply immediately so movement/new content appears without waiting 1/sec.
-                    const reason = window.voteTriggeredRerank ? 'Vote re-rank' : 'Post publish refresh';
+                } else if (window.postPublishImmediateRefresh && pendingSortedPosts.length > 0) {
+                    // New post publish should still apply immediately.
+                    const reason = 'Post publish refresh';
                     console.log(`⚡ ${reason}: immediate setItems (${pendingSortedPosts.length} posts)`);
                     gridScroller.setItems(pendingSortedPosts);
                     applyGridTextFontSizeToVisiblePosts();
