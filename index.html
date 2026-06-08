@@ -10033,6 +10033,32 @@
         // Refresh feed when tab/window returns to foreground (catch up after being closed/backgrounded)
         // Debounced so visibilitychange + focus do not double-trigger heavy refresh work.
         let __lastForegroundRefreshAt = 0;
+        let __lastBackgroundedAt = 0;
+        let __lastVisibleHeartbeatAt = Date.now();
+        const FOREGROUND_AWAY_REFRESH_MIN_MS = 8000;
+        let __foregroundRecoveryUntil = 0;
+
+        const shouldRefreshAfterAway = (reason = 'foreground') => {
+            try {
+                const now = Date.now();
+                const awayMs = __lastBackgroundedAt > 0 ? (now - __lastBackgroundedAt) : 0;
+
+                // BFCache/page restore should always re-sync data.
+                if (reason === 'pageshow-persisted') return true;
+
+                // If user was hidden/in background for long enough, refresh.
+                if (awayMs >= FOREGROUND_AWAY_REFRESH_MIN_MS) return true;
+
+                // If heartbeats are stale while visible/focused, treat as resume.
+                const staleVisibleMs = now - (__lastVisibleHeartbeatAt || now);
+                if (staleVisibleMs >= 30000) return true;
+
+                return false;
+            } catch (e) {
+                return true;
+            }
+        };
+
         const refreshOnForeground = (reason = 'foreground') => {
             const now = Date.now();
             if (now - __lastForegroundRefreshAt < 750) {
@@ -10040,6 +10066,7 @@
                 return;
             }
             __lastForegroundRefreshAt = now;
+            __foregroundRecoveryUntil = now + 15000;
 
             console.log(`🔄 Foreground sync: refreshing feed/cache state (${reason})`);
             try {
@@ -10084,11 +10111,33 @@
         setTimeout(checkLocationHealth, 5 * 1000);
 
         document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                __lastBackgroundedAt = Date.now();
+                return;
+            }
             if (document.visibilityState === 'visible') {
-                refreshOnForeground('visibilitychange');
+                __lastVisibleHeartbeatAt = Date.now();
+                if (shouldRefreshAfterAway('visibilitychange')) {
+                    refreshOnForeground('visibilitychange');
+                }
             }
         });
-        window.addEventListener('focus', () => refreshOnForeground('focus'));
+
+        window.addEventListener('focus', () => {
+            __lastVisibleHeartbeatAt = Date.now();
+            if (shouldRefreshAfterAway('focus')) {
+                refreshOnForeground('focus');
+            }
+        });
+
+        // BFCache/page restore path (common on mobile Safari/Chrome app switching).
+        window.addEventListener('pageshow', (event) => {
+            __lastVisibleHeartbeatAt = Date.now();
+            const restored = !!(event && event.persisted);
+            if (restored || shouldRefreshAfterAway('pageshow')) {
+                refreshOnForeground(restored ? 'pageshow-persisted' : 'pageshow');
+            }
+        });
 
         const initialGridSize = 12; // Start with 12 squares visible
         let maxGridSize = 2000; // Pre-create 2000 boxes total for virtually unlimited scrolling
@@ -25638,6 +25687,53 @@
         let gridReconcileInterval = null;
         let pendingSortedPosts = null;
 
+        function stabilizeReconcileTargetForRecovery(target, current) {
+            try {
+                const now = Date.now();
+                const inRecovery = now < (__foregroundRecoveryUntil || 0);
+                if (!inRecovery) return Array.isArray(target) ? target : [];
+                if (!Array.isArray(target) || !Array.isArray(current) || current.length === 0) return Array.isArray(target) ? target : [];
+
+                const currentById = new Map();
+                for (const p of current) {
+                    if (p && p.id) currentById.set(p.id, p);
+                }
+
+                const merged = [];
+                const seen = new Set();
+
+                // Prefer incoming order but never downgrade to an unrenderable payload.
+                for (const p of target) {
+                    if (!p || !p.id) continue;
+                    if (seen.has(p.id)) continue;
+                    seen.add(p.id);
+                    if (typeof hasRenderableGridPayload === 'function' && !hasRenderableGridPayload(p) && currentById.has(p.id)) {
+                        merged.push(currentById.get(p.id));
+                    } else {
+                        merged.push(p);
+                    }
+                }
+
+                // During recovery, prevent transient shrink: keep previously visible posts
+                // that are missing from a temporarily smaller target snapshot.
+                if (merged.length < current.length) {
+                    for (const p of current) {
+                        if (!p || !p.id) continue;
+                        if (seen.has(p.id)) continue;
+                        seen.add(p.id);
+                        merged.push(p);
+                        if (merged.length >= 2000) break;
+                    }
+                    console.log(`🛡️ Reconcile recovery guard: preserved ${merged.length - target.length} existing post(s) during foreground warmup`);
+                }
+
+                return merged;
+            } catch (e) {
+                console.warn('stabilizeReconcileTargetForRecovery failed:', e);
+                return Array.isArray(target) ? target : [];
+            }
+        }
+
         function scheduleGridReconcile() {
             if (gridReconcileInterval) return;
 
@@ -25645,8 +25741,12 @@
                 try {
                     if (!gridScroller || !pendingSortedPosts || !Array.isArray(pendingSortedPosts)) return;
 
-                    const target = pendingSortedPosts;
+                    let target = Array.isArray(pendingSortedPosts) ? pendingSortedPosts.slice() : [];
                     const current = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
+
+                    // Foreground resume can briefly produce sparse ML snapshots while
+                    // subscriptions/data warm up. Stabilize target before diffing.
+                    target = stabilizeReconcileTargetForRecovery(target, current);
 
                     // Never replace a visible non-empty grid with empty data (prevents black-out).
                     if (target.length === 0 && current.length > 0) return;
