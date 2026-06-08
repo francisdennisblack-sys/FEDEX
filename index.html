@@ -26216,6 +26216,42 @@
         // Keeps the first loaded grid stable while allowing gradual updates.
         let gridReconcileInterval = null;
         let pendingSortedPosts = null;
+        let gridTargetIndexById = new Map();
+
+        function buildIndexMapById(items) {
+            const out = new Map();
+            try {
+                if (!Array.isArray(items)) return out;
+                for (let i = 0; i < items.length; i++) {
+                    const p = items[i];
+                    if (!p || !p.id) continue;
+                    out.set(String(p.id), i);
+                }
+            } catch (e) { /* ignore */ }
+            return out;
+        }
+
+        function snapshotGridPositionTracker(target, current) {
+            try {
+                const tracker = {
+                    at: Date.now(),
+                    targetSize: Array.isArray(target) ? target.length : 0,
+                    currentSize: Array.isArray(current) ? current.length : 0,
+                    mismatchCountTop100: 0,
+                    firstMismatchIndex: -1
+                };
+                const maxCheck = Math.min(100, Math.max(tracker.targetSize, tracker.currentSize));
+                for (let i = 0; i < maxCheck; i++) {
+                    const curId = current[i] && current[i].id ? String(current[i].id) : null;
+                    const tgtId = target[i] && target[i].id ? String(target[i].id) : null;
+                    if (curId !== tgtId) {
+                        tracker.mismatchCountTop100++;
+                        if (tracker.firstMismatchIndex === -1) tracker.firstMismatchIndex = i;
+                    }
+                }
+                window.gridPositionTracker = tracker;
+            } catch (e) { /* ignore */ }
+        }
 
         function stabilizeReconcileTargetForRecovery(target, current) {
             try {
@@ -26277,6 +26313,8 @@
                     // Ensure reconcile compares/places fully-hydrated post payloads,
                     // not partial snapshots that may only have votes/ids.
                     target = target.map(p => hydratePostForRender(p));
+                    gridTargetIndexById = buildIndexMapById(target);
+                    snapshotGridPositionTracker(target, current);
 
                     // Foreground resume can briefly produce sparse ML snapshots while
                     // subscriptions/data warm up. Stabilize target before diffing.
@@ -26328,16 +26366,36 @@
                     const currentLenBefore = current.length;
                     const isRemoveChange = diffIdx >= target.length;
                     const isAddChange = diffIdx >= currentLenBefore;
+                    let opKind = 'replace';
 
                     if (isRemoveChange) {
-                        // Target shorter: remove one tail item
-                        current.pop();
+                        // Target shorter: remove the mismatched item at this index.
+                        current.splice(diffIdx, 1);
+                        opKind = 'remove';
                     } else if (isAddChange) {
                         // Target longer: add one item
-                        current.push(hydratePostForRender(target[diffIdx]));
+                        current.splice(diffIdx, 0, hydratePostForRender(target[diffIdx]));
+                        opKind = 'add';
                     } else {
-                        // Replace one mismatched slot
-                        current[diffIdx] = hydratePostForRender(target[diffIdx]);
+                        // Deterministic move-to-target: if target post already exists later,
+                        // move that existing object into the correct slot.
+                        const targetAtDiff = target[diffIdx];
+                        const targetIdAtDiff = targetAtDiff && targetAtDiff.id ? String(targetAtDiff.id) : null;
+                        let movedIdx = -1;
+                        if (targetIdAtDiff) {
+                            movedIdx = current.findIndex((p, idx) => idx > diffIdx && p && String(p.id) === targetIdAtDiff);
+                        }
+
+                        if (movedIdx !== -1) {
+                            const [movedPost] = current.splice(movedIdx, 1);
+                            current.splice(diffIdx, 0, hydratePostForRender(movedPost || targetAtDiff));
+                            movedFromIdx = movedIdx;
+                            opKind = 'move';
+                        } else {
+                            // Fallback when target post is not present in current list yet.
+                            current[diffIdx] = hydratePostForRender(targetAtDiff);
+                            opKind = 'replace';
+                        }
                     }
 
                     // 🛡️ FINAL DEDUPE PASS on the live scroller list.
@@ -26368,7 +26426,7 @@
                         gridScroller.setItems(current);
                         applyGridTextFontSizeToVisiblePosts();
                         try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
-                        const changeType = isRemoveChange ? 'remove' : (isAddChange ? 'add' : 'replace');
+                        const changeType = isRemoveChange ? 'remove' : (isAddChange ? 'add' : opKind);
                         console.log(`🔁 Grid reconcile (${changeType} +dedupe) @ index ${diffIdx}`);
                         return;
                     }
@@ -26387,12 +26445,12 @@
                         applyGridTextFontSizeToVisiblePosts();
                     }
 
-                    const changeType = isRemoveChange ? 'remove' : (isAddChange ? 'add' : 'replace');
+                    const changeType = isRemoveChange ? 'remove' : (isAddChange ? 'add' : opKind);
                     console.log(`🔁 Grid reconcile (${changeType}) @ index ${diffIdx}`);
                 } catch (e) {
                     console.warn('⚠️ Grid reconcile tick failed:', e);
                 }
-            }, 3000);
+            }, 1000);
         }
 
         // 📊 ORIGINAL RENDER: Main rendering function now sends posts to scroller
