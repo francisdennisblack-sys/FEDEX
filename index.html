@@ -984,6 +984,7 @@
                 // CRITICAL: clear from the true data length, not the initial render window.
                 // Otherwise stale boxes from previous larger feeds (glow + onclick) can persist.
                 this.clearBoxesBeyondItemCount(this.items.length + 1);
+                this.enforceStrictSlotIdentity(Math.max(initialCount + 10, this.items.length + 10));
             }
 
             addItems(items) {
@@ -1073,6 +1074,10 @@
                 if (startIdx === 0 && actualEnd >= 0) {
                     this.clearBoxesBeyondItemCount(actualEnd + 1);
                 }
+
+                // Final identity scrub for this rendered window to eliminate ghost boxes
+                // left by rapid swaps/reorders.
+                this.enforceStrictSlotIdentity(Math.max(actualEnd + 8, endIdx + 4));
             }
 
             clearBoxElement(box) {
@@ -1101,6 +1106,38 @@
                         const box = document.getElementById(`box-${i}`);
                         if (!box) break;
                         this.clearBoxElement(box);
+                    }
+                } catch (e) { /* ignore */ }
+            }
+
+            // Enforce a strict invariant: slot N must contain item[N-1] id or be empty.
+            // If any mismatch is found, clear and repaint that exact slot.
+            enforceStrictSlotIdentity(maxSlots = 420) {
+                try {
+                    const limit = Math.max(1, Math.min(2000, Number(maxSlots) || 420));
+                    for (let boxIndex = 1; boxIndex <= limit; boxIndex++) {
+                        const box = document.getElementById(`box-${boxIndex}`);
+                        if (!box) break;
+
+                        const itemIdx = boxIndex - 1;
+                        const expected = this.items[itemIdx] || null;
+                        const expectedId = expected && expected.id ? String(expected.id) : '';
+                        const actualId = String(box.getAttribute('data-post-id') || '');
+                        const hasVisualContent = !!String(box.innerHTML || '').trim();
+
+                        if (!expectedId) {
+                            if (actualId || hasVisualContent) {
+                                this.clearBoxElement(box);
+                            }
+                            continue;
+                        }
+
+                        if (actualId !== expectedId || !hasVisualContent) {
+                            this.clearBoxElement(box);
+                            if (this.onRenderItem) {
+                                this.onRenderItem(box, expected);
+                            }
+                        }
                     }
                 } catch (e) { /* ignore */ }
             }
@@ -26538,6 +26575,7 @@
                     if ((removedDuplicate || isAddChange || isRemoveChange) && typeof gridScroller.setItems === 'function') {
                         gridScroller.setItems(current);
                         applyGridTextFontSizeToVisiblePosts();
+                        try { if (typeof gridScroller.enforceStrictSlotIdentity === 'function') gridScroller.enforceStrictSlotIdentity(460); } catch(e) {}
                         try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
                         const changeType = isRemoveChange ? 'remove' : (isAddChange ? 'add' : opKind);
                         console.log(`🔁 Grid reconcile (${changeType} +dedupe) @ index ${diffIdx}`);
@@ -26551,11 +26589,13 @@
                         const endIdx = (movedFromIdx !== -1) ? Math.max(diffIdx, movedFromIdx) + 1 : diffIdx + 1;
                         gridScroller.renderItemsInRange(startIdx, endIdx);
                         applyGridTextFontSizeToVisiblePosts();
+                        try { if (typeof gridScroller.enforceStrictSlotIdentity === 'function') gridScroller.enforceStrictSlotIdentity(endIdx + 20); } catch(e) {}
                         try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
                     } else if (typeof gridScroller.setItems === 'function') {
                         // Fallback if API changes
                         gridScroller.setItems(current);
                         applyGridTextFontSizeToVisiblePosts();
+                        try { if (typeof gridScroller.enforceStrictSlotIdentity === 'function') gridScroller.enforceStrictSlotIdentity(460); } catch(e) {}
                     }
 
                     const changeType = isRemoveChange ? 'remove' : (isAddChange ? 'add' : opKind);
