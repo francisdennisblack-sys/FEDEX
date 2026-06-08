@@ -9408,7 +9408,13 @@
                 }
                 // Toggle outline glow when the current user has liked this post
                 try {
-                    const userVoteKey = `${currentUserId}_${postId}`;
+                    let voteViewerId = currentUserId;
+                    if (!voteViewerId) {
+                        try {
+                            voteViewerId = localStorage.getItem('userId') || localStorage.getItem('permanentUserId') || null;
+                        } catch (e) { voteViewerId = null; }
+                    }
+                    const userVoteKey = `${voteViewerId}_${postId}`;
                     const thisUserVote = (window.userVotes && window.userVotes[userVoteKey]) || null;
                     if (thisUserVote === 'like') {
                         box.classList.add('glow-like-outline');
@@ -9422,11 +9428,26 @@
         
         function voteOnPost(postId, voteType) {
             console.log(`🗳️ voteOnPost called: postId=${postId.substring(0,8)}, type=${voteType}`);
-            
-            if (!currentUserId) {
-                console.warn('⚠️ Cannot vote: no currentUserId');
-                showNotification && showNotification('Please sign in to vote');
+
+            // Allow voting while signed out by using a stable device-scoped id.
+            let voterId = currentUserId;
+            if (!voterId) {
+                try {
+                    voterId = localStorage.getItem('userId') || localStorage.getItem('permanentUserId') || null;
+                } catch (e) { voterId = null; }
+            }
+            if (!voterId && typeof getPermanentUserId === 'function') {
+                try { voterId = getPermanentUserId(); } catch (e) { voterId = null; }
+            }
+            if (!voterId) {
+                console.warn('⚠️ Cannot vote: no voterId available');
+                showNotification && showNotification('Unable to vote right now. Please try again.');
                 return;
+            }
+            if (!currentUserId) {
+                currentUserId = voterId;
+                try { window.currentUserId = voterId; } catch (e) {}
+                try { localStorage.setItem('userId', voterId); } catch (e) {}
             }
             
             // Get the post from cache
@@ -9437,7 +9458,7 @@
             }
             
             // DEBOUNCE: Prevent rapid-fire duplicate votes
-            const voteKey = `${currentUserId}_${postId}_${voteType}`;
+            const voteKey = `${voterId}_${postId}_${voteType}`;
             const lastVoteTime = window.voteDebounceMap ? (window.voteDebounceMap[voteKey] || 0) : 0;
             if (Date.now() - lastVoteTime < 500) {
                 console.log('⏳ Vote debounced - too soon');
@@ -9449,7 +9470,7 @@
             // Track original state for rollback
             const originalLikes = post.likes || 0;
             const originalDislikes = post.dislikes || 0;
-            const userVoteKey = `${currentUserId}_${postId}`;
+            const userVoteKey = `${voterId}_${postId}`;
             const originalVote = userVotes[userVoteKey];
             
             // Calculate new vote counts
@@ -9552,7 +9573,7 @@
             // 🔥 CRITICAL: Save vote using an atomic transaction to prevent race conditions
             // Use submitVoteTransaction so aggregated counts are computed server-side and written
             console.log(`🔄 Submitting atomic vote transaction to Firebase...`);
-            submitVoteTransaction(currentUserId, postId, newVoteType).then(({likes, dislikes}) => {
+            submitVoteTransaction(voterId, postId, newVoteType).then(({likes, dislikes}) => {
                 // Ensure local cache/UI reflect authoritative counts from transaction
                 try {
                     post.likes = likes;
@@ -9959,6 +9980,42 @@
                 // No gate/modal shown; users are either signed in or signed out (no choice page)
                     console.log('🔓 User not signed in - using anonymous session');
                     try { if (window.dumpAuthDiagnostics) window.dumpAuthDiagnostics(); } catch(e){ console.warn('dumpAuthDiagnostics failed', e); }
+
+                    // 🚀 FAST GUEST BOOTSTRAP:
+                    // Ensure first-time signed-out visitors get feed content immediately
+                    // instead of waiting for periodic heartbeat recovery.
+                    try {
+                        if (!window.__guestBootstrapStarted) {
+                            window.__guestBootstrapStarted = true;
+
+                            const guestId = currentUserId || localStorage.getItem('userId') || permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
+                            if (guestId) {
+                                currentUserId = guestId;
+                                try { window.currentUserId = guestId; } catch (_) {}
+                                try { localStorage.setItem('userId', guestId); } catch (_) {}
+                                if (!gridContent[currentUserId]) gridContent[currentUserId] = [];
+                            }
+
+                            try { initializeGrid(); } catch (e) { console.warn('guest initializeGrid warning', e); }
+                            try { subscribeToFirebasePostsWithReconnect(); } catch (e) { console.warn('guest subscribe warning', e); }
+                            try { if (typeof window.ensureDeviceFeed === 'function') window.ensureDeviceFeed(); } catch (e) { console.warn('guest ensureDeviceFeed warning', e); }
+                            try { window.lastRenderGridTime = 0; } catch (_) {}
+                            try { renderGrid(); } catch (e) { console.warn('guest render warning', e); }
+                        }
+                    } catch (e) {
+                        console.warn('Fast guest bootstrap failed', e);
+                    }
+
+                    // Best-effort anonymous auth restore in background.
+                    try {
+                        if (!window.__anonSignInAttempted && typeof signInAnonymously === 'function') {
+                            window.__anonSignInAttempted = true;
+                            signInAnonymously(auth).catch(err => {
+                                console.warn('Anonymous sign-in attempt failed (continuing guest mode):', err);
+                            });
+                        }
+                    } catch (e) { /* ignore */ }
+
                     try {
                         // If we have a marker showing a recent signed-in uid but auth did not restore,
                         // surface a banner to explain persistence may be blocked and offer profile modal.
@@ -9971,16 +10028,34 @@
         });
 
         // Refresh feed when tab/window returns to foreground (catch up after being closed/backgrounded)
-        const refreshOnForeground = () => {
-            if (!currentUserId) return;
-            console.log('🔄 Foreground sync: refreshing feed/cache state');
+        // Debounced so visibilitychange + focus do not double-trigger heavy refresh work.
+        let __lastForegroundRefreshAt = 0;
+        const refreshOnForeground = (reason = 'foreground') => {
+            const now = Date.now();
+            if (now - __lastForegroundRefreshAt < 750) {
+                console.log(`⏭️ Foreground sync skipped (debounced): ${reason}`);
+                return;
+            }
+            __lastForegroundRefreshAt = now;
+
+            console.log(`🔄 Foreground sync: refreshing feed/cache state (${reason})`);
             try {
                 subscribeToFirebasePostsWithReconnect();
             } catch (e) {
                 console.warn('⚠️ Foreground resubscribe warning:', e);
             }
+
+            // For guests or early-boot windows, ensure feed fallback can repopulate quickly.
+            try {
+                if (typeof window.ensureDeviceFeed === 'function') {
+                    window.ensureDeviceFeed();
+                }
+            } catch (e) {
+                console.warn('⚠️ Foreground ensureDeviceFeed warning:', e);
+            }
+
             try { window.lastRenderGridTime = 0; } catch (e) {}
-            renderGrid();
+            try { renderGrid(); } catch (e) { console.warn('⚠️ Foreground render warning:', e); }
         };
 
         // ============================================================
@@ -10007,10 +10082,10 @@
 
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
-                refreshOnForeground();
+                refreshOnForeground('visibilitychange');
             }
         });
-        window.addEventListener('focus', refreshOnForeground);
+        window.addEventListener('focus', () => refreshOnForeground('focus'));
 
         const initialGridSize = 12; // Start with 12 squares visible
         let maxGridSize = 2000; // Pre-create 2000 boxes total for virtually unlimited scrolling
@@ -15551,6 +15626,25 @@
 
         // Like/Dislike functions
         function toggleLike() {
+            let voteActorId = currentUserId;
+            if (!voteActorId) {
+                try {
+                    voteActorId = localStorage.getItem('userId') || localStorage.getItem('permanentUserId') || null;
+                } catch (e) { voteActorId = null; }
+            }
+            if (!voteActorId && typeof getPermanentUserId === 'function') {
+                try { voteActorId = getPermanentUserId(); } catch (e) { voteActorId = null; }
+            }
+            if (!voteActorId) {
+                showNotification && showNotification('Unable to vote right now. Please try again.');
+                return;
+            }
+            if (!currentUserId) {
+                currentUserId = voteActorId;
+                try { window.currentUserId = voteActorId; } catch (e) {}
+                try { localStorage.setItem('userId', voteActorId); } catch (e) {}
+            }
+
             // Search for post first in gridContent[currentUserId], then in postCache, then in other gridContent keys
             let post = gridContent[currentUserId] ? gridContent[currentUserId].find(p => p.id === selectedPostId) : null;
             if (!post && postCache[selectedPostId]) {
@@ -15568,7 +15662,7 @@
             }
             if (!post) return;
 
-            const voteKey = `${currentUserId}_${selectedPostId}`;
+            const voteKey = `${voteActorId}_${selectedPostId}`;
             const currentVote = userVotes[voteKey];
             let newLikes = post.likes || 0;
             let newDislikes = post.dislikes || 0;
@@ -15613,14 +15707,33 @@
             try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(e){}
             try { if (window.gridScroller && typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
             // Submit transaction to Firebase to update per-post votes atomically
-            submitVoteTransaction(currentUserId, selectedPostId, desiredVote).catch(err => {
+            submitVoteTransaction(voteActorId, selectedPostId, desiredVote).catch(err => {
                 console.warn('submitVoteTransaction failed, will retry saving vote:', err);
                 // Fallback: persist to localStorage for later sync
-                try { localStorage.setItem(`userVotes_${currentUserId}`, JSON.stringify(userVotes)); } catch(e){}
+                try { localStorage.setItem(`userVotes_${voteActorId}`, JSON.stringify(userVotes)); } catch(e){}
             });
         }
 
         function toggleDislike() {
+            let voteActorId = currentUserId;
+            if (!voteActorId) {
+                try {
+                    voteActorId = localStorage.getItem('userId') || localStorage.getItem('permanentUserId') || null;
+                } catch (e) { voteActorId = null; }
+            }
+            if (!voteActorId && typeof getPermanentUserId === 'function') {
+                try { voteActorId = getPermanentUserId(); } catch (e) { voteActorId = null; }
+            }
+            if (!voteActorId) {
+                showNotification && showNotification('Unable to vote right now. Please try again.');
+                return;
+            }
+            if (!currentUserId) {
+                currentUserId = voteActorId;
+                try { window.currentUserId = voteActorId; } catch (e) {}
+                try { localStorage.setItem('userId', voteActorId); } catch (e) {}
+            }
+
             // Search for post first in gridContent[currentUserId], then in postCache, then in other gridContent keys
             let post = gridContent[currentUserId] ? gridContent[currentUserId].find(p => p.id === selectedPostId) : null;
             if (!post && postCache[selectedPostId]) {
@@ -15638,7 +15751,7 @@
             }
             if (!post) return;
 
-            const voteKey = `${currentUserId}_${selectedPostId}`;
+            const voteKey = `${voteActorId}_${selectedPostId}`;
             const currentVote = userVotes[voteKey];
             let newLikes = post.likes || 0;
             let newDislikes = post.dislikes || 0;
@@ -15681,9 +15794,9 @@
             // Immediately recompute badges for visible boxes so badge "turning" is responsive
             try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(e){}
             try { if (window.gridScroller && typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
-            submitVoteTransaction(currentUserId, selectedPostId, desiredVote).catch(err => {
+            submitVoteTransaction(voteActorId, selectedPostId, desiredVote).catch(err => {
                 console.warn('submitVoteTransaction failed, will retry saving vote:', err);
-                try { localStorage.setItem(`userVotes_${currentUserId}`, JSON.stringify(userVotes)); } catch(e){}
+                try { localStorage.setItem(`userVotes_${voteActorId}`, JSON.stringify(userVotes)); } catch(e){}
             });
         }
 
@@ -15711,7 +15824,13 @@
             if (likeCountEl) likeCountEl.textContent = post.likes || 0;
             if (dislikeCountEl) dislikeCountEl.textContent = post.dislikes || 0;
 
-            const voteKey = `${currentUserId}_${selectedPostId}`;
+            let voteViewerId = currentUserId;
+            if (!voteViewerId) {
+                try {
+                    voteViewerId = localStorage.getItem('userId') || localStorage.getItem('permanentUserId') || null;
+                } catch (e) { voteViewerId = null; }
+            }
+            const voteKey = `${voteViewerId}_${selectedPostId}`;
             const currentVote = userVotes[voteKey];
 
             const likeBtn = document.getElementById('likeBtn');
@@ -20341,6 +20460,9 @@
                         console.warn('Live badge sync failed:', e);
                     }
 
+                    // Fresh Firebase data arrived: force immediate paint.
+                    // Otherwise the global 30s render throttle can delay first visible posts.
+                    try { window.lastRenderGridTime = 0; } catch (e) {}
                     renderGrid();
                 });
                 window.firebaseUnsubscribe = firebaseUnsubscribe;
@@ -20480,6 +20602,7 @@
                 const guestFeed = buildGuestViewerFeed(posts);
                 gridContent[String(deviceId)] = guestFeed.posts;
                 console.log(`fallbackPopulateDeviceFeed: populated guest feed mode=${guestFeed.mode}, zone=${guestFeed.zoneTag || 'none'}, posts=${(gridContent[String(deviceId)] || []).length}`);
+                try { window.lastRenderGridTime = 0; } catch (e) {}
                 try { renderGrid(); } catch(e) {}
             } catch (e) {
                 console.warn('fallbackPopulateDeviceFeed top-level error', e);
@@ -20563,6 +20686,7 @@
                 gc[String(deviceId)] = guestFeed.posts;
                 try { window.gridContent = gc; } catch(e) {}
                 console.log(`ensureDeviceFeed: populated guest feed mode=${guestFeed.mode}, zone=${guestFeed.zoneTag || 'none'}, posts=${(gc[String(deviceId)] || []).length}`);
+                try { window.lastRenderGridTime = 0; } catch (e) {}
                 try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
             } catch (e) { console.warn('ensureDeviceFeed top-level error', e); }
         };
@@ -25500,14 +25624,30 @@
 
         // 📊 ORIGINAL RENDER: Main rendering function now sends posts to scroller
         function renderGrid() {
-            // 🚫 THROTTLE: Don't refresh grid more than once every 30 seconds
-            // This prevents constant feed churning when there are no new posts
+            // 🚫 ADAPTIVE THROTTLE:
+            // - First load / first content: render almost immediately
+            // - Warm startup window: quick refreshes while data hydrates
+            // - Steady state: modest throttle to avoid feed churn
             const now = Date.now();
             const lastRenderTime = window.lastRenderGridTime || 0;
-            const RENDER_THROTTLE = 30 * 1000; // 30 seconds
+            const appAgeMs = (window.startupMetrics && window.startupMetrics.pageLoadStart)
+                ? (now - window.startupMetrics.pageLoadStart)
+                : 0;
+
+            const hasAnyPosts = Object.values(gridContent || {}).some(arr => Array.isArray(arr) && arr.length > 0);
+            const hasRenderedPostsOnce = !!window.__hasRenderedFeedPosts;
+
+            let RENDER_THROTTLE = 8000; // steady-state: 8s
+            if (!hasAnyPosts || !hasRenderedPostsOnce) {
+                RENDER_THROTTLE = 250; // first-time / empty-to-filled transitions
+            } else if (appAgeMs < 20000) {
+                RENDER_THROTTLE = 1000; // fast warm-up while initial snapshots stream in
+            } else if (appAgeMs < 120000) {
+                RENDER_THROTTLE = 3000; // first 2 minutes still fairly responsive
+            }
             
             if (now - lastRenderTime < RENDER_THROTTLE) {
-                console.log(`⏳ renderGrid throttled (${Math.round((RENDER_THROTTLE - (now - lastRenderTime)) / 1000)}s remaining)`);
+                console.log(`⏳ renderGrid throttled (${Math.max(0, Math.ceil((RENDER_THROTTLE - (now - lastRenderTime)) / 1000))}s remaining, throttle=${RENDER_THROTTLE}ms)`);
                 return;
             }
             
@@ -25530,6 +25670,7 @@
                 totalPosts += count;
             }
             console.log(`  Total posts: ${totalPosts}`);
+            if (totalPosts > 0) window.__hasRenderedFeedPosts = true;
 
             // Allow rendering regardless of `isConnected` so signed-in users see posts
             // even when connectivity/proximity flags are not set.
@@ -29632,7 +29773,11 @@
             try {
                 if (!currentUserId) {
                     console.error('❌ Step 1 FAILED: No currentUserId');
-                    alert('Please sign in to post');
+                    if (typeof showNotification === 'function') {
+                        showNotification('Sign up. Its easy.');
+                    } else {
+                        alert('Sign up. Its easy.');
+                    }
                     return;
                 }
                 console.log(`✅ Step 1 PASSED: currentUserId = ${currentUserId}`);
@@ -29642,7 +29787,11 @@
                 const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
                 console.log('  isSignedIn flag:', isSignedIn);
                 if (!isSignedIn) {
-                    alert('Please sign in or create an account to post. You can still browse posts without an account.');
+                    if (typeof showNotification === 'function') {
+                        showNotification('Sign up. Its easy.');
+                    } else {
+                        alert('Sign up. Its easy.');
+                    }
                     return;
                 }
                 if (window.postTrackingSystem && typeof window.postTrackingSystem.getUserPosts === 'function') {
