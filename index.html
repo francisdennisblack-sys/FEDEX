@@ -475,13 +475,16 @@
         function getNearestPOIAndDistance() {
             try {
                 if (!window.CLEANUP_FLAGS.ENABLE_POI_LOADING) return { poi: null, distance: Infinity };
-                if (!userLocation || !userLocation.lat || !userLocation.lon) return { poi: null, distance: Infinity };
+                const coords = (typeof getCanonicalUserCoords === 'function')
+                    ? getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 })
+                    : normalizeCoords(userLocation);
+                if (!coords) return { poi: null, distance: Infinity };
                 if (!window.globalPOIDatabase || !Array.isArray(window.globalPOIDatabase) || window.globalPOIDatabase.length === 0) return { poi: null, distance: Infinity };
                 let best = null;
                 let bestDist = Infinity;
                 for (const p of window.globalPOIDatabase) {
                     if (!p || p.lat === undefined || p.lon === undefined) continue;
-                    const d = (typeof calculateDistance === 'function') ? (calculateDistance(userLocation.lat, userLocation.lon, p.lat, p.lon) * 1000) : haversineMeters(userLocation.lat, userLocation.lon, p.lat, p.lon);
+                    const d = (typeof calculateDistance === 'function') ? (calculateDistance(coords.lat, coords.lon, p.lat, p.lon) * 1000) : haversineMeters(coords.lat, coords.lon, p.lat, p.lon);
                     if (d < bestDist) { bestDist = d; best = p; }
                 }
                 return { poi: best, distance: bestDist };
@@ -5184,6 +5187,54 @@
             };
         }
 
+        function resolveNearestAreaFromLiveLocation(options = {}) {
+            const coords = getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000, ...(options || {}) });
+            if (!coords) return null;
+
+            let best = null;
+            const maybeTake = (candidate) => {
+                if (!candidate || !candidate.name) return;
+                const km = Number(candidate.distanceKm);
+                if (!Number.isFinite(km) || km < 0) return;
+                if (!best || km < best.distanceKm) {
+                    best = {
+                        name: String(candidate.name).trim(),
+                        distanceKm: km,
+                        source: candidate.source || 'unknown',
+                        coords
+                    };
+                }
+            };
+
+            try {
+                if (typeof findClosestPOIInZone === 'function') {
+                    const poiResult = findClosestPOIInZone(coords.lat, coords.lon);
+                    if (poiResult && poiResult.poi && poiResult.poi.name) {
+                        maybeTake({
+                            name: poiResult.poi.name,
+                            distanceKm: Number(poiResult.distance) || 0,
+                            source: 'closest-poi'
+                        });
+                    }
+                }
+            } catch (e) { /* ignore */ }
+
+            try {
+                if (typeof findClosestLocation === 'function') {
+                    const locationResult = findClosestLocation(coords.lat, coords.lon);
+                    if (locationResult && locationResult.location && locationResult.location.name) {
+                        maybeTake({
+                            name: locationResult.location.name,
+                            distanceKm: Number(locationResult.distance) || 0,
+                            source: 'closest-location'
+                        });
+                    }
+                }
+            } catch (e) { /* ignore */ }
+
+            return best;
+        }
+
         // ============================================
         // 📍 REAL-TIME LOCATION & POI POLLING
         // Refresh user location and nearby POIs every 1 second
@@ -5265,28 +5316,17 @@
          */
         function updateNearbyPOIsFromPolling() {
             try {
-                if (!userLocation || !userLocation.lat || !userLocation.lon) return;
-                if (!window.globalPOIDatabase || window.globalPOIDatabase.length === 0) return;
+                const nearestArea = resolveNearestAreaFromLiveLocation({ maxAgeMs: 15 * 60 * 1000 });
+                if (nearestArea && nearestArea.name) {
+                    // Only update if nearest area changed
+                    if (lastPollPOIName !== nearestArea.name) {
+                        lastPollPOIName = nearestArea.name;
+                        currentAreaName = nearestArea.name;
+                        currentZoneTag = nearestArea.name;
 
-                const nearest = getNearestPOIAndDistance();
-                if (nearest && nearest.poi && nearest.poi.name) {
-                    // Only update if POI changed
-                    if (lastPollPOIName !== nearest.poi.name) {
-                        lastPollPOIName = nearest.poi.name;
-                        currentAreaName = nearest.poi.name;
-                        currentZoneTag = nearest.poi.name;
-
-                        console.log(`🎯 POI updated: ${nearest.poi.name} (${formatDistanceMeters(nearest.distance)})`);
-
-                        // 🔒 CRITICAL FIX: Don't refresh grid at all on POI change
-                        // Calling renderGridFull() would:
-                        //   1. Rebuild the entire post list from scratch
-                        //   2. Recalculate all badges from a new context
-                        //   3. Destroy the cached badge assignments
-                        //   4. Potentially change visible post order
-                        // Solution: Just update the POI variable. Posts will show new area tags naturally
-                        // The grid stays stable and scroll position is completely preserved
-                        console.log(`📍 POI area name updated - grid remains stable, cached badges preserved`);
+                        const meters = nearestArea.distanceKm * 1000;
+                        console.log(`🎯 Area updated (${nearestArea.source}): ${nearestArea.name} (${formatDistanceMeters(meters)})`);
+                        console.log(`📍 Area name synced from live location without forcing grid rerender`);
                     }
                 }
             } catch (e) {
@@ -24558,6 +24598,21 @@
             
             console.log(`🎯 AUTO-DETECT START: User at (${coords.lat}, ${coords.lon}) accuracy: ${coords.accuracy}m`);
 
+            // Prefer nearest POI/location directly from live coordinates so tags do not stick to stale labels.
+            try {
+                const nearestArea = resolveNearestAreaFromLiveLocation({ location: coords, maxAgeMs: 15 * 60 * 1000 });
+                if (nearestArea && nearestArea.name) {
+                    const distMilesNearest = nearestArea.distanceKm * 0.621371;
+                    const autoDisplay = document.getElementById('autoAreaText');
+                    if (autoDisplay) {
+                        autoDisplay.textContent = `✓ ${nearestArea.name} (${distMilesNearest.toFixed(1)}mi)`;
+                        autoDisplay.style.color = '#fff';
+                    }
+                    console.log(`📍 Live nearest area selected: ${nearestArea.name} via ${nearestArea.source}`);
+                    return nearestArea.name;
+                }
+            } catch (e) { console.warn('Live nearest-area resolver failed:', e); }
+
             // Use cached cloud reverse-geocode first when available.
             try {
                 const cached = getCloudReverseAreaTagFromCache(coords.lat, coords.lon);
@@ -30388,12 +30443,23 @@
 
         // Resolve a fresh area tag from the user's real location and nearest POI/location.
         async function __resolveFreshAreaTagFromLocation() {
-            if (!userLocation || !userLocation.lat || !userLocation.lon) return null;
+            const coords = getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 });
+            if (!coords) return null;
             let resolved = null;
+
+            // Highest priority for routing: nearest real POI/location from live coordinates.
+            try {
+                const nearest = resolveNearestAreaFromLiveLocation({ location: coords, maxAgeMs: 15 * 60 * 1000 });
+                if (nearest && nearest.name && !__isStaleAreaTag(nearest.name)) {
+                    resolved = String(nearest.name).trim();
+                }
+            } catch (e) {
+                console.warn('resolveNearestAreaFromLiveLocation failed during pre-post refresh:', e);
+            }
 
             // Best source: live cloud reverse geocode (OpenStreetMap).
             try {
-                const liveCloudMatch = await resolveCloudBackedAreaTagLive(userLocation.lat, userLocation.lon, 1600);
+                const liveCloudMatch = await resolveCloudBackedAreaTagLive(coords.lat, coords.lon, 1600);
                 if (liveCloudMatch && liveCloudMatch.name && !__isStaleAreaTag(liveCloudMatch.name)) {
                     resolved = String(liveCloudMatch.name).trim();
                 }
@@ -30404,7 +30470,7 @@
             // Primary: cloud-backed resolver used by refine-location datasets.
             if (!resolved) {
                 try {
-                    const cloudMatch = resolveCloudBackedAreaTag(userLocation.lat, userLocation.lon);
+                    const cloudMatch = resolveCloudBackedAreaTag(coords.lat, coords.lon);
                     if (cloudMatch && cloudMatch.name && !__isStaleAreaTag(cloudMatch.name)) {
                         resolved = String(cloudMatch.name).trim();
                     }
@@ -30415,7 +30481,7 @@
 
             if (!resolved) try {
                 if (typeof autoDetectClosestArea === 'function') {
-                    const detected = autoDetectClosestArea(userLocation);
+                    const detected = autoDetectClosestArea(coords);
                     if (detected && !__isStaleAreaTag(detected)) resolved = String(detected).trim();
                 }
             } catch (e) {
@@ -30425,7 +30491,7 @@
             if (!resolved) {
                 try {
                     if (typeof findClosestPOIInZone === 'function') {
-                        const poiResult = findClosestPOIInZone(userLocation.lat, userLocation.lon);
+                        const poiResult = findClosestPOIInZone(coords.lat, coords.lon);
                         if (poiResult && poiResult.poi && poiResult.poi.name) {
                             resolved = String(poiResult.poi.name).trim();
                         }
@@ -30438,7 +30504,7 @@
             if (!resolved) {
                 try {
                     if (typeof getLocationName === 'function') {
-                        const fallbackName = getLocationName(userLocation.lat, userLocation.lon);
+                        const fallbackName = getLocationName(coords.lat, coords.lon);
                         if (fallbackName && !__isStaleAreaTag(fallbackName)) {
                             resolved = String(fallbackName).trim();
                         }
