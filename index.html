@@ -16691,21 +16691,26 @@
             const dropdown = document.getElementById('autocompleteDropdown');
             if (dropdown) dropdown.style.display = 'none';
             
-            // Update zone predictor with best available location.
-            // Clear any previously pinned selection so auto-detect picks the freshest result.
-            userSelectedZone = false;
-            currentZoneTag = '';
-            try { window.persistZoneTagForUser && window.persistZoneTagForUser(null); } catch(e) {}
-            const clearZoneBtnOnReset = document.getElementById('clearZoneBtn');
-            if (clearZoneBtnOnReset) clearZoneBtnOnReset.style.display = 'none';
-            const customTagInputOnReset = document.getElementById('customZoneTag');
-            if (customTagInputOnReset) customTagInputOnReset.value = '';
-
-            // Re-run auto-detect so the SENDING TO field shows the best current location.
-            if (typeof autoDetectClosestArea === 'function') {
-                try { autoDetectClosestArea(); } catch(e) { console.warn('autoDetectClosestArea failed on reset', e); }
-            } else {
+            // Keep explicit user-selected area tags. Only clear/refresh if stale.
+            const hasPinnedAreaSelection = !!(userSelectedZone && currentZoneTag && !__isStaleAreaTag(currentZoneTag));
+            if (hasPinnedAreaSelection) {
+                console.log(`✅ Preserving user-selected area for posting: "${currentZoneTag}"`);
                 updateZonePredictor();
+            } else {
+                userSelectedZone = false;
+                currentZoneTag = '';
+                try { window.persistZoneTagForUser && window.persistZoneTagForUser(null); } catch(e) {}
+                const clearZoneBtnOnReset = document.getElementById('clearZoneBtn');
+                if (clearZoneBtnOnReset) clearZoneBtnOnReset.style.display = 'none';
+                const customTagInputOnReset = document.getElementById('customZoneTag');
+                if (customTagInputOnReset) customTagInputOnReset.value = '';
+
+                // Re-run auto-detect so the SENDING TO field shows the best current location.
+                if (typeof autoDetectClosestArea === 'function') {
+                    try { autoDetectClosestArea(); } catch(e) { console.warn('autoDetectClosestArea failed on reset', e); }
+                } else {
+                    updateZonePredictor();
+                }
             }
             
             // Show nearby locations for quick selection
@@ -29435,6 +29440,62 @@
             return v === true || v === 'true' || v === 1 || v === '1';
         }
 
+        // Detect placeholders/stale area tags that are not valid publish targets.
+        function __isStaleAreaTag(tag) {
+            const t = String(tag || '').trim().toLowerCase();
+            if (!t) return true;
+            return t === 'loading...' ||
+                   t === 'detecting' ||
+                   t === 'detecting location...' ||
+                   t === 'local area' ||
+                   t === 'local zone' ||
+                   t === '📍 local area' ||
+                   t === '🔍 detecting...';
+        }
+
+        // Resolve a fresh area tag from the user's real location and nearest POI/location.
+        function __resolveFreshAreaTagFromLocation() {
+            if (!userLocation || !userLocation.lat || !userLocation.lon) return null;
+            let resolved = null;
+
+            try {
+                if (typeof autoDetectClosestArea === 'function') {
+                    const detected = autoDetectClosestArea(userLocation);
+                    if (detected && !__isStaleAreaTag(detected)) resolved = String(detected).trim();
+                }
+            } catch (e) {
+                console.warn('autoDetectClosestArea failed during pre-post refresh:', e);
+            }
+
+            if (!resolved) {
+                try {
+                    if (typeof findClosestPOIInZone === 'function') {
+                        const poiResult = findClosestPOIInZone(userLocation.lat, userLocation.lon);
+                        if (poiResult && poiResult.poi && poiResult.poi.name) {
+                            resolved = String(poiResult.poi.name).trim();
+                        }
+                    }
+                } catch (e) {
+                    console.warn('findClosestPOIInZone failed during pre-post refresh:', e);
+                }
+            }
+
+            if (!resolved) {
+                try {
+                    if (typeof getLocationName === 'function') {
+                        const fallbackName = getLocationName(userLocation.lat, userLocation.lon);
+                        if (fallbackName && !__isStaleAreaTag(fallbackName)) {
+                            resolved = String(fallbackName).trim();
+                        }
+                    }
+                } catch (e) {
+                    console.warn('getLocationName failed during pre-post refresh:', e);
+                }
+            }
+
+            return resolved && !__isStaleAreaTag(resolved) ? resolved : null;
+        }
+
         /**
          * Check for pending purchases and auto-arm badge on next post
          * Called when composer opens or user is about to create a post
@@ -29615,6 +29676,35 @@
                 return;
             }
             console.log('✅ Step 2 PASSED: Has content');
+
+            // Require payment when paid badges are armed on the composer.
+            const boostBtnEl = document.getElementById('boostBtn');
+            const sellBtnEl = document.getElementById('sellBtn');
+            const boostArmed = !!((window.pendingBoost && window.pendingBoost.armed) || (boostBtnEl && boostBtnEl.getAttribute('aria-pressed') === 'true'));
+            const sellArmed = !!((window.pendingSell && window.pendingSell.armed) || (sellBtnEl && sellBtnEl.getAttribute('aria-pressed') === 'true'));
+            const boostPaid = __isPaidFlag(window.pendingBoost && window.pendingBoost.paid);
+            const sellPaid = __isPaidFlag(window.pendingSell && window.pendingSell.paid);
+
+            if ((boostArmed && !boostPaid) || (sellArmed && !sellPaid)) {
+                const unpaidBadges = [];
+                if (boostArmed && !boostPaid) unpaidBadges.push('Boost');
+                if (sellArmed && !sellPaid) unpaidBadges.push('Sell');
+                const unpaidText = unpaidBadges.join(' + ');
+                const blockMsg = `${unpaidText} selected but not paid. Please complete payment or unselect ${unpaidText} before posting.`;
+                console.warn('❌ Step 2.5 FAILED: unpaid paid-badge selection', {
+                    boostArmed,
+                    boostPaid,
+                    sellArmed,
+                    sellPaid
+                });
+                try {
+                    showErrorNotification('Payment required', blockMsg);
+                } catch (e) {
+                    alert(blockMsg);
+                }
+                return;
+            }
+            console.log('✅ Step 2.5 PASSED: paid-badge state valid');
             
             // Check for inappropriate content
             if (postText && checkContentForInappropriate(postText)) {
@@ -29632,8 +29722,21 @@
             console.log('Step 3: Checking location...');
             console.log(`  currentZoneTag: ${currentZoneTag}`);
             console.log(`  userLocation: ${userLocation ? `${userLocation.lat}, ${userLocation.lon}` : 'none'}`);
+
+            // If area tag is stale, refresh from real location / nearest POI before blocking post.
+            if (__isStaleAreaTag(currentZoneTag)) {
+                const refreshedAreaTag = __resolveFreshAreaTagFromLocation();
+                if (refreshedAreaTag) {
+                    currentZoneTag = refreshedAreaTag;
+                    try { if (!userSelectedZone && window.persistZoneTagForUser) window.persistZoneTagForUser(currentZoneTag); } catch (e) {}
+                    try { updateZonePredictor(); } catch (e) {}
+                    console.log(`✅ Step 3 PRECHECK: Refreshed stale area tag to "${currentZoneTag}"`);
+                } else {
+                    console.warn('⚠️ Step 3 PRECHECK: Area tag still stale after refresh attempt');
+                }
+            }
             
-            if (!currentZoneTag || currentZoneTag === 'Loading...' || currentZoneTag === '📍 Local Area') {
+            if (__isStaleAreaTag(currentZoneTag)) {
                 // Check if user has set a custom area
                 const customZoneInput = document.getElementById('customZoneTag');
                 if (!customZoneInput || !customZoneInput.value.trim()) {
@@ -29763,8 +29866,7 @@
                 const hasExplicitDropdownSelection = !!(
                     userSelectedZone &&
                     currentZoneTag &&
-                    currentZoneTag !== 'Loading...' &&
-                    currentZoneTag !== '🔍 Detecting...'
+                    !__isStaleAreaTag(currentZoneTag)
                 );
 
                 let areaTag = customTag || currentZoneTag;
