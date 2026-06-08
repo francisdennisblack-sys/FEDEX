@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const https = require('https');
 const app = express();
 
@@ -1396,7 +1397,15 @@ function setGeocodeSearchCache(cacheKey, results) {
 
 function httpsGetJson(requestUrl, headers = {}, timeoutMs = 7000) {
     return new Promise((resolve, reject) => {
-        const req = https.get(requestUrl, { headers }, (response) => {
+        let parsed;
+        try {
+            parsed = new URL(requestUrl);
+        } catch (e) {
+            return reject(new Error(`Invalid URL: ${requestUrl}`));
+        }
+
+        const client = parsed.protocol === 'http:' ? http : https;
+        const req = client.get(requestUrl, { headers }, (response) => {
             let data = '';
 
             response.on('data', (chunk) => {
@@ -1933,15 +1942,29 @@ function normalizePhotonFeature(feature) {
 }
 
 function parseSearchProviders() {
-    const raw = String(process.env.GEOCODE_SEARCH_PROVIDERS || 'nominatim,photon').trim();
+    const raw = String(process.env.GEOCODE_SEARCH_PROVIDERS || 'nominatim_cloud,nominatim,photon').trim();
     const providers = raw.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
-    return providers.length > 0 ? providers : ['nominatim'];
+    return providers.length > 0 ? providers : ['nominatim_cloud', 'nominatim', 'photon'];
+}
+
+function buildNominatimSearchUrl(baseEndpoint, query, fetchLimit, viewport) {
+    const queryParams = [
+        'format=jsonv2',
+        'addressdetails=1',
+        `limit=${fetchLimit}`,
+        `q=${encodeURIComponent(query)}`
+    ];
+    if (viewport) {
+        queryParams.push(`viewbox=${viewport[0]},${viewport[3]},${viewport[2]},${viewport[1]}`);
+    }
+    return `${baseEndpoint}?${queryParams.join('&')}`;
 }
 
 async function searchProvider(provider, query, limit, lang, timeoutMs, searchContext) {
     const ua = process.env.GEOCODE_USER_AGENT || 'FEDEX-WiFi-App/1.0';
     const viewport = searchContext && Array.isArray(searchContext.viewport) ? searchContext.viewport : null;
     const fetchLimit = Math.min(60, Math.max(limit * 4, 25));
+
     if (provider === 'photon') {
         const photonEndpoint = process.env.GEOCODE_SEARCH_PHOTON_URL || 'https://photon.komoot.io/api';
         const queryParams = [
@@ -1961,17 +1984,15 @@ async function searchProvider(provider, query, limit, lang, timeoutMs, searchCon
         return features.map(normalizePhotonFeature).filter(Boolean);
     }
 
-    const nominatimEndpoint = process.env.GEOCODE_SEARCH_URL || 'https://nominatim.openstreetmap.org/search';
-    const queryParams = [
-        'format=jsonv2',
-        'addressdetails=1',
-        `limit=${fetchLimit}`,
-        `q=${encodeURIComponent(query)}`
-    ];
-    if (viewport) {
-        queryParams.push(`viewbox=${viewport[0]},${viewport[3]},${viewport[2]},${viewport[1]}`);
-    }
-    const url = `${nominatimEndpoint}?${queryParams.join('&')}`;
+    // Support a cloud-first curated Nominatim endpoint without breaking existing behavior.
+    // Provider aliases:
+    // - nominatim_cloud: GEOCODE_SEARCH_CLOUD_URL (defaults to local container endpoint)
+    // - nominatim: GEOCODE_SEARCH_URL (defaults to public OSM)
+    const cloudEndpoint = process.env.GEOCODE_SEARCH_CLOUD_URL || 'http://127.0.0.1:18080/search';
+    const publicEndpoint = process.env.GEOCODE_SEARCH_URL || 'https://nominatim.openstreetmap.org/search';
+    const endpoint = (provider === 'nominatim_cloud') ? cloudEndpoint : publicEndpoint;
+
+    const url = buildNominatimSearchUrl(endpoint, query, fetchLimit, viewport);
     const payload = await httpsGetJson(url, {
         'User-Agent': ua,
         'Accept-Language': lang
@@ -2046,7 +2067,7 @@ app.get('/api/geocode/search', async (req, res) => {
 
         for (const provider of providers) {
             try {
-                if (provider === 'nominatim') metricsCounters.geocode_provider_nominatim += 1;
+                if (provider === 'nominatim' || provider === 'nominatim_cloud') metricsCounters.geocode_provider_nominatim += 1;
                 if (provider === 'photon') metricsCounters.geocode_provider_photon += 1;
                 const result = await searchProvider(provider, query, limit, lang, timeoutMs, searchContext);
                 if (Array.isArray(result) && result.length > 0) {
