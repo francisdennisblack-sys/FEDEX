@@ -13907,6 +13907,7 @@
                 const postsRef = ref(database, `posts`);
                 console.log('  postsRef created:', postsRef);
                 console.log('  postsRef path: posts (SHARED COLLECTION)');
+                window.__firebaseListenerStartedAt = Date.now();
                 
                 // FIRST: Try a one-time GET to verify data exists
                 console.log('  🔍 Attempting one-time GET to check if data exists...');
@@ -14015,6 +14016,17 @@
                             const cached = (postCache && postCache[postId]) || cachedPostsMap[postId] || null;
                             if ((incoming.content === undefined || incoming.content === null || (typeof incoming.content === 'string' && incoming.content.trim() === '')) && cached && cached.content) {
                                 incoming.content = cached.content;
+                            }
+                            if ((incoming.description === undefined || incoming.description === null || (typeof incoming.description === 'string' && incoming.description.trim() === '')) && cached) {
+                                incoming.description = cached.description || cached.content || incoming.description;
+                            }
+                            if ((incoming.text === undefined || incoming.text === null || (typeof incoming.text === 'string' && incoming.text.trim() === '')) && cached) {
+                                incoming.text = cached.text || cached.content || cached.description || incoming.text;
+                            }
+                            if ((!incoming.photoURL && !incoming.imageData) && cached) {
+                                incoming.photoURL = incoming.photoURL || cached.photoURL || cached.imageData || null;
+                                incoming.imageData = incoming.imageData || cached.imageData || cached.photoURL || null;
+                                incoming.mediaType = incoming.mediaType || cached.mediaType || null;
                             }
 
                             allPosts.push({
@@ -20692,7 +20704,35 @@
                     // Filter hidden/reported/deleted posts before storing so they cannot
                     // re-enter any render path from this point onward.
                     const contentKey = 'shared-posts';
-                    gridContent[contentKey] = uniquePosts.filter(p => !isPostHiddenForViewer(p, currentUserId));
+                    const incomingVisible = uniquePosts.filter(p => !isPostHiddenForViewer(p, currentUserId));
+                    const previousVisible = Array.isArray(gridContent[contentKey]) ? gridContent[contentKey] : [];
+                    let mergedVisible = incomingVisible;
+
+                    // Warmup guard: during relaunch/reconnect, transient snapshots can be
+                    // temporarily sparse. Preserve previous visible posts to avoid UI flicker.
+                    try {
+                        const listenerAgeMs = Date.now() - Number(window.__firebaseListenerStartedAt || 0);
+                        const inWarmup = listenerAgeMs < 45000 || callCount <= 3;
+                        const droppedTooFast = previousVisible.length >= 20 && incomingVisible.length < Math.floor(previousVisible.length * 0.7);
+                        if (inWarmup && droppedTooFast) {
+                            const byId = new Map();
+                            incomingVisible.forEach(p => { if (p && p.id) byId.set(String(p.id), p); });
+                            previousVisible.forEach(prev => {
+                                if (!prev || !prev.id) return;
+                                const id = String(prev.id);
+                                if (byId.has(id)) return;
+                                if (window.globallyDeletedPostIds && window.globallyDeletedPostIds.has(id)) return;
+                                if (isPostHiddenForViewer(prev, currentUserId)) return;
+                                byId.set(id, prev);
+                            });
+                            mergedVisible = Array.from(byId.values());
+                            console.warn(`🛡️ Snapshot churn guard: preserved ${mergedVisible.length - incomingVisible.length} posts during warmup`);
+                        }
+                    } catch (e) {
+                        console.warn('Snapshot churn guard failed:', e);
+                    }
+
+                    gridContent[contentKey] = mergedVisible;
                     console.log(`  ✅ gridContent['${contentKey}'] updated with ${gridContent[contentKey].length} posts (${uniquePosts.length - gridContent[contentKey].length} hidden filtered)`);
 
                     // For unsigned viewers, show a real feed:
@@ -25872,7 +25912,7 @@
                         post.mediaType = post.mediaType || cached.mediaType;
                         // ensure description/content stays sane
                         post.description = post.description || cached.description || cached.content || '';
-                        post.content = post.content || '';
+                        post.content = post.content || cached.content || post.description || '';
                         console.log(`🔁 renderGridItemFull: injected cached media into post ${post.id.substring(0,8)}`);
                     }
                 }
@@ -31059,7 +31099,6 @@
                 if (postData.photoURL) {
                     try {
                         postData.description = postData.content || '';
-                        postData.content = '';
                     } catch (e) { /* ignore */ }
                 }
 
