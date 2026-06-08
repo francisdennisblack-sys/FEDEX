@@ -18555,6 +18555,83 @@
             return requestId === refineLocationRequestSeq;
         }
 
+        function renderRefineDatabaseSuggestions(suggestions, query) {
+            const resultsContainer = document.getElementById('refineLocationResultsContainer');
+            if (!resultsContainer) return 0;
+
+            // Always reset any previous virtual list before painting new results.
+            cleanupRefineLocationScroller();
+
+            if (!Array.isArray(suggestions) || suggestions.length === 0) {
+                const safeQuery = String(query || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">No database matches found for "${safeQuery}"</div>`;
+                return 0;
+            }
+
+            const visibleRows = suggestions
+                .filter((s) => s && !s.disabled && s.type !== 'separator')
+                .slice(0, 350);
+
+            if (visibleRows.length === 0) {
+                const safeQuery = String(query || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">No selectable database matches for "${safeQuery}"</div>`;
+                return 0;
+            }
+
+            if (visibleRows.length > 80 && typeof VirtualScroller === 'function') {
+                const wrapperId = 'refineDbScroller_' + Date.now();
+                resultsContainer.innerHTML = '';
+                const scrollerDiv = document.createElement('div');
+                scrollerDiv.id = wrapperId;
+                resultsContainer.appendChild(scrollerDiv);
+
+                const scroller = new VirtualScroller('#' + wrapperId, visibleRows, 48, 24);
+                window.currentRefineLocationScroller = scroller;
+                scroller.onRenderItem = (div, item) => {
+                    const clickValue = (item.type === 'poi' && item.value) ? item.value : (item.display || item.value || '');
+                    div.innerHTML = `<span style="font-weight: 500;">${item.display || clickValue}</span>`;
+                    div.style.cursor = 'pointer';
+                    div.onmousedown = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        selectLocationFromSpecifyField(clickValue, e, { preserveInputValue: true, zoneLabel: clickValue });
+                    };
+                    div.ontouchstart = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        selectLocationFromSpecifyField(clickValue, e, { preserveInputValue: true, zoneLabel: clickValue });
+                    };
+                    div.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
+                };
+                if (typeof scroller.render === 'function') scroller.render();
+                return visibleRows.length;
+            }
+
+            const rowsHtml = visibleRows.map((item) => {
+                const clickValue = (item.type === 'poi' && item.value) ? item.value : (item.display || item.value || '');
+                const escapedJsValue = String(clickValue).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                const label = String(item.display || clickValue).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `<div style="padding:10px 12px;cursor:pointer;border-bottom:1px solid #222;" onmousedown="event.preventDefault();event.stopPropagation();" onclick="selectLocationFromSpecifyField('${escapedJsValue}', event, { preserveInputValue: true, zoneLabel: '${escapedJsValue}' })">${label}</div>`;
+            }).join('');
+
+            resultsContainer.innerHTML = rowsHtml;
+            return visibleRows.length;
+        }
+
+        function filterRefineLocationSearch(query) {
+            const q = String(query || '').trim();
+            if (!q) return 0;
+            if (typeof getAutocompleteSuggestions !== 'function') return 0;
+
+            try {
+                const suggestions = getAutocompleteSuggestions(q);
+                return renderRefineDatabaseSuggestions(suggestions, q);
+            } catch (e) {
+                console.warn('filterRefineLocationSearch failed', e);
+                return 0;
+            }
+        }
+
         function handleCustomZoneInput() {
             const customTagInput = document.getElementById('customZoneTag');
             if (!customTagInput) return;
@@ -18591,7 +18668,11 @@
             // DEBOUNCE: Clear existing timeout and set new one
             clearTimeout(refineLocationSearchTimeout);
             refineLocationSearchTimeout = setTimeout(() => {
-                remoteDropdown.handleInput(val);
+                // Local database search is primary; remote geocode is fallback.
+                const dbCount = filterRefineLocationSearch(val);
+                if (dbCount <= 0) {
+                    remoteDropdown.handleInput(val);
+                }
             }, 320); // Wait 320ms after user stops typing
         }
 

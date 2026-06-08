@@ -38,7 +38,22 @@ const sandbox = {
   },
   getCurrentUserArea: () => 'County',
   currentUserId: 'me',
-  window: {}
+  isStrictBoostActive: () => false,
+  onlineUsers: { size: 0 },
+  allPosts: [],
+  CROSS_AREA_MAX_POSTS: 100,
+  CROSS_AREA_MAX_MS: 3 * 60 * 1000,
+  CROSS_AREA_RATE_MS: 1000,
+  LOCAL_FEED_TARGET_MAX: 590,
+  LOCAL_FEED_TARGET_MIN: 50,
+  window: {
+    refreshSession: {
+      count: 0,
+      crossAreaStartedAt: 0,
+      crossAreaServed: 0,
+      servedNonLocalIds: new Set()
+    }
+  }
 };
 
 // Evaluate function in sandbox
