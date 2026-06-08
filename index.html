@@ -19130,47 +19130,102 @@
                 return `${this.endpoint}?${params.toString()}`;
             }
 
-            async remoteSearch(query) {
-                if (this.remoteSearchUnavailable) {
-                    throw new Error('Remote geocode endpoint unavailable in this deployment.');
-                }
+            normalizePhotonFeature(feature) {
+                if (!feature || !feature.geometry) return null;
+                const [lon, lat] = feature.geometry.coordinates || [];
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+                const p = feature.properties || {};
+                const name = p.name || p.city || p.county || p.state || 'Unknown';
+                const city = p.city || p.county || '';
+                const state = p.state || p.county || '';
+                const country = p.country || '';
+                const displayParts = [name, state, country].filter((v, i, arr) => v && arr.indexOf(v) === i);
+                return {
+                    id: p.osm_id ? String(p.osm_id) : null,
+                    locationId: p.osm_id ? String(p.osm_id) : null,
+                    displayName: displayParts.join(', '),
+                    name,
+                    city,
+                    stateOrProvince: state,
+                    country,
+                    latitude: lat,
+                    longitude: lon,
+                    type: p.osm_value || p.osm_key || 'location',
+                    hierarchyType: p.osm_key || 'location',
+                    boundingBox: null,
+                    importance: 0,
+                    population: p.population ? Number(p.population) : null,
+                    adminLevel: null,
+                    rankScore: null
+                };
+            }
 
-                const seq = ++this.requestSeq;
-                const url = this.buildRequestUrl(query);
-                refineSearchDebugLog('Remote search start', { query, seq, url });
+            async publicGeocode(query) {
+                const q = encodeURIComponent(String(query || '').trim());
+                const photonUrl = `https://photon.komoot.io/api/?q=${q}&limit=${this.limit}&lang=en`;
+                refineSearchDebugLog('Public geocode fallback start', { query, url: photonUrl });
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeoutMs);
-                let response;
                 try {
-                    response = await fetch(url, { method: 'GET', signal: controller.signal });
+                    const resp = await fetch(photonUrl, { signal: controller.signal });
+                    if (!resp.ok) throw new Error(`Photon ${resp.status}`);
+                    const payload = await resp.json();
+                    const features = Array.isArray(payload && payload.features) ? payload.features : [];
+                    const results = features.map((f) => this.normalizePhotonFeature(f)).filter(Boolean).slice(0, this.limit);
+                    refineSearchDebugLog('Public geocode fallback success', { query, resultCount: results.length });
+                    this.lastAttribution = 'Data © OpenStreetMap contributors, Photon';
+                    return results;
                 } catch (e) {
-                    if (e && e.name === 'AbortError') {
-                        throw new Error('Search timed out. Please try again.');
-                    }
+                    refineSearchDebugLog('Public geocode fallback failed', { query, error: e && e.message });
                     throw e;
                 } finally {
                     clearTimeout(timeoutId);
                 }
+            }
 
-                if (!response.ok) {
+            async remoteSearch(query) {
+                const seq = ++this.requestSeq;
+
+                if (!this.remoteSearchUnavailable) {
+                    const url = this.buildRequestUrl(query);
+                    refineSearchDebugLog('Remote search start', { query, seq, url });
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeoutMs);
+                    let response;
+                    try {
+                        response = await fetch(url, { method: 'GET', signal: controller.signal });
+                    } catch (e) {
+                        if (e && e.name === 'AbortError') {
+                            throw new Error('Search timed out. Please try again.');
+                        }
+                        throw e;
+                    } finally {
+                        clearTimeout(timeoutId);
+                    }
+
+                    if (response.ok) {
+                        const payload = await response.json();
+                        if (seq !== this.requestSeq) return null;
+                        if (payload && payload.attribution) this.lastAttribution = String(payload.attribution);
+                        const rows = Array.isArray(payload && payload.results) ? payload.results : [];
+                        refineSearchDebugLog('Remote search success', { query, seq, resultCount: rows.length });
+                        return rows.map((r) => this.normalizeRemoteResult(r)).filter(Boolean).slice(0, this.limit);
+                    }
+
                     refineSearchDebugLog('Remote search HTTP error', { query, seq, status: response.status });
-                    if (response.status === 404) {
+                    if (response.status === 404 || response.status === 502 || response.status === 503) {
                         this.remoteSearchUnavailable = true;
-                        throw new Error('Remote geocode endpoint not found (404).');
-                    }
-                    if (response.status === 429) {
+                        refineSearchDebugLog('Server endpoint unavailable, switching to public geocode', { status: response.status });
+                    } else if (response.status === 429) {
                         throw new Error('Too many searches right now. Please wait a moment.');
+                    } else {
+                        throw new Error(`Remote search failed (${response.status})`);
                     }
-                    throw new Error(`Remote search failed (${response.status})`);
                 }
-                const payload = await response.json();
+
+                // Server endpoint not available — fall back to public Photon geocoder directly.
                 if (seq !== this.requestSeq) return null;
-                if (payload && payload.attribution) {
-                    this.lastAttribution = String(payload.attribution);
-                }
-                const rows = Array.isArray(payload && payload.results) ? payload.results : [];
-                refineSearchDebugLog('Remote search success', { query, seq, resultCount: rows.length });
-                return rows.map((r) => this.normalizeRemoteResult(r)).filter(Boolean).slice(0, this.limit);
+                return this.publicGeocode(query);
             }
 
             handleInput(query) {
@@ -19188,15 +19243,6 @@
 
                 if (this.debounceTimer) clearTimeout(this.debounceTimer);
                 this.debounceTimer = setTimeout(async () => {
-                    if (this.remoteSearchUnavailable) {
-                        const noRemote = this.ensureContainer();
-                        if (noRemote) {
-                            noRemote.innerHTML = '<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">Remote search endpoint unavailable on this deployment.</div>';
-                        }
-                        refineSearchDebugLog('Remote search skipped: endpoint previously returned 404');
-                        return;
-                    }
-
                     const cached = this.getCached(q);
                     if (cached) {
                         this.results = cached;
@@ -19207,7 +19253,7 @@
 
                     const liveContainer = this.ensureContainer();
                     if (liveContainer) {
-                        liveContainer.innerHTML = '<div style="padding: 12px; text-align: center; color: #888; font-size: 13px;">Searching global OpenStreetMap locations...</div>';
+                        liveContainer.innerHTML = '<div style="padding: 12px; text-align: center; color: #888; font-size: 13px;">Searching locations...</div>';
                     }
 
                     try {
@@ -19220,7 +19266,7 @@
                     } catch (e) {
                         const errContainer = this.ensureContainer();
                         if (errContainer) {
-                            errContainer.innerHTML = '<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">Global search unavailable. Try again.</div>';
+                            errContainer.innerHTML = '<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">Search unavailable. Try again.</div>';
                         }
                     }
                 }, this.debounceMs);
