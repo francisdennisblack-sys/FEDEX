@@ -20219,95 +20219,21 @@
                     gridContent[contentKey] = uniquePosts.filter(p => !isPostHiddenForViewer(p, currentUserId));
                     console.log(`  ✅ gridContent['${contentKey}'] updated with ${gridContent[contentKey].length} posts (${uniquePosts.length - gridContent[contentKey].length} hidden filtered)`);
 
-                    // If the viewer is not fully signed-in, build a device-scoped
-                    // personalized read-only feed of up to 100 posts. Composition:
-                    //  - 1x most-liked post (if available)
-                    //  - ~10% boosted posts (best available)
-                    //  - remaining filled with random posts from the global pool
+                    // For unsigned viewers, show a real feed:
+                    // - default: full global feed
+                    // - if location permission granted + valid area: local-first ordering
                     try {
                         const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
                         if (!isSignedIn) {
                             window.readOnlyViewer = true;
 
                             // Resolve a stable device-scoped id (prefer existing vars)
-                            const deviceId = (typeof permanentUserId !== 'undefined' && permanentUserId) || window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null) || ('device-' + Date.now());
+                            const deviceId = currentUserId || (typeof permanentUserId !== 'undefined' && permanentUserId) || window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null) || ('device-' + Date.now());
                             const deviceKey = String(deviceId);
 
-                            const TARGET = 100;
-                            const BOOST_RATIO = 0.10;
-                            const boostedCount = Math.max(1, Math.floor(TARGET * BOOST_RATIO));
-
-                            // Flatten and sanitize posts list
-                            const posts = uniquePosts.filter(p => p && p.id);
-
-                            // Pick the single most-liked post site-wide (if any)
-                            let mostLiked = null;
-                            try {
-                                mostLiked = posts.reduce((best, cur) => {
-                                    const bLikes = Number(best && best.likes) || 0;
-                                    const cLikes = Number(cur && cur.likes) || 0;
-                                    return (cLikes > bLikes) ? cur : best;
-                                }, null);
-                            } catch (e) { mostLiked = null; }
-
-                            // Identify boosted posts (explicit boost flags or boost expiry)
-                            const boosted = posts.filter(p => isStrictBoostActive(p))
-                                .sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
-
-                            // Random candidates for filler (exclude boosted ones)
-                            const boostedIds = new Set((boosted||[]).map(p => p.id));
-                            const randomCandidates = posts.filter(p => !boostedIds.has(p.id));
-
-                            // Shuffle random candidates (Fisher-Yates)
-                            function shuffle(arr) {
-                                for (let i = arr.length - 1; i > 0; i--) {
-                                    const j = Math.floor(Math.random() * (i + 1));
-                                    const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
-                                }
-                                return arr;
-                            }
-
-                            const used = new Set();
-                            const final = [];
-
-                            if (mostLiked && mostLiked.id) {
-                                final.push(mostLiked);
-                                used.add(mostLiked.id);
-                            }
-
-                            // Add up to boostedCount boosted posts (skip duplicates)
-                            for (const b of boosted) {
-                                if (final.length >= TARGET) break;
-                                if (!b || !b.id) continue;
-                                if (used.has(b.id)) continue;
-                                final.push(b);
-                                used.add(b.id);
-                                if (final.length >= (1 + boostedCount)) break; // account for mostLiked already
-                            }
-
-                            // Fill the remainder with random picks
-                            const shuffled = shuffle(randomCandidates.slice());
-                            for (const r of shuffled) {
-                                if (final.length >= TARGET) break;
-                                if (!r || !r.id) continue;
-                                if (used.has(r.id)) continue;
-                                final.push(r);
-                                used.add(r.id);
-                            }
-
-                            // If not enough posts, allow adding remaining boosted posts
-                            if (final.length < TARGET) {
-                                for (const b of boosted) {
-                                    if (final.length >= TARGET) break;
-                                    if (!b || !b.id) continue;
-                                    if (used.has(b.id)) continue;
-                                    final.push(b);
-                                    used.add(b.id);
-                                }
-                            }
-
-                            gridContent[deviceKey] = final.slice(0, TARGET);
-                            console.log(`  ✅ device feed populated for ${deviceKey} with ${ (gridContent[deviceKey]||[]).length } posts (90/10-style composition)`);
+                            const guestFeed = buildGuestViewerFeed(uniquePosts);
+                            gridContent[deviceKey] = guestFeed.posts;
+                            console.log(`  ✅ guest feed populated for ${deviceKey}: mode=${guestFeed.mode}, zone=${guestFeed.zoneTag || 'none'}, posts=${(gridContent[deviceKey] || []).length}`);
                         } else {
                             window.readOnlyViewer = false;
                         }
@@ -20431,6 +20357,95 @@
             }
         }
 
+        function normalizeAreaTagForViewerFeed(value) {
+            const str = String(value || '').trim();
+            if (!str) return '';
+            return str
+                .replace(/^zone:\s*/i, '')
+                .replace(/^📍\s*/u, '')
+                .trim()
+                .toLowerCase();
+        }
+
+        function hasLocationConsentForViewerFeed() {
+            try {
+                if (typeof isContinuousTrackingPermitted === 'boolean' && isContinuousTrackingPermitted) return true;
+            } catch (e) { /* ignore */ }
+            try {
+                return localStorage.getItem('poiContentContinuousLocation') === 'true';
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function getViewerFeedZoneTag() {
+            const raw = String(window.latestUserAreaTag || currentZoneTag || '').trim();
+            if (!raw) return '';
+            const normalized = normalizeAreaTagForViewerFeed(raw);
+            if (!normalized) return '';
+            if (normalized.includes('loading')) return '';
+            if (normalized.includes('detecting')) return '';
+            if (normalized.includes('local area')) return '';
+            if (normalized === 'unknown') return '';
+            return raw;
+        }
+
+        function doesPostMatchZone(post, zoneTag) {
+            if (!post || !zoneTag) return false;
+            const target = normalizeAreaTagForViewerFeed(zoneTag);
+            if (!target) return false;
+
+            const candidates = [
+                post.displayAreaTag,
+                post.selectedAreaTag,
+                post.customTag,
+                post.zoneTag,
+                post.county,
+                post.area,
+                post.neighborhood,
+                post.region
+            ];
+
+            for (const value of candidates) {
+                if (normalizeAreaTagForViewerFeed(value) === target) return true;
+            }
+            return false;
+        }
+
+        function buildGuestViewerFeed(sourcePosts) {
+            const deduped = [];
+            const seen = new Set();
+            const base = Array.isArray(sourcePosts) ? sourcePosts : [];
+            const MAX_POSTS = 2000;
+
+            for (const post of base) {
+                if (!post || !post.id) continue;
+                if (seen.has(post.id)) continue;
+                seen.add(post.id);
+                deduped.push(post);
+                if (deduped.length >= MAX_POSTS) break;
+            }
+
+            const hasConsent = hasLocationConsentForViewerFeed();
+            const zoneTag = getViewerFeedZoneTag();
+            if (!hasConsent || !zoneTag) {
+                return { mode: 'global', zoneTag: null, posts: deduped };
+            }
+
+            const local = [];
+            const nonLocal = [];
+            for (const post of deduped) {
+                if (doesPostMatchZone(post, zoneTag)) local.push(post);
+                else nonLocal.push(post);
+            }
+
+            if (local.length === 0) {
+                return { mode: 'global-fallback', zoneTag, posts: deduped };
+            }
+
+            return { mode: 'local-first', zoneTag, posts: [...local, ...nonLocal] };
+        }
+
         // One-time fallback that fetches posts directly and builds the device feed
         async function fallbackPopulateDeviceFeed() {
             try {
@@ -20461,37 +20476,10 @@
                     return;
                 }
 
-                // Build device-scoped feed (same 90/10 logic as snapshot handler)
-                const TARGET = 100;
-                const BOOST_RATIO = 0.10;
-                const boostedCount = Math.max(1, Math.floor(TARGET * BOOST_RATIO));
-
-                const allPosts = posts.filter(p => p && p.id);
-                let mostLiked = null;
-                try { mostLiked = allPosts.reduce((best, cur) => { const b = Number(best && best.likes)||0; const c = Number(cur && cur.likes)||0; return c>b?cur:best; }, null); } catch(e) { mostLiked = null; }
-
-                const boosted = allPosts.filter(p => isStrictBoostActive(p))
-                    .sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
-
-                const boostedIds = new Set((boosted||[]).map(p => p.id));
-                const randomCandidates = allPosts.filter(p => !boostedIds.has(p.id));
-
-                function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp; } return arr; }
-
-                const used = new Set();
-                const final = [];
-                if (mostLiked && mostLiked.id) { final.push(mostLiked); used.add(mostLiked.id); }
-                for (const b of boosted) {
-                    if (final.length >= TARGET) break;
-                    if (!b || !b.id) continue; if (used.has(b.id)) continue; final.push(b); used.add(b.id); if (final.length >= (1 + boostedCount)) break;
-                }
-                const shuffled = shuffle(randomCandidates.slice());
-                for (const r of shuffled) { if (final.length >= TARGET) break; if (!r||!r.id) continue; if (used.has(r.id)) continue; final.push(r); used.add(r.id); }
-                if (final.length < TARGET) { for (const b of boosted) { if (final.length >= TARGET) break; if (!b||!b.id) continue; if (used.has(b.id)) continue; final.push(b); used.add(b.id); } }
-
                 const deviceId = (typeof permanentUserId !== 'undefined' && permanentUserId) || window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null) || ('device-' + Date.now());
-                gridContent[String(deviceId)] = final.slice(0, TARGET);
-                console.log('fallbackPopulateDeviceFeed: populated device feed with', (gridContent[String(deviceId)]||[]).length);
+                const guestFeed = buildGuestViewerFeed(posts);
+                gridContent[String(deviceId)] = guestFeed.posts;
+                console.log(`fallbackPopulateDeviceFeed: populated guest feed mode=${guestFeed.mode}, zone=${guestFeed.zoneTag || 'none'}, posts=${(gridContent[String(deviceId)] || []).length}`);
                 try { renderGrid(); } catch(e) {}
             } catch (e) {
                 console.warn('fallbackPopulateDeviceFeed top-level error', e);
@@ -20569,38 +20557,12 @@
                     }
                 }
 
-                const TARGET = 100;
-                const BOOST_RATIO = 0.10;
-                const boostedCount = Math.max(1, Math.floor(TARGET * BOOST_RATIO));
-
-                const allPosts = posts.filter(p => p && p.id);
-                let mostLiked = null;
-                try { mostLiked = allPosts.reduce((best, cur) => { const b = Number(best && best.likes)||0; const c = Number(cur && cur.likes)||0; return c>b?cur:best; }, null); } catch(e) { mostLiked = null; }
-
-                const boosted = allPosts.filter(p => isStrictBoostActive(p))
-                    .sort((a,b) => ((Number(b.likes)||0) - (Number(a.likes)||0)));
-
-                const boostedIds = new Set((boosted||[]).map(p => p.id));
-                const randomCandidates = allPosts.filter(p => !boostedIds.has(p.id));
-
-                function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp; } return arr; }
-
-                const used = new Set();
-                const final = [];
-                if (mostLiked && mostLiked.id) { final.push(mostLiked); used.add(mostLiked.id); }
-                for (const b of boosted) {
-                    if (final.length >= TARGET) break;
-                    if (!b || !b.id) continue; if (used.has(b.id)) continue; final.push(b); used.add(b.id); if (final.length >= (1 + boostedCount)) break;
-                }
-                const shuffled = shuffle(randomCandidates.slice());
-                for (const r of shuffled) { if (final.length >= TARGET) break; if (!r||!r.id) continue; if (used.has(r.id)) continue; final.push(r); used.add(r.id); }
-                if (final.length < TARGET) { for (const b of boosted) { if (final.length >= TARGET) break; if (!b||!b.id) continue; if (used.has(b.id)) continue; final.push(b); used.add(b.id); } }
-
                 const deviceId = (typeof permanentUserId !== 'undefined' && permanentUserId) || window.permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null) || ('device-' + Date.now());
-                try { gridContent = (typeof gridContent === 'object' && gridContent) ? gridContent : {}; gridContent[String(deviceId)] = final.slice(0, TARGET); } catch(e) {}
-                gc[String(deviceId)] = final.slice(0, TARGET);
+                const guestFeed = buildGuestViewerFeed(posts);
+                try { gridContent = (typeof gridContent === 'object' && gridContent) ? gridContent : {}; gridContent[String(deviceId)] = guestFeed.posts; } catch(e) {}
+                gc[String(deviceId)] = guestFeed.posts;
                 try { window.gridContent = gc; } catch(e) {}
-                console.log('ensureDeviceFeed: populated device feed with', (gc[String(deviceId)]||[]).length);
+                console.log(`ensureDeviceFeed: populated guest feed mode=${guestFeed.mode}, zone=${guestFeed.zoneTag || 'none'}, posts=${(gc[String(deviceId)] || []).length}`);
                 try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
             } catch (e) { console.warn('ensureDeviceFeed top-level error', e); }
         };
