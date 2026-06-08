@@ -18573,6 +18573,81 @@
             console.log(`[REFINE-DEBUG] ${message}`);
         }
 
+        function hasPrimaryRefineDatasets() {
+            const hasLocationDb = Array.isArray(window.globalLocationDatabase) && window.globalLocationDatabase.length > 0;
+            const hasPoiDb = Array.isArray(window.globalPOIDatabase) && window.globalPOIDatabase.length > 0;
+            const hasDensityDb = Array.isArray(window.globalDensityData) && window.globalDensityData.length > 0;
+            return hasLocationDb || hasPoiDb || hasDensityDb;
+        }
+
+        function buildLocalRefineFallbackSuggestions(query) {
+            const q = String(query || '').trim().toLowerCase();
+            if (!q) return [];
+
+            const out = [];
+            const seen = new Set();
+            const add = (name, type, priority) => {
+                const raw = String(name || '').trim();
+                if (!raw) return;
+                if (!raw.toLowerCase().includes(q)) return;
+                const key = raw.toLowerCase();
+                if (seen.has(key)) return;
+                seen.add(key);
+                out.push({
+                    display: raw,
+                    type: type || 'location',
+                    value: raw,
+                    priority: Number.isFinite(priority) ? priority : 5
+                });
+            };
+
+            add(currentZoneTag, 'location', 0);
+            add(currentAreaName, 'location', 0);
+            add(window.latestUserAreaTag, 'location', 1);
+            add(window.userDetectedCounty, 'location', 1);
+
+            if (Array.isArray(window.availableZones)) {
+                window.availableZones.forEach((z) => add(z, 'location', 2));
+            }
+
+            try {
+                const recents = (typeof getRecentLocationSearches === 'function') ? getRecentLocationSearches(25) : [];
+                recents.forEach((r) => add(r && r.displayName, (r && r.type) || 'location', 1));
+            } catch (e) {}
+
+            try {
+                const scanBuckets = [];
+                if (window.gridContent && typeof window.gridContent === 'object') {
+                    Object.keys(window.gridContent).forEach((k) => {
+                        const arr = window.gridContent[k];
+                        if (Array.isArray(arr)) scanBuckets.push(arr);
+                    });
+                }
+                scanBuckets.forEach((arr) => {
+                    arr.forEach((p) => {
+                        if (!p || typeof p !== 'object') return;
+                        add(p.county, 'location', 2);
+                        add(p.zoneTag, 'location', 2);
+                        add(p.area, 'location', 2);
+                        add(p.region, 'location', 3);
+                        add(p.locationName, 'location', 3);
+                    });
+                });
+            } catch (e) {}
+
+            out.sort((a, b) => {
+                if (a.priority !== b.priority) return a.priority - b.priority;
+                return String(a.display).localeCompare(String(b.display));
+            });
+
+            refineSearchDebugLog('Local fallback suggestions built', {
+                query,
+                total: out.length
+            });
+
+            return out.slice(0, 200);
+        }
+
         function initRefineSearchDiagnostics() {
             try {
                 // Default ON so the next launch immediately emits diagnostics.
@@ -18718,10 +18793,17 @@
             if (!q) return 0;
             if (typeof getAutocompleteSuggestions !== 'function') {
                 refineSearchDebugLog('DB search unavailable: getAutocompleteSuggestions missing');
-                return 0;
+                const localOnly = buildLocalRefineFallbackSuggestions(q);
+                return renderRefineDatabaseSuggestions(localOnly, q);
             }
 
             try {
+                if (!hasPrimaryRefineDatasets()) {
+                    refineSearchDebugLog('Primary datasets missing: using local fallback index', { query: q });
+                    const localFallback = buildLocalRefineFallbackSuggestions(q);
+                    return renderRefineDatabaseSuggestions(localFallback, q);
+                }
+
                 const startedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
                 const suggestions = getAutocompleteSuggestions(q);
                 const rendered = renderRefineDatabaseSuggestions(suggestions, q);
@@ -18896,6 +18978,7 @@
                 this.debounceTimer = null;
                 this.requestSeq = 0;
                 this.lastAttribution = 'Data © OpenStreetMap contributors';
+                this.remoteSearchUnavailable = false;
                 this.boundKeydown = (e) => this.handleKeyDown(e);
                 this.loadCacheFromSession();
             }
@@ -19048,6 +19131,10 @@
             }
 
             async remoteSearch(query) {
+                if (this.remoteSearchUnavailable) {
+                    throw new Error('Remote geocode endpoint unavailable in this deployment.');
+                }
+
                 const seq = ++this.requestSeq;
                 const url = this.buildRequestUrl(query);
                 refineSearchDebugLog('Remote search start', { query, seq, url });
@@ -19067,6 +19154,10 @@
 
                 if (!response.ok) {
                     refineSearchDebugLog('Remote search HTTP error', { query, seq, status: response.status });
+                    if (response.status === 404) {
+                        this.remoteSearchUnavailable = true;
+                        throw new Error('Remote geocode endpoint not found (404).');
+                    }
                     if (response.status === 429) {
                         throw new Error('Too many searches right now. Please wait a moment.');
                     }
@@ -19097,6 +19188,15 @@
 
                 if (this.debounceTimer) clearTimeout(this.debounceTimer);
                 this.debounceTimer = setTimeout(async () => {
+                    if (this.remoteSearchUnavailable) {
+                        const noRemote = this.ensureContainer();
+                        if (noRemote) {
+                            noRemote.innerHTML = '<div style="padding: 12px; text-align: center; color: #999; font-size: 13px;">Remote search endpoint unavailable on this deployment.</div>';
+                        }
+                        refineSearchDebugLog('Remote search skipped: endpoint previously returned 404');
+                        return;
+                    }
+
                     const cached = this.getCached(q);
                     if (cached) {
                         this.results = cached;
