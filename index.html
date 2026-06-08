@@ -24162,8 +24162,93 @@
             }
         }
 
+        function __cloudAreaTagCacheKey(lat, lon) {
+            const la = Number(lat);
+            const lo = Number(lon);
+            if (!Number.isFinite(la) || !Number.isFinite(lo)) return null;
+            return `${la.toFixed(4)},${lo.toFixed(4)}`;
+        }
+
+        function getCloudReverseAreaTagFromCache(lat, lon, maxAgeMs = 30 * 60 * 1000) {
+            try {
+                const key = __cloudAreaTagCacheKey(lat, lon);
+                if (!key) return null;
+                const bucket = window.__cloudReverseAreaTagCache;
+                if (!bucket || typeof bucket !== 'object') return null;
+                const entry = bucket[key];
+                if (!entry || !entry.name || !entry.ts) return null;
+                if ((Date.now() - Number(entry.ts || 0)) > maxAgeMs) return null;
+                return {
+                    name: String(entry.name).trim(),
+                    distanceKm: Number(entry.distanceKm) || 0,
+                    source: entry.source || 'cloud-reverse-cache'
+                };
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function setCloudReverseAreaTagCache(lat, lon, payload) {
+            try {
+                const key = __cloudAreaTagCacheKey(lat, lon);
+                if (!key || !payload || !payload.name) return;
+                window.__cloudReverseAreaTagCache = window.__cloudReverseAreaTagCache || {};
+                window.__cloudReverseAreaTagCache[key] = {
+                    name: String(payload.name).trim(),
+                    distanceKm: Number(payload.distanceKm) || 0,
+                    source: payload.source || 'cloud-reverse-osm',
+                    ts: Date.now()
+                };
+            } catch (e) {
+                /* ignore cache write errors */
+            }
+        }
+
+        async function resolveCloudBackedAreaTagLive(lat, lon, timeoutMs = 1400) {
+            if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+
+            // Fast cache hit first.
+            const cached = getCloudReverseAreaTagFromCache(lat, lon);
+            if (cached && cached.name) return cached;
+
+            try {
+                const url = `/api/reverse-geocode?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
+                const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+                const timer = controller ? setTimeout(() => {
+                    try { controller.abort(); } catch (e) {}
+                }, timeoutMs) : null;
+
+                const res = await fetch(url, {
+                    method: 'GET',
+                    headers: { 'Accept': 'application/json' },
+                    signal: controller ? controller.signal : undefined
+                });
+
+                if (timer) clearTimeout(timer);
+                if (!res || !res.ok) return null;
+
+                const data = await res.json();
+                const name = String((data && (data.name || data.city || data.displayName)) || '').trim();
+                if (!name || __isStaleAreaTag(name)) return null;
+
+                const out = {
+                    name,
+                    distanceKm: 0,
+                    source: 'cloud-reverse-osm'
+                };
+                setCloudReverseAreaTagCache(lat, lon, out);
+                return out;
+            } catch (e) {
+                return null;
+            }
+        }
+
         function resolveCloudBackedAreaTag(lat, lon) {
             if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+
+            // Prefer cached cloud reverse-geocode hit when available.
+            const cached = getCloudReverseAreaTagFromCache(lat, lon);
+            if (cached && cached.name) return cached;
 
             try {
                 if (window.GeoIndex && typeof window.GeoIndex.nearby === 'function') {
@@ -24228,6 +24313,37 @@
             }
             
             console.log(`🎯 AUTO-DETECT START: User at (${userLocation.lat}, ${userLocation.lon}) accuracy: ${userLocation.accuracy}m`);
+
+            // Use cached cloud reverse-geocode first when available.
+            try {
+                const cached = getCloudReverseAreaTagFromCache(userLocation.lat, userLocation.lon);
+                if (cached && cached.name) {
+                    const autoDisplay = document.getElementById('autoAreaText');
+                    if (autoDisplay) {
+                        autoDisplay.textContent = `✓ ${cached.name}`;
+                        autoDisplay.style.color = '#fff';
+                    }
+                    return cached.name;
+                }
+            } catch (e) { /* ignore */ }
+
+            // Kick cloud reverse geocode in the background so subsequent calls
+            // use authoritative OSM naming instead of local-only nearest matches.
+            try {
+                resolveCloudBackedAreaTagLive(userLocation.lat, userLocation.lon, 1400).then((liveMatch) => {
+                    if (!liveMatch || !liveMatch.name) return;
+                    if (userSelectedZone) return; // never overwrite explicit user choice
+                    currentZoneTag = liveMatch.name;
+                    const autoDisplay = document.getElementById('autoAreaText');
+                    if (autoDisplay) {
+                        autoDisplay.textContent = `✓ ${liveMatch.name}`;
+                        autoDisplay.style.color = '#fff';
+                    }
+                    try { if (typeof updateZonePredictor === 'function') updateZonePredictor(); } catch (e) {}
+                    try { if (window.persistZoneTagForUser) window.persistZoneTagForUser(liveMatch.name); } catch (e) {}
+                    console.log(`☁️ Cloud reverse area-tag applied: ${liveMatch.name}`);
+                }).catch(() => {});
+            } catch (e) { /* ignore */ }
 
             // PRIMARY: unified cloud-backed resolver (same data family as refine location search).
             try {
@@ -29932,18 +30048,30 @@
         }
 
         // Resolve a fresh area tag from the user's real location and nearest POI/location.
-        function __resolveFreshAreaTagFromLocation() {
+        async function __resolveFreshAreaTagFromLocation() {
             if (!userLocation || !userLocation.lat || !userLocation.lon) return null;
             let resolved = null;
 
-            // Primary: cloud-backed resolver used by refine-location datasets.
+            // Best source: live cloud reverse geocode (OpenStreetMap).
             try {
-                const cloudMatch = resolveCloudBackedAreaTag(userLocation.lat, userLocation.lon);
-                if (cloudMatch && cloudMatch.name && !__isStaleAreaTag(cloudMatch.name)) {
-                    resolved = String(cloudMatch.name).trim();
+                const liveCloudMatch = await resolveCloudBackedAreaTagLive(userLocation.lat, userLocation.lon, 1600);
+                if (liveCloudMatch && liveCloudMatch.name && !__isStaleAreaTag(liveCloudMatch.name)) {
+                    resolved = String(liveCloudMatch.name).trim();
                 }
             } catch (e) {
-                console.warn('resolveCloudBackedAreaTag failed during pre-post refresh:', e);
+                console.warn('resolveCloudBackedAreaTagLive failed during pre-post refresh:', e);
+            }
+
+            // Primary: cloud-backed resolver used by refine-location datasets.
+            if (!resolved) {
+                try {
+                    const cloudMatch = resolveCloudBackedAreaTag(userLocation.lat, userLocation.lon);
+                    if (cloudMatch && cloudMatch.name && !__isStaleAreaTag(cloudMatch.name)) {
+                        resolved = String(cloudMatch.name).trim();
+                    }
+                } catch (e) {
+                    console.warn('resolveCloudBackedAreaTag failed during pre-post refresh:', e);
+                }
             }
 
             if (!resolved) try {
@@ -30230,7 +30358,7 @@
 
             // If area tag is stale, refresh from real location / nearest POI before blocking post.
             if (__isStaleAreaTag(currentZoneTag)) {
-                const refreshedAreaTag = __resolveFreshAreaTagFromLocation();
+                const refreshedAreaTag = await __resolveFreshAreaTagFromLocation();
                 if (refreshedAreaTag) {
                     currentZoneTag = refreshedAreaTag;
                     try { if (!userSelectedZone && window.persistZoneTagForUser) window.persistZoneTagForUser(currentZoneTag); } catch (e) {}
