@@ -18461,7 +18461,28 @@
             const oldZoneTag = currentZoneTag;
             currentZoneTag = zoneLabel;
             userSelectedZone = true; // FLAG: User has explicitly selected a zone
-            
+
+            // 🗺️ SPATIAL CONTEXT: Store bbox + center so feed filter can match by geography
+            // not just exact tag string. This makes "Seattle, WA" also show posts tagged
+            // "Capitol Hill, WA" / "Belltown" etc. that fall inside Seattle's bounds.
+            try {
+                const _sm = selectedMeta;
+                if (_sm && Array.isArray(_sm.boundingBox) && _sm.boundingBox.length === 4) {
+                    window.currentSelectedAreaBbox = _sm.boundingBox.slice(0, 4).map(Number);
+                } else {
+                    window.currentSelectedAreaBbox = null;
+                }
+                if (_sm && Number.isFinite(Number(_sm.latitude)) && Number.isFinite(Number(_sm.longitude))) {
+                    window.currentSelectedAreaCenter = { lat: Number(_sm.latitude), lon: Number(_sm.longitude) };
+                } else {
+                    window.currentSelectedAreaCenter = null;
+                }
+                console.log(`   ✅ STEP 3a: Area bbox set → ${JSON.stringify(window.currentSelectedAreaBbox)}`);
+            } catch (e) {
+                window.currentSelectedAreaBbox = null;
+                window.currentSelectedAreaCenter = null;
+            }
+
             // 🎯 CONTEXT-AWARE: Track that user is accessing this area
             const canLoadArea = loadPostsForArea(currentZoneTag);
             if (!canLoadArea) {
@@ -27272,10 +27293,24 @@
             // ========================================================================
             const beforeFilterCount = displayPosts.length;
 
+            // 🗺️ Bbox helper: true when post's lat/lon falls inside the geocode-selected area.
+            const _areaBbox = Array.isArray(window.currentSelectedAreaBbox) && window.currentSelectedAreaBbox.length === 4
+                ? window.currentSelectedAreaBbox.map(Number)
+                : null;
+            function _postInAreaBbox(post) {
+                if (!_areaBbox) return false;
+                const plat = Number(post.lat || post.latitude);
+                const plon = Number(post.lon || post.longitude);
+                if (!Number.isFinite(plat) || !Number.isFinite(plon)) return false;
+                return plon >= _areaBbox[0] && plon <= _areaBbox[2] && plat >= _areaBbox[1] && plat <= _areaBbox[3];
+            }
+
             // First, measure local density to decide filter strictness.
+            // Count both exact-string matches and spatial bbox matches as "local".
             const localMatchCount = displayPosts.reduce((n, p) => {
                 if (!p) return n;
                 if (p.county === userAreaTag) return n + 1;
+                if (_postInAreaBbox(p)) return n + 1;
                 if (p.proximityClass === 'nearby' || p.proximityClass === 'featured' || p.proximityClass === 'community') return n + 1;
                 return n;
             }, 0);
@@ -27309,6 +27344,11 @@
 
                 // KEEP: Post's area tag matches user's area exactly
                 if (post.county === userAreaTag) { post._distantFiller = false; return true; }
+
+                // KEEP: Post's lat/lon falls inside the geocode-selected area's bounding box.
+                // This means selecting "Seattle, WA" also shows posts tagged "Capitol Hill"
+                // or any sub-area whose coordinates sit within Seattle's bbox from Nominatim.
+                if (_postInAreaBbox(post)) { post._distantFiller = false; return true; }
 
                 // KEEP: Post is in nearby/community proximity (within distance)
                 if (post.proximityClass === 'nearby' || 
