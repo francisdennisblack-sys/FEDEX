@@ -26934,33 +26934,10 @@
             }
             
             // ========================================================================
-            // AUTO-DELETE: Remove posts older than 36 hours
+            // RETENTION POLICY: no automatic deletion based on age
             // ========================================================================
+            // Posts should persist; ranking determines visibility.
             const now = Date.now();
-            const THIRTY_SIX_HOURS = 36 * 60 * 60 * 1000;
-            const expiredPosts = [];
-            
-            allPosts = allPosts.filter(post => {
-                if (!post.timestamp) return true; // Keep posts without timestamps (shouldn't happen)
-                
-                const postAge = now - post.timestamp;
-                if (postAge > THIRTY_SIX_HOURS) {
-                    expiredPosts.push(post);
-                    console.log(`🗑️ AUTO-DELETE: Post "${post.id.substring(0, 8)}..." is ${Math.round(postAge / (60*60*1000))}h old - removing from grid`);
-                    
-                    // Delete from Firebase too (async, don't block rendering)
-                    if (post.id) {
-                        const postRef = ref(database, `posts/${post.id}`);
-                        remove(postRef).catch(err => console.error(`❌ Failed to delete expired post:`, err));
-                    }
-                    return false;
-                }
-                return true;
-            });
-            
-            if (expiredPosts.length > 0) {
-                console.log(`🗑️ CLEANUP: Removed ${expiredPosts.length} expired posts from grid`);
-            }
             console.log(`📊 renderGrid: Using contentKey="${contentKey}" (currentUserId=${currentUserId}), found ${allPosts.length} posts`);
             
             // ========================================================================
@@ -27386,8 +27363,9 @@
             // FEED VOLUME TARGET: Show maximum posts to all users
             // Simple: Show all available posts up to grid size
             // ========================================================================
-            const FEED_MIN_POSTS = 300; // Minimum posts to always show (increased from 100)
-            const FEED_MAX_POSTS = Math.min(1999, maxGridSize - 1); // Show as many as possible
+            const FEED_MIN_POSTS = 100;
+            const FEED_TARGET_POSTS = 200;
+            const FEED_MAX_POSTS = Math.min(400, maxGridSize - 1);
 
             if (sortedPosts.length < FEED_MIN_POSTS && allPosts.length > sortedPosts.length) {
                 const existingIds = new Set(sortedPosts.map(p => p.id));
@@ -27398,7 +27376,7 @@
                 });
 
                 for (const post of fallbackPool) {
-                    if (sortedPosts.length >= FEED_MIN_POSTS) break;
+                    if (sortedPosts.length >= FEED_TARGET_POSTS) break;
                     sortedPosts.push(post);
                     existingIds.add(post.id);
                 }
@@ -27544,6 +27522,12 @@
             });
 
             // Rank with boost priority + nearby bias + rotating rebadge boost
+            const DENSE_AREA_ACTIVE_USERS = 50;
+            const LOCAL_RADIUS_MI = 0.5;
+            const NEARBY_RADIUS_MI = 5;
+            const FAR_RADIUS_MI = 25;
+            const denseAreaLocalFirst = Number(onlineUserCount || 0) >= DENSE_AREA_ACTIVE_USERS;
+
             sortedPosts = sortedPosts
                 .map((post, index) => {
                     // 🚀 BOOST PRIORITY: Get boost score first
@@ -27567,23 +27551,60 @@
                     const tier = String(post.engagementTier || '').toLowerCase();
                     const ageHours = post.timestamp ? Math.max(0, (nowMs - post.timestamp) / (1000 * 60 * 60)) : 0;
 
-                    const isLocal = post.county === userAreaTag;
-                    const isNearby = post.proximityClass === 'nearby' ||
-                                    post.proximityClass === 'community' ||
-                                    (post.county && isNearbyArea(userAreaTag, post.county));
+                    const postLat = Number(
+                        (post.geolocation && (post.geolocation.lat || post.geolocation.latitude)) ||
+                        post.latitude ||
+                        post.lat ||
+                        null
+                    );
+                    const postLon = Number(
+                        (post.geolocation && (post.geolocation.lon || post.geolocation.longitude)) ||
+                        post.longitude ||
+                        post.lon ||
+                        null
+                    );
+                    const userLat = Number(userLocation && (userLocation.lat || userLocation.latitude));
+                    const userLon = Number(userLocation && (userLocation.lon || userLocation.longitude));
+
+                    let distanceMiles = Infinity;
+                    if (Number.isFinite(userLat) && Number.isFinite(userLon) && Number.isFinite(postLat) && Number.isFinite(postLon)) {
+                        distanceMiles = calculateDistance(userLat, userLon, postLat, postLon);
+                    }
+
+                    const isAreaLocal = post.county === userAreaTag || post.zoneTag === userAreaTag;
+                    const isDistanceLocal = Number.isFinite(distanceMiles) && distanceMiles <= LOCAL_RADIUS_MI;
+                    const isDistanceNearby = Number.isFinite(distanceMiles) && distanceMiles > LOCAL_RADIUS_MI && distanceMiles <= NEARBY_RADIUS_MI;
+                    const isHeuristicNearby = post.proximityClass === 'nearby' ||
+                                              post.proximityClass === 'community' ||
+                                              (post.county && isNearbyArea(userAreaTag, post.county));
+
+                    const isLocal = isAreaLocal || isDistanceLocal;
+                    const isNearby = !isLocal && (isDistanceNearby || isHeuristicNearby);
+                    const isFar = Number.isFinite(distanceMiles)
+                        ? distanceMiles > FAR_RADIUS_MI
+                        : (!isLocal && !isNearby);
 
                     let score = 0;
-                    if (isLocal) score += 220;
-                    else if (isNearby) score += 150;
+                    if (isLocal) score += 360;
+                    else if (isNearby) score += 180;
+                    else if (denseAreaLocalFirst) score -= 120;
 
-                    if (tier === 'podium') score += 130;
-                    else if (tier === 'hot') score += 110;
-                    else if (tier === 'trending') score += 95;
-                    else if (tier === 'rising') score += 70;
+                    if (tier === 'podium') score += isLocal ? 130 : (isNearby ? 80 : 35);
+                    else if (tier === 'hot') score += isLocal ? 110 : (isNearby ? 70 : 30);
+                    else if (tier === 'trending') score += isLocal ? 95 : (isNearby ? 60 : 25);
+                    else if (tier === 'rising') score += isLocal ? 70 : (isNearby ? 45 : 18);
 
-                    score += Math.min(80, likes * 4);
+                    const likesWeight = isLocal ? 4 : (isNearby ? 2.4 : (denseAreaLocalFirst ? 0.45 : 1.2));
+                    score += Math.min(80, likes * likesWeight);
                     score -= Math.min(45, dislikes * 3);
                     score -= Math.min(24, ageHours * 0.8);
+
+                    if (denseAreaLocalFirst && isFar) {
+                        score -= 260;
+                        if (likes > 0) {
+                            score -= Math.min(220, likes * 6);
+                        }
+                    }
 
                     if (rebadgedIds.has(post.id)) {
                         score += 140;
