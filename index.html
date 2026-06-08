@@ -9232,9 +9232,9 @@
             
             console.log('🧹 Running periodic memory cleanup...');
             
-            // 1. Clean up gridContent - remove posts older than 1 hour
+            // 1. Keep recent feed content warm; trim only very old entries.
             let totalRemoved = 0;
-            const oneHourAgo = now - (60 * 60 * 1000);
+            const staleCutoff = now - (7 * 24 * 60 * 60 * 1000); // 7 days
             
             for (const key of Object.keys(gridContent)) {
                 if (!Array.isArray(gridContent[key])) continue;
@@ -9242,7 +9242,7 @@
                 const beforeLen = gridContent[key].length;
                 gridContent[key] = gridContent[key].filter(post => {
                     const postTime = post.timestamp || post.createdAt || now;
-                    return postTime > oneHourAgo;
+                    return postTime > staleCutoff;
                 });
                 
                 totalRemoved += (beforeLen - gridContent[key].length);
@@ -9979,6 +9979,7 @@
             } catch (e) {
                 console.warn('⚠️ Foreground resubscribe warning:', e);
             }
+            try { window.lastRenderGridTime = 0; } catch (e) {}
             renderGrid();
         };
 
@@ -10664,6 +10665,34 @@
             if (new Set(getPendingDeletedPosts()).has(id)) return true;
 
             return false;
+        }
+
+        // Keep grid layout stable by clearing a tile in-place instead of removing nodes.
+        function clearGridBoxByPostId(postId) {
+            try {
+                const normalized = normalizePostId(postId);
+                if (!normalized) return false;
+                const boxEl = document.querySelector(`.grid-box[data-post-id="${normalized}"]`);
+                if (!boxEl) return false;
+
+                boxEl.removeAttribute('data-post-id');
+                boxEl.classList.remove('filled', 'placeholder');
+                try {
+                    const removeClasses = [];
+                    boxEl.classList.forEach(cls => {
+                        if (/^(badge-|border-|glow-)/.test(cls)) removeClasses.push(cls);
+                    });
+                    removeClasses.forEach(cls => boxEl.classList.remove(cls));
+                } catch (e) { /* ignore class cleanup errors */ }
+
+                boxEl.style.boxShadow = 'none';
+                boxEl.style.borderColor = '';
+                boxEl.innerHTML = '';
+                return true;
+            } catch (e) {
+                console.warn('clearGridBoxByPostId failed', e);
+                return false;
+            }
         }
 
         function persistHiddenPostForViewer(postId, viewerId) {
@@ -13605,10 +13634,7 @@
                                             }
                                         });
                                     } catch(e){}
-                                    try {
-                                        const el = document.querySelector(`.grid-box[data-post-id="${id}"]`);
-                                        if (el && el.parentNode) el.parentNode.removeChild(el);
-                                    } catch(e){}
+                                    try { clearGridBoxByPostId(id); } catch(e){}
                                 });
                                 try {
                                     if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
@@ -13871,10 +13897,7 @@
                             }
                         } catch(e){}
                         // Remove rendered DOM node instantly
-                        try {
-                            const el = document.querySelector(`.grid-box[data-post-id="${postId}"]`);
-                            if (el && el.parentNode) el.parentNode.removeChild(el);
-                        } catch(e){}
+                        try { clearGridBoxByPostId(postId); } catch(e){}
                         // Drop from virtual scroller and refresh
                         try {
                             if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
@@ -16085,10 +16108,7 @@
                     try { persistHiddenPostForViewer(normalizedSelectedPostId, currentUserId); } catch (e) { console.warn('Failed to persist report-hide viewer state', e); }
 
                     // Also remove any rendered DOM node and purge virtual scroller cache immediately
-                    try {
-                        const boxEl = document.querySelector(`.grid-box[data-post-id="${normalizedSelectedPostId}"]`);
-                        if (boxEl && boxEl.parentNode) boxEl.parentNode.removeChild(boxEl);
-                    } catch (e) { console.warn('Immediate DOM removal failed during report', e); }
+                    try { clearGridBoxByPostId(normalizedSelectedPostId); } catch (e) { console.warn('Immediate tile clear failed during report', e); }
 
                     try {
                         if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
@@ -16268,10 +16288,7 @@
             persistHiddenPostForViewer(normalizedSelectedPostId, viewerKey);
 
             // Remove DOM node and virtual scroller entry immediately
-            try {
-                const boxEl = document.querySelector(`.grid-box[data-post-id="${normalizedSelectedPostId}"]`);
-                if (boxEl && boxEl.parentNode) boxEl.parentNode.removeChild(boxEl);
-            } catch (e) { console.warn('Immediate DOM removal failed in hidePostFromMyView', e); }
+            try { clearGridBoxByPostId(normalizedSelectedPostId); } catch (e) { console.warn('Immediate tile clear failed in hidePostFromMyView', e); }
 
             try {
                 if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
@@ -20045,6 +20062,11 @@
             // Clear existing Firebase listener
             if (firebaseUnsubscribe) {
                 firebaseUnsubscribe();
+                firebaseUnsubscribe = null;
+            }
+            if (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function') {
+                window.firebaseUnsubscribe();
+                window.firebaseUnsubscribe = null;
             }
             
             // Subscribe to real-time updates from Firebase
@@ -20080,7 +20102,8 @@
         function subscribeToFirebasePostsWithReconnect() {
             try {
                 // Prevent creating multiple listeners — if one exists, skip creating another
-                if (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function') {
+                if ((firebaseUnsubscribe && typeof firebaseUnsubscribe === 'function') ||
+                    (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function')) {
                     console.log('⚠️ subscribeToFirebasePostsWithReconnect: listener already active - skipping new subscribe');
                     return;
                 }
@@ -20394,6 +20417,7 @@
 
                     renderGrid();
                 });
+                window.firebaseUnsubscribe = firebaseUnsubscribe;
                 
             } catch (error) {
                 console.error('Firebase listener error:', error);
@@ -25765,6 +25789,7 @@
                     box.classList.remove('filled');
                     box.innerHTML = '';
                 } catch (e) { /* ignore */ }
+                try { fillEmptySlotAfterDelay(0); } catch (e) { /* ignore */ }
                 return;
             }
             
@@ -28797,6 +28822,10 @@
                 console.log('Unsubscribing from Firebase listener');
                 firebaseUnsubscribe();
                 firebaseUnsubscribe = null;
+            }
+            if (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function') {
+                window.firebaseUnsubscribe();
+                window.firebaseUnsubscribe = null;
             }
             
             console.log('Disconnected from POI session');
