@@ -25883,6 +25883,58 @@
             return hasText || hasMedia;
         }
 
+        function hydratePostForRender(post) {
+            if (!post || typeof post !== 'object' || !post.id) return post;
+            try {
+                const id = String(post.id);
+                const candidates = [post];
+
+                if (window.postCache && postCache[id]) candidates.push(postCache[id]);
+
+                for (const key of Object.keys(gridContent || {})) {
+                    const arr = gridContent[key];
+                    if (!Array.isArray(arr)) continue;
+                    const found = arr.find(p => p && String(p.id) === id);
+                    if (found) {
+                        candidates.push(found);
+                        break;
+                    }
+                }
+
+                let richest = post;
+                let bestScore = -1;
+                for (const c of candidates) {
+                    if (!c || typeof c !== 'object') continue;
+                    const score =
+                        (String(c.content || '').trim().length > 0 ? 4 : 0) +
+                        (String(c.text || '').trim().length > 0 ? 3 : 0) +
+                        (String(c.description || '').trim().length > 0 ? 2 : 0) +
+                        ((c.photoURL || c.imageData || c.videoURL || c.mediaURL) ? 4 : 0) +
+                        (Array.isArray(c.cachedBadges) ? 1 : 0);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        richest = c;
+                    }
+                }
+
+                const merged = Object.assign({}, richest, post);
+                if (!merged.content && richest.content) merged.content = richest.content;
+                if (!merged.text && richest.text) merged.text = richest.text;
+                if (!merged.description && richest.description) merged.description = richest.description;
+                if (!merged.photoURL && richest.photoURL) merged.photoURL = richest.photoURL;
+                if (!merged.imageData && richest.imageData) merged.imageData = richest.imageData;
+                if (!merged.videoURL && richest.videoURL) merged.videoURL = richest.videoURL;
+                if (!merged.mediaURL && richest.mediaURL) merged.mediaURL = richest.mediaURL;
+                if (!merged.mediaType && richest.mediaType) merged.mediaType = richest.mediaType;
+                if ((!merged.cachedBadges || merged.cachedBadges.length === 0) && Array.isArray(richest.cachedBadges)) {
+                    merged.cachedBadges = richest.cachedBadges;
+                }
+                return merged;
+            } catch (e) {
+                return post;
+            }
+        }
+
         if (!window.gridTextFontResizeHookInstalled) {
             window.addEventListener('resize', () => {
                 applyGridTextFontSizeToVisiblePosts();
@@ -26222,6 +26274,10 @@
                     let target = Array.isArray(pendingSortedPosts) ? pendingSortedPosts.slice() : [];
                     const current = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
 
+                    // Ensure reconcile compares/places fully-hydrated post payloads,
+                    // not partial snapshots that may only have votes/ids.
+                    target = target.map(p => hydratePostForRender(p));
+
                     // Foreground resume can briefly produce sparse ML snapshots while
                     // subscriptions/data warm up. Stabilize target before diffing.
                     target = stabilizeReconcileTargetForRecovery(target, current);
@@ -26278,10 +26334,10 @@
                         current.pop();
                     } else if (isAddChange) {
                         // Target longer: add one item
-                        current.push(target[diffIdx]);
+                        current.push(hydratePostForRender(target[diffIdx]));
                     } else {
                         // Replace one mismatched slot
-                        current[diffIdx] = target[diffIdx];
+                        current[diffIdx] = hydratePostForRender(target[diffIdx]);
                     }
 
                     // 🛡️ FINAL DEDUPE PASS on the live scroller list.
@@ -26600,6 +26656,7 @@
          */
         function renderGridItem(box, item) {
             if (!item || !item.id) return;
+            item = hydratePostForRender(item);
 
             // Last-mile guard: even if an upstream list missed filtering,
             // never render a post that this viewer has hidden/reported/deleted.
@@ -26620,7 +26677,7 @@
             } catch (e) {
                 console.warn('Error rendering grid item:', e);
                 // Fallback to simple render
-                const content = (item.content || item.text || '').substring(0, 150);
+                const content = String(item.content || item.text || item.description || '').substring(0, 150);
                 const likes = item.likes || 0;
                 box.innerHTML = `<div style="padding: 12px; font-size: 14px;">${content}<br/><small>👍 ${likes}</small></div>`;
                 box.setAttribute('data-post-id', item.id);
