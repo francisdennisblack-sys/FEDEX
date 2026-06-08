@@ -1284,6 +1284,9 @@ app.get('/api/fetch-wifi', async (req, res) => {
 
 // In-memory cache for geocoding results (24 hour expiry)
 let geocodeCache = {};
+let geocodeSearchCache = new Map();
+const GEOCODE_SEARCH_CACHE_TTL_MS = Number(process.env.GEOCODE_SEARCH_CACHE_TTL_MS || 10 * 60 * 1000);
+const GEOCODE_SEARCH_CACHE_MAX = Number(process.env.GEOCODE_SEARCH_CACHE_MAX || 500);
 
 function getGeocodeCache(lat, lon) {
     const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
@@ -1302,6 +1305,155 @@ function setGeocodeCache(lat, lon, data) {
         timestamp: Date.now()
     };
 }
+
+function getGeocodeSearchCache(cacheKey) {
+    const cached = geocodeSearchCache.get(cacheKey);
+    if (!cached) return null;
+    if (Date.now() - cached.timestamp > GEOCODE_SEARCH_CACHE_TTL_MS) {
+        geocodeSearchCache.delete(cacheKey);
+        return null;
+    }
+    return cached.results;
+}
+
+function setGeocodeSearchCache(cacheKey, results) {
+    geocodeSearchCache.set(cacheKey, {
+        timestamp: Date.now(),
+        results
+    });
+
+    if (geocodeSearchCache.size > GEOCODE_SEARCH_CACHE_MAX) {
+        const oldestKey = geocodeSearchCache.keys().next().value;
+        geocodeSearchCache.delete(oldestKey);
+    }
+}
+
+function httpsGetJson(requestUrl, headers = {}, timeoutMs = 7000) {
+    return new Promise((resolve, reject) => {
+        const req = https.get(requestUrl, { headers }, (response) => {
+            let data = '';
+
+            response.on('data', (chunk) => {
+                data += chunk;
+            });
+
+            response.on('end', () => {
+                if (response.statusCode < 200 || response.statusCode >= 300) {
+                    return reject(new Error(`HTTP ${response.statusCode}`));
+                }
+
+                try {
+                    resolve(JSON.parse(data));
+                } catch (e) {
+                    reject(new Error(`Invalid JSON response: ${e.message}`));
+                }
+            });
+        });
+
+        req.on('error', reject);
+        req.setTimeout(timeoutMs, () => {
+            req.destroy(new Error('Geocoding request timed out'));
+        });
+    });
+}
+
+function normalizeSearchResult(item) {
+    if (!item || typeof item !== 'object') return null;
+
+    const address = item.address || {};
+    const city = address.city || address.town || address.village || address.hamlet || address.municipality || address.county || '';
+    const stateOrProvince = address.state || address.province || address.region || address.state_district || '';
+    const country = address.country || '';
+
+    const lat = Number(item.lat);
+    const lon = Number(item.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+    const displayName = item.display_name || item.name || [city, stateOrProvince, country].filter(Boolean).join(', ') || 'Unknown';
+    const shortName = item.name || city || displayName;
+    const locationId = item.place_id != null
+        ? `nominatim:${item.place_id}`
+        : `${String(item.osm_type || 'osm')}:${String(item.osm_id || shortName)}`;
+
+    return {
+        locationId,
+        displayName,
+        name: shortName,
+        city,
+        stateOrProvince,
+        country,
+        latitude: lat,
+        longitude: lon,
+        osmType: item.osm_type || null,
+        osmId: item.osm_id || null,
+        class: item.class || null,
+        type: item.type || null
+    };
+}
+
+app.get('/api/geocode/search', async (req, res) => {
+    try {
+        const rawQuery = String(req.query.q || '').trim();
+        const query = rawQuery.replace(/\s+/g, ' ');
+        const minChars = Math.max(2, Number(req.query.minChars || 2));
+
+        if (query.length < minChars) {
+            return res.status(400).json({
+                success: false,
+                error: `Query must be at least ${minChars} characters`,
+                minChars,
+                query
+            });
+        }
+
+        const limit = Math.min(20, Math.max(1, Number(req.query.limit || 12)));
+        const lang = String(req.query.lang || 'en').trim();
+        const endpoint = process.env.GEOCODE_SEARCH_URL || 'https://nominatim.openstreetmap.org/search';
+        const cacheKey = `${query.toLowerCase()}|${limit}|${lang}`;
+
+        const cachedResults = getGeocodeSearchCache(cacheKey);
+        if (cachedResults) {
+            return res.json({
+                success: true,
+                source: 'cache',
+                query,
+                count: cachedResults.length,
+                results: cachedResults,
+                timestamp: Date.now()
+            });
+        }
+
+        const searchUrl = `${endpoint}?format=jsonv2&addressdetails=1&limit=${limit}&q=${encodeURIComponent(query)}`;
+        const payload = await httpsGetJson(searchUrl, {
+            'User-Agent': process.env.GEOCODE_USER_AGENT || 'FEDEX-WiFi-App/1.0',
+            'Accept-Language': lang
+        }, Number(process.env.GEOCODE_SEARCH_TIMEOUT_MS || 7000));
+
+        const rows = Array.isArray(payload) ? payload : [];
+        const normalized = rows
+            .map(normalizeSearchResult)
+            .filter(Boolean)
+            .slice(0, limit);
+
+        setGeocodeSearchCache(cacheKey, normalized);
+
+        return res.json({
+            success: true,
+            source: 'nominatim',
+            query,
+            count: normalized.length,
+            results: normalized,
+            timestamp: Date.now()
+        });
+    } catch (error) {
+        console.error('[Geocode Search Error]', error.message);
+        return res.status(502).json({
+            success: false,
+            error: error.message,
+            source: 'error'
+        });
+    }
+});
 
 app.get('/api/reverse-geocode', (req, res) => {
     try {
