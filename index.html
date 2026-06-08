@@ -25341,6 +25341,14 @@
             });
         }
 
+        function hasRenderableGridPayload(post) {
+            if (!post || typeof post !== 'object') return false;
+            const text = String(post.content || post.text || post.description || '').trim();
+            const hasText = text.length > 0;
+            const hasMedia = !!(post.photoURL || post.imageData || post.videoURL || post.mediaURL);
+            return hasText || hasMedia;
+        }
+
         if (!window.gridTextFontResizeHookInstalled) {
             window.addEventListener('resize', () => {
                 applyGridTextFontSizeToVisiblePosts();
@@ -25375,6 +25383,20 @@
                     }
                 }
             } catch (e) { /* ignore cache injection errors */ }
+
+            // Non-destructive guard: if a rerank/reconcile pass delivers a partial
+            // payload for this slot, keep the currently rendered tile instead of
+            // wiping content and showing a blank/loader.
+            if (!post._placeholder && !hasRenderableGridPayload(post)) {
+                try {
+                    const existingId = box.getAttribute('data-post-id');
+                    if (existingId && box.innerHTML && box.innerHTML.trim().length > 0) {
+                        console.warn('🛡️ renderGridItemFull: skipping destructive partial render for', post.id);
+                        return;
+                    }
+                } catch (e) { /* ignore guard failures */ }
+            }
+
             // If this is a placeholder (minimal stub while full post is fetched),
             // render a visible loading card instead of an empty box to avoid
             // a permanently blank slot on the grid.
@@ -28573,10 +28595,11 @@
                             // If still lacking visible content, mark placeholder and fetch full post
                             const hasVisibleContent = (selected && (selected.content && selected.content.trim().length > 0)) || (selected && (selected.photoURL || selected.imageData));
                             if (!hasVisibleContent) {
-                                console.log('⚠️ Promoted post missing content — marking placeholder and fetching full post:', selectedRaw.id);
-                                selected = Object.assign({}, selectedRaw, { _placeholder: true });
+                                console.log('⚠️ Promoted post missing content — skip promotion and fetch full post:', selectedRaw.id);
+                                selected = null;
 
-                                // Background fetch to replace placeholder with full post when available
+                                // Background fetch to warm cache; do not replace an existing
+                                // visible tile with a placeholder during ML rotation.
                                 (async function fetchAndCacheFullPost(pid){
                                     try {
                                         const full = (typeof window.getPostByIdFromDB === 'function') ? await window.getPostByIdFromDB(pid) : null;
@@ -28602,7 +28625,9 @@
                         selected = selectedRaw;
                     }
 
-                    sortedPosts = [selected, ...sortedPosts.filter(p => p.id !== selectedRaw.id)];
+                    if (selected && selected.id && hasRenderableGridPayload(selected)) {
+                        sortedPosts = [selected, ...sortedPosts.filter(p => p.id !== selectedRaw.id)];
+                    }
                 }
             }
 
@@ -28624,10 +28649,11 @@
             if (goldMedalPool.length > 0) {
                 const goldRotationBucket = Math.floor(Date.now() / (5 * 60 * 1000)); // 5 min rotation
                 const selectedGoldPost = goldMedalPool[goldRotationBucket % goldMedalPool.length];
-                sortedPosts = [selectedGoldPost, ...sortedPosts.filter(p => p.id !== selectedGoldPost.id)];
-
-                window.activeGoldMedalPostId = selectedGoldPost.id;
-                window.goldMedalRotationBucket = goldRotationBucket;
+                if (selectedGoldPost && selectedGoldPost.id && hasRenderableGridPayload(selectedGoldPost)) {
+                    sortedPosts = [selectedGoldPost, ...sortedPosts.filter(p => p.id !== selectedGoldPost.id)];
+                    window.activeGoldMedalPostId = selectedGoldPost.id;
+                    window.goldMedalRotationBucket = goldRotationBucket;
+                }
             } else {
                 window.activeGoldMedalPostId = null;
                 window.goldMedalRotationBucket = Math.floor(Date.now() / (5 * 60 * 1000));
