@@ -1582,24 +1582,31 @@ function parseViewportBounds(raw) {
 
 function parseSearchContext(req) {
     const zoom = Number(req.query.zoom);
+    const lat = Number(req.query.lat ?? req.query.userLat);
+    const lon = Number(req.query.lon ?? req.query.userLon);
     const viewport = parseViewportBounds(req.query.viewport)
         || ((req.query.minLon != null && req.query.minLat != null && req.query.maxLon != null && req.query.maxLat != null)
             ? parseViewportBounds([req.query.minLon, req.query.minLat, req.query.maxLon, req.query.maxLat].join(','))
             : null);
     return {
         zoom: Number.isFinite(zoom) ? zoom : null,
-        viewport
+        viewport,
+        userLat: Number.isFinite(lat) ? lat : null,
+        userLon: Number.isFinite(lon) ? lon : null
     };
 }
 
 function serializeSearchContext(searchContext) {
     if (!searchContext) return 'noctx';
     const zoomPart = Number.isFinite(searchContext.zoom) ? `z:${searchContext.zoom.toFixed(1)}` : 'z:none';
+    const userPart = (Number.isFinite(searchContext.userLat) && Number.isFinite(searchContext.userLon))
+        ? `u:${Number(searchContext.userLat).toFixed(3)},${Number(searchContext.userLon).toFixed(3)}`
+        : 'u:none';
     const vp = Array.isArray(searchContext.viewport) ? searchContext.viewport : null;
     const viewportPart = vp
         ? `v:${vp.map((n) => Number(n).toFixed(2)).join(',')}`
         : 'v:none';
-    return `${zoomPart}|${viewportPart}`;
+    return `${zoomPart}|${userPart}|${viewportPart}`;
 }
 
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -1680,6 +1687,12 @@ function populationScore(value) {
 function inferQueryIntentType(query) {
     const q = String(query || '').toLowerCase();
     if (!q) return null;
+    if (/\b(airport|airports)\b/.test(q)) return 'airport';
+    if (/\b(hospital|hospitals|medical|clinic)\b/.test(q)) return 'hospital';
+    if (/\b(school|schools|elementary|middle school|high school)\b/.test(q)) return 'school';
+    if (/\b(university|college|campus)\b/.test(q)) return 'university';
+    if (/\b(hotel|hotels|resort|motel)\b/.test(q)) return 'hotel';
+    if (/\b(museum|library|libraries|beach|mountain|lake|attraction|mall|shopping|landmark|park)\b/.test(q)) return 'poi';
     if (/\b(continent|ocean|sea)\b/.test(q)) return 'continent';
     if (/\b(country|territory)\b/.test(q)) return 'country';
     if (/\b(state|province|region)\b/.test(q)) return 'state';
@@ -1697,6 +1710,12 @@ function intentTypeBonus(intentType, resultType) {
     const r = String(resultType || '');
     if (i === r) return 1;
     const compatible = {
+        airport: new Set(['airport', 'landmark', 'business']),
+        hospital: new Set(['hospital', 'landmark', 'business']),
+        school: new Set(['school', 'landmark', 'business']),
+        university: new Set(['university', 'landmark', 'business']),
+        hotel: new Set(['hotel', 'landmark', 'business']),
+        poi: new Set(['park', 'landmark', 'business', 'city', 'neighborhood']),
         country: new Set(['country', 'territory', 'state']),
         state: new Set(['state', 'province', 'region']),
         county: new Set(['county', 'district', 'borough']),
@@ -1709,26 +1728,86 @@ function intentTypeBonus(intentType, resultType) {
     return compatible[i] && compatible[i].has(r) ? 0.7 : 0;
 }
 
+function getResultTextBlob(result) {
+    return [
+        result && result.name,
+        result && result.displayName,
+        result && result.class,
+        result && result.rawType,
+        result && result.type,
+        result && result.hierarchyType
+    ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function isInfrastructureNoise(result, intentType) {
+    if (intentType === 'road') return false;
+    const blob = getResultTextBlob(result);
+    return /(road|street|avenue|highway|route|motorway|trunk|bus route|transit|rail|station exit|exit\s*\d+)/.test(blob);
+}
+
+function isLowLevelVenuePart(result) {
+    const blob = getResultTextBlob(result);
+    return /(gate\s*[a-z0-9]+|terminal\s*\d+|concourse|platform\s*\d+|section\s*[a-z0-9]+)/.test(blob);
+}
+
+function isPriorityPoi(result) {
+    const blob = getResultTextBlob(result);
+    return /(park|school|university|airport|hospital|hotel|museum|library|beach|mountain|lake|attraction|mall|shopping|business|landmark)/.test(blob);
+}
+
+function isPriorityAdministrative(result) {
+    const t = String(result && (result.type || result.hierarchyType) || '').toLowerCase();
+    return ['country', 'state', 'province', 'region', 'county', 'city', 'town', 'village', 'neighborhood', 'district', 'borough'].includes(t);
+}
+
+function locationProximityScore(result, userLat, userLon) {
+    const lat = Number(result && result.latitude);
+    const lon = Number(result && result.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(userLat) || !Number.isFinite(userLon)) {
+        return 0;
+    }
+    const km = haversineKm(userLat, userLon, lat, lon);
+    const mi = km * 0.621371;
+    if (mi <= 10) return 1;
+    if (mi <= 25) return 0.82;
+    if (mi <= 50) return 0.66;
+    if (mi <= 100) return 0.48;
+    if (mi <= 300) return 0.28;
+    return 0.1;
+}
+
 function rankSearchResults(results, query, searchContext) {
     const zoom = searchContext && searchContext.zoom;
     const viewport = searchContext && searchContext.viewport;
+    const userLat = searchContext && searchContext.userLat;
+    const userLon = searchContext && searchContext.userLon;
     const intentType = inferQueryIntentType(query);
     return (Array.isArray(results) ? results : [])
         .map((r) => {
             const relevance = textRelevanceScore(query, r);
             const viewportBias = viewportProximityScore(r, viewport);
+            const distanceBias = locationProximityScore(r, userLat, userLon);
             const zoomAffinity = zoomScaleAffinityScore(zoom, r.type);
             const importance = Math.max(0, Math.min(1, Number(r.importance) || 0));
             const popScore = populationScore(r.population);
             const adminWeight = 1 - (Math.min(12, Number(r.adminLevel) || 12) / 12);
             const intentBonus = intentTypeBonus(intentType, r.type);
+            const adminBoost = isPriorityAdministrative(r) ? 1 : 0;
+            const poiBoost = isPriorityPoi(r) ? 1 : 0;
+            const infraPenalty = isInfrastructureNoise(r, intentType) ? 1 : 0;
+            const venuePartPenalty = isLowLevelVenuePart(r) ? 1 : 0;
             const score = (relevance * 4)
-                + (viewportBias * 3)
-                + (zoomAffinity * 2)
+                + (distanceBias * 3.5)
+                + (viewportBias * 2.5)
+                + (zoomAffinity * 1.6)
                 + (importance * 1.5)
                 + (popScore * 1)
                 + (adminWeight * 0.75)
-                + (intentBonus * 2.25);
+                + (intentBonus * 2.25)
+                + (adminBoost * 1.4)
+                + (poiBoost * 1.2)
+                - (infraPenalty * 2.2)
+                - (venuePartPenalty * 1.3);
             return { ...r, rankScore: Number(score.toFixed(6)) };
         })
         .sort((a, b) => b.rankScore - a.rankScore);
