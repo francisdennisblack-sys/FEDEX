@@ -970,7 +970,9 @@
             }
 
             setItems(items) {
-                this.items = items || [];
+                this.items = (typeof compactPostListForSlots === 'function')
+                    ? compactPostListForSlots(items)
+                    : (items || []);
                 // 🎯 LAZY: Create only the initial batch; remaining boxes render on demand.
                 const initialCount = Math.max(20, Math.min(this.batchSize, this.items.length));
                 const initialTarget = Math.min(
@@ -985,7 +987,10 @@
             addItems(items) {
                 if (!Array.isArray(items)) return;
                 const startIdx = this.items.length;
-                this.items.push(...items);
+                const merged = [...(this.items || []), ...items];
+                this.items = (typeof compactPostListForSlots === 'function')
+                    ? compactPostListForSlots(merged)
+                    : merged;
                 // Don't create boxes yet - wait until user scrolls to them
                 console.log(`📥 Added ${items.length} items to queue (total: ${this.items.length}). Boxes created on-demand.`);
             }
@@ -26218,6 +26223,26 @@
         let pendingSortedPosts = null;
         let gridTargetIndexById = new Map();
 
+        function compactPostListForSlots(items) {
+            const out = [];
+            try {
+                if (!Array.isArray(items)) return out;
+                const seen = new Set();
+                for (const raw of items) {
+                    if (!raw || !raw.id) continue;
+                    const p = (typeof hydratePostForRender === 'function') ? hydratePostForRender(raw) : raw;
+                    if (!p || !p.id) continue;
+                    const id = String(p.id);
+                    if (seen.has(id)) continue;
+                    seen.add(id);
+                    out.push(p);
+                }
+                return out;
+            } catch (e) {
+                return out;
+            }
+        }
+
         function buildIndexMapById(items) {
             const out = new Map();
             try {
@@ -26312,7 +26337,7 @@
 
                     // Ensure reconcile compares/places fully-hydrated post payloads,
                     // not partial snapshots that may only have votes/ids.
-                    target = target.map(p => hydratePostForRender(p));
+                    target = compactPostListForSlots(target);
                     gridTargetIndexById = buildIndexMapById(target);
                     snapshotGridPositionTracker(target, current);
 
@@ -26416,7 +26441,7 @@
                         for (const _it of _clean) current.push(_it);
                     } catch (e) { /* defensive */ }
 
-                    gridScroller.items = current;
+                    gridScroller.items = compactPostListForSlots(current);
 
                     // If we collapsed a duplicate OR the operation is add/remove,
                     // slot positions after diffIdx have shifted, so we MUST do a
@@ -27790,7 +27815,7 @@
                     if (dedup.length >= MAX_POSTS) break;
                 }
 
-                pendingSortedPosts = applyContentFreshnessWaterfall(dedup, 'incremental');
+                pendingSortedPosts = compactPostListForSlots(applyContentFreshnessWaterfall(dedup, 'incremental'));
                 // Kick off the 1/sec reconciler to apply minimal diffs
                 try { scheduleGridReconcile(); } catch (e) { /* ignore */ }
                 console.log(`⚡ recomputeFeedSnapshot: built snapshot of ${pendingSortedPosts.length} posts`);
@@ -29584,7 +29609,7 @@
                 } catch (e) { console.warn('Final dedupe before scroller failed', e); }
 
                 // Save latest target snapshot and reconcile gradually (1 post per second)
-                pendingSortedPosts = Array.isArray(sortedPosts) ? [...sortedPosts] : [];
+                pendingSortedPosts = compactPostListForSlots(Array.isArray(sortedPosts) ? sortedPosts : []);
                 scheduleGridReconcile();
 
                 const gridAlreadyLoaded = Array.isArray(gridScroller.items) && gridScroller.items.length > 0;
