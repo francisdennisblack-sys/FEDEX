@@ -31629,24 +31629,45 @@
                             // Merge into shared-posts key without duplicating
                             const contentKey = 'shared-posts';
                             if (!gridContent[contentKey]) gridContent[contentKey] = [];
-                            const existingIds = new Set(gridContent[contentKey].map(p => p.id));
+                            // Build a global seen-id map across ALL grid keys so we never
+                            // inject a partial shadow copy that can outrank a richer post.
+                            const existingIds = new Set();
+                            try {
+                                for (const k of Object.keys(gridContent || {})) {
+                                    const arr = gridContent[k];
+                                    if (!Array.isArray(arr)) continue;
+                                    for (const ep of arr) {
+                                        if (ep && ep.id) existingIds.add(String(ep.id));
+                                    }
+                                }
+                            } catch (e) { /* defensive */ }
                             let added = 0;
                             data.posts.forEach(p => {
                                 if (!p || !p.id) return;
-                                if (!existingIds.has(p.id)) {
-                                    // Normalize minimal fields to match Firebase shape
-                                    const normalized = Object.assign({}, p, {
-                                        id: String(p.id),
-                                        authId: p.authId || p.clientId || null,
-                                        userId: p.userId || p.authId || p.clientId || null,
-                                        createdBy: p.createdBy || p.authId || p.clientId || null,
-                                        timestamp: p.timestamp || Date.now()
-                                    });
-                                    gridContent[contentKey].push(normalized);
-                                    postCache[normalized.id] = normalized;
-                                    existingIds.add(normalized.id);
-                                    added++;
+                                const pid = String(p.id);
+                                if (existingIds.has(pid)) return;
+
+                                // Normalize to Firebase-like shape and preserve any available text fields.
+                                const normalized = Object.assign({}, p, {
+                                    id: pid,
+                                    authId: p.authId || p.clientId || null,
+                                    userId: p.userId || p.authId || p.clientId || null,
+                                    createdBy: p.createdBy || p.authId || p.clientId || null,
+                                    content: p.content || p.text || p.description || '',
+                                    description: p.description || p.content || p.text || '',
+                                    timestamp: p.timestamp || Date.now()
+                                });
+
+                                gridContent[contentKey].push(normalized);
+
+                                // Non-destructive cache merge: never downgrade a rich cached post.
+                                const prev = postCache[pid];
+                                if (!prev || !hasRenderableGridPayload(prev)) {
+                                    postCache[pid] = normalized;
                                 }
+
+                                existingIds.add(pid);
+                                added++;
                             });
                             if (added > 0) {
                                 console.log(`📡 Local server posts merged: ${added} posts into ${contentKey}`);
