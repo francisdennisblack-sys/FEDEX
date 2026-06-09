@@ -10082,6 +10082,19 @@
                     }
                     updateVoteDisplayInDOM(postId, likes, dislikes);
                     try { refreshVisiblePostGlowOutlines('vote-transaction-success'); } catch (e) {}
+                    try {
+                        recalculateBadgesForCurrentGrid(postId);
+                        window.lastVoteRerankAt = Date.now();
+                        window.lastVoteRerankPostId = postId;
+                        window.lastRenderGridTime = 0;
+                        window.voteTriggeredRerank = true;
+                        renderGrid();
+                        try { refreshVisiblePostGlowOutlines('vote-authoritative-rerank'); } catch (e) {}
+                    } catch (rankErr) {
+                        console.warn('⚠️ Authoritative vote rerank failed:', rankErr);
+                    } finally {
+                        window.voteTriggeredRerank = false;
+                    }
                 } catch (e) { /* defensive */ }
             }).catch(err => {
                 console.error('❌ Transaction failed, rolling back UI:', err);
@@ -28081,9 +28094,22 @@
                 // cannot teleport a post through large portions of the feed.
                 const desiredIndex = Math.max(0, next.findIndex(p => p && p.id === votedPostId));
                 const oldIndex = Math.max(0, prev.findIndex(p => p && p.id === votedPostId));
-                // Hard rule: one vote can move the voted post by at most one slot.
-                // This enforces simple adjacent swaps and keeps movement predictable.
-                const MAX_STEP = 1;
+                const votedPost = byId.get(votedPostId);
+                const likes = Number(votedPost && votedPost.likes) || 0;
+                const dislikes = Number(votedPost && votedPost.dislikes) || 0;
+                const net = likes - dislikes;
+
+                // A vote is an explicit ML update, so let meaningful engagement move
+                // farther than an adjacent swap while still preventing whole-feed churn.
+                // Positive posts can climb faster; negative posts can fall faster.
+                let maxStepUp = 2;
+                let maxStepDown = 2;
+                if (net >= 3) maxStepUp = 4;
+                if (net >= 8) maxStepUp = 8;
+                if (net >= 15) maxStepUp = 12;
+                if (net < 0) maxStepDown = Math.min(12, 3 + Math.abs(net));
+
+                const MAX_STEP = desiredIndex < oldIndex ? maxStepUp : maxStepDown;
                 const minAllowed = Math.max(0, oldIndex - MAX_STEP);
                 const maxAllowed = Math.min(baseIds.length, oldIndex + MAX_STEP);
                 const targetIndex = Math.max(minAllowed, Math.min(maxAllowed, desiredIndex));
@@ -28105,7 +28131,7 @@
                     }
                 }
 
-                console.log(`🧊 Vote reorder stabilization (adjacent): old=${oldIndex} desired=${desiredIndex} final=${targetIndex}`);
+                console.log(`🧊 Vote reorder stabilization: old=${oldIndex} desired=${desiredIndex} final=${targetIndex} net=${net} maxStep=${MAX_STEP}`);
                 return stabilized;
             } catch (e) {
                 console.warn('stabilizeVoteDrivenReorder failed:', e);
@@ -28324,7 +28350,20 @@
                     if (dedup.length >= MAX_POSTS) break;
                 }
 
-                pendingSortedPosts = compactPostListForSlots(applyContentFreshnessWaterfall(dedup, 'incremental'));
+                let rankedSnapshot = dedup;
+                try {
+                    rankedSnapshot = applyUnifiedRanking(rankedSnapshot);
+                } catch (e) {
+                    console.warn('incremental unified ranking failed:', e);
+                    rankedSnapshot = dedup;
+                }
+                try {
+                    rankedSnapshot = applyContentFreshnessWaterfall(rankedSnapshot, 'incremental');
+                } catch (e) {
+                    console.warn('incremental freshness pass failed:', e);
+                }
+
+                pendingSortedPosts = compactPostListForSlots(rankedSnapshot);
                 // Kick off the 1/sec reconciler to apply minimal diffs
                 try { scheduleGridReconcile(); } catch (e) { /* ignore */ }
                 console.log(`⚡ recomputeFeedSnapshot: built snapshot of ${pendingSortedPosts.length} posts`);
