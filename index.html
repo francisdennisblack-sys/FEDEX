@@ -17325,26 +17325,22 @@
             const dropdown = document.getElementById('autocompleteDropdown');
             if (dropdown) dropdown.style.display = 'none';
             
-            // Keep explicit user-selected area tags. Only clear/refresh if stale.
-            const hasPinnedAreaSelection = !!(userSelectedZone && currentZoneTag && !__isStaleAreaTag(currentZoneTag));
-            if (hasPinnedAreaSelection) {
-                console.log(`✅ Preserving user-selected area for posting: "${currentZoneTag}"`);
-                updateZonePredictor();
-            } else {
-                userSelectedZone = false;
-                currentZoneTag = '';
-                try { window.persistZoneTagForUser && window.persistZoneTagForUser(null); } catch(e) {}
-                const clearZoneBtnOnReset = document.getElementById('clearZoneBtn');
-                if (clearZoneBtnOnReset) clearZoneBtnOnReset.style.display = 'none';
-                const customTagInputOnReset = document.getElementById('customZoneTag');
-                if (customTagInputOnReset) customTagInputOnReset.value = '';
+            // Always reset previously selected area tag when reopening posting.
+            userSelectedZone = false;
+            currentZoneTag = '';
+            window.currentSelectedAreaBbox = null;
+            window.currentSelectedAreaCenter = null;
+            try { window.persistZoneTagForUser && window.persistZoneTagForUser(null); } catch(e) {}
+            const clearZoneBtnOnReset = document.getElementById('clearZoneBtn');
+            if (clearZoneBtnOnReset) clearZoneBtnOnReset.style.display = 'none';
+            const customTagInputOnReset = document.getElementById('customZoneTag');
+            if (customTagInputOnReset) customTagInputOnReset.value = '';
 
-                // Re-run auto-detect so the SENDING TO field shows the best current location.
-                if (typeof autoDetectClosestArea === 'function') {
-                    try { autoDetectClosestArea(); } catch(e) { console.warn('autoDetectClosestArea failed on reset', e); }
-                } else {
-                    updateZonePredictor();
-                }
+            // Re-run auto-detect so the SENDING TO field shows the best current location.
+            if (typeof autoDetectClosestArea === 'function') {
+                try { autoDetectClosestArea(); } catch(e) { console.warn('autoDetectClosestArea failed on reset', e); }
+            } else {
+                updateZonePredictor();
             }
             
             // Show nearby locations for quick selection
@@ -18347,8 +18343,8 @@
                 window.lazyLoadEnhancedLocationDatabase().catch(e => console.log('Background enhance load:', e));
             }
 
-            // Search-only behavior: do not prefill with defaults or quick picks.
-            console.log('📍 Refine location field focused - search-only mode');
+            // Show curated defaults immediately when the field is focused and empty.
+            console.log('📍 Refine location field focused - show defaults + live search');
             try {
                 const customTagInput = document.getElementById('customZoneTag');
                 const currentValue = customTagInput ? customTagInput.value.trim() : '';
@@ -18356,7 +18352,12 @@
                     remoteDropdown.handleInput(currentValue);
                 } else {
                     try { if (remoteDropdown) remoteDropdown.close(); } catch (e) {}
-                    // Preload search data in the background only; no visible pre-picked list.
+                    // Render dropdown with ready-to-tap defaults before typing.
+                    showRefineLocationSearch();
+                    if (typeof fetchRefineDefaults === 'function') {
+                        fetchRefineDefaults();
+                    }
+                    // Preload search data in the background for faster first keystroke.
                     try {
                         if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
                             window._poiIndexPreloadPromise = window._poiIndexPreloadPromise || window.ensureGlobalPoiSearchIndex().catch(e => { console.warn('POI preload failed:', e); return null; });
@@ -18786,7 +18787,7 @@
         }
 
         /**
-         * Show dedicated dropdown for refine location field with search input (no prefill)
+         * Show dedicated dropdown for refine location field.
          */
         function showRefineLocationSearch() {
             const dropdown = document.getElementById('refineLocationDropdown');
@@ -19549,7 +19550,11 @@
             if (val.length === 0) {
                 lastRefineLocationSearchQuery = '';
                 try { if (remoteDropdown) remoteDropdown.close(); } catch (e) {}
-                refineSearchDebugLog('Input empty: reset to prompt mode');
+                showRefineLocationSearch();
+                if (typeof fetchRefineDefaults === 'function') {
+                    fetchRefineDefaults();
+                }
+                refineSearchDebugLog('Input empty: showing default refine suggestions');
                 return;
             }
 
