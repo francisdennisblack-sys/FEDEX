@@ -17515,6 +17515,7 @@
             
             console.log(`🔍 SEARCH START: Query="${query}"`);
             const q = query.toLowerCase();
+            const isShortQuery = q.length <= 2;
             const results = [];
             
             // GENERAL CITY-ANCHORED SEARCH: If query exactly matches any city/town in our DB,
@@ -17581,12 +17582,16 @@
                 let prefixMatches = 0;
                 let containsMatches = 0;
                 let stateMatches = 0;
+                const locationScanCap = isShortQuery
+                    ? Math.min(globalLocationDatabase.length, 18000)
+                    : globalLocationDatabase.length;
                 
                 // Search flat array directly (already flattened during loadUSLocationDatabase)
-                globalLocationDatabase.forEach((location) => {
+                for (let li = 0; li < locationScanCap; li++) {
+                    const location = globalLocationDatabase[li];
                     // Skip POIs here — they are handled by the dedicated POI section below
                     // (so we don't list them twice; the POI section adds emoji + distance metadata)
-                    if (location && location.isPOI) return;
+                    if (location && location.isPOI) continue;
                     const locName = (location.name || '').toLowerCase();
                     const state = (location.state || '').toLowerCase();
                     const stateCode = (location.stateCode || '').toLowerCase();
@@ -17618,7 +17623,7 @@
                         prefixMatches++;
                     }
                     // Contains match (high priority)
-                    else if (locName.includes(q)) {
+                    else if (!isShortQuery && locName.includes(q)) {
                         const key = `${location.name}, ${location.state}`;
                         if (!locationMatches[key]) {
                             locationMatches[key] = { 
@@ -17633,7 +17638,7 @@
                         }
                     }
                     // State name match (medium priority)
-                    else if (state.includes(q) || stateCode.includes(q)) {
+                    else if ((isShortQuery && (state.startsWith(q) || stateCode.startsWith(q))) || (!isShortQuery && (state.includes(q) || stateCode.includes(q)))) {
                         const key = `${location.name}, ${location.state}`;
                         if (!locationMatches[key]) {
                             locationMatches[key] = { 
@@ -17647,7 +17652,7 @@
                             stateMatches++;
                         }
                     }
-                });
+                }
                 
                 console.log(`   ✅ Location matches: ${prefixMatches} prefix + ${containsMatches} contains + ${stateMatches} state = ${Object.keys(locationMatches).length} total`);
                 
@@ -17698,7 +17703,7 @@
 
                 // Cap scan for perf — prefix matches are gathered first across the full set,
                 // contains matches are gathered up to a cap so 500k POIs stay snappy.
-                const SCAN_CAP = 60000; // ~60k POI scan max per query (raised for type-filter queries below)
+                const SCAN_CAP = isShortQuery ? 14000 : 60000; // cap aggressively for 1-2 char queries
 
                 // Token-aware query: split into words so "high school" matches "Lincoln High School"
                 // even though the substring "high school" isn't a prefix. Also map common queries to typeCodes
@@ -17726,7 +17731,9 @@
                     const idx = window.globalPoiSearchIndex;
                     const stateCodes = idx.stateCodes || [];
                     // Broader scan when type filter is active (return all of that type)
-                    const indexLimit = typeCodeFilter ? idx.rows.length : Math.min(idx.rows.length, 200000);
+                    const indexLimit = typeCodeFilter
+                        ? (isShortQuery ? Math.min(idx.rows.length, 30000) : idx.rows.length)
+                        : (isShortQuery ? Math.min(idx.rows.length, 50000) : Math.min(idx.rows.length, 200000));
                     // Per-name dedupe so the same POI name in 50 states only appears once (nearest wins below)
                     const seenNames = new Set();
                     for (let i = 0; i < indexLimit; i++) {
@@ -17957,7 +17964,7 @@
             // Return comprehensive results - ENTIRE DATABASE SEARCH
             // Includes: ALL locations + ALL POIs + ALL cities + neighborhoods + nearby + secondary nearby
             // Limited only by practical UI constraints (1000 items should cover 99.9% of searches)
-            const finalResults = results.slice(0, 1000);
+            const finalResults = results.slice(0, isShortQuery ? 180 : 1000);
             console.log(`🔍 SEARCH END: Returning ${finalResults.length} total suggestions from entire database search`);
             
             return finalResults;
@@ -19551,6 +19558,18 @@
             }
             lastRefineLocationSearchQuery = val;
 
+            // Fast-path UX for short queries: render lightweight local suggestions immediately
+            // so users see instant dropdown feedback while heavier searches run.
+            if (val.length <= 2) {
+                try {
+                    const instant = buildLocalRefineFallbackSuggestions(val).slice(0, 40);
+                    const immediateCount = renderRefineDatabaseSuggestions(instant, val);
+                    refineSearchDebugLog('Short-query fast path rendered', { query: val, immediateCount });
+                } catch (e) {
+                    console.warn('Short-query fast path render failed', e);
+                }
+            }
+
             // DEBOUNCE: Clear existing timeout and set new one
             clearTimeout(refineLocationSearchTimeout);
             refineLocationSearchTimeout = setTimeout(() => {
@@ -19566,7 +19585,7 @@
                 } else {
                     refineSearchDebugLog('Using DB results only', { query: val, dbCount });
                 }
-            }, 320); // Wait 320ms after user stops typing
+            }, val.length <= 2 ? 120 : 260); // faster on short queries, still throttled for stability
         }
 
         if (document.readyState === 'loading') {
