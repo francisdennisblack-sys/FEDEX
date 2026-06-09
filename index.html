@@ -7531,6 +7531,47 @@
             return displayPosts;
         }
 
+        function normalizeBadgeKindForGlow(badge) {
+            if (!badge) return '';
+            if (typeof badge === 'string') return badge.toLowerCase();
+            if (typeof badge === 'object' && badge.kind) return String(badge.kind).toLowerCase();
+            return '';
+        }
+
+        function resolvePostGlowKind(post, opts = {}) {
+            if (!post) return '';
+
+            const podium = Array.isArray(opts.podium) ? opts.podium : [];
+            const badges = Array.isArray(opts.badges) ? opts.badges : [];
+            const likes = Number(post.likes) || 0;
+            const dislikes = Number(post.dislikes) || 0;
+            const net = likes - dislikes;
+            const totalVotes = likes + dislikes;
+
+            // Priority order keeps visuals deterministic across ML refreshes.
+            if (opts.hasBoostFlag || isStrictBoostActive(post)) return 'boost';
+
+            const boostBadgeRaw = String((post && post.boostBadge && (post.boostBadge.label || post.boostBadge.kind || post.boostBadge.type)) || post.boostBadge || '').toLowerCase();
+            const primaryBadgeRaw = String(post.primaryBadge || '').toLowerCase();
+            if (boostBadgeRaw.includes('spotlight') || primaryBadgeRaw.includes('spotlight') || hasBadgeKind(post, 'spotlight')) return 'spotlight';
+
+            if (podium.includes(post.id)) return 'top3';
+
+            const hasTrendingBadge = badges.some((b) => {
+                const kind = normalizeBadgeKindForGlow(b);
+                return kind.includes('trend') || kind === 'hot';
+            });
+            const tier = String(post.engagementTier || '').toLowerCase();
+            if (hasTrendingBadge || tier.includes('trend') || tier === 'hot' || tier === 'viral') return 'trending';
+
+            if (net < 0) return 'disliked';
+            if (totalVotes > 0 && net === 0) return 'balanced';
+            if (net > 0) return 'liked';
+            if (totalVotes === 0) return 'untouched';
+
+            return '';
+        }
+
         // Centralized helper: apply glow and border styles consistently for grid boxes and modal elements
         function applyGlowAndBorder(el, post, opts = {}) {
             if (!el) return;
@@ -7543,52 +7584,55 @@
                 Array.from(el.classList || []).forEach(c => { if (c && c.indexOf && c.indexOf('glow-') === 0) el.classList.remove(c); });
             } catch (e) { /* ignore */ }
 
-            // Boost overrides everything
-            if (hasBoostFlag) {
-                try { el.classList.add('glow-boost'); } catch (e) {}
-                return;
+            try {
+                const glowKind = resolvePostGlowKind(post, { podium, badges, hasBoostFlag });
+                if (!glowKind) return;
+                if (glowKind === 'boost') { el.classList.add('glow-boost'); return; }
+                if (glowKind === 'spotlight') { el.classList.add('glow-spotlight'); return; }
+                if (glowKind === 'top3') { el.classList.add('glow-top3'); return; }
+                if (glowKind === 'trending') { el.classList.add('glow-trending'); return; }
+                if (glowKind === 'disliked') { el.classList.add('glow-disliked'); return; }
+                if (glowKind === 'balanced') { el.classList.add('glow-balanced'); return; }
+                if (glowKind === 'untouched') { el.classList.add('glow-untouched'); return; }
+                if (glowKind === 'liked') { el.classList.add('glow-liked'); return; }
+            } catch (e) { /* ignore */ }
+        }
+
+        function refreshVisiblePostGlowOutlines(reason = '') {
+            try {
+                const orderedPosts = (window.gridScroller && Array.isArray(window.gridScroller.items) && window.gridScroller.items.length > 0)
+                    ? window.gridScroller.items.filter(p => p && p.id)
+                    : getActiveViewerFeedPosts().filter(p => p && p.id);
+                if (!orderedPosts.length) return;
+
+                const podium = orderedPosts.slice(0, 3).map(p => p.id);
+                window.lastVisibleTop3 = podium.slice(0, 3);
+                const postMap = new Map(orderedPosts.map((p) => [String(p.id), p]));
+                const visibleNodes = Array.from(document.querySelectorAll('.grid-box[data-post-id]'));
+
+                visibleNodes.forEach((node) => {
+                    const postId = String(node.getAttribute('data-post-id') || '');
+                    if (!postId) return;
+                    let post = postMap.get(postId) || findPostAcrossVisibleFeeds(postId) || (postCache && postCache[postId]);
+                    if (!post) return;
+                    const badges = calculateBadges(post, orderedPosts) || [];
+                    applyGlowAndBorder(node, post, { podium, badges, hasBoostFlag: isStrictBoostActive(post) });
+                });
+
+                if (reason) console.log(`✨ Glow refresh complete: ${reason} (visible=${visibleNodes.length})`);
+            } catch (e) {
+                console.warn('refreshVisiblePostGlowOutlines failed', e);
             }
-
-            // Top-3 uniform glow
-            try {
-                if (podium && Array.isArray(podium) && podium.includes(post.id)) {
-                    el.classList.add('glow-top3');
-                    return;
-                }
-            } catch (e) { /* ignore */ }
-
-            // Fallback auxiliary glows based on badge kinds
-            try {
-                for (const b of (badges || [])) {
-                    if (!b || !b.kind) continue;
-                    if (b.kind === 'hot') { el.classList.add('glow-hot'); break; }
-                    if (b.kind === 'disliked' || b.kind === 'review') { el.classList.add('glow-disliked'); break; }
-                    if (b.kind === 'balanced') { el.classList.add('glow-balanced'); break; }
-                    if (b.kind === 'untouched') { el.classList.add('glow-untouched'); break; }
-                    if (b.kind === 'liked') { el.classList.add('glow-liked'); break; }
-                }
-            } catch (e) { /* ignore */ }
         }
 
         // Recompute badge assignments for visible posts and apply DOM updates
         function recomputeAndApplyBadges() {
             try {
-                // Build top-100 ranking by engagement (likes - dislikes)
-                const allPostsList = [];
-                for (const k in gridContent) {
-                    if (!Array.isArray(gridContent[k])) continue;
-                    gridContent[k].forEach(p => { if (p && p.id) allPostsList.push(p); });
-                }
-
-                // Sort by score desc
-                allPostsList.sort((a,b) => ((b.likes||0)-(b.dislikes||0)) - ((a.likes||0)-(a.dislikes||0)));
-
-                // Top 3 (exclude viewer's own posts from podium if they are the author)
-                const podium = [];
-                for (let i=0;i<allPostsList.length && podium.length<3;i++) {
-                    const p = allPostsList[i];
-                    if (p && (p.authId !== currentUserId) && p.id) podium.push(p.id);
-                }
+                // Podium must follow current on-screen ordering so glow/position stay in sync.
+                const orderedPosts = (window.gridScroller && Array.isArray(window.gridScroller.items) && window.gridScroller.items.length > 0)
+                    ? window.gridScroller.items.filter(p => p && p.id)
+                    : getActiveViewerFeedPosts().filter(p => p && p.id);
+                const podium = orderedPosts.slice(0, 3).map(p => p.id);
 
                 // Cache last visible top-3 for modal mapping consistency
                 try { window.lastVisibleTop3 = podium.slice(0,3); } catch(e) { window.lastVisibleTop3 = podium.slice(0,3); }
@@ -7755,6 +7799,8 @@
                         } catch (e) { /* defensive */ }
                     } catch(e){ console.warn('applyBadge error', e); }
                 });
+
+                try { refreshVisiblePostGlowOutlines('recomputeAndApplyBadges'); } catch (e) {}
 
                 function findPostById(id) {
                     for (const k in gridContent) {
@@ -10011,6 +10057,7 @@
                     window.lastRenderGridTime = 0; // bypass throttle for deliberate vote action
                     window.voteTriggeredRerank = true; // signal immediate apply to scroller
                     renderGrid();
+                    try { refreshVisiblePostGlowOutlines('vote-delayed-rerank'); } catch (e) {}
                     window.voteTriggeredRerank = false;
                     console.log(`✅ Delayed vote refresh applied for ${postId.substring(0, 8)} after ${VOTE_VISUAL_DELAY_MS}ms`);
                 } catch (e) {
@@ -10034,6 +10081,7 @@
                         postCache[postId].dislikes = dislikes;
                     }
                     updateVoteDisplayInDOM(postId, likes, dislikes);
+                    try { refreshVisiblePostGlowOutlines('vote-transaction-success'); } catch (e) {}
                 } catch (e) { /* defensive */ }
             }).catch(err => {
                 console.error('❌ Transaction failed, rolling back UI:', err);
@@ -16484,6 +16532,12 @@
                     .glow-hot { box-shadow: inset 0 0 0 6px rgba(251,146,60,0.10), 0 18px 48px rgba(251,146,60,0.06); }
                     .view-modal-content.glow-hot { box-shadow: 0 18px 48px rgba(251,146,60,0.14), 0 0 30px rgba(251,146,60,0.04); border: 1px solid rgba(251,146,60,0.06); }
 
+                    .glow-trending { box-shadow: inset 0 0 0 6px rgba(244,114,182,0.11), 0 18px 48px rgba(244,114,182,0.07); }
+                    .view-modal-content.glow-trending { box-shadow: 0 18px 48px rgba(244,114,182,0.15), 0 0 30px rgba(244,114,182,0.05); border: 1px solid rgba(244,114,182,0.08); }
+
+                    .glow-spotlight { box-shadow: inset 0 0 0 7px rgba(250,204,21,0.16), 0 20px 54px rgba(250,204,21,0.09); }
+                    .view-modal-content.glow-spotlight { box-shadow: 0 20px 54px rgba(250,204,21,0.20), 0 0 34px rgba(250,204,21,0.07); border: 1px solid rgba(250,204,21,0.12); }
+
                     .glow-disliked { box-shadow: inset 0 0 0 6px rgba(168,85,247,0.10), 0 18px 48px rgba(168,85,247,0.06); }
                     .view-modal-content.glow-disliked { box-shadow: 0 18px 48px rgba(168,85,247,0.14), 0 0 30px rgba(168,85,247,0.04); border: 1px solid rgba(168,85,247,0.06); }
 
@@ -18666,13 +18720,83 @@
                 const esc = (s) => String(s || '').replace(/'/g, "&#39;");
                 const currentLocationLabel = String(currentAreaName || currentZoneTag || window.latestUserAreaTag || 'Current Location').trim();
 
-                const nearbyCities = locationRows
-                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi <= 120)
-                    .slice(0, 10);
+                const pickSpacedRows = (rows, maxCount, minSpacingMiles) => {
+                    if (!Array.isArray(rows) || rows.length === 0) return [];
+                    const out = [];
+                    const normSpacing = Number(minSpacingMiles) > 0 ? Number(minSpacingMiles) : 0;
+                    for (let i = 0; i < rows.length && out.length < maxCount; i++) {
+                        const candidate = rows[i];
+                        if (!candidate) continue;
+                        const cLat = Number(candidate.lat);
+                        const cLon = Number(candidate.lon);
+                        const hasCoords = Number.isFinite(cLat) && Number.isFinite(cLon);
+                        let tooClose = false;
+                        for (let j = 0; j < out.length; j++) {
+                            const existing = out[j];
+                            const eLat = Number(existing.lat);
+                            const eLon = Number(existing.lon);
+                            if (hasCoords && Number.isFinite(eLat) && Number.isFinite(eLon) && typeof calculateDistance === 'function') {
+                                const distMi = calculateDistance(cLat, cLon, eLat, eLon) * 0.621371;
+                                if (distMi < normSpacing) {
+                                    tooClose = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!tooClose) out.push(candidate);
+                    }
+                    return out;
+                };
 
-                const nearbyPOIs = poiRows
-                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi <= 35)
+                const scorePoiPopularity = (row) => {
+                    const categoryText = String((row && row.category) || '').toLowerCase();
+                    const nameText = String((row && row.display) || '').toLowerCase();
+                    let score = 0;
+                    if (/(park|museum|stadium|arena|mall|center|beach|downtown|airport|station|university|college|landmark|market|pier|harbor|trail|campus)/.test(categoryText)) score += 4;
+                    if (/(park|museum|stadium|mall|airport|university|college|landmark)/.test(nameText)) score += 2;
+                    if (inViewport(row && row.lat, row && row.lon)) score += 2.5;
+                    if (isFinite(row && row.distanceMi)) {
+                        if (row.distanceMi <= 100) score += 3;
+                        score += Math.max(0, 3 - (row.distanceMi / 40));
+                    }
+                    return score;
+                };
+
+                // Rebalance defaults: avoid overloading ultra-close options and
+                // increase 5-100 mile coverage + POI representation.
+                const veryNearbyCities = locationRows
+                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi <= 5)
                     .slice(0, 12);
+
+                const regionalCitiesPool = locationRows
+                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi > 5 && x.distanceMi <= 100)
+                    .slice(0, 80);
+                const regionalCities = pickSpacedRows(regionalCitiesPool, 12, 10);
+
+                const veryNearbyPOIs = poiRows
+                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi <= 5)
+                    .sort((a, b) => scorePoiPopularity(b) - scorePoiPopularity(a))
+                    .slice(0, 12);
+
+                const regionalPOIsPool = poiRows
+                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi > 5 && x.distanceMi <= 100)
+                    .map((x) => ({ ...x, _poiScore: scorePoiPopularity(x) }))
+                    .sort((a, b) => (b._poiScore || 0) - (a._poiScore || 0))
+                    .slice(0, 120);
+                const regionalPOIs = pickSpacedRows(regionalPOIsPool, 16, 4);
+
+                const farPopularPOIs = pickSpacedRows(
+                    poiRows
+                        .filter((x) => isFinite(x.distanceMi) && x.distanceMi > 100 && x.distanceMi <= 250)
+                        .map((x) => ({ ...x, _poiScore: scorePoiPopularity(x) }))
+                        .sort((a, b) => (b._poiScore || 0) - (a._poiScore || 0))
+                        .slice(0, 60),
+                    3,
+                    12
+                );
+
+                const compactNearbyCities = pickSpacedRows(veryNearbyCities, 2, 3);
+                const compactNearbyPOIs = pickSpacedRows(veryNearbyPOIs, 3, 2);
 
                 const recentSearches = getRecentLocationSearches(8).map((r) => ({
                     display: r.displayName,
@@ -18685,18 +18809,12 @@
                 const popularLocalDestinations = poiRows
                     .filter((x) => {
                         if (inViewport(x.lat, x.lon)) return true;
-                        return isFinite(x.distanceMi) && x.distanceMi <= 25;
+                        return isFinite(x.distanceMi) && x.distanceMi > 5 && x.distanceMi <= 100;
                     })
-                    .map((x) => {
-                        const categoryText = String(x.category || '').toLowerCase();
-                        let popularityBoost = 0;
-                        if (/(park|museum|stadium|mall|center|beach|downtown|airport|station|university|college|landmark)/.test(categoryText)) popularityBoost += 2;
-                        if (inViewport(x.lat, x.lon)) popularityBoost += 2.5;
-                        if (isFinite(x.distanceMi)) popularityBoost += Math.max(0, 3 - (x.distanceMi / 10));
-                        return { ...x, _popularityBoost: popularityBoost };
-                    })
+                    .map((x) => ({ ...x, _popularityBoost: scorePoiPopularity(x) }))
                     .sort((a, b) => b._popularityBoost - a._popularityBoost)
-                    .slice(0, 10);
+                    .slice(0, 80);
+                const popularLocalDestinationsCurated = pickSpacedRows(popularLocalDestinations, 10, 5);
 
                 const renderSection = (title, rows) => {
                     if (!Array.isArray(rows) || rows.length === 0) return '';
@@ -18712,10 +18830,13 @@
 
                 let html = '';
                 html += renderSection('Current Location', [{ display: currentLocationLabel, distanceMi: Infinity }]);
-                html += renderSection('Nearby Cities', nearbyCities);
-                html += renderSection('Nearby POIs', nearbyPOIs);
+                html += renderSection('Cities 5-100 Miles', regionalCities);
+                html += renderSection('Popular POIs Within 100 Miles', regionalPOIs);
+                html += renderSection('Very Nearby Cities (0-5 mi)', compactNearbyCities);
+                html += renderSection('Very Nearby POIs (0-5 mi)', compactNearbyPOIs);
                 html += renderSection('Recent Searches', recentSearches);
-                html += renderSection('Popular Local Destinations', popularLocalDestinations);
+                html += renderSection('Popular POIs In Range', popularLocalDestinationsCurated);
+                html += renderSection('Far Popular POIs (Few Picks)', farPopularPOIs);
 
                 if (!html) {
                     const fallback = [];
@@ -26886,6 +27007,7 @@
             renderGridFull();
             // Ensure badges are recomputed immediately after a full render
             try { recomputeAndApplyBadges(); } catch (e) { console.warn('recompute badges failed after renderGrid', e); }
+            try { refreshVisiblePostGlowOutlines('renderGrid'); } catch (e) { console.warn('glow refresh failed after renderGrid', e); }
         }
 
         /**
@@ -30215,10 +30337,12 @@
                 // because vote might have changed rankings
                 console.log(`🏅 Recalculating top 3 position badges due to vote change...`);
                 updateTopPositionBadges(postsInGrid);
+                try { refreshVisiblePostGlowOutlines('recalculateBadgesForCurrentGrid-voted'); } catch (e) {}
             } else {
                 // 🔄 FULL MODE: Recalculate only top 3 (when page loads/refreshes)
                 console.log(`🏅 Recalculating top 3 position badges for grid (${postsInGrid.length} posts)`);
                 updateTopPositionBadges(postsInGrid);
+                try { refreshVisiblePostGlowOutlines('recalculateBadgesForCurrentGrid-full'); } catch (e) {}
             }
         }
         
@@ -30247,6 +30371,7 @@
             });
 
             console.log(`✅ Top position badges updated: crowned/runner-up/podium by position`);
+            try { refreshVisiblePostGlowOutlines('updateTopPositionBadges'); } catch (e) {}
         }
         window.getPostBadgesForArea = getPostBadgesForArea;
 
