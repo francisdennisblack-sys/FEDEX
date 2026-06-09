@@ -166,6 +166,39 @@
             }
         }
 
+        function getStablePostAreaTag(post) {
+            if (!post) return null;
+            return (post.displayAreaTag && String(post.displayAreaTag).trim()) ||
+                   (post.selectedAreaTag && String(post.selectedAreaTag).trim()) ||
+                   (post.customTag && String(post.customTag).trim()) ||
+                   (post.originalAreaTag && String(post.originalAreaTag).trim()) ||
+                   (post.county && String(post.county).trim()) ||
+                   (post.zoneTag && String(post.zoneTag).trim()) ||
+                   (post.area && String(post.area).trim()) ||
+                   (post.neighborhood && String(post.neighborhood).trim()) ||
+                   null;
+        }
+
+        function isPostAreaPromotionEligible(post) {
+            if (!post) return false;
+            const likes = Number(post.likes || 0);
+            const dislikes = Number(post.dislikes || 0);
+            const net = likes - dislikes;
+            const rank = Number(post.globalRank || post.platformRank || post.rank || post.feedRank || 0);
+            const proximity = String(post.proximityClass || '').toLowerCase();
+            const source = String(post.contentSource || '').toUpperCase();
+            const badges = Array.isArray(post.badges) ? post.badges : [];
+
+            if (rank > 0 && rank <= 1000 && net > 0) return true;
+            if (proximity === 'featured' && net > 0) return true;
+            if (source === 'EXTERNAL_TOP_TIER' && net > 0) return true;
+            if (badges.some(b => ['featured', 'crowned', 'hot', 'trending'].includes(String(b).toLowerCase())) && net > 0) return true;
+            try {
+                if (typeof isTopTierPost === 'function' && isTopTierPost(post)) return true;
+            } catch (e) { /* ignore optional helper failures */ }
+            return false;
+        }
+
         /**
          * Re-tag recent posts authored by the current user when they move zones.
          * Looks for posts created within the last N minutes that are not locked.
@@ -181,8 +214,29 @@
                     if (!tracked || !tracked.created) continue;
                     if (now - tracked.created > WINDOW_MS) continue; // only recent posts
 
-                    // Skip locked posts
-                    if (tracked.areaTagLocked) continue;
+                    // Area tags are author intent. Never rewrite an existing tag just
+                    // because the viewer/author moved; only backfill legacy missing tags.
+                    if (tracked.areaTag || tracked.originalAreaTag || tracked.displayAreaTag || tracked.areaTagLocked) {
+                        const stableZone = tracked.displayAreaTag || tracked.originalAreaTag || tracked.areaTag || null;
+                        tracked.areaTagLocked = true;
+                        tracked.originalAreaTag = tracked.originalAreaTag || stableZone;
+                        tracked.displayAreaTag = tracked.displayAreaTag || stableZone;
+                        if (!tracked.areaHistory) tracked.areaHistory = stableZone ? [stableZone] : [];
+                        if (stableZone) {
+                            try {
+                                await update(ref(database, `posts/${postId}`), {
+                                    originalAreaTag: tracked.originalAreaTag,
+                                    displayAreaTag: tracked.displayAreaTag,
+                                    areaTagLocked: true,
+                                    areaPending: false,
+                                    updatedAt: Date.now()
+                                });
+                            } catch (err) {
+                                console.warn('Failed locking existing legacy area tag', err);
+                            }
+                        }
+                        continue;
+                    }
 
                     // Compute best new zone for current location
                     let newZone = currentZoneTag || tracked.areaTag || tracked.originalAreaTag;
@@ -198,17 +252,30 @@
 
                     if (!newZone) continue;
 
-                    // If the new zone differs from tracked area, update server and tracker
-                    if (String(newZone) !== String(tracked.areaTag)) {
-                        const oldZone = tracked.areaTag || tracked.originalAreaTag || null;
-                        console.log(`🔁 Retagging recent post ${postId} ${oldZone} → ${newZone}`);
-                        // Update server copy
-                        await updatePostZoneOnServer(postId, newZone, oldZone);
+                    console.log(`📍 Backfilling missing legacy area tag for recent post ${postId}: ${newZone}`);
+                    tracked.areaTag = newZone;
+                    tracked.originalAreaTag = newZone;
+                    tracked.displayAreaTag = newZone;
+                    tracked.areaTagLocked = true;
+                    tracked.areaTagLockedAt = tracked.areaTagLockedAt || Date.now();
+                    tracked.areaHistory = [newZone];
 
-                        // Update local tracker
-                        tracked.areaTag = newZone;
-                        if (!tracked.areaHistory) tracked.areaHistory = [];
-                        tracked.areaHistory.push(newZone);
+                    try {
+                        await update(ref(database, `posts/${postId}`), {
+                            county: newZone,
+                            zoneTag: newZone,
+                            area: newZone,
+                            region: newZone,
+                            originalAreaTag: newZone,
+                            displayAreaTag: newZone,
+                            areaTagLocked: true,
+                            areaPending: false,
+                            areaTagLockedAt: tracked.areaTagLockedAt,
+                            areaHistory: [newZone],
+                            updatedAt: Date.now()
+                        });
+                    } catch (err) {
+                        console.warn('Failed backfilling legacy missing area tag', err);
                     }
                 }
             } catch (e) {
@@ -7968,11 +8035,27 @@
         }
 
         // Determine what geographic context to show based on engagement & viewer distance
-        // This is PER-VIEWER - same post shows different tags to different viewers
+        // Stable area tags are AUTHOR/DESTINATION intent. Reach can broaden only after
+        // promotion; far-away viewers/likes are tracked separately and must not make the
+        // post look local to that far-away viewer.
         function getContextualZoneTag(post, userLocation) {
             if (!post) return { display: 'Unknown', emoji: '', scale: 'unknown' };
 
-            // PRIMARY: hard distance milestones for all viewers, including creators.
+            const stableAreaTag = (typeof getStablePostAreaTag === 'function') ? getStablePostAreaTag(post) : null;
+            const areaPromotionEligible = (typeof isPostAreaPromotionEligible === 'function') ? isPostAreaPromotionEligible(post) : false;
+
+            if (stableAreaTag && !areaPromotionEligible) {
+                return {
+                    display: stableAreaTag,
+                    emoji: post.poiEmoji || '📍',
+                    scale: post.customTag ? 'CUSTOM_POI' : 'POI',
+                    context: 'stable_author_area',
+                    reach: 'local',
+                    stableAreaTag: true
+                };
+            }
+
+            // Promotion path: top/featured/global content may show broader reach labels.
             // Thresholds in miles: 1 -> 10 -> 100 -> 400 -> 900 -> 1500 -> 5000 -> worldwide.
             const milestoneContext = getDistanceMilestoneZoneTag(post, userLocation);
             if (milestoneContext) return milestoneContext;
@@ -12389,7 +12472,9 @@
                     trackedPost.likes = engagementMetrics.likes || trackedPost.likes || 0;
                     trackedPost.dislikes = engagementMetrics.dislikes || trackedPost.dislikes || 0;
 
-                    // If engagement originated from a new area, add it to areasCovered and areaHistory
+                    // If engagement originated from a new area, add it to reach history only.
+                    // A far-away like/view expands reach, but it must not rewrite the
+                    // post's canonical author/destination area tag.
                     const engagementArea = engagementMetrics.area || engagementMetrics.areaTag || (typeof getCurrentUserArea === 'function' ? getCurrentUserArea() : null) || (userLocation && (userLocation.areaName || userLocation.county || userLocation.name));
                     let addedNewArea = false;
                     if (engagementArea) {
@@ -12397,8 +12482,8 @@
                         if (!areas.includes(engagementArea)) {
                             areas.push(engagementArea);
                             trackedPost.reach.areasCovered = areas;
-                            // Add to areaHistory (preserve previous tags)
-                            if (!trackedPost.areaHistory.includes(engagementArea)) trackedPost.areaHistory.push(engagementArea);
+                            if (!trackedPost.reach.areaExpansionHistory) trackedPost.reach.areaExpansionHistory = [];
+                            trackedPost.reach.areaExpansionHistory.push({ area: engagementArea, ts: Date.now() });
                             addedNewArea = true;
                             console.log(`🔁 Post ${postId.substring(0,8)} expanded to new area: ${engagementArea}`);
                         }
@@ -12409,6 +12494,7 @@
                         const updates = {
                             areaHistory: trackedPost.areaHistory,
                             areasCovered: trackedPost.reach.areasCovered,
+                            reachAreaHistory: trackedPost.reach.areaExpansionHistory || [],
                             areaHierarchyLevel: trackedPost.areaHierarchyLevel,
                             likes: trackedPost.likes,
                             dislikes: trackedPost.dislikes
@@ -12426,6 +12512,7 @@
                         if (postCache && postCache[postId]) {
                             postCache[postId].areaHistory = trackedPost.areaHistory.slice();
                             postCache[postId].areasCovered = (trackedPost.reach.areasCovered || []).slice();
+                            postCache[postId].reachAreaHistory = (trackedPost.reach.areaExpansionHistory || []).slice();
                             postCache[postId].areaHierarchyLevel = trackedPost.areaHierarchyLevel;
                         }
                         // Update gridContent entries
@@ -12436,6 +12523,7 @@
                                 const p = gridContent[key][idx];
                                 p.areaHistory = trackedPost.areaHistory.slice();
                                 p.areasCovered = (trackedPost.reach.areasCovered || []).slice();
+                                p.reachAreaHistory = (trackedPost.reach.areaExpansionHistory || []).slice();
                                 p.areaHierarchyLevel = trackedPost.areaHierarchyLevel;
                             }
                         }
@@ -13155,10 +13243,12 @@
                 ownedPosts.forEach(post => {
                     if (!seenIds.has(post.id)) {
                         seenIds.add(post.id);
+                        const stableTag = getStablePostAreaTag(post) || areaTag;
                         posts.push({
                             ...post,
                             contentSource: 'OWN_POST',
-                            displayAreaTag: post.county || areaTag,
+                            displayAreaTag: stableTag,
+                            originalAreaTag: post.originalAreaTag || stableTag,
                             isOwnPost: true
                         });
                     }
@@ -13173,10 +13263,12 @@
                 gridContent[areaTag].forEach(post => {
                     if (!seenIds.has(post.id) && posts.length < limit) {
                         seenIds.add(post.id);
+                        const stableTag = getStablePostAreaTag(post) || areaTag;
                         posts.push({
                             ...post,
                             contentSource: 'LOCAL',
-                            displayAreaTag: areaTag
+                            displayAreaTag: stableTag,
+                            originalAreaTag: post.originalAreaTag || stableTag
                         });
                     }
                 });
@@ -13193,10 +13285,12 @@
                     if (areaTag && post.county && String(post.county) !== String(areaTag)) return;
                     if (posts.length < limit) {
                         seenIds.add(post.id);
+                        const stableTag = getStablePostAreaTag(post) || areaTag;
                         posts.push({
                             ...post,
                             contentSource: 'SHARED',
-                            displayAreaTag: post.county || areaTag
+                            displayAreaTag: stableTag,
+                            originalAreaTag: post.originalAreaTag || stableTag
                         });
                     }
                 });
@@ -13221,11 +13315,12 @@
                 
                 // Add to external pool with rebadging
                 topTierPosts.forEach(post => {
+                    const stableTag = getStablePostAreaTag(post) || post.county || otherArea;
                     externalPosts.push({
                         ...post,
                         contentSource: 'EXTERNAL_TOP_TIER',
-                        displayAreaTag: extractCity(post.county), // "Seattle" not "Capitol Hill"
-                        originalAreaTag: post.county
+                        displayAreaTag: extractCity(stableTag), // "Seattle" not "Capitol Hill"
+                        originalAreaTag: post.originalAreaTag || stableTag
                     });
                 });
             }
@@ -21088,6 +21183,12 @@
                                                       post.neighborhood ||
                                                       null;
                             }
+                            const stableLoadedAreaTag = getStablePostAreaTag(post);
+                            if (stableLoadedAreaTag) {
+                                post.originalAreaTag = post.originalAreaTag || stableLoadedAreaTag;
+                                post.displayAreaTag = post.displayAreaTag || stableLoadedAreaTag;
+                                post.areaTagLocked = post.areaTagLocked !== false;
+                            }
                         } catch (e) {
                             console.error('  Error normalizing post at index', idx, 'id=', post.id, e);
                         }
@@ -26566,7 +26667,8 @@
                     // Generate zone/area tag display (always show immediately, even on first load)
                     // Fast path: avoid expensive enrichment for every card; read directly
                     // from already-hydrated post fields so the tag paints with first render.
-                    const resolvedAreaTag = post.displayAreaTag || post.county || post.zoneTag || post.area || post.customTag ||
+                    const stableResolvedAreaTag = getStablePostAreaTag(post);
+                    const resolvedAreaTag = stableResolvedAreaTag || post.county || post.zoneTag || post.area || post.customTag ||
                                             post.neighborhood || post.city || post.district ||
                                             post.poiName || post.state || post.region ||
                                             post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
@@ -26604,7 +26706,8 @@
                     const tileText = (post.content || post.text || post.description || '');
                     const content = String(tileText).substring(0, 200);
                     // 🟢 FAST PATH: author's frozen displayAreaTag (Firebase-backed).
-                    const areaTagText = post.displayAreaTag || post.county || post.zoneTag || post.area || post.customTag ||
+                    const stableAreaTagText = getStablePostAreaTag(post);
+                    const areaTagText = stableAreaTagText || post.county || post.zoneTag || post.area || post.customTag ||
                                        post.neighborhood || post.city || post.district ||
                                        post.poiName || post.state || post.region ||
                                        post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
