@@ -7540,15 +7540,22 @@
             return '';
         }
 
+        function getVoteCountState(post) {
+            const likes = Number(post && post.likes) || 0;
+            const dislikes = Number(post && post.dislikes) || 0;
+            const totalVotes = likes + dislikes;
+            if (totalVotes === 0) return 'untouched';
+            if (dislikes > likes) return 'disliked';
+            if (likes === dislikes) return 'balanced';
+            return 'liked';
+        }
+
         function resolvePostGlowKind(post, opts = {}) {
             if (!post) return '';
 
             const podium = Array.isArray(opts.podium) ? opts.podium : [];
             const badges = Array.isArray(opts.badges) ? opts.badges : [];
-            const likes = Number(post.likes) || 0;
-            const dislikes = Number(post.dislikes) || 0;
-            const net = likes - dislikes;
-            const totalVotes = likes + dislikes;
+            const voteState = getVoteCountState(post);
 
             // Priority order keeps visuals deterministic across ML refreshes.
             if (opts.hasBoostFlag || isStrictBoostActive(post)) return 'boost';
@@ -7557,11 +7564,11 @@
             const primaryBadgeRaw = String(post.primaryBadge || '').toLowerCase();
             if (boostBadgeRaw.includes('spotlight') || primaryBadgeRaw.includes('spotlight') || hasBadgeKind(post, 'spotlight')) return 'spotlight';
 
-            if (net < 0) return 'disliked';
-            if (totalVotes > 0 && net === 0) return 'balanced';
-            if (net > 0) return 'liked';
-
             if (podium.includes(post.id)) return 'top3';
+
+            if (voteState === 'disliked') return 'disliked';
+            if (voteState === 'balanced') return 'balanced';
+            if (voteState === 'liked') return 'liked';
 
             const hasTrendingBadge = badges.some((b) => {
                 const kind = normalizeBadgeKindForGlow(b);
@@ -7570,7 +7577,7 @@
             const tier = String(post.engagementTier || '').toLowerCase();
             if (hasTrendingBadge || tier.includes('trend') || tier === 'hot' || tier === 'viral') return 'trending';
 
-            if (totalVotes === 0) return 'untouched';
+            if (voteState === 'untouched') return 'untouched';
 
             return '';
         }
@@ -7779,11 +7786,8 @@
                                     badges.push({ kind: 'review', label: '👎' });
                                 }
 
-                                const likes = Number(post.likes) || 0;
-                                const dislikes = Number(post.dislikes) || 0;
-                                if (likes > 0 && likes === dislikes && !badges.some(b => normalizeBadgeKindForGlow(b) === 'balanced')) {
-                                    badges.push({ kind: 'balanced', label: 'Fusion' });
-                                }
+                                // Balanced is expressed by the fusion-colored outline,
+                                // not by adding another visible badge chip.
                             }
                         }
 
@@ -16609,13 +16613,15 @@
                 .boost-badge-prominent .boost-icon { transition: transform 240ms ease; }
                 .boost-badge-prominent:hover .boost-icon { transform: translateY(-2px) scale(1.08); }
 
-                     /* Unified top-3 glow: identical outline for slots 1-3 (visual parity across users)
-                         and neutral color to match current theme */
-                     .glow-top3 { box-shadow: inset 0 0 0 6px rgba(59,130,246,0.08), 0 18px 48px rgba(59,130,246,0.06); }
-                     .view-modal-content.glow-top3 { box-shadow: 0 18px 48px rgba(59,130,246,0.14), 0 0 30px rgba(59,130,246,0.04); border: 1px solid rgba(59,130,246,0.06); }
-                    /* Outline glow for user Like action: subtle blue outline inside the tile */
-                    .glow-like-outline { box-shadow: inset 0 0 0 6px rgba(96,165,250,0.10), 0 18px 48px rgba(96,165,250,0.06); }
-                    .view-modal-content.glow-like-outline { box-shadow: 0 18px 48px rgba(96,165,250,0.14), 0 0 30px rgba(96,165,250,0.04); border: 1px solid rgba(96,165,250,0.06); }
+                     /* Unified top-3 glow: clear gold/blue outline for slots 1-3. */
+                     .glow-top3 {
+                        box-shadow:
+                            inset 0 0 0 3px rgba(15,23,42,0.78),
+                            inset 0 0 0 8px rgba(250,204,21,0.24),
+                            0 0 0 2px rgba(96,165,250,0.24),
+                            0 18px 50px rgba(250,204,21,0.12);
+                     }
+                     .view-modal-content.glow-top3 { box-shadow: 0 18px 50px rgba(250,204,21,0.20), 0 0 34px rgba(96,165,250,0.08); border: 1px solid rgba(250,204,21,0.16); }
                     /* Ensure all auxiliary glows render as a full wrap-around inset outline + subtle outer shadow */
                     .glow-hot { box-shadow: inset 0 0 0 6px rgba(251,146,60,0.10), 0 18px 48px rgba(251,146,60,0.06); }
                     .view-modal-content.glow-hot { box-shadow: 0 18px 48px rgba(251,146,60,0.14), 0 0 30px rgba(251,146,60,0.04); border: 1px solid rgba(251,146,60,0.06); }
@@ -16626,16 +16632,22 @@
                     .glow-spotlight { box-shadow: inset 0 0 0 7px rgba(250,204,21,0.16), 0 20px 54px rgba(250,204,21,0.09); }
                     .view-modal-content.glow-spotlight { box-shadow: 0 20px 54px rgba(250,204,21,0.20), 0 0 34px rgba(250,204,21,0.07); border: 1px solid rgba(250,204,21,0.12); }
 
-                    .glow-disliked { box-shadow: inset 0 0 0 6px rgba(168,85,247,0.10), 0 18px 48px rgba(168,85,247,0.06); }
-                    .view-modal-content.glow-disliked { box-shadow: 0 18px 48px rgba(168,85,247,0.14), 0 0 30px rgba(168,85,247,0.04); border: 1px solid rgba(168,85,247,0.06); }
+                    .glow-disliked {
+                        box-shadow:
+                            inset 0 0 0 3px rgba(15,23,42,0.76),
+                            inset 0 0 0 8px rgba(168,85,247,0.24),
+                            0 0 0 2px rgba(168,85,247,0.26),
+                            0 18px 50px rgba(168,85,247,0.12);
+                    }
+                    .view-modal-content.glow-disliked { box-shadow: 0 18px 50px rgba(168,85,247,0.22), 0 0 34px rgba(168,85,247,0.10); border: 1px solid rgba(168,85,247,0.18); }
 
                     .glow-balanced {
                         box-shadow:
                             inset 0 0 0 3px rgba(15,23,42,0.72),
-                            inset 0 0 0 7px rgba(52,211,153,0.20),
-                            0 0 0 2px rgba(96,165,250,0.28),
-                            0 0 0 5px rgba(244,114,182,0.16),
-                            0 18px 48px rgba(52,211,153,0.10);
+                            inset 0 0 0 8px rgba(52,211,153,0.24),
+                            0 0 0 2px rgba(96,165,250,0.30),
+                            0 0 0 5px rgba(244,114,182,0.18),
+                            0 18px 50px rgba(52,211,153,0.12);
                     }
                     .view-modal-content.glow-balanced { box-shadow: 0 18px 48px rgba(52,211,153,0.18), 0 0 30px rgba(96,165,250,0.08), 0 0 44px rgba(244,114,182,0.07); border: 1px solid rgba(52,211,153,0.16); }
 
@@ -16970,7 +16982,11 @@
                     } catch(e){}
                     try { boxEl.style.boxShadow = 'none'; } catch(e){}
                     try { boxEl.style.borderColor = ''; } catch(e){}
-                    try { boxEl.classList.remove('glow-crowned','glow-podium','glow-runner-up','glow-disliked','glow-balanced','glow-untouched'); } catch(e){}
+                    try {
+                        Array.from(boxEl.classList || []).forEach(cls => {
+                            if (cls && cls.indexOf && cls.indexOf('glow-') === 0) boxEl.classList.remove(cls);
+                        });
+                    } catch(e){}
                 }
             } catch (e) { console.warn('Immediate DOM clearing failed', e); }
 
