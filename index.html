@@ -3819,7 +3819,9 @@
                     return;
                 }
                 
-                // No markers and no Firebase session - user is genuinely signed out
+                // No markers and no Firebase session - user is genuinely signed out.
+                // Keep the anonymous device identity stable so a guest cannot become
+                // a new voter every refresh. Only clear signed-in account markers.
                 console.log('❌ No active Firebase auth and no sign-in markers - user is signed out.');
                 // Clear any orphaned localStorage data
                 try {
@@ -3828,9 +3830,9 @@
                     localStorage.removeItem('displayName');
                     localStorage.removeItem('userGridId');
                     localStorage.removeItem('userPostId');
-                    localStorage.removeItem('permanentUserId');
-                    localStorage.removeItem('userId');
                     localStorage.removeItem('isSignedIn');
+                    const stableGuestId = localStorage.getItem('permanentUserId') || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
+                    if (stableGuestId) localStorage.setItem('userId', stableGuestId);
                 } catch(e) {}
                 window.currentUserId = null;
                 updateAccountUI();
@@ -9980,6 +9982,21 @@
             });
             console.log(`✅ Updated vote display in DOM for post ${postId.substring(0, 8)}: ${newLikes} likes, ${newDislikes} dislikes`);
         }
+
+        function keepVoteRerankActive(postId, durationMs = 12000) {
+            try {
+                window.lastVoteRerankAt = Date.now();
+                window.lastVoteRerankPostId = postId;
+                window.voteTriggeredRerank = true;
+                if (window.__voteRerankClearTimer) clearTimeout(window.__voteRerankClearTimer);
+                window.__voteRerankClearTimer = setTimeout(() => {
+                    window.voteTriggeredRerank = false;
+                    window.__voteRerankClearTimer = null;
+                }, Math.max(1000, Number(durationMs) || 12000));
+            } catch (e) {
+                window.voteTriggeredRerank = true;
+            }
+        }
         
         function voteOnPost(postId, voteType) {
             console.log(`🗳️ voteOnPost called: postId=${postId.substring(0,8)}, type=${voteType}`);
@@ -10075,6 +10092,10 @@
                 userVotes[userVoteKey] = newVoteType;
                 try { recordTop15VoteInteraction(postId, newVoteType); } catch (e) { /* ignore model errors */ }
             }
+            try {
+                window.userVotes = userVotes;
+                localStorage.setItem(`userVotes_${voterId}`, JSON.stringify(userVotes));
+            } catch (e) { /* ignore local vote cache errors */ }
             
             // Update all references to this post before the glow resolver runs.
             syncPostVoteCountsEverywhere(postId, newLikes, newDislikes);
@@ -10101,17 +10122,14 @@
                     // 2) Re-run ranking so post can move to new position
                         // Defensive dedupe before re-render to avoid duplicate artifacts
                         try { if (typeof dedupeGridContent === 'function') dedupeGridContent(); } catch (e) {}
-                    window.lastVoteRerankAt = Date.now();
-                    window.lastVoteRerankPostId = postId;
+                    keepVoteRerankActive(postId);
                     window.lastRenderGridTime = 0; // bypass throttle for deliberate vote action
-                    window.voteTriggeredRerank = true; // signal immediate apply to scroller
                     renderGrid();
+                    try { repairGridSlotGaps('vote-delayed-rerank'); } catch (e) {}
                     try { refreshVisiblePostGlowOutlines('vote-delayed-rerank'); } catch (e) {}
-                    window.voteTriggeredRerank = false;
                     console.log(`✅ Delayed vote refresh applied for ${postId.substring(0, 8)} after ${VOTE_VISUAL_DELAY_MS}ms`);
                 } catch (e) {
                     console.warn('⚠️ Delayed vote refresh failed:', e);
-                    window.voteTriggeredRerank = false;
                 } finally {
                     delete window.voteVisualUpdateTimers[postId];
                 }
@@ -10130,16 +10148,13 @@
                     try { refreshVisiblePostGlowOutlines('vote-transaction-success'); } catch (e) {}
                     try {
                         recalculateBadgesForCurrentGrid(postId);
-                        window.lastVoteRerankAt = Date.now();
-                        window.lastVoteRerankPostId = postId;
+                        keepVoteRerankActive(postId);
                         window.lastRenderGridTime = 0;
-                        window.voteTriggeredRerank = true;
                         renderGrid();
+                        try { repairGridSlotGaps('vote-authoritative-rerank'); } catch (e) {}
                         try { refreshVisiblePostGlowOutlines('vote-authoritative-rerank'); } catch (e) {}
                     } catch (rankErr) {
                         console.warn('⚠️ Authoritative vote rerank failed:', rankErr);
-                    } finally {
-                        window.voteTriggeredRerank = false;
                     }
                 } catch (e) { /* defensive */ }
             }).catch(err => {
@@ -10156,6 +10171,7 @@
                 updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
                 window.lastRenderGridTime = 0;
                 renderGrid();
+                try { repairGridSlotGaps('vote-rollback'); } catch (e) {}
                 showNotification && showNotification('Failed to save vote');
             });
         }
@@ -10546,12 +10562,13 @@
                         if (!window.__guestBootstrapStarted) {
                             window.__guestBootstrapStarted = true;
 
-                            const guestId = currentUserId || localStorage.getItem('userId') || permanentUserId || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
+                            const guestId = currentUserId || permanentUserId || localStorage.getItem('permanentUserId') || localStorage.getItem('userId') || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
                             if (guestId) {
                                 currentUserId = guestId;
                                 try { window.currentUserId = guestId; } catch (_) {}
                                 try { localStorage.setItem('userId', guestId); } catch (_) {}
                                 if (!gridContent[currentUserId]) gridContent[currentUserId] = [];
+                                try { await loadUserVotesFromFirebase(guestId); } catch (e) { console.warn('guest vote load warning', e); }
                             }
 
                             try { initializeGrid(); } catch (e) { console.warn('guest initializeGrid warning', e); }
@@ -16259,6 +16276,11 @@
 
         // Like/Dislike functions
         function toggleLike() {
+            if (selectedPostId && typeof voteOnPost === 'function') {
+                voteOnPost(selectedPostId, 'like');
+                setTimeout(() => { try { updateVoteDisplay(); } catch (e) {} }, 900);
+                return;
+            }
             let voteActorId = currentUserId;
             if (!voteActorId) {
                 try {
@@ -16335,6 +16357,11 @@
         }
 
         function toggleDislike() {
+            if (selectedPostId && typeof voteOnPost === 'function') {
+                voteOnPost(selectedPostId, 'dislike');
+                setTimeout(() => { try { updateVoteDisplay(); } catch (e) {} }, 900);
+                return;
+            }
             let voteActorId = currentUserId;
             if (!voteActorId) {
                 try {
@@ -26673,6 +26700,52 @@
             }
         }
 
+        function repairGridSlotGaps(reason = '') {
+            try {
+                if (!window.gridScroller || !Array.isArray(window.gridScroller.items)) return false;
+
+                const beforeItems = window.gridScroller.items || [];
+                const compacted = compactPostListForSlots(beforeItems).filter(post => {
+                    if (!post || !post.id) return false;
+                    try { return !isPostHiddenForViewer(post, currentUserId); } catch (e) { return true; }
+                });
+
+                let needsRepair = compacted.length !== beforeItems.length;
+                if (!needsRepair) {
+                    const maxScan = Math.min(450, Math.max(1, compacted.length + 1));
+                    let sawEmptySlot = false;
+                    for (let boxIndex = 1; boxIndex <= maxScan; boxIndex++) {
+                        const box = document.getElementById(`box-${boxIndex}`);
+                        if (!box) break;
+                        const hasPost = !!String(box.getAttribute('data-post-id') || '').trim();
+                        if (!hasPost && boxIndex <= compacted.length) {
+                            sawEmptySlot = true;
+                        } else if (hasPost && sawEmptySlot) {
+                            needsRepair = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!needsRepair) return false;
+
+                window.gridScroller.items = compacted;
+                if (typeof window.gridScroller.setItems === 'function') {
+                    window.gridScroller.setItems(compacted);
+                } else if (typeof window.gridScroller.renderItemsInRange === 'function') {
+                    window.gridScroller.renderItemsInRange(0, Math.min(50, compacted.length));
+                    try { window.gridScroller.clearBoxesBeyondItemCount(compacted.length + 1); } catch (e) {}
+                }
+                try { recomputeAndApplyBadges(); } catch (e) {}
+                try { refreshVisiblePostGlowOutlines(`slot-gap-repair:${reason}`); } catch (e) {}
+                console.log(`🧩 Slot gap repair${reason ? ` (${reason})` : ''}: ${beforeItems.length} → ${compacted.length}`);
+                return true;
+            } catch (e) {
+                console.warn('repairGridSlotGaps failed:', e);
+                return false;
+            }
+        }
+
         function buildIndexMapById(items) {
             const out = new Map();
             try {
@@ -27073,6 +27146,7 @@
             // Use full rendering - no MVP mode
             try { if (typeof dedupeGridContent === 'function') dedupeGridContent(); } catch (e) { console.warn('pre-fullRender dedupe failed', e); }
             renderGridFull();
+            try { repairGridSlotGaps('renderGrid'); } catch (e) { console.warn('slot repair failed after renderGrid', e); }
             // Ensure badges are recomputed immediately after a full render
             try { recomputeAndApplyBadges(); } catch (e) { console.warn('recompute badges failed after renderGrid', e); }
             try { refreshVisiblePostGlowOutlines('renderGrid'); } catch (e) { console.warn('glow refresh failed after renderGrid', e); }
@@ -27101,6 +27175,7 @@
                         // Force a re-render bypassing throttle so new content appears
                         try { window.lastRenderGridTime = 0; } catch (e) {}
                         try { renderGrid(); } catch (e) { /* ignore */ }
+                        try { repairGridSlotGaps('fill-empty-slot'); } catch (e) { /* ignore */ }
                     } catch (e) { console.warn('fillEmptySlotAfterDelay inner error', e); }
                 }, ms);
             } catch (e) {
