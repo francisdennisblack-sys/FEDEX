@@ -29440,6 +29440,7 @@
                     // Regular scoring for non-boosted posts
                     const likes = post.likes || 0;
                     const dislikes = post.dislikes || 0;
+                    const netLikes = likes - dislikes;
                     const tier = String(post.engagementTier || '').toLowerCase();
                     const ageHours = post.timestamp ? Math.max(0, (nowMs - post.timestamp) / (1000 * 60 * 60)) : 0;
 
@@ -29491,6 +29492,14 @@
                     score -= Math.min(45, dislikes * 3);
                     score -= Math.min(24, ageHours * 0.8);
 
+                    // Position hardening: explicit sentiment lift/demotion.
+                    // Net-positive posts should consistently outrank neutral/negative posts.
+                    if (netLikes > 0) {
+                        score += Math.min(140, netLikes * (isLocal ? 10 : 7));
+                    } else if (netLikes < 0) {
+                        score -= Math.min(220, Math.abs(netLikes) * 14);
+                    }
+
                     if (denseAreaLocalFirst && isFar) {
                         score -= 260;
                         if (likes > 0) {
@@ -29506,12 +29515,33 @@
                         post,
                         score,
                         index,
-                        boostInfo
+                        boostInfo,
+                        likes,
+                        dislikes,
+                        netLikes,
+                        sentimentBucket: netLikes > 0 ? 2 : (netLikes === 0 ? 1 : 0)
                     };
                 })
                 .sort((a, b) => {
-                    // Sort by boost score first, then regular score
+                    // Hard ordering before score:
+                    // 1) net-positive posts
+                    // 2) neutral posts
+                    // 3) net-negative posts
+                    if (b.sentimentBucket !== a.sentimentBucket) {
+                        return b.sentimentBucket - a.sentimentBucket;
+                    }
+
+                    // Within same bucket, favor stronger net likes first.
+                    if (b.netLikes !== a.netLikes) {
+                        return b.netLikes - a.netLikes;
+                    }
+
+                    // Then fall back to blended score.
                     if (b.score !== a.score) return b.score - a.score;
+
+                    // Deterministic tie-breakers.
+                    if (b.likes !== a.likes) return b.likes - a.likes;
+                    if (a.dislikes !== b.dislikes) return a.dislikes - b.dislikes;
                     return a.index - b.index;
                 })
                 .map((item, newPosition) => {
