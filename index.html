@@ -4184,7 +4184,15 @@
                         photoURL: post.photoURL,
                         imageData: post.imageData,
                         customTags: post.customTags,
-                        mediaType: post.mediaType
+                        mediaType: post.mediaType,
+                        badges: post.badges,
+                        boostBadge: post.boostBadge,
+                        sellBadge: post.sellBadge,
+                        primaryBadge: post.primaryBadge,
+                        boostStatus: post.boostStatus,
+                        boostPaidAt: post.boostPaidAt,
+                        boostExpiresAt: post.boostExpiresAt,
+                        sellPaidAt: post.sellPaidAt
                     };
                 });
                 
@@ -7611,8 +7619,8 @@
                         }
 
                         // Boost / Buy badges (persisted flags)
-                        const hasBoostFlag = isStrictBoostActive(post);
-                        const hasSellFlag = !!(post.sellBadge || post.forSale || post.buyBadge || (post.badges && post.badges.includes('sell')));
+                        const hasBoostFlag = isStrictBoostActive(post) || hasBadgeKind(post, 'boost');
+                        const hasSellFlag = hasBadgeKind(post, 'sell') || !!(post.sellBadge || post.forSale || post.buyBadge || post.sellPaidAt);
                         // We render the BOOST badge as a dedicated prominent element (top-left)
                         // but also include a compact BOOST indicator on the right-side badge
                         // container so users see both cues. Sell/buy stays in the top-right
@@ -22121,14 +22129,35 @@
             try {
                 const intentId = post.boostIntent && post.boostIntent.paymentIntentId;
                 const badgeIntentId = post.boostBadge && post.boostBadge.paymentIntentId;
+                const badgePaymentId = post.boostBadge && post.boostBadge.paymentId;
                 const boostIntentId = post.boost && post.boost.paymentIntentId;
                 const paidAt = Number(post.boostPaidAt) ||
                     (post.boostBadge && Number(post.boostBadge.purchasedAt)) ||
                     (post.boostIntent && Number(post.boostIntent.armedAt));
-                return !!(intentId || badgeIntentId || boostIntentId || paidAt);
+                return !!(intentId || badgeIntentId || badgePaymentId || boostIntentId || paidAt);
             } catch (_) {
                 return false;
             }
+        }
+
+        function hasBadgeKind(post, kind) {
+            if (!post || !kind) return false;
+            try {
+                const target = String(kind).toLowerCase();
+                const raw = post.badges;
+                if (Array.isArray(raw)) {
+                    return raw.some(v => String(v || '').toLowerCase() === target);
+                }
+                if (raw && typeof raw === 'object') {
+                    // Support denormalized object shape: badges/{id} => { kind: 'boost'|'sell', ... }
+                    return Object.values(raw).some(rec => {
+                        if (typeof rec === 'string') return String(rec).toLowerCase() === target;
+                        if (!rec || typeof rec !== 'object') return false;
+                        return String(rec.kind || rec.type || '').toLowerCase() === target;
+                    });
+                }
+            } catch (_) { /* defensive */ }
+            return false;
         }
 
         function strictBoostStatus(post) {
@@ -22136,7 +22165,9 @@
             if (!post || typeof post !== 'object') return inactive;
 
             const hasPurchase = hasVerifiedBoostPurchase(post);
-            if (!hasPurchase && !(post.boost && post.boost.status === 'active')) return inactive;
+            const topLevelStatus = (post.boost && post.boost.status) || post.boostStatus || null;
+            const hasBoostEvidence = hasPurchase || hasBadgeKind(post, 'boost') || !!post.boostBadge || topLevelStatus === 'active';
+            if (!hasBoostEvidence) return inactive;
 
             try {
                 if (post.boostRequested && window.boostEngine && typeof window.boostEngine.activateIfReady === 'function') {
@@ -22153,11 +22184,13 @@
 
             const now = Date.now();
             const expiresAt = Number(post.boostExpiresAt) || (post.boost && Number(post.boost.expiresAt)) || 0;
-            const status = (post.boost && post.boost.status) || post.boostStatus || null;
+            const status = topLevelStatus;
 
             if (status === 'expired') return { active: false, expired: true };
             if (expiresAt > 0 && now >= expiresAt) return { active: false, expired: true };
             if ((status === 'active' || expiresAt > now) && hasPurchase) return { active: true, expired: false };
+            // Durable fallback: some flows denormalize only badge objects/flags on refresh.
+            if (status === 'active' || expiresAt > now || hasBadgeKind(post, 'boost')) return { active: true, expired: false };
             return inactive;
         }
 

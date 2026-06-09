@@ -1,5 +1,40 @@
 # IMMEDIATE ACTION ITEMS - FEDEX-ZONES-v2
 
+## 🧹 Deferred Cleanup Note (Do Not Remove Yet)
+
+Purpose: reclaim workspace disk space later, after cloud-only DB paths are fully confirmed.
+
+### Safe To Remove Anytime (No runtime impact expected)
+1. `data/archives/` (~185 MB)
+2. `functions/node_modules/` (~113 MB, can be restored with npm install in `functions/`)
+3. `pois/places.json.bak.1780688705735` (~16 MB)
+4. `pois/places.json.bak.1780688706487` (~14 MB)
+5. `pois/places.json.bak.1780688708518` (~14 MB)
+
+Estimated reclaim from safe-only set: ~342 MB
+
+### Remove Later Only After Cloud-Only Validation
+1. `pois/tiles/` (~390 MB)
+2. `pois/states/` (~35 MB)
+3. `pois/osm/` (~14 MB)
+4. `pois/search-index.json` (~7.9 MB)
+5. `pois/manifest.json`
+6. `pois/places.json`
+
+Important: `index.html` still contains active fetch paths/fallbacks for several of the files above. Keep them until cloud fetch is the only active source in runtime.
+
+### Legacy Root Files
+Current root files present and still used as fallback in code:
+1. `master_locations_database.json`
+2. `master_pois_database.json`
+
+Keep these until fallback branches are removed or disabled.
+
+### One-Liner For Later Safe Cleanup (when ready)
+```bash
+rm -rf data/archives functions/node_modules pois/places.json.bak.1780688705735 pois/places.json.bak.1780688706487 pois/places.json.bak.1780688708518
+```
+
 ## ✅ Just Completed (This Session)
 1. ✅ Zone tag styling fixed (18px, bold 900, moved up)
 2. ✅ Reverse geocoding fixed (now uses Nominatim API)
