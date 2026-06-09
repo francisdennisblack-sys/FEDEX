@@ -7555,6 +7555,10 @@
             const primaryBadgeRaw = String(post.primaryBadge || '').toLowerCase();
             if (boostBadgeRaw.includes('spotlight') || primaryBadgeRaw.includes('spotlight') || hasBadgeKind(post, 'spotlight')) return 'spotlight';
 
+            if (net < 0) return 'disliked';
+            if (totalVotes > 0 && net === 0) return 'balanced';
+            if (net > 0) return 'liked';
+
             if (podium.includes(post.id)) return 'top3';
 
             const hasTrendingBadge = badges.some((b) => {
@@ -7564,9 +7568,6 @@
             const tier = String(post.engagementTier || '').toLowerCase();
             if (hasTrendingBadge || tier.includes('trend') || tier === 'hot' || tier === 'viral') return 'trending';
 
-            if (net < 0) return 'disliked';
-            if (totalVotes > 0 && net === 0) return 'balanced';
-            if (net > 0) return 'liked';
             if (totalVotes === 0) return 'untouched';
 
             return '';
@@ -7598,6 +7599,60 @@
             } catch (e) { /* ignore */ }
         }
 
+        function syncPostVoteCountsEverywhere(postId, likes, dislikes) {
+            if (!postId) return null;
+            const nextLikes = Number(likes) || 0;
+            const nextDislikes = Number(dislikes) || 0;
+            let canonicalPost = null;
+
+            try {
+                if (postCache && postCache[postId]) {
+                    postCache[postId].likes = nextLikes;
+                    postCache[postId].dislikes = nextDislikes;
+                    postCache[postId].cachedBadges = null;
+                    canonicalPost = postCache[postId];
+                }
+            } catch (e) { /* ignore */ }
+
+            try {
+                for (const key in gridContent) {
+                    if (!Array.isArray(gridContent[key])) continue;
+                    for (const post of gridContent[key]) {
+                        if (post && post.id === postId) {
+                            post.likes = nextLikes;
+                            post.dislikes = nextDislikes;
+                            post.cachedBadges = null;
+                            if (!canonicalPost) canonicalPost = post;
+                        }
+                    }
+                }
+            } catch (e) { /* ignore */ }
+
+            try {
+                if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                    for (const post of window.gridScroller.items) {
+                        if (post && post.id === postId) {
+                            post.likes = nextLikes;
+                            post.dislikes = nextDislikes;
+                            post.cachedBadges = null;
+                            if (!canonicalPost) canonicalPost = post;
+                        }
+                    }
+                }
+            } catch (e) { /* ignore */ }
+
+            if (!canonicalPost) {
+                canonicalPost = findPostAcrossVisibleFeeds(postId);
+                if (canonicalPost) {
+                    canonicalPost.likes = nextLikes;
+                    canonicalPost.dislikes = nextDislikes;
+                    canonicalPost.cachedBadges = null;
+                }
+            }
+
+            return canonicalPost;
+        }
+
         function refreshVisiblePostGlowOutlines(reason = '') {
             try {
                 const orderedPosts = (window.gridScroller && Array.isArray(window.gridScroller.items) && window.gridScroller.items.length > 0)
@@ -7613,7 +7668,7 @@
                 visibleNodes.forEach((node) => {
                     const postId = String(node.getAttribute('data-post-id') || '');
                     if (!postId) return;
-                    let post = postMap.get(postId) || findPostAcrossVisibleFeeds(postId) || (postCache && postCache[postId]);
+                    let post = (postCache && postCache[postId]) || postMap.get(postId) || findPostAcrossVisibleFeeds(postId);
                     if (!post) return;
                     const badges = calculateBadges(post, orderedPosts) || [];
                     applyGlowAndBorder(node, post, { podium, badges, hasBoostFlag: isStrictBoostActive(post) });
@@ -7721,6 +7776,12 @@
                                 } else if (tier === 'DISLIKED') {
                                     badges.push({ kind: 'review', label: '👎' });
                                 }
+
+                                const likes = Number(post.likes) || 0;
+                                const dislikes = Number(post.dislikes) || 0;
+                                if (likes > 0 && likes === dislikes && !badges.some(b => normalizeBadgeKindForGlow(b) === 'balanced')) {
+                                    badges.push({ kind: 'balanced', label: 'Fusion' });
+                                }
                             }
                         }
 
@@ -7770,6 +7831,7 @@
 
                         // Render badges (show up to 3 chips)
                         const badgeHtml = badges.slice(0,3).map(b => {
+                            if (typeof b === 'string') b = { kind: b, label: b };
                                 if (b.kind === 'sell') {
                                     return `<div class="badge badge--sell"><span class="badge-icon">💠</span><span class="badge-label">${b.label}</span></div>`;
                                 }
@@ -9875,6 +9937,7 @@
         // Update vote display directly in DOM without full re-render
         // This prevents posts from moving positions on the grid
         function updateVoteDisplayInDOM(postId, newLikes, newDislikes) {
+            const syncedPost = syncPostVoteCountsEverywhere(postId, newLikes, newDislikes);
             const postBoxes = document.querySelectorAll(`[data-post-id="${postId}"]`);
             postBoxes.forEach(box => {
                 // Update likes display
@@ -9901,21 +9964,18 @@
                         dislikeBtn.style.backgroundColor = newDislikes > 0 ? '#fff' : '#333';
                     }
                 }
-                // Toggle outline glow when the current user has liked this post
+                // Vote-count glows are badge state, not per-user state. Re-apply
+                // the shared resolver immediately so balanced/liked/disliked flips
+                // track the latest counts even between full grid renders.
                 try {
-                    let voteViewerId = currentUserId;
-                    if (!voteViewerId) {
-                        try {
-                            voteViewerId = localStorage.getItem('userId') || localStorage.getItem('permanentUserId') || null;
-                        } catch (e) { voteViewerId = null; }
-                    }
-                    const userVoteKey = `${voteViewerId}_${postId}`;
-                    const thisUserVote = (window.userVotes && window.userVotes[userVoteKey]) || null;
-                    if (thisUserVote === 'like') {
-                        box.classList.add('glow-like-outline');
-                    } else {
-                        box.classList.remove('glow-like-outline');
-                    }
+                    box.classList.remove('glow-like-outline');
+                    const orderedPosts = (window.gridScroller && Array.isArray(window.gridScroller.items) && window.gridScroller.items.length > 0)
+                        ? window.gridScroller.items.filter(p => p && p.id)
+                        : getActiveViewerFeedPosts().filter(p => p && p.id);
+                    const podium = orderedPosts.slice(0, 3).map(p => p.id);
+                    const post = syncedPost || findPostAcrossVisibleFeeds(postId) || { id: postId, likes: newLikes, dislikes: newDislikes };
+                    const badges = calculateBadges(post, orderedPosts) || [];
+                    applyGlowAndBorder(box, post, { podium, badges, hasBoostFlag: isStrictBoostActive(post) });
                 } catch (e) { /* ignore */ }
             });
             console.log(`✅ Updated vote display in DOM for post ${postId.substring(0, 8)}: ${newLikes} likes, ${newDislikes} dislikes`);
@@ -10016,19 +10076,8 @@
                 try { recordTop15VoteInteraction(postId, newVoteType); } catch (e) { /* ignore model errors */ }
             }
             
-            // Update all references to this post
-            if (postCache[postId]) {
-                postCache[postId].likes = newLikes;
-                postCache[postId].dislikes = newDislikes;
-            }
-            
-            for (let key in gridContent) {
-                const p = gridContent[key].find(x => x.id === postId);
-                if (p) {
-                    p.likes = newLikes;
-                    p.dislikes = newDislikes;
-                }
-            }
+            // Update all references to this post before the glow resolver runs.
+            syncPostVoteCountsEverywhere(postId, newLikes, newDislikes);
 
             // Defensive: ensure no duplicate entries exist in any gridContent array
             try {
@@ -10076,10 +10125,7 @@
                 try {
                     post.likes = likes;
                     post.dislikes = dislikes;
-                    if (postCache && postCache[postId]) {
-                        postCache[postId].likes = likes;
-                        postCache[postId].dislikes = dislikes;
-                    }
+                    syncPostVoteCountsEverywhere(postId, likes, dislikes);
                     updateVoteDisplayInDOM(postId, likes, dislikes);
                     try { refreshVisiblePostGlowOutlines('vote-transaction-success'); } catch (e) {}
                     try {
@@ -14871,7 +14917,9 @@
 
                 // Update local cache & UI
                 try {
-                    if (postCache && postCache[postId]) {
+                    if (typeof syncPostVoteCountsEverywhere === 'function') {
+                        syncPostVoteCountsEverywhere(postId, likeCount, dislikeCount);
+                    } else if (postCache && postCache[postId]) {
                         postCache[postId].likes = likeCount;
                         postCache[postId].dislikes = dislikeCount;
                     }
@@ -16554,8 +16602,15 @@
                     .glow-disliked { box-shadow: inset 0 0 0 6px rgba(168,85,247,0.10), 0 18px 48px rgba(168,85,247,0.06); }
                     .view-modal-content.glow-disliked { box-shadow: 0 18px 48px rgba(168,85,247,0.14), 0 0 30px rgba(168,85,247,0.04); border: 1px solid rgba(168,85,247,0.06); }
 
-                    .glow-balanced { box-shadow: inset 0 0 0 6px rgba(52,211,153,0.10), 0 18px 48px rgba(52,211,153,0.06); }
-                    .view-modal-content.glow-balanced { box-shadow: 0 18px 48px rgba(52,211,153,0.14), 0 0 30px rgba(52,211,153,0.04); border: 1px solid rgba(52,211,153,0.06); }
+                    .glow-balanced {
+                        box-shadow:
+                            inset 0 0 0 3px rgba(15,23,42,0.72),
+                            inset 0 0 0 7px rgba(52,211,153,0.20),
+                            0 0 0 2px rgba(96,165,250,0.28),
+                            0 0 0 5px rgba(244,114,182,0.16),
+                            0 18px 48px rgba(52,211,153,0.10);
+                    }
+                    .view-modal-content.glow-balanced { box-shadow: 0 18px 48px rgba(52,211,153,0.18), 0 0 30px rgba(96,165,250,0.08), 0 0 44px rgba(244,114,182,0.07); border: 1px solid rgba(52,211,153,0.16); }
 
                     .glow-untouched { box-shadow: inset 0 0 0 6px rgba(148,163,184,0.06), 0 18px 48px rgba(148,163,184,0.04); }
                     .view-modal-content.glow-untouched { box-shadow: 0 18px 48px rgba(148,163,184,0.10), 0 0 30px rgba(148,163,184,0.03); border: 1px solid rgba(148,163,184,0.04); }
