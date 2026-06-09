@@ -9555,6 +9555,27 @@
             startTime: Date.now()
         };
 
+        function setBrandGlobeConnection(isOnline, reason = '') {
+            const canvas = document.getElementById('brandGlobeCanvas');
+            const connected = !!isOnline;
+            const changed = window.__brandGlobeConnected !== connected;
+            if (canvas) canvas.classList.toggle('online', connected);
+            try {
+                if (window.brandGlobeEngine) {
+                    if (connected && typeof window.brandGlobeEngine.start === 'function') {
+                        window.brandGlobeEngine.start();
+                    } else if (!connected && typeof window.brandGlobeEngine.stop === 'function') {
+                        window.brandGlobeEngine.stop();
+                    }
+                }
+            } catch (e) {
+                console.warn('brand globe connection update failed:', e);
+            }
+            systemHealth.logoAnimating = connected;
+            window.__brandGlobeConnected = connected;
+            if (reason && changed) console.log(`🌍 Logo ${connected ? 'spinning' : 'paused'}: ${reason}`);
+        }
+
         function updateSystemHealth() {
             const now = Date.now();
             const isHealthy = isConnected && currentUserId && (now - diagnosticState.lastLocationUpdate < 5000 || !locationTrackingInterval);
@@ -9562,17 +9583,10 @@
             systemHealth.isHealthy = isHealthy;
             systemHealth.lastCheck = now;
             
-            // Animate logo if system is healthy
-            const canvas = document.getElementById('brandGlobeCanvas');
-            if (canvas) {
-                if (isHealthy) {
-                    canvas.classList.add('online');
-                    systemHealth.logoAnimating = true;
-                } else {
-                    canvas.classList.remove('online');
-                    systemHealth.logoAnimating = false;
-                }
-            }
+            // Logo animation is a connectivity indicator, not a full app-health gate.
+            const browserOnline = (typeof navigator === 'undefined') || navigator.onLine !== false;
+            const firebaseOnline = !window.connectionStatus || window.connectionStatus.isOnline !== false;
+            setBrandGlobeConnection(browserOnline && firebaseOnline, 'system-health');
             
             return isHealthy;
         }
@@ -9658,6 +9672,10 @@
             const emoji = status === 'online' ? '🟢' : status === 'reconnecting' ? '🟡' : '🔴';
             const message = `${emoji} [${timestamp}] CONNECTION: ${status.toUpperCase()} ${details}`;
             console.log(message);
+            connectionStatus.isOnline = status !== 'offline';
+            connectionStatus.lastUpdate = Date.now();
+            connectionStatus.lastError = status === 'offline' ? details : null;
+            try { setBrandGlobeConnection(connectionStatus.isOnline, `connection-${status}`); } catch (e) {}
             
             connectionStatus.connectionHistory.push({
                 status,
@@ -15195,8 +15213,14 @@
         // Monitor connection status and sync when coming online
         window.addEventListener('online', () => {
             console.log('✅ Connection restored - syncing offline votes...');
+            try { if (typeof logConnectionStatus === 'function') logConnectionStatus('online', 'browser online event'); } catch (e) {}
             syncOfflineVotes();
             try { flushQueuedPosts().catch(e => console.warn('Queued flush error (online):', e)); } catch (e) { console.warn('flushQueuedPosts not available', e); }
+        });
+
+        window.addEventListener('offline', () => {
+            console.log('🔴 Browser offline - pausing logo connectivity animation');
+            try { if (typeof logConnectionStatus === 'function') logConnectionStatus('offline', 'browser offline event'); } catch (e) {}
         });
         
         // Periodic sync every 30 seconds
@@ -16044,16 +16068,12 @@
                                     console.log(`👥 ONLINE COUNT UPDATE: active=${count} (${activeUsers.slice(0,3).join(', ')}${activeUsers.length > 3 ? '...' : ''})`);
                                 }
 
-                        // 🌍 Canvas globe engine — start rotation when others are online (use total as fallback)
+                        // 🌍 Canvas globe engine — spin while connected. Online-user count
+                        // is still shown separately, but the logo is the connectivity cue.
                         try {
-                            const canvas = document.getElementById('brandGlobeCanvas');
-                            const isOnline = (count > 1) || (totalUsers > 1);
-                            if (canvas) canvas.classList.toggle('online', isOnline);
-                            if (isOnline) {
-                                window.brandGlobeEngine.start();
-                            } else {
-                                window.brandGlobeEngine.stop();
-                            }
+                            const browserOnline = (typeof navigator === 'undefined') || navigator.onLine !== false;
+                            const hasPresence = count > 0 || totalUsers > 0;
+                            setBrandGlobeConnection(browserOnline && (hasPresence || connectionStatus.isOnline !== false), 'online-count');
                         } catch (_) {}
                 }, (error) => {
                     // Error handler: handle permission issues or transient errors
@@ -16064,6 +16084,7 @@
                         onlineUserCount = 1;
                         const countElement = document.getElementById('onlineUserCount');
                         if (countElement) countElement.textContent = '1 online';
+                        try { setBrandGlobeConnection(true, 'online-count-permission-fallback'); } catch (_) {}
                         // Also attempt a one-time fetch (may succeed even when listener fails)
                         fetchOnlineUserCountOnce().catch(() => {});
                         return;
