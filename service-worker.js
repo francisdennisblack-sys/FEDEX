@@ -1,7 +1,12 @@
 // 🔄 SERVICE WORKER: Offline-first, background sync, post caching
 // Keeps website running in background, never kills processes, enables offline access
 
-const CACHE_NAME = 'wifi-content-v3-mobile-optimized'; // Updated cache version for mobile optimization
+// Derive cache name from service worker URL query param so registering
+// with `service-worker.js?v=<version>` forces an updated cache namespace.
+const _swUrl = typeof self !== 'undefined' && self.location ? String(self.location.href) : '';
+const _swUrlObj = (() => { try { return new URL(_swUrl); } catch (e) { return null; } })();
+const _swVer = (_swUrlObj && _swUrlObj.searchParams && _swUrlObj.searchParams.get('v')) || 'mobile-optimized';
+const CACHE_NAME = 'wifi-content-v3-' + _swVer;
 const POSTS_CACHE = 'posts-cache-v2';
 const urlsToCache = [
   '/',

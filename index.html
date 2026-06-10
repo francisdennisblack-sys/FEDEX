@@ -10525,9 +10525,79 @@
                 }
                 
                 // 🔄 SERVICE WORKER: Register for background sync and offline support
+                // We register using a versioned URL so browsers always detect updates
+                // Add a safe, non-blocking update prompt instead of forcing reloads
+                function showUpdatePrompt() {
+                    try {
+                        if (document.getElementById('fw-update-banner')) return; // already shown
+                        const banner = document.createElement('div');
+                        banner.id = 'fw-update-banner';
+                        banner.style.position = 'fixed';
+                        banner.style.left = '50%';
+                        banner.style.transform = 'translateX(-50%)';
+                        banner.style.bottom = '18px';
+                        banner.style.zIndex = 2147483647;
+                        banner.style.background = 'linear-gradient(90deg,#0b84ff,#0063d1)';
+                        banner.style.color = '#fff';
+                        banner.style.padding = '10px 14px';
+                        banner.style.borderRadius = '8px';
+                        banner.style.boxShadow = '0 6px 18px rgba(0,0,0,0.25)';
+                        banner.style.fontFamily = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial';
+                        banner.style.display = 'flex';
+                        banner.style.alignItems = 'center';
+                        banner.style.gap = '12px';
+
+                        const text = document.createElement('div');
+                        text.textContent = 'Update available — reload to get the latest version.';
+                        text.style.fontSize = '14px';
+
+                        const btn = document.createElement('button');
+                        btn.textContent = 'Reload';
+                        btn.style.background = '#fff';
+                        btn.style.color = '#0047b3';
+                        btn.style.border = '0';
+                        btn.style.padding = '6px 10px';
+                        btn.style.borderRadius = '6px';
+                        btn.style.cursor = 'pointer';
+                        btn.onclick = function() {
+                            // attempt to activate waiting service worker first
+                            navigator.serviceWorker.getRegistration().then(reg => {
+                                if (reg && reg.waiting) {
+                                    try { reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch (e) { console.warn('postMessage SKIP_WAITING failed', e); }
+                                    // wait briefly for activation then reload
+                                    setTimeout(() => { try { window.location.reload(); } catch (e) { location.reload(); } }, 600);
+                                } else {
+                                    try { window.location.reload(); } catch (e) { location.reload(); }
+                                }
+                            }).catch(() => { try { window.location.reload(); } catch (e) { location.reload(); } });
+                        };
+
+                        const dismiss = document.createElement('button');
+                        dismiss.textContent = 'Dismiss';
+                        dismiss.style.background = 'transparent';
+                        dismiss.style.color = 'rgba(255,255,255,0.95)';
+                        dismiss.style.border = '1px solid rgba(255,255,255,0.12)';
+                        dismiss.style.padding = '6px 10px';
+                        dismiss.style.borderRadius = '6px';
+                        dismiss.style.cursor = 'pointer';
+                        dismiss.onclick = function() { try { banner.remove(); } catch (e) {} };
+
+                        banner.appendChild(text);
+                        banner.appendChild(btn);
+                        banner.appendChild(dismiss);
+                        document.body.appendChild(banner);
+                    } catch (e) { console.warn('showUpdatePrompt failed', e); }
+                }
+
                 if ('serviceWorker' in navigator) {
-                    navigator.serviceWorker.register('/service-worker.js').then(reg => {
-                        console.log('✅ Service Worker registered - offline mode active');
+                    // Fetch current deployed version (CI should update /version.json on each release)
+                    fetch('/version.json', {cache: 'no-store'}).then(r => r.json()).then(ver => {
+                        try {
+                            window.__APP_VERSION__ = ver && ver.version ? String(ver.version) : String(Date.now());
+                        } catch (e) { window.__APP_VERSION__ = String(Date.now()); }
+
+                        navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(window.__APP_VERSION__)).then(reg => {
+                            console.log('✅ Service Worker registered (version=' + window.__APP_VERSION__ + ') - offline mode active');
                         
                         // Attempt background sync if available
                         if ('sync' in reg) {
@@ -10547,8 +10617,15 @@
                                 }
                             });
                         });
+                        }).catch(err => {
+                            console.warn('Service Worker registration failed:', err);
+                        });
                     }).catch(err => {
-                        console.warn('Service Worker registration failed:', err);
+                        // If version check fails, fall back to standard registration
+                        console.warn('Version check failed; falling back to standard SW registration:', err);
+                        navigator.serviceWorker.register('/service-worker.js').then(reg => {
+                            console.log('✅ Service Worker registered (fallback) - offline mode active');
+                        }).catch(err2 => console.warn('Service Worker fallback registration failed:', err2));
                     });
                     
                     // Listen for messages from service worker
@@ -10560,17 +10637,47 @@
                             try { flushQueuedPosts().catch(e => console.warn('Queued flush error (sw message):', e)); } catch(e) { console.warn('flushQueuedPosts not available yet', e); }
                             try { subscribeToFirebasePostsWithReconnect(); } catch (e) { console.warn('subscribeToFirebasePostsWithReconnect error', e); }
                         }
-                        // New version available - reload so client loads latest deployment
+                        // New version available - prompt user to reload so client loads latest deployment
                         if (event.data.type === 'NEW_VERSION_AVAILABLE') {
-                            console.log('🔔 New service worker version available — reloading to fetch latest assets');
-                            try {
-                                // Use location.reload(); the SW now uses network-first for navigations
-                                window.location.reload();
-                            } catch (e) { console.warn('Auto-reload failed:', e); }
+                            console.log('🔔 New service worker version available — prompting user to reload');
+                            try { showUpdatePrompt(); } catch (e) { console.warn('showUpdatePrompt failed:', e); }
                         }
                     });
                 }
                 
+                // Version polling: periodically check /version.json and trigger SW update/reload
+                (function() {
+                    if (!('fetch' in window) || !('serviceWorker' in navigator)) return;
+                    const POLL_INTERVAL = 60 * 1000; // 60s
+                    let lastKnown = window.__APP_VERSION__ || null;
+                    // Check immediately once
+                    fetch('/version.json', {cache: 'no-store'}).then(r => r.json()).then(j => { if (j && j.version) lastKnown = j.version; }).catch(() => {});
+                    setInterval(() => {
+                        fetch('/version.json', {cache: 'no-store'}).then(r => r.json()).then(j => {
+                            if (!j || !j.version) return;
+                            if (!lastKnown) { lastKnown = j.version; return; }
+                            if (String(j.version) !== String(lastKnown)) {
+                                console.log('🔔 New app version detected (' + j.version + ' != ' + lastKnown + ')');
+                                lastKnown = j.version;
+                                // Ask service worker to skip waiting if present
+                                navigator.serviceWorker.getRegistration().then(reg => {
+                                    if (reg && reg.waiting) {
+                                        try { reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch (e) { console.warn('SW postMessage SKIP_WAITING failed', e); }
+                                    } else if (reg && reg.installing) {
+                                        // nothing to do; installing will activate
+                                    } else {
+                                        // Force a re-register with the new version query so browser fetches updated SW
+                                        try { navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(j.version)).catch(()=>{}); } catch(e) {}
+                                    }
+                                }).finally(() => {
+                                    // Prompt user to reload (non-blocking)
+                                    try { showUpdatePrompt(); } catch (e) { try { window.location.reload(); } catch(e2) { location.reload(); } }
+                                });
+                            }
+                        }).catch(() => {});
+                    }, POLL_INTERVAL);
+                })();
+
                 // ✅ STEP 8: Load worldwide locations (async, non-blocking)
                 console.log(`\n✅ Step 8: Loading location database (non-blocking)...`);
                 loadWorldwideLocationsAndPOIs().then(success => {
