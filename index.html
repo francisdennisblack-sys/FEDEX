@@ -443,6 +443,10 @@
     .change-grid-form .actions { display:flex; gap:8px; margin-top:8px; }
     .btn-apply { background: linear-gradient(135deg,#059669,#10b981); color:#fff; border:none; padding:8px 12px; border-radius:8px; font-weight:700; cursor:pointer; }
     .btn-cancel { background:transparent; border:1px solid #d1d5db; color:#374151; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    /* Suggestions dropdown inside change-grid modal */
+    .change-grid-suggestions { display:none; background:#fff; border:1px solid #e6e6e6; border-radius:8px; box-shadow:0 8px 24px rgba(2,6,23,0.08); max-height:240px; overflow:auto; margin-top:8px; }
+    .change-grid-suggestion-item { padding:8px 12px; cursor:pointer; font-size:14px; color:#0f1724; }
+    .change-grid-suggestion-item:hover { background:#f1f5f9; }
 
     .post-badges {
         position: absolute; top: 8px; right: 8px; left: auto; display:flex; gap:6px; z-index:20; justify-content:flex-end;
@@ -35061,8 +35065,9 @@
             </div>
             <div class="modal-body">
                 <form class="change-grid-form" id="changeGridForm" onsubmit="return false;">
-                    <div>
-                        <input id="refinePrimary" class="refine-input" placeholder="e.g. Coffee, Restaurants, Parks" />
+                    <div style="position:relative;">
+                        <input id="refinePrimary" class="refine-input" placeholder="e.g. Coffee, Restaurants, Parks" autocomplete="off" />
+                        <div id="changeGridSuggestions" class="change-grid-suggestions" aria-hidden="true"></div>
                     </div>
                     <div style="margin-top:auto; display:flex; flex-direction:column; gap:10px; align-items:center; padding:18px 0;">
                         <button type="button" class="btn-apply" id="changeLocationBtn">Change location</button>
@@ -35098,6 +35103,93 @@
                 if (pill) {
                     pill.addEventListener('click', function(){ openModal(); });
                     pill.addEventListener('keypress', function(e){ if (e.key === 'Enter' || e.key === ' ') openModal(); });
+                }
+
+                // Suggestions UI + logic
+                const suggestionsEl = document.getElementById('changeGridSuggestions');
+                const refineInput = document.getElementById('refinePrimary');
+                function getCombinedSources() {
+                    const out = [];
+                    try {
+                        if (Array.isArray(window.popularLocalDestinationsCurated)) out.push(...window.popularLocalDestinationsCurated);
+                        if (Array.isArray(window.compactNearbyCities)) out.push(...window.compactNearbyCities);
+                        if (Array.isArray(window.nearbyPOIsSection)) out.push(...window.nearbyPOIsSection);
+                        if (Array.isArray(window.regionalCities)) out.push(...window.regionalCities);
+                    } catch (e) { /* ignore */ }
+                    // fallback sample items when no sources available
+                    if (out.length === 0) {
+                        out.push({ display: 'San Francisco', lat: 37.7749, lon: -122.4194 });
+                        out.push({ display: 'New York', lat: 40.7128, lon: -74.0060 });
+                        out.push({ display: 'Salt Lake City', lat: 40.7608, lon: -111.8910 });
+                        out.push({ display: 'Nearby Park', lat: (window.userLocation?.lat || 40.7128) + 0.02, lon: (window.userLocation?.lon || -74.0060) + 0.01 });
+                    }
+                    return out;
+                }
+                function normalizeItem(it, idx) {
+                    const label = (it && (it.display || it.name || it.title || it.label)) || (typeof it === 'string' ? it : 'Unknown');
+                    let lat = it && (it.lat || it.latitude || (it.location && it.location.lat) || (it.center && it.center.lat));
+                    let lon = it && (it.lon || it.longitude || (it.location && it.location.lon) || (it.center && it.center.lon));
+                    if (lat == null || lon == null) {
+                        const base = (window.userLocation && window.userLocation.lat && window.userLocation.lon) ? window.userLocation : { lat: 40.7128, lon: -74.0060 };
+                        lat = base.lat + (idx + 1) * 0.01;
+                        lon = base.lon + (idx + 1) * 0.01;
+                    }
+                    return { label, lat, lon };
+                }
+                function getLocationSuggestions(q) {
+                    if (!q || String(q).trim().length === 0) return [];
+                    const src = getCombinedSources();
+                    const list = src.map(normalizeItem).filter(it => String(it.label || '').toLowerCase().includes(String(q).toLowerCase()));
+                    return list.slice(0, 12);
+                }
+                function renderSuggestions(list) {
+                    if (!suggestionsEl) return;
+                    suggestionsEl.innerHTML = '';
+                    if (!list || list.length === 0) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); return; }
+                    list.forEach((it, idx) => {
+                        const div = document.createElement('div');
+                        div.className = 'change-grid-suggestion-item';
+                        div.setAttribute('role','button');
+                        div.setAttribute('tabindex','0');
+                        div.textContent = it.label + ` • ${it.lat.toFixed(3)}, ${it.lon.toFixed(3)}`;
+                        div.addEventListener('click', function(){ selectSuggestion(it); });
+                        div.addEventListener('keypress', function(e){ if (e.key === 'Enter' || e.key === ' ') selectSuggestion(it); });
+                        suggestionsEl.appendChild(div);
+                    });
+                    suggestionsEl.style.display = 'block';
+                    suggestionsEl.setAttribute('aria-hidden','false');
+                }
+                function selectSuggestion(it) {
+                    try {
+                        // preserve original user location once
+                        if (!window.__originalUserLocation) window.__originalUserLocation = window.userLocation || null;
+                        window.__tempLocationOverride = { lat: it.lat, lon: it.lon, label: it.label };
+                        // apply as current user location for grid rendering
+                        try { window.userLocation = { lat: it.lat, lon: it.lon }; } catch (e) {}
+                        // attempt to re-render grid
+                        if (typeof renderGrid === 'function') {
+                            renderGrid();
+                        } else if (typeof rebuildGridScrollerFromGridContent === 'function') {
+                            rebuildGridScrollerFromGridContent();
+                        } else {
+                            // fallback: reload to force server-side calculations
+                            location.reload();
+                        }
+                    } catch (e) { console.warn('selectSuggestion failed', e); }
+                    // hide suggestions and close modal
+                    if (suggestionsEl) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); }
+                    closeModal();
+                }
+                if (refineInput) {
+                    refineInput.addEventListener('input', function(e){
+                        const v = String(e.target.value || '');
+                        if (v.length >= 1) {
+                            const list = getLocationSuggestions(v);
+                            renderSuggestions(list);
+                        } else {
+                            if (suggestionsEl) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); }
+                        }
+                    });
                 }
                 if (closeBtn) closeBtn.addEventListener('click', closeModal);
                 if (changeBtn) changeBtn.addEventListener('click', function(){
