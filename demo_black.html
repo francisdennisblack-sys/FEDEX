@@ -690,107 +690,97 @@
           try{
             opts = opts || {};
             if(!target) { if(onComplete) onComplete(); return; }
-            // If any previous button-focus zoom has already happened, skip further ones
             if(window._demo_button_zoomed_done){ if(onComplete) onComplete(); return; }
-            // if the target explicitly opts out of button-focus zooms, skip
-            if(target.getAttribute && target.getAttribute('data-no-zoom') === 'true'){
-              if(onComplete) onComplete();
-              return;
-            }
+            if(target.getAttribute && target.getAttribute('data-no-zoom') === 'true'){ if(onComplete) onComplete(); return; }
+
             const boxes = Array.from(document.querySelectorAll('.grid-box'));
-            const btn = target.querySelector(btnSelector);
-            if(!btn){ if(onComplete) onComplete(); return; }
 
-            const btnRect = btn.getBoundingClientRect();
-            const vcx = window.innerWidth/2, vcy = window.innerHeight/2;
-            const dx = vcx - (btnRect.left + btnRect.width/2);
-            const dy = vcy - (btnRect.top + btnRect.height/2);
+            // Clone the entire post box so we truly zoom the post (not just the button)
+            const rect = target.getBoundingClientRect();
+            const cloneBox = target.cloneNode(true);
+            cloneBox.style.position = 'fixed';
+            cloneBox.style.left = rect.left + 'px';
+            cloneBox.style.top = rect.top + 'px';
+            cloneBox.style.width = rect.width + 'px';
+            cloneBox.style.height = rect.height + 'px';
+            cloneBox.style.margin = '0';
+            cloneBox.style.boxSizing = 'border-box';
+            cloneBox.style.transformOrigin = 'center center';
+            cloneBox.style.zIndex = 10001;
+            cloneBox.style.transition = 'transform 480ms cubic-bezier(.2,.85,.25,1), box-shadow 420ms ease, opacity 220ms ease';
+            cloneBox.style.pointerEvents = 'none';
 
-            // Clone just the button so we zoom the button only
-            const cloneBtn = btn.cloneNode(true);
-            cloneBtn.style.position = 'fixed';
-            cloneBtn.style.left = btnRect.left + 'px';
-            cloneBtn.style.top = btnRect.top + 'px';
-            cloneBtn.style.width = btnRect.width + 'px';
-            cloneBtn.style.height = btnRect.height + 'px';
-            cloneBtn.style.margin = '0';
-            cloneBtn.style.boxSizing = 'border-box';
-            cloneBtn.style.transformOrigin = 'center center';
-            cloneBtn.style.zIndex = 10001;
-            cloneBtn.style.transition = 'transform 480ms cubic-bezier(.2,.85,.25,1), box-shadow 420ms ease, opacity 220ms ease';
-            cloneBtn.style.pointerEvents = 'none';
-            cloneBtn.style.display = 'inline-flex';
-
-            // hide other boxes (keep layout stable) and hide original button to avoid duplication
+            // hide other boxes and original target to keep layout stable
             boxes.forEach(b => { if(b !== target) b.classList.add('dimmed'); });
-            btn.style.visibility = 'hidden';
+            target.style.visibility = 'hidden';
 
-            // attach clone (start at same screen position)
-            document.body.appendChild(cloneBtn);
-            // mark that a button-focus zoom has occurred so subsequent calls skip
+            document.body.appendChild(cloneBox);
             try{ window._demo_button_zoomed_done = true; }catch(e){}
-            // subtly zoom the original post for context while button is centered
             try{ target.classList.add('button-focused'); }catch(e){}
-            cloneBtn.style.willChange = 'transform, opacity';
-            cloneBtn.style.transform = 'translate(0px,0px) scale(1)';
 
-            // update counts on the clone only to avoid repainting original during animation
+            cloneBox.style.willChange = 'transform, opacity';
+            cloneBox.style.transform = 'translate(0px,0px) scale(1)';
+
+            // update counts on the clone only so users can watch numbers change while zoomed
             const likeBtn = target.querySelector('.vote-button.like');
             const dislikeBtn = target.querySelector('.vote-button.dislike');
+            const cloneLikeBtn = cloneBox.querySelector('.vote-button.like');
+            const cloneDislikeBtn = cloneBox.querySelector('.vote-button.dislike');
             try{
-              if(changeType === 'dislike'){
+              if(changeType === 'dislike' && cloneDislikeBtn){
                 const prev = parseInt((dislikeBtn && dislikeBtn.querySelector('.count') && dislikeBtn.querySelector('.count').textContent) || '0',10) || 0;
                 target.setAttribute('data-dislikes-original', String(prev));
                 const added = opts.increment || 1;
                 const newVal = String(prev + added);
-                const cloneDis = cloneBtn.querySelector('.count'); if(cloneDis) cloneDis.textContent = newVal;
+                const cloneDis = cloneDislikeBtn.querySelector('.count'); if(cloneDis) cloneDis.textContent = newVal;
+                if(cloneDislikeBtn) cloneDislikeBtn.setAttribute('aria-pressed','true');
               }
-              if(changeType === 'like'){
+              if(changeType === 'like' && cloneLikeBtn){
                 const prev = parseInt((likeBtn && likeBtn.querySelector('.count') && likeBtn.querySelector('.count').textContent) || '0',10) || 0;
                 target.setAttribute('data-likes-original', String(prev));
                 const added = opts.increment || 1;
                 const newVal = String(prev + added);
-                const cloneL = cloneBtn.querySelector('.count'); if(cloneL) cloneL.textContent = newVal;
+                const cloneL = cloneLikeBtn.querySelector('.count'); if(cloneL) cloneL.textContent = newVal;
+                if(cloneLikeBtn) cloneLikeBtn.setAttribute('aria-pressed','true');
               }
             }catch(e){}
 
-            // compute scale to make button prominent and translate to center (use full dx/dy)
-            const scale = opts.scale || 2.6;
-            const tx = dx;
-            const ty = dy;
+            // compute translation to center the cloned box in viewport
+            const vcx = window.innerWidth/2, vcy = window.innerHeight/2;
+            const dx = vcx - (rect.left + rect.width/2);
+            const dy = vcy - (rect.top + rect.height/2);
+            const scale = opts.scale || 1.5;
 
-            // animate clone into center
+            // animate clone into center (true zoom)
             requestAnimationFrame(() => {
-              cloneBtn.style.transition = 'transform 480ms cubic-bezier(.2,.85,.25,1), opacity 220ms ease';
-              cloneBtn.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+              cloneBox.style.transition = 'transform 480ms cubic-bezier(.2,.85,.25,1), opacity 220ms ease';
+              cloneBox.style.transform = `translate(${dx}px, ${dy}px) scale(${scale})`;
             });
 
             const duration = (typeof opts.duration === 'number') ? opts.duration : 1600;
-            // pause at center, then animate back (longer pause for clarity)
             setTimeout(() => {
-              // small pause while centered
               setTimeout(() => {
                 // animate back to original position
-                cloneBtn.style.transform = 'translate(0px,0px) scale(1)';
+                cloneBox.style.transform = 'translate(0px,0px) scale(1)';
                 // cleanup after reverse animation
                 setTimeout(() => {
-                  try { cloneBtn.remove(); } catch(e) { if(cloneBtn.parentNode) cloneBtn.parentNode.removeChild(cloneBtn); }
+                  try { cloneBox.remove(); } catch(e) { if(cloneBox.parentNode) cloneBox.parentNode.removeChild(cloneBox); }
                   boxes.forEach(b => { b.classList.remove('dimmed'); });
-                  btn.style.visibility = '';
+                  target.style.visibility = '';
                   try{ target.classList.remove('button-focused'); }catch(e){}
 
                   // commit to original if requested
                   try{
                     if(opts.persist){
-                      if(changeType === 'like' && likeBtn){
-                        const cloneL = cloneBtn && cloneBtn.querySelector ? cloneBtn.querySelector('.count') : null;
+                      if(changeType === 'like' && likeBtn && cloneLikeBtn){
+                        const cloneL = cloneLikeBtn.querySelector('.count');
                         const val = cloneL ? cloneL.textContent : target.getAttribute('data-likes-original');
                         if(val && likeBtn.querySelector('.count')) likeBtn.querySelector('.count').textContent = val;
                         if(likeBtn) likeBtn.setAttribute('aria-pressed','true');
                         target.removeAttribute('data-likes-original');
                       }
-                      if(changeType === 'dislike' && dislikeBtn){
-                        const cloneD = cloneBtn && cloneBtn.querySelector ? cloneBtn.querySelector('.count') : null;
+                      if(changeType === 'dislike' && dislikeBtn && cloneDislikeBtn){
+                        const cloneD = cloneDislikeBtn.querySelector('.count');
                         const val2 = cloneD ? cloneD.textContent : target.getAttribute('data-dislikes-original');
                         if(val2 && dislikeBtn.querySelector('.count')) dislikeBtn.querySelector('.count').textContent = val2;
                         if(dislikeBtn) dislikeBtn.setAttribute('aria-pressed','true');
