@@ -1678,19 +1678,54 @@
         // schedule initial run (remove 1s more waiting at start: extra pause now 1.5s)
         window.demoZoomTimeout = setTimeout(runDemoSequence, ZOOM_DELAY_MS + 1500);
 
-        // After 35 seconds, pause the demo and remove scheduled animations so
-        // we can continue the demo manually. Also show simple controls to add
-        // bold text into the focused slot.
+        // After 35 seconds, aggressively pause the demo so the screen becomes static.
+        // This clears timers/intervals, cancels RAFs, stops the brand globe, and
+        // disables CSS transitions/animations so you can edit content safely.
         setTimeout(function(){
           try{
-            // clear main demo timeout if still pending
+            // mark paused state so other logic can guard against restarting
+            window._demo_paused = true;
+
+            // clear known demo timeout
             if(window.demoZoomTimeout) { clearTimeout(window.demoZoomTimeout); window.demoZoomTimeout = null; }
-            // stop any auto-like intervals
+
+            // attempt to stop auto-like manager if exposed
             if(window._demoAutoLike && typeof window._demoAutoLike.stopSoloBoost === 'function') try{ window._demoAutoLike.stopSoloBoost(); }catch(e){}
-            // remove functions that re-schedule the demo to avoid restarting
-            window.runDemoSequence = function(){};
-            window.runZoomSequence = function(){return;};
-            window.runButtonFocus = function(){return;};
+
+            // replace scheduling functions with no-ops to prevent future scheduling
+            try{ window.runDemoSequence = function(){}; }catch(e){}
+            try{ window.runZoomSequence = function(){ return; }; }catch(e){}
+            try{ window.runButtonFocus = function(){ return; }; }catch(e){}
+
+            // cancel all pending timeouts and intervals (brute-force)
+            try{
+              var highestTimerId = setTimeout(function(){}, 0);
+              for(var i = 0; i <= highestTimerId; i++){ try{ clearTimeout(i); }catch(e){} try{ clearInterval(i); }catch(e){} }
+            }catch(e){}
+
+            // cancel all pending requestAnimationFrame callbacks
+            try{
+              var lastRaf = requestAnimationFrame(function(){});
+              for(var j = 0; j <= lastRaf; j++){ try{ cancelAnimationFrame(j); }catch(e){} }
+            }catch(e){}
+
+            // stop the brand globe animation if available
+            try{ if(window.brandGlobeEngine && typeof window.brandGlobeEngine.stop === 'function') window.brandGlobeEngine.stop(); }catch(e){}
+
+            // disable CSS transitions and animations globally to freeze visual motion
+            try{
+              if(!document.getElementById('demo-freeze-styles')){
+                var s = document.createElement('style'); s.id = 'demo-freeze-styles';
+                s.textContent = '* { transition: none !important; animation: none !important; animation-play-state: paused !important; transition-duration: 0s !important; }';
+                document.head.appendChild(s);
+              }
+            }catch(e){}
+
+            // additionally, remove any running 'pulse' classes so CSS keyframes stop
+            try{ document.querySelectorAll('.pulse, .demo-glow-positive.pulse, .voted-pulse, .animate-badge').forEach(el => el.classList.remove('pulse','voted-pulse','animate-badge')); }catch(e){}
+
+            // leave the DOM as-is (don't remove clones) so screen appears frozen for edits
+
             // show a minimal control UI for adding bold text to a selected slot
             try{
               const ctrl = document.createElement('div'); ctrl.id = 'demo-continue-controls';
