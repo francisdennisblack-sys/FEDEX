@@ -463,6 +463,8 @@
     .change-grid-form .actions { display:flex; gap:8px; margin-top:8px; }
     .btn-apply { background: linear-gradient(135deg,#059669,#10b981); color:#fff; border:none; padding:8px 12px; border-radius:8px; font-weight:700; cursor:pointer; }
     .btn-cancel { background:transparent; border:1px solid #d1d5db; color:#374151; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    /* Highlight state for primary action when a suggestion is selected */
+    .btn-highlight { box-shadow: 0 8px 28px rgba(16,185,129,0.28); transform: translateY(-1px); border: 1px solid rgba(16,185,129,0.18); }
     /* Suggestions dropdown inside change-grid modal */
     .change-grid-suggestions { display:none; background:#111827; border:1px solid #374151; border-radius:8px; box-shadow:0 8px 24px rgba(2,6,23,0.2); max-height:240px; overflow:auto; margin-top:8px; }
     .change-grid-suggestion-item { padding:8px 12px; cursor:pointer; font-size:14px; color:#e6e6e6; }
@@ -35144,17 +35146,26 @@
                 function getCombinedSources() {
                     const out = [];
                     try {
+                        // Preferred curated coffee-shop list (global)
+                        if (Array.isArray(window.bestCoffeeShops)) out.push(...window.bestCoffeeShops);
+                        // existing sources
                         if (Array.isArray(window.popularLocalDestinationsCurated)) out.push(...window.popularLocalDestinationsCurated);
                         if (Array.isArray(window.compactNearbyCities)) out.push(...window.compactNearbyCities);
                         if (Array.isArray(window.nearbyPOIsSection)) out.push(...window.nearbyPOIsSection);
                         if (Array.isArray(window.regionalCities)) out.push(...window.regionalCities);
                     } catch (e) { /* ignore */ }
-                    // fallback sample items when no sources available
+                    // sensible default coffee / city fallbacks when no sources available
                     if (out.length === 0) {
-                        out.push({ display: 'San Francisco', lat: 37.7749, lon: -122.4194 });
-                        out.push({ display: 'New York', lat: 40.7128, lon: -74.0060 });
-                        out.push({ display: 'Salt Lake City', lat: 40.7608, lon: -111.8910 });
-                        out.push({ display: 'Nearby Park', lat: (window.userLocation?.lat || 40.7128) + 0.02, lon: (window.userLocation?.lon || -74.0060) + 0.01 });
+                        out.push({ display: 'Blue Bottle Coffee — San Francisco', lat: 37.7764, lon: -122.4231 });
+                        out.push({ display: 'Stumptown Coffee Roasters — Portland', lat: 45.5231, lon: -122.6765 });
+                        out.push({ display: 'Café Central — Vienna', lat: 48.210033, lon: 16.365444 });
+                        out.push({ display: 'Tim Wendelboe — Oslo', lat: 59.9235, lon: 10.7529 });
+                        out.push({ display: 'Toby’s Estate (Allpress) — Brooklyn', lat: 40.7033, lon: -73.9860 });
+                        out.push({ display: 'The Coffee Collective — Copenhagen', lat: 55.6839, lon: 12.5735 });
+                        out.push({ display: 'Café de Flore — Paris', lat: 48.8556, lon: 2.3333 });
+                        out.push({ display: '%Arabica — Kyoto', lat: 35.0116, lon: 135.7681 });
+                        out.push({ display: 'Single O — Sydney', lat: -33.8768, lon: 151.2045 });
+                        out.push({ display: 'Relay Coffee — Tokyo', lat: 35.6895, lon: 139.6917 });
                     }
                     return out;
                 }
@@ -35196,22 +35207,28 @@
                     try {
                         // preserve original user location once
                         if (!window.__originalUserLocation) window.__originalUserLocation = window.userLocation || null;
+                        // set temporary override and update the input immediately
                         window.__tempLocationOverride = { lat: it.lat, lon: it.lon, label: it.label };
-                        // apply as current user location for grid rendering
+                        if (refineInput) refineInput.value = it.label;
+                        // apply as current user location for immediate preview
                         try { window.userLocation = { lat: it.lat, lon: it.lon }; } catch (e) {}
-                        // attempt to re-render grid
+                        // attempt to re-render grid immediately so selection 'works first time'
                         if (typeof renderGrid === 'function') {
                             renderGrid();
                         } else if (typeof rebuildGridScrollerFromGridContent === 'function') {
                             rebuildGridScrollerFromGridContent();
                         } else {
-                            // fallback: reload to force server-side calculations
-                            location.reload();
+                            // fallback: don't force a full reload; keep modal open for user confirmation
+                        }
+                        // highlight the primary change button so user sees the next action
+                        if (changeBtn) {
+                            changeBtn.classList.add('btn-highlight');
+                            changeBtn.setAttribute('aria-pressed','true');
+                            try { changeBtn.focus(); } catch (e) {}
                         }
                     } catch (e) { console.warn('selectSuggestion failed', e); }
-                    // hide suggestions and close modal
+                    // hide suggestions but keep modal open so user can see the highlighted action
                     if (suggestionsEl) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); }
-                    closeModal();
                 }
                 if (refineInput) {
                     refineInput.addEventListener('input', function(e){
@@ -35224,14 +35241,40 @@
                         }
                     });
                 }
+                // If a location change was previously applied, highlight Come Home so user can revert
+                try {
+                    if (comeHomeBtn && localStorage.getItem('shouldHighlightComeHome') === '1') {
+                        comeHomeBtn.classList.add('btn-highlight');
+                        comeHomeBtn.setAttribute('aria-pressed','true');
+                    }
+                } catch (e) {}
                 if (closeBtn) closeBtn.addEventListener('click', closeModal);
                 if (changeBtn) changeBtn.addEventListener('click', function(){
                     const primary = document.getElementById('refinePrimary')?.value || '';
-                    // Placeholder: wire up actual refine logic later
-                    console.log('Change location:', { primary });
+                    // If a temporary selection exists, persist it as the chosen location
+                    try {
+                        if (window.__tempLocationOverride) {
+                            const sel = window.__tempLocationOverride;
+                            try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch (e) {}
+                            console.log('Applied selected location:', sel);
+                        } else {
+                            console.log('Change location (manual):', { primary });
+                        }
+                    } catch (e) { console.warn('changeBtn handler error', e); }
+                    // mark that user can come home (highlight the Come Home button)
+                    try { localStorage.setItem('shouldHighlightComeHome','1'); if (comeHomeBtn) { comeHomeBtn.classList.add('btn-highlight'); comeHomeBtn.setAttribute('aria-pressed','true'); } } catch (e) {}
+                    // clear highlight state on Change button itself
+                    try { changeBtn.classList.remove('btn-highlight'); changeBtn.removeAttribute('aria-pressed'); } catch (e) {}
                     closeModal();
                 });
                 if (comeHomeBtn) comeHomeBtn.addEventListener('click', function(){
+                    // clear the stored chosen location and highlight flag
+                    try {
+                        localStorage.removeItem('lastChosenLocation');
+                        localStorage.removeItem('shouldHighlightComeHome');
+                    } catch (e) {}
+                    // remove highlight UI
+                    try { comeHomeBtn.classList.remove('btn-highlight'); comeHomeBtn.removeAttribute('aria-pressed'); } catch (e) {}
                     closeModal();
                     try { if (typeof goHome === 'function') { goHome(); return; } } catch (e) {}
                     // Fallback: navigate to root
