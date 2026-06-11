@@ -19181,6 +19181,8 @@
                 html += renderSection('Current Location', currentRows);
                 // Show recent searches right after current location for quicker access
                 html += renderSection('Recent Searches', recentSearches);
+                // New: show nearby popular POIs for quick access
+                html += renderSection('Nearby Popular POIs', popularLocalDestinationsCurated);
                 html += renderSection('Very Nearby Cities (0-5 mi)', compactNearbyCities);
                 html += renderSection('Very Nearby POIs (0-5 mi)', compactNearbyPOIs);
                 html += renderSection('Nearby POIs (Within 25 mi)', nearbyPOIsSection);
@@ -33128,86 +33130,6 @@
                     console.error('❌ Smoke test failed:', err);
                 }
             };
-
-                    // Cross-area distribution test helper
-                    window.runCrossAreaDistributionTest = function runCrossAreaDistributionTest(opts = {}) {
-                        const origin = opts.origin || 'SLC';
-                        const target = opts.target || 'NYC';
-                        const slotsNeeded = opts.slotsNeeded || 6;
-                        const originUserCount = opts.originUsers || 50;
-                        const targetUserCount = opts.targetUsers || 5; // assume NYC is underserved for test
-
-                        // Ensure gridContent exists
-                        window.gridContent = window.gridContent || {};
-                        window.postCache = window.postCache || {};
-
-                        // Create a mock origin post
-                        const now = Date.now();
-                        const postId = opts.postId || `cross-${Math.random().toString(36).slice(2,9)}`;
-                        const post = {
-                            id: postId,
-                            content: opts.content || `Cross-area test post from ${origin}`,
-                            likes: Number(opts.likes || 3),
-                            dislikes: Number(opts.dislikes || 0),
-                            timestamp: now - (opts.ageMs || 1000),
-                            authId: opts.authId || 'test-user',
-                            userId: opts.userId || 'test-user',
-                            county: origin,
-                            areaTag: origin,
-                            customTags: Array.isArray(opts.customTags) ? opts.customTags : (opts.customTags ? [opts.customTags] : [])
-                        };
-
-                        // Insert into origin bucket
-                        gridContent[origin] = gridContent[origin] || [];
-                        if (!gridContent[origin].find(p => p.id === post.id)) gridContent[origin].push(post);
-                        postCache[post.id] = post;
-
-                        // Ensure target area has few posts to simulate scarcity
-                        gridContent[target] = gridContent[target] || [];
-                        gridContent[target].length = 0; // clear any existing for deterministic test
-                        // Add a single low-engagement post in target
-                        gridContent[target].push({ id: `${target}-seed-1`, content: 'Seed post', likes: 1, dislikes: 0, timestamp: now - 100000, county: target, areaTag: target });
-
-                        // Compute badges when seen in origin and when seen in target
-                        try {
-                            const originBadgeResult = adaptiveBadgeSystem.rebadgePostForArea(post, origin, gridContent[origin], originUserCount);
-                            const targetBadgeResult = adaptiveBadgeSystem.rebadgePostForArea(post, target, gridContent[target], targetUserCount);
-
-                            console.log(`\n🔬 Cross-area test: post ${post.id} from ${origin} → ${target}`);
-                            console.log(`  Origin badge: ${originBadgeResult.newBadge} | reasoning: ${originBadgeResult.reasoning}`);
-                            console.log(`  Target badge: ${targetBadgeResult.newBadge} | reasoning: ${targetBadgeResult.reasoning}`);
-
-                            // Calculate density + external pool for target
-                            const density = calculateDensityMetrics(target);
-                            console.log(`  Target density:`, density);
-
-                            const externalPool = getExternalContentWithFallbacks(target, slotsNeeded, density) || [];
-                            const included = externalPool.find(p => p && p.id === post.id);
-                            console.log(`  External pool size for target (slots ${slotsNeeded}): ${externalPool.length}`);
-                            if (included) {
-                                console.log(`  ✅ Post ${post.id} WOULD be included in target external pool (position ${externalPool.indexOf(included)})`);
-                            } else {
-                                console.log(`  ⛔ Post ${post.id} NOT included in external pool for target`);
-                                // Check emergency pool fallback (rural mode)
-                                if (density.isRural) {
-                                    const allExternal = [];
-                                    for (const [otherArea, posts] of Object.entries(gridContent)) {
-                                        if (otherArea !== target) allExternal.push(...posts);
-                                    }
-                                    allExternal.sort((a,b) => ((b.likes||0)-(b.dislikes||0)) - ((a.likes||0)-(a.dislikes||0)));
-                                    const foundInAll = allExternal.find(p=>p && p.id === post.id);
-                                    if (foundInAll) console.log(`  🔁 In emergency pool (rural fallback) the post WOULD be present at index ${allExternal.indexOf(foundInAll)}`);
-                                }
-                            }
-
-                            console.log('\n  Summary:');
-                            console.log('   - Badge assigned in target is determined by adaptiveBadgeSystem.calculateContextualBadge (percentile vs area metrics).');
-                            console.log('   - Area tags: originalAreaTag remains the origin (SLC); when rendering for target the post.areaContext is set to target by rebadging. displayAreaTag used by getLocalPosts will prefer stable area tag when present.');
-                            console.log('   - Placement: if not top-tier the post is only included via external fallback tiers; in rural/critical density it may be injected via emergency pool and ordered by engagement.');
-                        } catch (e) {
-                            console.error('Cross-area distribution test failed:', e);
-                        }
-                    };
             
             // 🌐 LAZY LOAD: POI connection check
             setTimeout(() => {
