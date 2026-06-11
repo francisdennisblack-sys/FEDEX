@@ -19121,10 +19121,11 @@
                     12
                 );
 
-                const compactNearbyCities = pickSpacedRows(veryNearbyCities, 2, 3);
-                const compactNearbyPOIs = pickSpacedRows(veryNearbyPOIs, 3, 2);
+                const compactNearbyCities = pickSpacedRows(veryNearbyCities, 4, 2);
+                const compactNearbyPOIs = pickSpacedRows(veryNearbyPOIs, 6, 1);
 
-                const recentSearches = getRecentLocationSearches(8).map((r) => ({
+                // Reduce emphasis on recent searches (show fewer) and prefer more current contextual locations
+                const recentSearches = getRecentLocationSearches(4).map((r) => ({
                     display: r.displayName,
                     type: r.type || 'location',
                     distanceMi: Infinity,
@@ -19142,6 +19143,19 @@
                     .slice(0, 80);
                 const popularLocalDestinationsCurated = pickSpacedRows(popularLocalDestinations, 10, 5);
 
+                // New POI sections: Nearby (<=25mi) and Far Away (100-250mi)
+                const nearbyPOIsSection = poiRows
+                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi <= 25)
+                    .map((x) => ({ ...x, _poiScore: scorePoiPopularity(x) }))
+                    .sort((a,b) => (b._poiScore||0) - (a._poiScore||0))
+                    .slice(0, 18);
+
+                const farAwayPOIsSection = poiRows
+                    .filter((x) => isFinite(x.distanceMi) && x.distanceMi > 100 && x.distanceMi <= 250)
+                    .map((x) => ({ ...x, _poiScore: scorePoiPopularity(x) }))
+                    .sort((a,b) => (b._poiScore||0) - (a._poiScore||0))
+                    .slice(0, 6);
+
                 const renderSection = (title, rows) => {
                     if (!Array.isArray(rows) || rows.length === 0) return '';
                     let sectionHtml = `<div style="padding:7px 12px;background:#0f1419;border-bottom:1px solid #1e293b;color:#9ca3af;font-size:10px;text-transform:uppercase;font-weight:700;letter-spacing:0.06em;">${title}</div>`;
@@ -19155,13 +19169,24 @@
                 };
 
                 let html = '';
-                html += renderSection('Current Location', [{ display: currentLocationLabel, distanceMi: Infinity }]);
-                html += renderSection('Cities 5-100 Miles', regionalCities);
-                html += renderSection('Popular POIs Within 100 Miles', regionalPOIs);
+                // Expand Current Location to include multiple context-aware 'current' rows
+                const currentRows = [];
+                currentRows.push({ display: currentLocationLabel, distanceMi: Infinity });
+                if (window.latestUserAreaTag && String(window.latestUserAreaTag).trim() && String(window.latestUserAreaTag).trim() !== currentLocationLabel) currentRows.push({ display: window.latestUserAreaTag, distanceMi: Infinity });
+                if (currentAreaName && String(currentAreaName).trim() && String(currentAreaName).trim() !== currentLocationLabel) currentRows.push({ display: currentAreaName, distanceMi: Infinity });
+                if (window.userDetectedCounty && String(window.userDetectedCounty).trim() && String(window.userDetectedCounty).trim() !== currentLocationLabel) currentRows.push({ display: window.userDetectedCounty, distanceMi: Infinity });
+                // Add a few nearby city picks into the 'Current Location' group for quick context switching
+                compactNearbyCities.slice(0,3).forEach(c => currentRows.push({ display: c.display, distanceMi: c.distanceMi }));
+
+                html += renderSection('Current Location', currentRows);
                 html += renderSection('Very Nearby Cities (0-5 mi)', compactNearbyCities);
                 html += renderSection('Very Nearby POIs (0-5 mi)', compactNearbyPOIs);
+                html += renderSection('Nearby POIs (Within 25 mi)', nearbyPOIsSection);
+                html += renderSection('Cities 5-100 Miles', regionalCities);
+                html += renderSection('Popular POIs Within 100 Miles', regionalPOIs);
                 html += renderSection('Recent Searches', recentSearches);
                 html += renderSection('Popular POIs In Range', popularLocalDestinationsCurated);
+                html += renderSection('Far Away POIs (100-250 mi)', farAwayPOIsSection);
                 html += renderSection('Far Popular POIs (Few Picks)', farPopularPOIs);
 
                 if (!html) {
