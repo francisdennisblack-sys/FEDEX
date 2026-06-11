@@ -1536,5 +1536,113 @@
         window.demoZoomTimeout = setTimeout(runDemoSequence, ZOOM_DELAY_MS + 1500);
       })();
       </script>
+      <script>
+        // Auto-like manager: boosts likes for the focused/solo post or when a post moves to the top
+        (function(){
+          const grid = document.querySelector('.grid');
+          if(!grid) return;
+
+          let soloInterval = null;
+          let currentSolo = null;
+          const SOLO_INCREMENT_MS = 300;
+          const SOLO_MAX_ADDED = 400; // safety cap per solo session
+
+          function getVisibleBoxes(){
+            return Array.from(grid.querySelectorAll('.grid-box')).filter(b => {
+              const cs = window.getComputedStyle(b);
+              return cs.display !== 'none' && b.offsetParent !== null && cs.visibility !== 'hidden';
+            });
+          }
+
+          function parseCountLocal(s){
+            if(!s) return 0;
+            if(typeof s === 'number') return s;
+            s = String(s).trim();
+            if(/k/i.test(s)) return Math.round(parseFloat(s.replace(/[^0-9\.\-]/g,'')) * 1000);
+            if(/m/i.test(s)) return Math.round(parseFloat(s.replace(/[^0-9\.\-]/g,'')) * 1000000);
+            return parseInt(s.replace(/[^0-9\-]/g,''),10) || 0;
+          }
+
+          function setLikeCount(btn, newVal){
+            const span = btn.querySelector('.count');
+            if(!span) return;
+            // animateCount is available in this file; fall back to direct set if missing
+            try{ animateCount(span, newVal, 420); }catch(e){ span.textContent = String(newVal); }
+          }
+
+          function startSoloBoost(box){
+            stopSoloBoost();
+            if(!box) return;
+            currentSolo = box;
+            let added = 0;
+            soloInterval = setInterval(()=>{
+              try{
+                const likeBtn = box.querySelector('.vote-button.like');
+                if(!likeBtn) return;
+                const span = likeBtn.querySelector('.count');
+                const cur = parseCountLocal(span ? span.textContent : '0');
+                const inc = Math.max(1, Math.round(Math.min(12, Math.sqrt(cur) / 2)) );
+                const next = cur + inc;
+                setLikeCount(likeBtn, next);
+                likeBtn.setAttribute('aria-pressed','true');
+                likeBtn.classList.add('voted-like');
+                added += inc;
+                if(added >= SOLO_MAX_ADDED) stopSoloBoost();
+              }catch(e){ stopSoloBoost(); }
+            }, SOLO_INCREMENT_MS);
+          }
+
+          function stopSoloBoost(){
+            if(soloInterval){ clearInterval(soloInterval); soloInterval = null; }
+            currentSolo = null;
+          }
+
+          // When a box moves to first position, give it a burst of likes
+          let lastFirst = grid.firstElementChild;
+          function boostOnMoveToTop(box){
+            try{
+              if(!box) return;
+              const likeBtn = box.querySelector('.vote-button.like');
+              if(!likeBtn) return;
+              const span = likeBtn.querySelector('.count');
+              const cur = parseCountLocal(span ? span.textContent : '0');
+              const add = Math.max(6, Math.round(Math.min(80, Math.sqrt(cur) * 2)));
+              setLikeCount(likeBtn, cur + add);
+              likeBtn.setAttribute('aria-pressed','true');
+              likeBtn.classList.add('voted-like');
+              // small visual pulse
+              likeBtn.classList.add('voted-pulse');
+              setTimeout(()=> likeBtn.classList.remove('voted-pulse'), 900);
+            }catch(e){}
+          }
+
+          // Monitor visible boxes for solo state using a small interval (cheap and reliable)
+          setInterval(()=>{
+            try{
+              const visible = getVisibleBoxes();
+              if(visible.length === 1){
+                if(currentSolo !== visible[0]) startSoloBoost(visible[0]);
+              } else {
+                // if there are multiple visible, stop any solo boost
+                if(currentSolo) stopSoloBoost();
+              }
+            }catch(e){}
+          }, 400);
+
+          // Observe grid for first-child changes and run boost on newly-first
+          if(window.MutationObserver){
+            const mo = new MutationObserver((mutations)=>{
+              try{
+                const first = grid.firstElementChild;
+                if(first && first !== lastFirst){ lastFirst = first; boostOnMoveToTop(first); }
+              }catch(e){}
+            });
+            mo.observe(grid, { childList: true, subtree: false });
+          }
+
+          // Expose helpers for manual testing
+          window._demoAutoLike = { startSoloBoost, stopSoloBoost, boostOnMoveToTop };
+        })();
+      </script>
 </body>
 </html>
