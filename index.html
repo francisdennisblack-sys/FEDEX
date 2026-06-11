@@ -35194,6 +35194,16 @@
                     const list = src.map(normalizeItem).filter(it => String(it.label || '').toLowerCase().includes(String(q).toLowerCase()));
                     return list.slice(0, 12);
                 }
+                // Remote geocoding fallback (Nominatim) to find arbitrary places when local POIs miss
+                async function fetchGeocode(q, limit=8) {
+                    try {
+                        const url = 'https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(q) + '&limit=' + limit;
+                        const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+                        if (!res.ok) return [];
+                        const data = await res.json();
+                        return data.map(d => ({ label: d.display_name, lat: parseFloat(d.lat), lon: parseFloat(d.lon) }));
+                    } catch (e) { return []; }
+                }
                 function renderSuggestions(list) {
                     if (!suggestionsEl) return;
                     suggestionsEl.innerHTML = '';
@@ -35255,11 +35265,24 @@
                     if (suggestionsEl) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); }
                 }
                 if (refineInput) {
+                    let refineTimer = null;
                     refineInput.addEventListener('input', function(e){
                         const v = String(e.target.value || '');
+                        if (refineTimer) clearTimeout(refineTimer);
                         if (v.length >= 1) {
                             const list = getLocationSuggestions(v);
                             renderSuggestions(list);
+                            // fetch remote geocoding results and merge
+                            refineTimer = setTimeout(async function(){
+                                const remote = await fetchGeocode(v, 6);
+                                // merge, avoiding duplicates by label
+                                const labels = new Set(list.map(x => (x.label||'').toLowerCase()));
+                                const merged = list.slice();
+                                for (const r of remote) {
+                                    if (!labels.has((r.label||'').toLowerCase())) { merged.push(r); labels.add((r.label||'').toLowerCase()); }
+                                }
+                                renderSuggestions(merged.slice(0,12));
+                            }, 250);
                         } else {
                             if (suggestionsEl) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); }
                         }
@@ -35306,7 +35329,19 @@
                             try { input.value = it.label; window.__tempLocationOverride = { lat: it.lat, lon: it.lon, label: it.label }; document.dispatchEvent(new CustomEvent('locationSelected',{detail:window.__tempLocationOverride})); try { window.userLocation = { lat: it.lat, lon: it.lon }; } catch(e){} } catch(e){}
                             dd.style.display = 'none'; dd.setAttribute('aria-hidden','true');
                         }
-                        input.addEventListener('input', function(e){ const v=String(e.target.value||''); if (v.length>=1){ render(getLocationSuggestions(v)); } else { dd.style.display='none'; dd.setAttribute('aria-hidden','true'); } });
+                        input.addEventListener('input', function(e){ const v=String(e.target.value||''); if (v.length>=1){
+                                const local = getLocationSuggestions(v);
+                                render(local);
+                                // fetch remote and merge after debounce
+                                if (input._poiTimer) clearTimeout(input._poiTimer);
+                                input._poiTimer = setTimeout(async function(){
+                                    const remote = await fetchGeocode(v,6);
+                                    const labels = new Set(local.map(x=>(x.label||'').toLowerCase()));
+                                    const merged = local.slice();
+                                    for (const r of remote) if (!labels.has((r.label||'').toLowerCase())) merged.push(r);
+                                    render(merged.slice(0,12));
+                                }, 250);
+                            } else { dd.style.display='none'; dd.setAttribute('aria-hidden','true'); } });
                         document.addEventListener('click', function(e){ if (!wrapperContains(e.target, dd) && e.target !== input) dd.style.display='none'; });
                         function wrapperContains(t, el){ while(t){ if (t===el) return true; t=t.parentNode; } return false; }
                     }
