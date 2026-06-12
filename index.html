@@ -216,6 +216,48 @@
         }
 
         /**
+         * Decide whether a post from another zone may be shown on the current
+         * viewer's grid. Rules:
+         * - Always include the viewer's own posts.
+         * - Allow if post is top-tier / promoted (isPostAreaPromotionEligible).
+         * - Allow if origin area is low-population (areaUserCounts[area] < 50).
+         * - Allow if post is recent and has unusually high engagement for its area.
+         */
+        function isAllowedCrossZone(post) {
+            try {
+                if (!post || !post.id) return false;
+                // Always allow user's own posts (handled earlier but keep check)
+                if (post.userId && currentUserId && String(post.userId) === String(currentUserId)) return true;
+
+                // Promote explicitly flagged/shared posts
+                if (isPostAreaPromotionEligible(post)) return true;
+
+                // Low-user-area heuristic: prefer cross-zone duplication to populate sparse areas
+                const area = String(post.county || post.zoneTag || post.area || '').trim();
+                try {
+                    const counts = window.areaUserCounts || {};
+                    const c = Number(counts[area] || 0);
+                    if (Number.isFinite(c) && c > 0 && c < 50) return true;
+                } catch (e) { /* ignore area count errors */ }
+
+                // Recent viral content: recent createdAt + high net likes
+                try {
+                    const created = Number(post.createdAt || post.ts || post.publishedAt || 0);
+                    const ageMs = Date.now() - (created || 0);
+                    const likes = Number(post.likes || 0);
+                    const dislikes = Number(post.dislikes || 0);
+                    const net = likes - dislikes;
+                    if (ageMs > 0 && ageMs < (6 * 60 * 60 * 1000) && net >= 100) return true;
+                } catch (e) { /* ignore */ }
+
+                // Default: do not include cross-zone post
+                return false;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        /**
          * Re-tag recent posts authored by the current user when they move zones.
          * Looks for posts created within the last N minutes that are not locked.
          */
@@ -451,11 +493,11 @@
         background:#ffffff; /* white modal bg */
         width: min(450px, 59vw);
         height: 56.6vh;
-        max-height: 75vh;
+        max-height: calc(100vh - 80px);
         border-radius:10px;
         box-shadow: 0 20px 48px rgba(2,6,23,0.08);
         position:relative;
-        overflow:auto;
+        overflow: hidden; /* keep dropdowns constrained within modal */
         display:flex;
         flex-direction:column;
         border: 4px solid #16a34a; /* thicker green border */
@@ -474,7 +516,7 @@
     }
     #changeGridModal .modal-header h2 { margin:0; font-size:18px; color:#111827; }
     #changeGridModal .modal-close { background:none; border:none; color:#6b7280; font-size:24px; cursor:pointer; padding:0; width:30px; height:30px; }
-    #changeGridModal .modal-body { padding:20px; padding-bottom:120px; color:#111827; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; }
+    #changeGridModal .modal-body { padding:20px; padding-bottom:180px; color:#111827; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; position:relative; overflow:auto; }
     .change-grid-form { display:flex; flex-direction:column; gap:12px; }
     .change-grid-form label { font-size:13px; color:#374151; font-weight:600; }
     .change-grid-form .refine-input { width:100%; padding:10px 12px; border-radius:8px; border:1px solid #000000; font-size:14px; background:#ffffff; color:#111827; }
@@ -494,7 +536,7 @@
         border: 1px solid rgba(16,185,129,0.18);
     }
     /* Suggestions dropdown inside change-grid modal. Limit height so it doesn't overlap the modal actions. */
-    .change-grid-suggestions { display:none; background:#ffffff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 8px 24px rgba(2,6,23,0.06); max-height:calc(56.6vh - 160px); overflow:auto; margin-top:8px; z-index:100110; }
+    .change-grid-suggestions { display:none; background:#ffffff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 8px 24px rgba(2,6,23,0.06); max-height:calc(56.6vh - 160px); overflow:auto; margin-top:8px; z-index:100120; box-sizing:border-box; position:absolute; left:20px; right:20px; }
     .change-grid-suggestion-item { padding:8px 12px; cursor:pointer; font-size:14px; color:#111827; }
     .change-grid-suggestion-item:hover { background:#f3f4f6; }
 
@@ -6454,7 +6496,7 @@
                                 // After automatic area detection, attempt to re-tag recent posts authored by this user
                                 try {
                                     setTimeout(() => {
-                                        if (typeof retagRecentUserPosts === 'function') retagRecentUserPosts();
+                                        if (!window.__suppressRetagOnManualLocation && typeof retagRecentUserPosts === 'function') retagRecentUserPosts();
                                     }, 800);
                                 } catch (e) { console.warn('Failed to schedule retagRecentUserPosts', e); }
                             }
@@ -10673,6 +10715,41 @@
                 
                 // Store current session auth ID for next refresh check
                 localStorage.setItem('lastSessionAuthId', newUserId);
+
+                // Respect any persisted manual-location suppression flag so we don't
+                // automatically retag posts when the user explicitly changed location.
+                try {
+                    if (localStorage.getItem('suppressRetagOnManualLocation') === '1') {
+                        window.__suppressRetagOnManualLocation = true;
+                        // clear the persisted marker so it doesn't persist forever
+                        localStorage.removeItem('suppressRetagOnManualLocation');
+                        console.log('Applied persisted suppressRetagOnManualLocation flag');
+                    } else {
+                        window.__suppressRetagOnManualLocation = false;
+                    }
+                } catch (e) { window.__suppressRetagOnManualLocation = false; }
+
+                // Attempt to restore a server-persisted user location (if present)
+                try {
+                    const locRef = ref(database, `users/${currentUserId}/location`);
+                    const locSnap = await get(locRef);
+                    if (locSnap && locSnap.exists()) {
+                        const loc = locSnap.val();
+                        if (loc && Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lon))) {
+                            const sel = {
+                                lat: Number(loc.lat),
+                                lon: Number(loc.lon),
+                                label: loc.label || '',
+                                accuracy: loc.accuracy || 100,
+                                changedAt: loc.changedAt || Date.now()
+                            };
+                            window.userLocation = { lat: sel.lat, lon: sel.lon, accuracy: sel.accuracy, timestamp: sel.changedAt };
+                            try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); localStorage.setItem('lastLocationTimestamp', String(sel.changedAt || Date.now())); } catch (e) {}
+                            console.log('Restored server-side user location for', currentUserId, sel);
+                            try { if (typeof renderGrid === 'function') renderGrid(); } catch (e) {}
+                        }
+                    }
+                } catch (e) { console.warn('Could not restore server-side user location', e); }
                 
                 // 📊 UPDATE DIAGNOSTIC DASHBOARD
                 if (diagnosticState) {
@@ -29489,11 +29566,12 @@
                         if (!seenPostIds.has(post.id)) {
                             // Filter out posts hidden for this viewer across all hide/report/delete sources.
                             if (isPostHiddenForViewer(post, currentUserId)) {
-                                // skip
-                            } else {
-                                seenPostIds.add(post.id);
-                                allPosts.push(post);
+                                return; // skip
                             }
+                            // Apply cross-zone display rules to avoid noisy duplication
+                            if (!isAllowedCrossZone(post)) return;
+                            seenPostIds.add(post.id);
+                            allPosts.push(post);
                         }
                     });
                 }
@@ -35585,13 +35663,33 @@
                     }
                 } catch (e) {}
                 if (closeBtn) closeBtn.addEventListener('click', closeModal);
-                if (changeBtn) changeBtn.addEventListener('click', function(){
+                if (changeBtn) changeBtn.addEventListener('click', async function(){
                     const primary = document.getElementById('refinePrimary')?.value || '';
                     // If a temporary selection exists, persist it as the chosen location
                     try {
                         if (window.__tempLocationOverride) {
                             const sel = window.__tempLocationOverride;
-                            try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch (e) {}
+                            // Try to persist server-side via callable function; fall back to localStorage if not authenticated
+                            try {
+                                if (!window.functions) {
+                                    const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
+                                    window.functions = getFunctions(window.app, 'us-central1');
+                                    window.httpsCallable = httpsCallable;
+                                }
+                                const setUserLocation = window.httpsCallable(window.functions, 'setUserLocation');
+                                try {
+                                    await setUserLocation({ lat: Number(sel.lat), lon: Number(sel.lon), label: sel.label || '', source: 'manual' });
+                                    console.log('Persisted selected location to server for user:', sel);
+                                    try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch (e) {}
+                                } catch (fnErr) {
+                                    // If not authenticated or callable failed, fall back to localStorage
+                                    console.warn('setUserLocation failed, falling back to localStorage', fnErr);
+                                    try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch (e) {}
+                                }
+                            } catch (e) {
+                                console.warn('Failed loading functions SDK, falling back to localStorage', e);
+                                try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch (e) {}
+                            }
                             console.log('Applied selected location:', sel);
                         } else {
                             console.log('Change location (manual):', { primary });
@@ -35615,6 +35713,8 @@
                             } catch (e) {}
                             // persist chosen location so reload can reapply and grid updates
                             try { localStorage.setItem('lastChosenLocation', JSON.stringify(window.__tempLocationOverride)); } catch (e) {}
+                            // Suppress server-side retagging when this is a manual location change
+                            try { localStorage.setItem('suppressRetagOnManualLocation', '1'); } catch (e) {}
                             // reload page to show updated grid based on the chosen location
                             try { location.reload(); return; } catch (e) {}
                             // keep modal open so user sees the Come Home button filled

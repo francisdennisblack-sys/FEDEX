@@ -566,6 +566,142 @@ exports.createPaymentIntent = functions
     }
 });
 
+// Persist a user's chosen location (lat/lon) as canonical for their account.
+// Callable: expects { lat: number, lon: number, label?: string, source?: string }
+exports.setUserLocation = functions.https.onCall(async (data, context) => {
+  if (!context || !context.auth || !context.auth.uid) {
+    throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
+  }
+  const uid = context.auth.uid;
+  const lat = data && (typeof data.lat === 'number' ? data.lat : Number(data.lat));
+  const lon = data && (typeof data.lon === 'number' ? data.lon : Number(data.lon));
+  const label = data && data.label ? String(data.label).slice(0,256) : null;
+  const source = data && data.source ? String(data.source).slice(0,64) : 'manual';
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    throw new functions.https.HttpsError('invalid-argument', 'lat and lon (numbers) required');
+  }
+  try {
+    const now = admin.database.ServerValue.TIMESTAMP;
+    const updates = {};
+    updates[`users/${uid}/location/lat`] = lat;
+    updates[`users/${uid}/location/lon`] = lon;
+    updates[`users/${uid}/location/label`] = label;
+    updates[`users/${uid}/location/changedAt`] = now;
+    updates[`users/${uid}/location/source`] = source;
+    updates[`users/${uid}/location/manualOverride`] = true;
+    await db.ref().update(updates);
+    return { success: true, lat, lon, label, source, changedAt: Date.now() };
+  } catch (e) {
+    console.error('setUserLocation error:', e && e.message);
+    throw new functions.https.HttpsError('internal', 'Failed to save location');
+  }
+});
+
+// Scheduled cleanup: remove expired posts and reclaim expired badges
+exports.expiryCleanupJob = functions
+  .runWith({ memory: '512MB', timeoutSeconds: 540 })
+  .pubsub.schedule('every 15 minutes')
+  .onRun(async (context) => {
+    console.log('🔁 expiryCleanupJob starting');
+    const now = Date.now();
+    let scanned = 0;
+    let badgesRemoved = 0;
+    let postsRemoved = 0;
+    try {
+      const postsSnap = await db.ref('posts').once('value');
+      if (!postsSnap.exists()) {
+        console.log('No posts found for expiry sweep');
+        return { scanned: 0, badgesRemoved: 0, postsRemoved: 0 };
+      }
+      const posts = postsSnap.val() || {};
+      for (const postId of Object.keys(posts)) {
+        scanned++;
+        const post = posts[postId] || {};
+
+        // 1) Remove fully expired posts (explicit expiresAt or deleted flag)
+        const expiresAt = post.expiresAt ? Number(post.expiresAt) : null;
+        const isDeletedFlag = post.deleted === true || post._deleted === true;
+        if ((expiresAt && expiresAt <= now) || isDeletedFlag) {
+          try {
+            const zoneKey = post.zoneTag || post.county || post.area || 'unknown_zone';
+            const updates = {};
+            updates[`posts/${postId}`] = null;
+            updates[`posts_by_zone/${zoneKey}/${postId}`] = null;
+            if (post.userId) updates[`user-posts/${post.userId}/${postId}`] = null;
+            await db.ref().update(updates);
+            postsRemoved++;
+            console.log(`Removed expired/flagged post ${postId}`);
+            continue; // nothing more to do for this post
+          } catch (e) {
+            console.warn('Failed removing expired post', postId, e && e.message);
+          }
+        }
+
+        // 2) Clean expired badge entries and boost state
+        try {
+          const badgesRef = db.ref(`posts/${postId}/badges`);
+          const badgesSnap = await badgesRef.once('value');
+          const updates = {};
+          let needsUpdate = false;
+          if (badgesSnap.exists()) {
+            const badgeMap = badgesSnap.val() || {};
+            for (const bid of Object.keys(badgeMap)) {
+              const b = badgeMap[bid] || {};
+              const bExpires = b.expiresAt ? Number(b.expiresAt) : null;
+              const kind = (b.kind || b.type || '').toLowerCase();
+              if ((bExpires && bExpires <= now) || (kind === 'boost' && post.boostExpiresAt && Number(post.boostExpiresAt) <= now)) {
+                updates[`posts/${postId}/badges/${bid}`] = null;
+                needsUpdate = true;
+                badgesRemoved++;
+                console.log(`Marked badge ${bid} on post ${postId} for removal`);
+              }
+            }
+          }
+
+          // If boost has expired, clear denormalized boost state on the post
+          if (post.boostExpiresAt && Number(post.boostExpiresAt) <= now) {
+            updates[`posts/${postId}/boostPaidAt`] = null;
+            updates[`posts/${postId}/boostExpiresAt`] = null;
+            updates[`posts/${postId}/boostStatus`] = null;
+            needsUpdate = true;
+            console.log(`Clearing expired boost fields for post ${postId}`);
+          }
+
+          // If sell badge implied and expired by badge record, clear primaryBadge/sellPaidAt
+          if (post.sellPaidAt && post.badges) {
+            // conservative: if no active sell badge remains under badges map, clear sell fields
+            let hasActiveSell = false;
+            try {
+              const badgeObjs = badgesSnap.exists() ? (badgesSnap.val() || {}) : {};
+              for (const bid of Object.keys(badgeObjs)) {
+                const kb = badgeObjs[bid] || {};
+                if ((kb.kind || kb.type || '').toLowerCase() === 'sell') { hasActiveSell = true; break; }
+              }
+            } catch (e) { /* ignore */ }
+            if (!hasActiveSell) {
+              updates[`posts/${postId}/primaryBadge`] = null;
+              updates[`posts/${postId}/sellPaidAt`] = null;
+              needsUpdate = true;
+              console.log(`Clearing expired sell badge fields for post ${postId}`);
+            }
+          }
+
+          if (needsUpdate) {
+            try { await db.ref().update(updates); } catch (e) { console.warn('Failed applying badge cleanup updates for', postId, e && e.message); }
+          }
+        } catch (e) {
+          console.warn('Badge cleanup failed for post', postId, e && e.message);
+        }
+      }
+    } catch (e) {
+      console.error('expiryCleanupJob failed', e && e.message);
+      throw e;
+    }
+
+    console.log(`🔁 expiryCleanupJob completed: scanned=${scanned}, badgesRemoved=${badgesRemoved}, postsRemoved=${postsRemoved}`);
+    return { scanned, badgesRemoved, postsRemoved };
+  });
+
 // ============================================================================
 // Media moderation (Google Cloud Vision + Video Intelligence)
 //
