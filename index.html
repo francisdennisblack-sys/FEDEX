@@ -35411,6 +35411,41 @@
                                 }
                             }
                         } catch (e) {}
+
+                        // If no manual override and no app userLocation exists yet, try to use device geolocation
+                        (function ensureDeviceLocationFallback(){
+                            try {
+                                if (!window.userLocation) {
+                                    // If the app already cached a geolocation earlier, prefer that
+                                    if (window.__cachedDeviceLocation && window.__cachedDeviceLocation.lat != null) {
+                                        window.userLocation = {
+                                            lat: Number(window.__cachedDeviceLocation.lat),
+                                            lon: Number(window.__cachedDeviceLocation.lon)
+                                        };
+                                        console.log('Using cached device location for app userLocation', window.userLocation);
+                                        try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
+                                        try { updateChangeButtonVisual(); } catch(e){}
+                                        return;
+                                    }
+                                    // Otherwise request a fresh device position (non-blocking)
+                                    if (navigator && navigator.geolocation) {
+                                        navigator.geolocation.getCurrentPosition(function(pos){
+                                            try {
+                                                window.userLocation = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+                                                window.__cachedDeviceLocation = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
+                                                console.log('Device geolocation set app.userLocation:', window.userLocation);
+                                                try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
+                                                try { updateChangeButtonVisual(); } catch(e){}
+                                            } catch (e) { console.warn('Failed applying device geolocation to app', e); }
+                                        }, function(err){
+                                            try { console.warn('Device geolocation error:', err && err.message); } catch(e){}
+                                        }, { enableHighAccuracy: true, maximumAge: 30000, timeout: 10000 });
+                                    }
+                                } else {
+                                    try { updateChangeButtonVisual(); } catch(e){}
+                                }
+                            } catch (e) { /* ignore */ }
+                        })();
                 const pill = document.getElementById('changeGridLocationPill');
                 const backdrop = document.getElementById('changeGridModalBackdrop');
                 const modal = document.getElementById('changeGridModal');
@@ -35778,6 +35813,8 @@
                         localStorage.removeItem('shouldHighlightComeHome');
                         localStorage.removeItem('transferBg');
                         localStorage.removeItem('transferColor');
+                        // Clear suppressRetagOnManualLocation so the app stops treating this as a manual override
+                        localStorage.removeItem('suppressRetagOnManualLocation');
                     } catch (e) {}
                     // remove inline styles so CSS returns to original visuals
                     try { if (comeHomeBtn) { comeHomeBtn.style.background = ''; comeHomeBtn.style.color = ''; } if (changeBtn) { changeBtn.style.background = ''; changeBtn.style.color = ''; } } catch (e) {}
