@@ -35708,6 +35708,21 @@
                             const sel = window.__tempLocationOverride;
                             // Persist locally first so the chosen location survives refreshes immediately
                             try {
+                                // Backup any existing cached real browser location so Return Home can restore it
+                                try {
+                                    const existing = localStorage.getItem('userLocationCache');
+                                    if (existing && !localStorage.getItem('userLocationCacheBackup')) {
+                                        localStorage.setItem('userLocationCacheBackup', existing);
+                                        console.info('Backed up existing userLocationCache');
+                                    }
+                                } catch (be) { console.warn('Failed to backup userLocationCache', be); }
+
+                                // Overwrite the cached browser location with the selected manual location
+                                try {
+                                    const cacheObj = { lat: Number(sel.lat), lon: Number(sel.lon), accuracy: sel.accuracy || 100, timestamp: Date.now(), source: 'manual' };
+                                    localStorage.setItem('userLocationCache', JSON.stringify(cacheObj));
+                                } catch (ce) { console.warn('Failed to write userLocationCache', ce); }
+
                                 localStorage.setItem('lastChosenLocation', JSON.stringify(sel));
                                 localStorage.setItem('lastLocationTimestamp', String(sel.changedAt || Date.now()));
                                 localStorage.setItem('suppressRetagOnManualLocation', '1');
@@ -35761,6 +35776,21 @@
                     } catch (e) {}
                 });
                 if (comeHomeBtn) comeHomeBtn.addEventListener('click', function(){
+                    // Restore any backed-up cached real browser location, then clear manual flags
+                    try {
+                        const backup = localStorage.getItem('userLocationCacheBackup');
+                        if (backup) {
+                            localStorage.setItem('userLocationCache', backup);
+                            localStorage.removeItem('userLocationCacheBackup');
+                            console.info('Restored userLocationCache from backup');
+                        } else {
+                            // No backup: remove manual override and request fresh geolocation
+                            localStorage.removeItem('userLocationCache');
+                            try { localStorage.removeItem('lastChosenLocation'); } catch(e){}
+                            try { if (typeof requestGeolocation === 'function') requestGeolocation().then(loc => { try { localStorage.setItem('userLocationCache', JSON.stringify(loc)); console.info('Fetched fresh geolocation and cached'); } catch(e){} }).catch(()=>{}); } catch(e){}
+                        }
+                    } catch (e) { console.warn('Error restoring userLocationCache backup', e); }
+
                     // clear the stored chosen location and highlight/transfer flag
                     try {
                         localStorage.removeItem('lastChosenLocation');
@@ -35768,7 +35798,7 @@
                         localStorage.removeItem('transferBg');
                         localStorage.removeItem('transferColor');
                     } catch (e) {}
-                    // remove inline styles so CSS returns to original visuals
+                    // update visuals: Change Location should be green (using real/cached location)
                     try {
                         if (comeHomeBtn) { comeHomeBtn.style.background = ''; comeHomeBtn.style.color = ''; }
                         if (changeBtn) { changeBtn.style.background = '#10B981'; changeBtn.style.color = '#ffffff'; }
@@ -35776,9 +35806,8 @@
                     // remove highlight UI markers
                     try { comeHomeBtn.classList.remove('btn-highlight'); comeHomeBtn.removeAttribute('aria-pressed'); } catch (e) {}
                     closeModal();
-                    try { if (typeof goHome === 'function') { goHome(); return; } } catch (e) {}
-                    // Fallback: navigate to root
-                    window.location.href = '/';
+                    // After restore, reload so the app uses the restored cached location
+                    try { location.reload(); return; } catch (e) {}
                 });
                 if (backdrop) backdrop.addEventListener('click', function(e){ if (e.target === backdrop) closeModal(); });
                 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeModal(); });
