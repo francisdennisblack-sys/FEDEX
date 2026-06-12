@@ -35697,43 +35697,46 @@
                 if (closeBtn) closeBtn.addEventListener('click', closeModal);
                 if (changeBtn) changeBtn.addEventListener('click', async function(){
                     const primary = document.getElementById('refinePrimary')?.value || '';
-                    // If a temporary selection exists, persist it as the chosen location
                     try {
                         if (window.__tempLocationOverride) {
                             const sel = window.__tempLocationOverride;
-                            // Try to persist server-side via callable function; fall back to localStorage if not authenticated
+                            // Persist locally first so the chosen location survives refreshes immediately
                             try {
-                                if (!window.functions) {
-                                    const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
-                                    window.functions = getFunctions(window.app, 'us-central1');
-                                    window.httpsCallable = httpsCallable;
-                                }
-                                const setUserLocation = window.httpsCallable(window.functions, 'setUserLocation');
+                                localStorage.setItem('lastChosenLocation', JSON.stringify(sel));
+                                localStorage.setItem('lastLocationTimestamp', String(sel.changedAt || Date.now()));
+                                localStorage.setItem('suppressRetagOnManualLocation', '1');
+                                window.userLocation = { lat: Number(sel.lat), lon: Number(sel.lon) };
+                                try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'pending', sel: sel, ts: Date.now() })); } catch(e){}
+                            } catch (e) { console.warn('Failed to persist chosen location locally', e); }
+
+                            // Refresh grid immediately to reflect the chosen location without waiting for network
+                            try { if (typeof renderGrid === 'function') renderGrid(); else if (typeof forceGridRefresh === 'function') forceGridRefresh(); } catch (e) {}
+
+                            // Attempt to persist server-side in the background; do not block UI or reload
+                            (async () => {
                                 try {
+                                    if (!window.functions) {
+                                        const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
+                                        window.functions = getFunctions(window.app, 'us-central1');
+                                        window.httpsCallable = httpsCallable;
+                                    }
+                                    const setUserLocation = window.httpsCallable(window.functions, 'setUserLocation');
                                     await setUserLocation({ lat: Number(sel.lat), lon: Number(sel.lon), label: sel.label || '', source: 'manual' });
                                     console.info('✅ setUserLocation: persisted to server', sel);
-                                    try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch (e) {}
-                                    try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'success', sel: sel, ts: Date.now() })); } catch (e) {}
+                                    try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'success', sel: sel, ts: Date.now() })); } catch(e){}
                                 } catch (fnErr) {
-                                    // If not authenticated or callable failed, fall back to localStorage
-                                    console.warn('⚠️ setUserLocation failed, falling back to localStorage', fnErr);
-                                    try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch (e) {}
-                                    try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'fallback', error: String(fnErr && (fnErr.message || fnErr)), sel: sel, ts: Date.now() })); } catch (e) {}
+                                    console.warn('⚠️ setUserLocation failed (background), kept local copy', fnErr);
+                                    try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'fallback', error: String(fnErr && (fnErr.message || fnErr)), sel: sel, ts: Date.now() })); } catch(e){}
                                 }
-                            } catch (e) {
-                                console.warn('Failed loading functions SDK, falling back to localStorage', e);
-                                try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch (e) {}
-                                try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'fallback', error: String(e && (e.message || e)), sel: sel, ts: Date.now() })); } catch (e) {}
-                            }
-                            console.log('Applied selected location:', sel);
+                            })();
                         } else {
                             console.log('Change location (manual):', { primary });
                         }
                     } catch (e) { console.warn('changeBtn handler error', e); }
+
                     // Only transfer highlight/fill if a temp selection exists
                     try {
                         if (window.__tempLocationOverride) {
-                            // persist transfer of the exact inner fill (backgroundImage + color)
                             try {
                                 const computed = window.getComputedStyle(changeBtn);
                                 const bg = computed.backgroundImage || computed.background || '';
@@ -35741,20 +35744,13 @@
                                 localStorage.setItem('transferBg', bg);
                                 localStorage.setItem('transferColor', color);
                                 localStorage.setItem('shouldHighlightComeHome','1');
-                                // apply the transfer: give Come Home the same inner fill and strip Change Location
                                 if (comeHomeBtn) { comeHomeBtn.style.background = bg; comeHomeBtn.style.color = color; }
                                 if (changeBtn) { changeBtn.style.background = 'transparent'; changeBtn.style.color = '#fff'; }
                                 try { if (comeHomeBtn) comeHomeBtn.focus(); } catch (e) {}
                             } catch (e) {}
-                            // persist chosen location so reload can reapply and grid updates
-                            try { localStorage.setItem('lastChosenLocation', JSON.stringify(window.__tempLocationOverride)); } catch (e) {}
-                            // Suppress server-side retagging when this is a manual location change
-                            try { localStorage.setItem('suppressRetagOnManualLocation', '1'); } catch (e) {}
-                            // reload page to show updated grid based on the chosen location
-                            try { location.reload(); return; } catch (e) {}
-                            // keep modal open so user sees the Come Home button filled
+                            // Keep modal UX: close modal so user sees updated grid
+                            try { closeModal(); } catch (e) {}
                         } else {
-                            // no selection: do not change highlighting state; user may have typed a manual location
                             console.log('Change location pressed with no selected suggestion');
                         }
                     } catch (e) {}
