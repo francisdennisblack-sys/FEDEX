@@ -22075,14 +22075,23 @@
                             if (zoneResp && zoneResp.ok) {
                                 const zoneJson = await zoneResp.json();
                                 const zoneId = zoneJson && (zoneJson.zoneId || zoneJson.zone || zoneJson.zone_id) || 'global';
-                                try {
-                                    const postsResp = await fetch('https://wificontent.com/api/posts/' + encodeURIComponent(zoneId));
-                                    if (postsResp && postsResp.ok) {
-                                        const postsJson = await postsResp.json();
-                                        if (postsJson && Array.isArray(postsJson.posts)) posts = postsJson.posts;
-                                        else if (Array.isArray(postsJson)) posts = postsJson;
-                                    }
-                                } catch (e) { console.warn('ensureDeviceFeed prod posts fetch failed', e); }
+                                            } catch (e) { console.warn('ensureDeviceFeed prod zone-id fetch failed', e); }
+                                            // attempt production posts fetch with graceful fallback
+                                            try {
+                                                const postsResp = await fetch('https://wificontent.com/api/posts/' + encodeURIComponent(zoneId));
+                                                if (postsResp && postsResp.ok) {
+                                                    const postsJson = await postsResp.json();
+                                                    if (postsJson && Array.isArray(postsJson.posts)) posts = postsJson.posts;
+                                                    else if (Array.isArray(postsJson)) posts = postsJson;
+                                                } else {
+                                                    console.warn('ensureDeviceFeed prod posts fetch returned non-ok', postsResp && postsResp.status);
+                                                    // fallback to built-in or remote test posts
+                                                    try { const testPosts = await window.fetchTestPosts(); if (testPosts && testPosts.length) posts = testPosts; } catch(_){}
+                                                }
+                                            } catch (e) {
+                                                console.warn('ensureDeviceFeed prod posts fetch failed', e);
+                                                try { const testPosts = await window.fetchTestPosts(); if (testPosts && testPosts.length) posts = testPosts; } catch(_){}
+                                            }
                             }
                         } catch (e) { console.warn('ensureDeviceFeed prod zone-id fetch failed', e); }
                     }
@@ -22106,6 +22115,53 @@
         };
 
         try { window.ensureDeviceFeed(); } catch(e) { /* best-effort */ }
+
+        // Small floating badge to show the active location source (device vs chosen)
+        (function createLocationSourceBadge(){
+            try {
+                const existing = document.getElementById('location-source-badge');
+                if (existing) return;
+                const el = document.createElement('div');
+                el.id = 'location-source-badge';
+                el.style.position = 'fixed';
+                el.style.right = '12px';
+                el.style.top = '12px';
+                el.style.zIndex = 99999;
+                el.style.padding = '6px 10px';
+                el.style.borderRadius = '999px';
+                el.style.background = 'rgba(17,24,39,0.9)';
+                el.style.color = 'white';
+                el.style.fontSize = '13px';
+                el.style.fontWeight = '600';
+                el.style.boxShadow = '0 6px 18px rgba(0,0,0,0.3)';
+                el.style.pointerEvents = 'none';
+                el.textContent = 'Location: unknown';
+                document.body.appendChild(el);
+                window.updateLocationIndicator = function() {
+                    try {
+                        const raw = localStorage.getItem('lastChosenLocation');
+                        const parsed = raw ? JSON.parse(raw) : null;
+                        const badge = document.getElementById('location-source-badge');
+                        if (!badge) return;
+                        if (parsed && parsed.label) {
+                            badge.textContent = 'Using: Chosen — ' + parsed.label;
+                            badge.style.background = 'rgba(16,185,129,0.95)';
+                            badge.style.color = '#06251b';
+                        } else if (window.__cachedDeviceLocation || (window.userLocation && !parsed)) {
+                            badge.textContent = 'Using: Device location';
+                            badge.style.background = 'rgba(59,130,246,0.95)';
+                            badge.style.color = '#fff';
+                        } else {
+                            badge.textContent = 'Location: unknown';
+                            badge.style.background = 'rgba(17,24,39,0.9)';
+                            badge.style.color = '#fff';
+                        }
+                    } catch (e) { /* ignore */ }
+                };
+                // initial update
+                try { window.updateLocationIndicator(); } catch(e){}
+            } catch (e) { /* ignore DOM creation errors */ }
+        })();
 
         // Local-test shortcut: if running on localhost and grid is empty, quickly populate
         try {
@@ -33391,9 +33447,18 @@
                     const tileLat = Math.round(userLocation.lat * 10) / 10;
                     const tileLon = Math.round(userLocation.lon * 10) / 10;
                     const zoneKey = `${tileLat}_${tileLon}`;
-                    fetch(`/api/posts/${encodeURIComponent(zoneKey)}`)
-                        .then(r => r.json())
-                        .then(data => {
+                    (async function(){
+                        try {
+                            const resp = await fetch(`/api/posts/${encodeURIComponent(zoneKey)}`);
+                            if (!resp.ok) {
+                                console.warn('pollLocalServerPosts: local posts fetch returned', resp.status);
+                                const testPosts = await window.fetchTestPosts();
+                                if (testPosts && testPosts.length) {
+                                    data = { posts: testPosts };
+                                } else return;
+                            } else {
+                                var data = await resp.json();
+                            }
                             if (!data || !data.posts) return;
                             // Merge into shared-posts key without duplicating
                             const contentKey = 'shared-posts';
