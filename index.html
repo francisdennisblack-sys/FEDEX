@@ -517,6 +517,16 @@
     #changeGridModal .modal-header h2 { margin:0; font-size:18px; color:#111827; }
     #changeGridModal .modal-close { background:none; border:none; color:#6b7280; font-size:24px; cursor:pointer; padding:0; width:30px; height:30px; }
     #changeGridModal .modal-body { padding:20px; padding-bottom:calc(var(--change-actions-height) + 97px); color:#111827; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; position:relative; overflow:auto; }
+    /* Button semantic classes used by JS to toggle visuals cleanly */
+    .btn-green { background: #10B981 !important; color: #ffffff !important; border-color: #059669 !important; }
+    .btn-white { background: #ffffff !important; color: #111827 !important; border-color: #d1d5db !important; }
+    .btn-highlight { box-shadow: 0 8px 24px rgba(16,185,129,0.18) !important; transform: translateY(-1px); }
+
+    /* Toast notifications */
+    #fdx-toast-container { position: fixed; left: 50%; transform: translateX(-50%); bottom: 28px; z-index: 120000; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events: none; }
+    .fdx-toast { pointer-events: auto; padding: 10px 14px; border-radius: 8px; color: #fff; font-weight: 600; box-shadow: 0 8px 24px rgba(2,6,23,0.12); min-width: 180px; text-align: center; }
+    .fdx-toast.success { background: linear-gradient(90deg,#10B981,#059669); }
+    .fdx-toast.error { background: linear-gradient(90deg,#ef4444,#dc2626); }
 
     /* Ensure actions are hidden unless modal is open */
     #changeGridModal:not(.open) .change-grid-actions { display:none; }
@@ -22163,6 +22173,26 @@
             } catch (e) { /* ignore DOM creation errors */ }
         })();
 
+        // Toast helper
+        (function createToastHelpers(){
+            try {
+                if (document.getElementById('fdx-toast-container')) return;
+                const cont = document.createElement('div');
+                cont.id = 'fdx-toast-container';
+                document.body.appendChild(cont);
+                window.showToast = function(message, type='success', ttl=3500){
+                    try {
+                        const t = document.createElement('div');
+                        t.className = 'fdx-toast ' + (type === 'error' ? 'error' : 'success');
+                        t.textContent = message || '';
+                        cont.appendChild(t);
+                        setTimeout(()=>{ t.style.opacity = '0'; t.style.transform = 'translateY(6px)'; }, ttl - 300);
+                        setTimeout(()=>{ try{ cont.removeChild(t); }catch(e){} }, ttl);
+                    } catch (e) { console.warn('showToast failed', e); }
+                };
+            } catch (e) {}
+        })();
+
         // Local-test shortcut: if running on localhost and grid is empty, quickly populate
         try {
             if (location && location.hostname === 'localhost') {
@@ -35530,14 +35560,13 @@
                     try {
                         const hasManual = !!localStorage.getItem('lastChosenLocation');
                         if (hasManual) {
-                            // Manual override: Change should be white, Come Home highlighted green
-                            if (changeBtn) { changeBtn.style.background = '#ffffff'; changeBtn.style.color = '#111827'; }
-                            if (comeHomeBtn) { comeHomeBtn.style.background = '#10B981'; comeHomeBtn.style.color = '#ffffff'; }
+                            if (changeBtn) { changeBtn.classList.add('btn-white'); changeBtn.classList.remove('btn-green'); }
+                            if (comeHomeBtn) { comeHomeBtn.classList.add('btn-green'); comeHomeBtn.classList.remove('btn-white'); }
                         } else {
-                            // Using real/device location: Change should be prominent green
-                            if (changeBtn) { changeBtn.style.background = '#10B981'; changeBtn.style.color = '#ffffff'; }
-                            if (comeHomeBtn) { comeHomeBtn.style.background = ''; comeHomeBtn.style.color = ''; }
+                            if (changeBtn) { changeBtn.classList.add('btn-green'); changeBtn.classList.remove('btn-white'); }
+                            if (comeHomeBtn) { comeHomeBtn.classList.remove('btn-green'); comeHomeBtn.classList.remove('btn-white'); }
                         }
+                        try { window.updateLocationIndicator && window.updateLocationIndicator(); } catch(e){}
                     } catch (e) { /* ignore visual update errors */ }
                 }
                 function closeModal(){
@@ -35804,8 +35833,8 @@
                         const tBg = localStorage.getItem('transferBg');
                         const tColor = localStorage.getItem('transferColor') || '';
                         try {
-                            if (comeHomeBtn) { comeHomeBtn.style.background = tBg; comeHomeBtn.style.color = tColor; }
-                            if (changeBtn) { changeBtn.style.background = 'transparent'; changeBtn.style.color = '#fff'; }
+                                if (comeHomeBtn) { comeHomeBtn.classList.add('btn-green'); comeHomeBtn.classList.remove('btn-white'); }
+                            if (changeBtn) { changeBtn.classList.remove('btn-green'); changeBtn.classList.add('btn-white'); }
                         } catch (e) {}
                     }
                     // Ensure the change/come-home visuals reflect whether a manual location is active
@@ -35841,9 +35870,11 @@
                                     await setUserLocation({ lat: Number(sel.lat), lon: Number(sel.lon), label: sel.label || '', source: 'manual' });
                                     console.info('✅ setUserLocation: persisted to server', sel);
                                     try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'success', sel: sel, ts: Date.now() })); } catch(e){}
+                                    try { window.showToast && window.showToast('Saved to account', 'success'); } catch(e){}
                                 } catch (fnErr) {
                                     console.warn('⚠️ setUserLocation failed (background), kept local copy', fnErr);
                                     try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'fallback', error: String(fnErr && (fnErr.message || fnErr)), sel: sel, ts: Date.now() })); } catch(e){}
+                                    try { window.showToast && window.showToast('Saved locally (server failed)', 'error'); } catch(e){}
                                 }
                             })();
                         } else {
@@ -35860,8 +35891,8 @@
                                 // Persist simple transfer colors: make Come Home green and Change white
                                 localStorage.setItem('transferBg', '#10B981');
                                 localStorage.setItem('transferColor', '#ffffff');
-                                if (comeHomeBtn) { comeHomeBtn.style.background = '#10B981'; comeHomeBtn.style.color = '#ffffff'; }
-                                if (changeBtn) { changeBtn.style.background = '#ffffff'; changeBtn.style.color = '#111827'; }
+                                if (comeHomeBtn) { comeHomeBtn.classList.add('btn-green'); comeHomeBtn.classList.remove('btn-white'); }
+                                if (changeBtn) { changeBtn.classList.add('btn-white'); changeBtn.classList.remove('btn-green'); }
                                 try { if (comeHomeBtn) comeHomeBtn.focus(); } catch (e) {}
                             } catch (e) {}
                             // Full reload so the site uses the saved lon/lat as the authoritative location
@@ -35882,7 +35913,7 @@
                         localStorage.removeItem('suppressRetagOnManualLocation');
                     } catch (e) {}
                     // remove inline styles so CSS returns to original visuals
-                    try { if (comeHomeBtn) { comeHomeBtn.style.background = ''; comeHomeBtn.style.color = ''; } if (changeBtn) { changeBtn.style.background = ''; changeBtn.style.color = ''; } } catch (e) {}
+                    try { if (comeHomeBtn) { comeHomeBtn.classList.remove('btn-green'); comeHomeBtn.classList.remove('btn-white'); } if (changeBtn) { changeBtn.classList.remove('btn-green'); changeBtn.classList.remove('btn-white'); } } catch (e) {}
                     // Update visuals to reflect that we're now using the real/device location
                     try { updateChangeButtonVisual(); } catch (e) {}
                     // remove highlight UI markers
