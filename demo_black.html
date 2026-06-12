@@ -1357,22 +1357,102 @@
                 setTimeout(()=>{
                   try{
                     animateReorder(grid, () => { grid.insertBefore(box, grid.firstChild); }, 900, function(){
-                      // Viral post has moved to first position — mark landed and stop further demo scheduling.
+                      // After the viral post lands in position 1, animate the final
+                      // overlay to land on that slot and then end the demo there.
                       try{
-                        window._demo_viral_landed = true;
-                        // keep the post visible in-place and update visuals
-                        try{ if(box && box.style){ box.style.display = ''; box.style.opacity = '1'; }catch(e){}
-                        try{ if(typeof updateTopVisuals === 'function') updateTopVisuals(); }catch(e){}
-                        // prevent additional time slots from running
-                        try{ if(window.demoZoomTimeout){ clearTimeout(window.demoZoomTimeout); window.demoZoomTimeout = null; } }catch(e){}
-                        try{ window.runDemoSequence = function(){}; }catch(e){}
-                        // stop auto-like manager
-                        try{ if(window._demoAutoLike && typeof window._demoAutoLike.stopSoloBoost === 'function') window._demoAutoLike.stopSoloBoost(); }catch(e){}
-                        // stop brand globe for final state
-                        try{ if(window.brandGlobeEngine && typeof window.brandGlobeEngine.stop === 'function') window.brandGlobeEngine.stop(); }catch(e){}
-                        // leave remaining posts as-is until final overlay transition (handled elsewhere)
-                      }catch(e){}
-                      resolve();
+                        // create or reuse the full-screen overlay
+                        var overlay = document.getElementById('demo-final-overlay');
+                        if(!overlay){
+                          overlay = document.createElement('div');
+                          overlay.id = 'demo-final-overlay';
+                          overlay.style.position = 'fixed';
+                          overlay.style.left = '0px';
+                          overlay.style.top = '0px';
+                          overlay.style.width = '100vw';
+                          overlay.style.height = '100vh';
+                          overlay.style.zIndex = '100000';
+                          // keep the animated overlay transparent so it doesn't cover the viral post
+                          overlay.style.background = 'transparent';
+                          overlay.style.color = '#fff';
+                          overlay.style.display = 'flex';
+                          overlay.style.alignItems = 'center';
+                          overlay.style.justifyContent = 'center';
+                          overlay.style.fontFamily = 'Inter, system-ui, -apple-system, sans-serif';
+                          overlay.style.fontSize = '36px';
+                          overlay.style.fontWeight = '800';
+                          overlay.style.textAlign = 'center';
+                          overlay.style.pointerEvents = 'none';
+                          overlay.style.transition = 'transform 700ms cubic-bezier(.2,.85,.25,1), opacity 420ms ease';
+                          // do not put the final text onto this animated overlay — keep it blank
+                          overlay.setAttribute('data-final-text', 'Visit a website, its easy!');
+                          overlay.textContent = '';
+                          document.body.appendChild(overlay);
+                        }
+
+                        // compute target rect (first slot)
+                        var targetRect = box.getBoundingClientRect();
+                        var vw = window.innerWidth || document.documentElement.clientWidth;
+                        var vh = window.innerHeight || document.documentElement.clientHeight;
+                        var scaleX = targetRect.width / vw;
+                        var scaleY = targetRect.height / vh;
+                        var tx = targetRect.left;
+                        var ty = targetRect.top;
+
+                        // animate overlay from full-screen to the slot rect
+                        overlay.style.transformOrigin = '0 0';
+                        requestAnimationFrame(function(){
+                          overlay.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scaleX + ', ' + scaleY + ')';
+                        });
+
+                        // wait 1s while the post glows and shakes, then fade to final overlay
+                        setTimeout(function(){
+                          try{
+                            // do not apply gold glow or a black slot; keep the viral post visible and unchanged
+                            try{
+                              var mediaDiv = box.querySelector('.media div');
+                              if(mediaDiv) { box.setAttribute('data-media-original', String(mediaDiv.textContent)); }
+                            }catch(e){}
+
+                            // after shake completes (~1s), remove other posts and show final overlay
+                            setTimeout(function(){
+                              try{
+                                // remove other grid-box elements
+                                try{ document.querySelectorAll('.grid-box').forEach(function(b){ if(b && b !== box && b.parentNode) b.parentNode.removeChild(b); }); }catch(e){}
+
+                                // remove the animated overlay (it never held visible text)
+                                try{ if(overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay); }catch(e){}
+
+                                // create final full-screen black overlay (not inside post) and set the message
+                                try{
+                                  var final = document.getElementById('demo-final-full');
+                                  if(!final){
+                                    final = document.createElement('div'); final.id = 'demo-final-full';
+                                    final.style.position = 'fixed'; final.style.inset = '0'; final.style.zIndex = '100000';
+                                    final.style.background = '#000'; final.style.color = '#fff'; final.style.display = 'flex'; final.style.alignItems = 'center'; final.style.justifyContent = 'center';
+                                    final.style.fontFamily = 'Inter, system-ui, -apple-system, sans-serif'; final.style.fontSize = '40px'; final.style.fontWeight = '800'; final.style.textAlign = 'center'; final.style.opacity = '0'; final.style.transition = 'opacity 420ms ease';
+                                    // prefer the stored final message on the animated overlay, fallback to default
+                                    var finalText = overlay && overlay.getAttribute ? overlay.getAttribute('data-final-text') : null;
+                                    final.textContent = finalText || 'Visit a website, its easy!';
+                                    document.body.appendChild(final);
+                                  }
+                                  // fade in the final screen
+                                  requestAnimationFrame(function(){ final.style.opacity = '1'; });
+                                }catch(e){}
+                                // restore viral post media text (ensure it does NOT show the final message)
+                                try{ var orig = box.getAttribute('data-media-original'); if(orig && box.querySelector('.media div')) box.querySelector('.media div').textContent = orig; }catch(e){}
+                                // ensure the viral box stays visible above the final overlay
+                                try{ box.style.position = box.style.position || 'relative'; box.style.zIndex = '100001'; }catch(e){}
+                                // stop brand globe and finalize paused state
+                                try{ if(window.brandGlobeEngine && typeof window.brandGlobeEngine.stop === 'function') window.brandGlobeEngine.stop(); }catch(e){}
+                                // mark that a viral landing finished the demo so other finalizers don't remove the post
+                                try{ window._demo_viral_landed = true; }catch(e){}
+                                window._demo_paused = true;
+                              }catch(e){}
+                              resolve();
+                            }, 1000);
+                          }catch(e){ resolve(); }
+                        }, 1000);
+                      }catch(e){ resolve(); }
                     });
                   }catch(e){ resolve(); }
                 }, 600);
@@ -1985,42 +2065,7 @@
               100% { box-shadow: 0 8px 30px rgba(16,185,129,0.18), 0 0 32px rgba(16,185,129,0.28); transform: translateY(0); }
             }
             .demo-glow-positive.pulse { animation: demoGlowPulse 2.2s ease-in-out infinite; }
-            .demo-viral-gold {
-              border-radius: 12px !important;
-              border: 4px solid rgba(250, 204, 21, 0.95) !important;
-              box-shadow: 0 24px 120px rgba(250,204,21,0.22) !important, 0 0 160px rgba(250,204,21,0.32) !important, inset 0 1px 0 rgba(255,255,255,0.02) !important;
-              transform-origin: center center !important;
-              transition: box-shadow 240ms ease, transform 240ms ease;
-              animation: demoViralExplode 1200ms cubic-bezier(.2,.85,.25,1) 1 both;
-              will-change: transform, box-shadow;
-            }
-
-            @keyframes demoViralExplode {
-              0% {
-                transform: scale(1) rotate(0deg);
-                box-shadow: 0 18px 60px rgba(250,204,21,0.18), 0 0 80px rgba(250,204,21,0.22);
-              }
-              20% {
-                transform: scale(1.12) rotate(-2deg);
-                box-shadow: 0 30px 140px rgba(250,204,21,0.32), 0 0 200px rgba(250,204,21,0.45);
-              }
-              40% {
-                transform: scale(1.06) translateX(-10px) rotate(3deg);
-                box-shadow: 0 34px 160px rgba(250,204,21,0.36), 0 0 220px rgba(250,204,21,0.5);
-              }
-              60% {
-                transform: scale(1.08) translateX(10px) rotate(-3deg);
-                box-shadow: 0 40px 200px rgba(250,204,21,0.4), 0 0 260px rgba(250,204,21,0.55);
-              }
-              80% {
-                transform: scale(1.04) translateX(-6px) rotate(1deg);
-                box-shadow: 0 28px 140px rgba(250,204,21,0.34), 0 0 200px rgba(250,204,21,0.48);
-              }
-              100% {
-                transform: scale(1) rotate(0deg) translateX(0);
-                box-shadow: 0 24px 120px rgba(250,204,21,0.22), 0 0 160px rgba(250,204,21,0.32);
-              }
-            }
+            /* removed demo viral gold/shake animation per user request */
           `;
           try{
             const s = document.createElement('style'); s.id = 'demo-glow-styles'; s.textContent = css; document.head.appendChild(s);
