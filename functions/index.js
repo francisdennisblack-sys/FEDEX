@@ -254,6 +254,34 @@ exports.consumeUserBadgeOnPostCreate = functions.database.ref('/posts/{postId}')
   return null;
 });
 
+// When a post's content is removed (redacted/cleared), also remove any
+// denormalized badge fields so the slot can be reused and badges are not
+// orphaned on an otherwise-empty post. This listens only to the `content`
+// leaf so it won't fire for arbitrary badge updates.
+exports.cleanBadgesOnContentRemoval = functions.database.ref('/posts/{postId}/content').onWrite(async (change, ctx) => {
+  try {
+    const postId = ctx.params.postId;
+    const before = change.before.exists() ? change.before.val() : null;
+    const after = change.after.exists() ? change.after.val() : null;
+
+    // If content was present and now is empty/null/zero-length, clear badges
+    if ((before !== null && before !== undefined && String(before).trim().length > 0) && (!after || String(after).trim().length === 0)) {
+      const updates = {};
+      // Remove common badge flags/metadata to avoid leaving orphans
+      const keysToClear = [
+        'primaryBadge', 'sellBadge', 'boostBadge', 'boostPaidAt', 'boostExpiresAt', 'boostStatus', 'sellPaidAt', 'badges'
+      ];
+      for (const k of keysToClear) updates[`posts/${postId}/${k}`] = null;
+
+      await admin.database().ref().update(updates);
+      console.log(`cleanBadgesOnContentRemoval: cleared badge keys for post ${postId}`);
+    }
+  } catch (e) {
+    console.error('cleanBadgesOnContentRemoval failed:', e && e.message ? e.message : e);
+  }
+  return null;
+});
+
 exports.createCheckoutSession = functions
   .runWith({ secrets: [stripeSecretParam] })
   .https.onRequest(async (req,res)=>{
