@@ -517,12 +517,6 @@
     #changeGridModal .modal-header h2 { margin:0; font-size:18px; color:#111827; }
     #changeGridModal .modal-close { background:none; border:none; color:#6b7280; font-size:24px; cursor:pointer; padding:0; width:30px; height:30px; }
     #changeGridModal .modal-body { padding:20px; padding-bottom:calc(var(--change-actions-height) + 97px); color:#111827; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; position:relative; overflow:auto; }
-    /* Button semantic classes used by JS to toggle visuals cleanly */
-    .btn-green { background: #10B981 !important; color: #ffffff !important; border-color: #059669 !important; }
-    .btn-white { background: #ffffff !important; color: #111827 !important; border-color: #d1d5db !important; }
-    .btn-highlight { box-shadow: 0 8px 24px rgba(16,185,129,0.18) !important; transform: translateY(-1px); }
-
-    /* Toast notifications removed to avoid adding new UI elements */
 
     /* Ensure actions are hidden unless modal is open */
     #changeGridModal:not(.open) .change-grid-actions { display:none; }
@@ -22081,23 +22075,14 @@
                             if (zoneResp && zoneResp.ok) {
                                 const zoneJson = await zoneResp.json();
                                 const zoneId = zoneJson && (zoneJson.zoneId || zoneJson.zone || zoneJson.zone_id) || 'global';
-                                            } catch (e) { console.warn('ensureDeviceFeed prod zone-id fetch failed', e); }
-                                            // attempt production posts fetch with graceful fallback
-                                            try {
-                                                const postsResp = await fetch('https://wificontent.com/api/posts/' + encodeURIComponent(zoneId));
-                                                if (postsResp && postsResp.ok) {
-                                                    const postsJson = await postsResp.json();
-                                                    if (postsJson && Array.isArray(postsJson.posts)) posts = postsJson.posts;
-                                                    else if (Array.isArray(postsJson)) posts = postsJson;
-                                                } else {
-                                                    console.warn('ensureDeviceFeed prod posts fetch returned non-ok', postsResp && postsResp.status);
-                                                    // fallback to built-in or remote test posts
-                                                    try { const testPosts = await window.fetchTestPosts(); if (testPosts && testPosts.length) posts = testPosts; } catch(_){}
-                                                }
-                                            } catch (e) {
-                                                console.warn('ensureDeviceFeed prod posts fetch failed', e);
-                                                try { const testPosts = await window.fetchTestPosts(); if (testPosts && testPosts.length) posts = testPosts; } catch(_){}
-                                            }
+                                try {
+                                    const postsResp = await fetch('https://wificontent.com/api/posts/' + encodeURIComponent(zoneId));
+                                    if (postsResp && postsResp.ok) {
+                                        const postsJson = await postsResp.json();
+                                        if (postsJson && Array.isArray(postsJson.posts)) posts = postsJson.posts;
+                                        else if (Array.isArray(postsJson)) posts = postsJson;
+                                    }
+                                } catch (e) { console.warn('ensureDeviceFeed prod posts fetch failed', e); }
                             }
                         } catch (e) { console.warn('ensureDeviceFeed prod zone-id fetch failed', e); }
                     }
@@ -22121,8 +22106,6 @@
         };
 
         try { window.ensureDeviceFeed(); } catch(e) { /* best-effort */ }
-
-        // No floating UI elements added per product request.
 
         // Local-test shortcut: if running on localhost and grid is empty, quickly populate
         try {
@@ -33408,18 +33391,9 @@
                     const tileLat = Math.round(userLocation.lat * 10) / 10;
                     const tileLon = Math.round(userLocation.lon * 10) / 10;
                     const zoneKey = `${tileLat}_${tileLon}`;
-                    (async function(){
-                        try {
-                            const resp = await fetch(`/api/posts/${encodeURIComponent(zoneKey)}`);
-                            if (!resp.ok) {
-                                console.warn('pollLocalServerPosts: local posts fetch returned', resp.status);
-                                const testPosts = await window.fetchTestPosts();
-                                if (testPosts && testPosts.length) {
-                                    data = { posts: testPosts };
-                                } else return;
-                            } else {
-                                var data = await resp.json();
-                            }
+                    fetch(`/api/posts/${encodeURIComponent(zoneKey)}`)
+                        .then(r => r.json())
+                        .then(data => {
                             if (!data || !data.posts) return;
                             // Merge into shared-posts key without duplicating
                             const contentKey = 'shared-posts';
@@ -35437,41 +35411,6 @@
                                 }
                             }
                         } catch (e) {}
-
-                        // If no manual override and no app userLocation exists yet, try to use device geolocation
-                        (function ensureDeviceLocationFallback(){
-                            try {
-                                if (!window.userLocation) {
-                                    // If the app already cached a geolocation earlier, prefer that
-                                    if (window.__cachedDeviceLocation && window.__cachedDeviceLocation.lat != null) {
-                                        window.userLocation = {
-                                            lat: Number(window.__cachedDeviceLocation.lat),
-                                            lon: Number(window.__cachedDeviceLocation.lon)
-                                        };
-                                        console.log('Using cached device location for app userLocation', window.userLocation);
-                                        try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
-                                        try { updateChangeButtonVisual(); } catch(e){}
-                                        return;
-                                    }
-                                    // Otherwise request a fresh device position (non-blocking)
-                                    if (navigator && navigator.geolocation) {
-                                        navigator.geolocation.getCurrentPosition(function(pos){
-                                            try {
-                                                window.userLocation = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-                                                window.__cachedDeviceLocation = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
-                                                console.log('Device geolocation set app.userLocation:', window.userLocation);
-                                                try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
-                                                try { updateChangeButtonVisual(); } catch(e){}
-                                            } catch (e) { console.warn('Failed applying device geolocation to app', e); }
-                                        }, function(err){
-                                            try { console.warn('Device geolocation error:', err && err.message); } catch(e){}
-                                        }, { enableHighAccuracy: true, maximumAge: 30000, timeout: 10000 });
-                                    }
-                                } else {
-                                    try { updateChangeButtonVisual(); } catch(e){}
-                                }
-                            } catch (e) { /* ignore */ }
-                        })();
                 const pill = document.getElementById('changeGridLocationPill');
                 const backdrop = document.getElementById('changeGridModalBackdrop');
                 const modal = document.getElementById('changeGridModal');
@@ -35485,20 +35424,6 @@
                     if (modal) modal.classList.add('open');
                     document.body.style.overflow = 'hidden';
                     if (closeBtn) closeBtn.focus();
-                }
-                // Update button visuals depending on whether a manual location is active
-                function updateChangeButtonVisual() {
-                    try {
-                        const hasManual = !!localStorage.getItem('lastChosenLocation');
-                        if (hasManual) {
-                            if (changeBtn) { changeBtn.classList.add('btn-white'); changeBtn.classList.remove('btn-green'); }
-                            if (comeHomeBtn) { comeHomeBtn.classList.add('btn-green'); comeHomeBtn.classList.remove('btn-white'); }
-                        } else {
-                            if (changeBtn) { changeBtn.classList.add('btn-green'); changeBtn.classList.remove('btn-white'); }
-                            if (comeHomeBtn) { comeHomeBtn.classList.remove('btn-green'); comeHomeBtn.classList.remove('btn-white'); }
-                        }
-                        try { window.updateLocationIndicator && window.updateLocationIndicator(); } catch(e){}
-                    } catch (e) { /* ignore visual update errors */ }
                 }
                 function closeModal(){
                     if (!backdrop) return;
@@ -35759,17 +35684,21 @@
                         window.__origComeHomeColor = window.getComputedStyle(comeHomeBtn).color || '';
                         window.__origComeHomeBorder = window.getComputedStyle(comeHomeBtn).border || '';
                     }
-                    // Apply persisted transfer or update visuals based on manual override
-                    if (localStorage.getItem('shouldHighlightComeHome') === '1' && localStorage.getItem('transferBg')) {
-                        const tBg = localStorage.getItem('transferBg');
-                        const tColor = localStorage.getItem('transferColor') || '';
-                        try {
-                                if (comeHomeBtn) { comeHomeBtn.classList.add('btn-green'); comeHomeBtn.classList.remove('btn-white'); }
-                            if (changeBtn) { changeBtn.classList.remove('btn-green'); changeBtn.classList.add('btn-white'); }
-                        } catch (e) {}
-                    }
-                    // Ensure the change/come-home visuals reflect whether a manual location is active
-                    updateChangeButtonVisual();
+                    // Decide which button to highlight based on whether we're using a manual override
+                    try {
+                        const hasManualOverride = Boolean(localStorage.getItem('lastChosenLocation')) || localStorage.getItem('shouldHighlightComeHome') === '1';
+                        if (hasManualOverride) {
+                            // Apply persisted transfer (if present) or default Come Home green
+                            const tBg = localStorage.getItem('transferBg') || '#10B981';
+                            const tColor = localStorage.getItem('transferColor') || '#ffffff';
+                            if (comeHomeBtn) { comeHomeBtn.style.background = tBg; comeHomeBtn.style.color = tColor; }
+                            if (changeBtn) { changeBtn.style.background = '#ffffff'; changeBtn.style.color = '#111827'; }
+                        } else {
+                            // No manual override: Change Location should be green (using real/location)
+                            if (changeBtn) { changeBtn.style.background = '#10B981'; changeBtn.style.color = '#ffffff'; }
+                            if (comeHomeBtn) { comeHomeBtn.style.background = ''; comeHomeBtn.style.color = ''; }
+                        }
+                    } catch (e) {}
                 } catch (e) {}
                 if (closeBtn) closeBtn.addEventListener('click', closeModal);
                 if (changeBtn) changeBtn.addEventListener('click', async function(){
@@ -35801,11 +35730,9 @@
                                     await setUserLocation({ lat: Number(sel.lat), lon: Number(sel.lon), label: sel.label || '', source: 'manual' });
                                     console.info('✅ setUserLocation: persisted to server', sel);
                                     try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'success', sel: sel, ts: Date.now() })); } catch(e){}
-                                    console.info('setUserLocation: saved to server');
                                 } catch (fnErr) {
                                     console.warn('⚠️ setUserLocation failed (background), kept local copy', fnErr);
                                     try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'fallback', error: String(fnErr && (fnErr.message || fnErr)), sel: sel, ts: Date.now() })); } catch(e){}
-                                    console.info('setUserLocation: saved locally (server save failed)', fnErr);
                                 }
                             })();
                         } else {
@@ -35822,8 +35749,8 @@
                                 // Persist simple transfer colors: make Come Home green and Change white
                                 localStorage.setItem('transferBg', '#10B981');
                                 localStorage.setItem('transferColor', '#ffffff');
-                                if (comeHomeBtn) { comeHomeBtn.classList.add('btn-green'); comeHomeBtn.classList.remove('btn-white'); }
-                                if (changeBtn) { changeBtn.classList.add('btn-white'); changeBtn.classList.remove('btn-green'); }
+                                if (comeHomeBtn) { comeHomeBtn.style.background = '#10B981'; comeHomeBtn.style.color = '#ffffff'; }
+                                if (changeBtn) { changeBtn.style.background = '#ffffff'; changeBtn.style.color = '#111827'; }
                                 try { if (comeHomeBtn) comeHomeBtn.focus(); } catch (e) {}
                             } catch (e) {}
                             // Full reload so the site uses the saved lon/lat as the authoritative location
@@ -35840,13 +35767,12 @@
                         localStorage.removeItem('shouldHighlightComeHome');
                         localStorage.removeItem('transferBg');
                         localStorage.removeItem('transferColor');
-                        // Clear suppressRetagOnManualLocation so the app stops treating this as a manual override
-                        localStorage.removeItem('suppressRetagOnManualLocation');
                     } catch (e) {}
                     // remove inline styles so CSS returns to original visuals
-                    try { if (comeHomeBtn) { comeHomeBtn.classList.remove('btn-green'); comeHomeBtn.classList.remove('btn-white'); } if (changeBtn) { changeBtn.classList.remove('btn-green'); changeBtn.classList.remove('btn-white'); } } catch (e) {}
-                    // Update visuals to reflect that we're now using the real/device location
-                    try { updateChangeButtonVisual(); } catch (e) {}
+                    try {
+                        if (comeHomeBtn) { comeHomeBtn.style.background = ''; comeHomeBtn.style.color = ''; }
+                        if (changeBtn) { changeBtn.style.background = '#10B981'; changeBtn.style.color = '#ffffff'; }
+                    } catch (e) {}
                     // remove highlight UI markers
                     try { comeHomeBtn.classList.remove('btn-highlight'); comeHomeBtn.removeAttribute('aria-pressed'); } catch (e) {}
                     closeModal();
