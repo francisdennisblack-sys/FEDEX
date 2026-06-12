@@ -695,6 +695,47 @@
             // ensure any leftover zoom artifacts are removed before starting
             try{ cleanupZoomArtifacts(); }catch(e){}
             if(!target) { if(onComplete) onComplete(); return; }
+            // if caller requests noCenter, perform a lightweight persist without cloning/centering
+            if(opts.noCenter){
+              try{
+                const btn = target.querySelector(btnSelector);
+                if(!btn){ if(onComplete) onComplete(); return; }
+                // small visual pulse on the button only
+                try{ target.classList.add('button-focused'); }catch(e){}
+                try{ btn.style.transition = 'transform 260ms ease'; btn.style.transform = 'scale(1.08)'; }catch(e){}
+                // update counts directly on target
+                const likeBtn = target.querySelector('.vote-button.like');
+                const dislikeBtn = target.querySelector('.vote-button.dislike');
+                try{
+                  if(changeType === 'dislike' && dislikeBtn){
+                    const prev = parseInt((dislikeBtn.querySelector('.count') && dislikeBtn.querySelector('.count').textContent) || '0',10) || 0;
+                    target.setAttribute('data-dislikes-original', String(prev));
+                    const added = opts.increment || 1;
+                    const newVal = String(prev + added);
+                    const s = dislikeBtn.querySelector('.count'); if(s) s.textContent = newVal;
+                    dislikeBtn.setAttribute('aria-pressed','true');
+                  }
+                  if(changeType === 'like' && likeBtn){
+                    const prev = parseInt((likeBtn.querySelector('.count') && likeBtn.querySelector('.count').textContent) || '0',10) || 0;
+                    target.setAttribute('data-likes-original', String(prev));
+                    const added = opts.increment || 1;
+                    const newVal = String(prev + added);
+                    const s = likeBtn.querySelector('.count'); if(s) s.textContent = newVal;
+                    likeBtn.setAttribute('aria-pressed','true');
+                  }
+                }catch(e){}
+                // after a short duration, remove pulse and optionally persist
+                const cleanupDelay = (typeof opts.duration === 'number' ? opts.duration : 600);
+                setTimeout(()=>{
+                  try{ btn.style.transform = ''; btn.style.transition = ''; }catch(e){}
+                  try{ target.classList.remove('button-focused'); }catch(e){}
+                  try{ if(opts.persist){ /* leave counts as-is */ } else { restoreCountsForTarget(target); } }catch(e){}
+                  try{ cleanupZoomArtifacts(); }catch(e){}
+                  if(onComplete) onComplete();
+                }, cleanupDelay);
+                return;
+              }catch(e){ /* fallthrough to normal path if something fails */ }
+            }
             if(window._demo_button_zoomed_done){ if(onComplete) onComplete(); return; }
             if(target.getAttribute && target.getAttribute('data-no-zoom') === 'true'){ if(onComplete) onComplete(); return; }
 
@@ -1776,7 +1817,7 @@
                       let nowOpen = boxesNow.find(b => { const m = b.querySelector('.media'); return m && m.innerText && m.innerText.includes('Now open'); });
                       let video = boxesNow.find(b=> { const m = b.querySelector('.media'); return m && m.innerText && m.innerText.includes('🎥'); });
                       if(nowOpen){
-                        // Zoom only the dislike button and persist the dislike
+                        // Zoom only the dislike button and persist the dislike — do not center the whole post
                         runButtonFocus(nowOpen, '.vote-button.dislike', 'dislike', function(){
                           try{
                             // After dislike persisted, zoom the video's like button and persist
@@ -1813,7 +1854,7 @@
                               }, {persist: true, scale:1.15, duration:600, increment:1});
                             }
                           }catch(e){}
-                        }, {increment:1, duration:600, persist:true});
+                        }, {increment:1, duration:600, persist:true, noCenter:true});
                       }
                     }catch(e){}
                   }, { likes: '50.9k', dislikes: '0', persist: true }, 1200);
