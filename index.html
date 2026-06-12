@@ -11628,8 +11628,10 @@
                                 const postRef = ref(database, `posts/${post.id}`);
                                 await remove(postRef);
                                 console.log(`🗑️ Removed expired post from Firebase: ${post.id.substring(0, 8)}`);
+                                try { purgeDeletedPostFromDOM(post.id); } catch(e) { /* ignore DOM purge errors */ }
                             } catch (err) {
                                 console.warn(`Could not remove expired post from Firebase:`, err.message);
+                                try { purgeDeletedPostFromDOM(post.id); } catch(e) { /* ignore DOM purge errors */ }
                             }
                         }
                     }
@@ -11648,6 +11650,50 @@
                 rotatePostsBasedOnEngagement().catch(err => console.error('Post rotation failed:', err));
             }
         }, 5 * 60 * 1000);
+
+        // Purge DOM and internal caches for a deleted/expired post id
+        function purgeDeletedPostFromDOM(postId) {
+            try {
+                if (!postId) return;
+                // Remove caches
+                try { if (window.postCache && postCache[postId]) delete postCache[postId]; } catch(e){}
+                try { if (window.userVotes) { Object.keys(window.userVotes).forEach(k => { if (k.indexOf && k.indexOf(postId) !== -1) delete window.userVotes[k]; }); } } catch(e){}
+                try { if (window.voteVisualUpdateTimers && window.voteVisualUpdateTimers[postId]) { clearTimeout(window.voteVisualUpdateTimers[postId]); delete window.voteVisualUpdateTimers[postId]; } } catch(e){}
+
+                // Remove any global trackers
+                try { if (window.postReachTracker && window.postReachTracker[postId]) delete window.postReachTracker[postId]; } catch(e){}
+
+                // Clear DOM boxes that reference this post id
+                const nodes = Array.from(document.querySelectorAll(`.grid-box[data-post-id="${postId}"]`));
+                nodes.forEach(box => {
+                    try {
+                        // Remove prominent boost element if present
+                        const bp = box.querySelector && box.querySelector('.boost-badge-prominent'); if (bp && bp.parentNode) bp.parentNode.removeChild(bp);
+                        const pb = box.querySelector && box.querySelector('.post-badges'); if (pb && pb.parentNode) pb.parentNode.removeChild(pb);
+                        // Remove any vote buttons and handlers
+                        const like = box.querySelector && box.querySelector('.like-btn'); if (like) { like.onclick = null; }
+                        const dislike = box.querySelector && box.querySelector('.dislike-btn'); if (dislike) { dislike.onclick = null; }
+                        // Fully clear content and attributes
+                        try { box.innerHTML = ''; } catch(e) {}
+                        try { box.removeAttribute('data-post-id'); } catch(e) {}
+                        try { box.className = 'grid-box'; } catch(e) {}
+                        try { box.style.opacity = ''; box.style.transition = ''; } catch(e) {}
+                    } catch(e) { /* ignore per-box errors */ }
+                });
+
+                // Remove from gridScroller items if present
+                try {
+                    if (window.gridScroller && Array.isArray(gridScroller.items)) {
+                        const before = gridScroller.items.length;
+                        gridScroller.items = gridScroller.items.filter(i => !(i && i.id === postId));
+                        const after = gridScroller.items.length;
+                        if (typeof gridScroller.setItems === 'function') gridScroller.setItems(gridScroller.items);
+                        try { gridScroller.render(); } catch(e) {}
+                        console.log(`purgeDeletedPostFromDOM: removed ${before - after} instances of ${postId} from scroller`);
+                    }
+                } catch(e) { /* ignore scroller cleanup errors */ }
+            } catch (e) { console.warn('purgeDeletedPostFromDOM failed', e); }
+        }
         let isMediaProcessing = false; // Prevent posting while media is being processed/checked
         let selectedBoxIndex = -1;
         let userPostBoxes = []; // Array to track up to 5 user posts
