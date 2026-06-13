@@ -36167,6 +36167,77 @@
                 }
             } catch(e) {}
         })();
+        // Enhance Change Location modal to use the unified autocomplete backend
+        (function(){
+            try {
+                const input = document.getElementById('refinePrimary');
+                const suggEl = document.getElementById('changeGridSuggestions');
+                if (!input || !suggEl) return;
+
+                let timer = null;
+                input.addEventListener('focus', function(){
+                    try { if (typeof fetchRefineDefaults === 'function') fetchRefineDefaults(); } catch(e){}
+                    input.setAttribute('aria-expanded','true');
+                });
+                input.addEventListener('blur', function(){
+                    setTimeout(() => { try { suggEl.style.display='none'; suggEl.setAttribute('aria-hidden','true'); } catch(e){} }, 150);
+                });
+                input.addEventListener('input', function(e){
+                    const v = String(e.target.value || '').trim();
+                    if (timer) clearTimeout(timer);
+                    if (!v) {
+                        suggEl.innerHTML = '';
+                        suggEl.style.display = 'none';
+                        suggEl.setAttribute('aria-hidden','true');
+                        return;
+                    }
+                    timer = setTimeout(async () => {
+                        try {
+                            // Use the main autocomplete search to get rich suggestions
+                            const results = (typeof getAutocompleteSuggestions === 'function') ? getAutocompleteSuggestions(v) : [];
+                            if (!Array.isArray(results) || results.length === 0) {
+                                suggEl.innerHTML = '<div style="padding:10px;color:#999;text-align:center">No matches</div>';
+                                suggEl.style.display = 'block';
+                                suggEl.setAttribute('aria-hidden','false');
+                                return;
+                            }
+
+                            // Render list
+                            const rows = results.slice(0,200).map(item => {
+                                const display = String(item.display || item.value || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                                const clickVal = (item.type === 'poi' && item.value) ? item.value : (item.display || item.value || '');
+                                const safeJs = String(clickVal).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+                                return `<div class=\"change-grid-suggestion-item\" tabindex=\"0\" role=\"button\" data-val='${safeJs}' style=\"padding:10px 12px;cursor:pointer;color:#111827;background:#fff;border-bottom:1px solid #eee\">${display}</div>`;
+                            }).join('');
+                            suggEl.innerHTML = rows;
+                            suggEl.style.display = 'block';
+                            suggEl.setAttribute('aria-hidden','false');
+
+                            // Attach handlers
+                            Array.from(suggEl.querySelectorAll('.change-grid-suggestion-item')).forEach(el => {
+                                el.addEventListener('click', function(ev){
+                                    const val = el.getAttribute('data-val');
+                                    if (!val) return;
+                                    try {
+                                        // route selection through unified flow when possible
+                                        if (typeof selectLocationFromSpecifyField === 'function') {
+                                            selectLocationFromSpecifyField(val, ev, { preserveInputValue: true, zoneLabel: val });
+                                        } else {
+                                            // fallback: populate input and trigger existing selectSuggestion path
+                                            input.value = val;
+                                            try { selectSuggestion({ label: val, lat: null, lon: null }); } catch(e){}
+                                        }
+                                    } catch (e) { console.warn('changeGrid selection failed', e); }
+                                    // hide suggestions
+                                    try { suggEl.style.display='none'; suggEl.setAttribute('aria-hidden','true'); } catch(e){}
+                                });
+                                el.addEventListener('keypress', function(ev){ if (ev.key === 'Enter' || ev.key === ' ') el.click(); });
+                            });
+                        } catch (err) { console.warn('changeGrid suggestion fetch failed', err); }
+                    }, v.length <= 2 ? 120 : 260);
+                });
+            } catch (e) { console.warn('changeGrid autocomplete attach failed', e); }
+        })();
     </script>
     <script>
         (function() {
