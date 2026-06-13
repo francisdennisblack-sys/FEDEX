@@ -14954,14 +14954,25 @@
                 console.log('  Storage path:', photoPath);
                 console.log('  File details:', { name: file.name, size: file.size, type: file.type });
                 
-                // Ensure client is authenticated (anonymous sign-in counts)
+                // Ensure client is authenticated (anonymous sign-in counts).
+                // Also try to refresh token if a user is present to avoid expired-token denials.
                 try {
-                    if (auth && !auth.currentUser) {
+                    if (auth && auth.currentUser) {
+                        try {
+                            console.log('Auth: current user exists - attempting token refresh');
+                            if (typeof auth.currentUser.getIdToken === 'function') {
+                                await auth.currentUser.getIdToken(true);
+                                console.log('Auth: token refresh success');
+                            }
+                        } catch (tokErr) {
+                            console.warn('Auth token refresh failed, will attempt anonymous sign-in fallback', tokErr);
+                            try { await signInAnonymously(auth); } catch (e) { console.warn('Anonymous sign-in fallback failed', e); }
+                        }
+                    } else if (auth && !auth.currentUser) {
                         console.log('Auth: no current user - attempting anonymous sign-in before upload');
-                        try { await signInAnonymously(auth); } catch (e) { console.warn('Anonymous sign-in failed', e); }
+                        try { await signInAnonymously(auth); console.log('Anonymous sign-in succeeded'); } catch (e) { console.warn('Anonymous sign-in failed', e); }
                     }
                 } catch (e) { console.warn('Auth ensure check failed', e); }
-
                 const photoRef = storageRef(storage, photoPath);
                 console.log('  Storage reference created');
                 
@@ -14987,16 +14998,23 @@
                     snapshot = await uploadBytes(photoRef, file, metadata);
                     console.log('✅ File uploaded to Storage');
                 } catch (uploadErr) {
-                    // If unauthorized, try anonymous sign-in and retry once
+                    // Enhanced diagnostics
                     console.error('Upload error:', uploadErr && uploadErr.code, uploadErr && uploadErr.message);
-                    if (uploadErr && String(uploadErr.code).includes('storage/unauthorized')) {
-                        console.warn('Received storage/unauthorized - attempting anonymous sign-in and retry');
+                    // If unauthorized, try to refresh token / anonymous sign-in and retry once
+                    const code = String(uploadErr && uploadErr.code || '');
+                    if (code.includes('storage/unauthorized')) {
+                        console.warn('Received storage/unauthorized - attempting token refresh and anonymous sign-in then retrying');
                         try {
-                            await signInAnonymously(auth);
+                            if (auth && auth.currentUser && typeof auth.currentUser.getIdToken === 'function') {
+                                try { await auth.currentUser.getIdToken(true); console.log('Token refresh succeeded before retry'); } catch(e) { console.warn('Token refresh before retry failed', e); }
+                            }
+                            try { await signInAnonymously(auth); console.log('Anonymous sign-in attempted before retry'); } catch(e) { console.warn('Anonymous sign-in before retry failed', e); }
+
+                            // Final attempt
                             snapshot = await uploadBytes(photoRef, file, metadata);
-                            console.log('✅ File uploaded to Storage after anonymous sign-in retry');
+                            console.log('✅ File uploaded to Storage after retry');
                         } catch (retryErr) {
-                            console.error('Retry after anonymous sign-in failed:', retryErr);
+                            console.error('Retry after auth refresh/anonymous sign-in failed:', retryErr);
                             throw retryErr;
                         }
                     } else {
