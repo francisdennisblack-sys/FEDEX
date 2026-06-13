@@ -17092,7 +17092,7 @@
 
         // Runtime helper: move protected brand globe into the Create Post box
         (function moveGlobeIntoCreateBox(){
-            function tryMove(){
+            function ensureMove(){
                 try {
                     const createBox = document.querySelector('.add-content-box');
                     const globe = document.getElementById('brandGlobeCanvas');
@@ -17101,21 +17101,21 @@
 
                     const labelDiv = createBox.querySelector('div');
                     const target = labelDiv || createBox;
-                    // Ensure text and globe align
                     if (labelDiv) {
                         target.style.display = 'inline-flex';
                         target.style.alignItems = 'center';
                     }
+                    // Move the protected canvas into the create label
                     target.appendChild(globe);
 
-                    // Override protected stylesheet locally so it fits the Create Post label
+                    // Force size/display to ensure visibility next to text
                     globe.style.setProperty('width','18px','important');
                     globe.style.setProperty('height','18px','important');
                     globe.style.setProperty('display','inline-block','important');
                     globe.style.setProperty('transform','none','important');
                     globe.style.setProperty('margin-left','6px','important');
 
-                    // If the overlay copy exists, remove it to avoid duplicate visuals
+                    // Defensive: remove any dynamic overlay if present
                     const overlay = document.getElementById('brandGlobeAbsoluteOverlay');
                     if (overlay && overlay.parentNode) try { overlay.parentNode.removeChild(overlay); } catch(e){}
 
@@ -17123,19 +17123,26 @@
                 } catch (e) { return false; }
             }
 
+            let succeeded = false;
+            // Immediate attempt
+            if (ensureMove()) succeeded = true;
+
+            // Repeat attempts for a short window in case of async re-renders
             let attempts = 0;
-            function loop() {
+            const maxAttempts = 60; // ~15s at 250ms
+            const intervalId = setInterval(() => {
                 attempts++;
-                if (tryMove()) return;
-                if (attempts < 30) setTimeout(loop, 200);
-                else {
-                    // Fallback: observe DOM changes and try once when create box appears
-                    const mo = new MutationObserver(() => { if (tryMove()) mo.disconnect(); });
-                    mo.observe(document.body, { childList: true, subtree: true });
+                if (succeeded || ensureMove()) {
+                    succeeded = true;
                 }
-            }
-            // Start shortly after page scripts run
-            setTimeout(loop, 300);
+                if (succeeded || attempts >= maxAttempts) {
+                    clearInterval(intervalId);
+                }
+            }, 250);
+
+            // Observe DOM mutations and re-apply move if the create box or globe is re-rendered
+            const mo = new MutationObserver(() => { if (!succeeded) { if (ensureMove()) succeeded = true; } else { ensureMove(); } });
+            mo.observe(document.body, { childList: true, subtree: true, attributes: false });
         })();
 
         function toggleDislike() {
