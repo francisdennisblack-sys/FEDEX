@@ -6,6 +6,42 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
     <script>
     </script>
+    <script>
+        (function enforceChangeLocationsLabel(){
+            try {
+                function setLabel(b){
+                    try {
+                        b.textContent = 'change locations';
+                        b.setAttribute('aria-label','change locations');
+                        b.style.background = '#ffffff';
+                        b.style.color = '#0f172a';
+                    } catch(e){}
+                }
+                const btn = document.getElementById('changeLocationBtn');
+                if (btn) setLabel(btn);
+
+                const observer = new MutationObserver(() => {
+                    const b = document.getElementById('changeLocationBtn');
+                    if (b && (String(b.textContent||'').trim().toLowerCase() !== 'change locations')) setLabel(b);
+                });
+
+                if (btn) {
+                    observer.observe(btn, { childList: true, subtree: true, characterData: true, attributes: true });
+                } else {
+                    // Watch document for the element appearing later
+                    const bodyObs = new MutationObserver((mutations, obs) => {
+                        const b2 = document.getElementById('changeLocationBtn');
+                        if (b2) {
+                            setLabel(b2);
+                            observer.observe(b2, { childList: true, subtree: true, characterData: true, attributes: true });
+                            obs.disconnect();
+                        }
+                    });
+                    bodyObs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+                }
+            } catch (e) { /* ignore */ }
+        })();
+    </script>
 
     <style>
         /* Reset page margins so the top has no unexpected spacer */
@@ -671,26 +707,10 @@
         transform: translateY(-1px);
         border: 1px solid rgba(16,185,129,0.18);
     }
-    /* Suggestions dropdown inside change-grid modal — use same dark theme as refineLocationDropdown */
-    .change-grid-suggestions {
-        display:none;
-        position:absolute;
-        top: calc(100% + 8px);
-        left:20px;
-        right:20px;
-        bottom:86px; /* leave space for modal action buttons */
-        background-color: #202123;
-        border: 1px solid #3f4045;
-        border-radius: 14px;
-        box-shadow: 0 18px 42px rgba(0, 0, 0, 0.45);
-        max-height: calc(100% - 110px);
-        overflow-y: auto;
-        z-index: 100120;
-        box-sizing: border-box;
-        margin-top: 8px;
-    }
-    .change-grid-suggestion-item { padding:10px 12px; cursor:pointer; font-size:13px; color:#ddd; border-bottom:1px solid rgba(255,255,255,0.03); display:flex; align-items:center; gap:8px; }
-    .change-grid-suggestion-item:hover { background:#2d3748; color:#fff; }
+    /* Suggestions dropdown inside change-grid modal. Limit height so it doesn't overlap the modal actions. */
+    .change-grid-suggestions { display:none; background:#ffffff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 8px 24px rgba(2,6,23,0.06); max-height:calc(84vh - 160px); overflow:auto; margin-top:8px; z-index:100120; box-sizing:border-box; position:absolute; left:20px; right:20px; }
+    .change-grid-suggestion-item { padding:8px 12px; cursor:pointer; font-size:14px; color:#111827; }
+    .change-grid-suggestion-item:hover { background:#f3f4f6; }
 
     /* Actions area pinned to bottom of modal and responsive two-up buttons */
     /* Reduce actions height to lower modal bottom spacing */
@@ -36154,7 +36174,7 @@
             <div class="modal-body">
                 <form class="change-grid-form" id="changeGridForm" onsubmit="return false;">
                     <div style="position:relative;">
-                        <input id="refinePrimary" class="refine-input" placeholder="e.g. Specific coffee shops around the globe" autocomplete="off" style="border:1px solid #000;" onfocus="this.style.borderColor='#000'; this.style.background='#f3f4f6'; this.style.boxShadow='0 1px 2px rgba(0,0,0,0.06)'; handleCustomZoneInputFocus();" oninput="handleCustomZoneInput();" onblur="this.style.borderColor='#000'; this.style.background='#f3f4f6'; this.style.boxShadow='0 1px 2px rgba(0,0,0,0.04)'; setTimeout(() => { const d=document.getElementById('refineLocationDropdown'); if(d) d.style.display='none'; cleanupRefineLocationScroller(); }, 600);" />
+                        <input id="refinePrimary" class="refine-input" placeholder="e.g. Specific coffee shops around the globe" autocomplete="off" />
                         <div id="changeGridSuggestions" class="change-grid-suggestions" aria-hidden="true"></div>
                     </div>
                 </form>
@@ -36182,65 +36202,6 @@
                     r.setAttribute('aria-label', 'cancel');
                 }
             } catch(e) {}
-        })();
-        // Enhance Change Location modal to use the unified autocomplete backend
-        (function(){
-            try {
-                const input = document.getElementById('refinePrimary');
-                const suggEl = document.getElementById('changeGridSuggestions');
-                if (!input || !suggEl) return;
-
-                let timer = null;
-                input.addEventListener('focus', function(){
-                    try { if (typeof fetchRefineDefaults === 'function') fetchRefineDefaults(); } catch(e){}
-                    input.setAttribute('aria-expanded','true');
-                });
-                input.addEventListener('blur', function(){
-                    setTimeout(() => { try { suggEl.style.display='none'; suggEl.setAttribute('aria-hidden','true'); } catch(e){} }, 150);
-                });
-                input.addEventListener('input', function(e){
-                    const v = String(e.target.value || '').trim();
-                    if (timer) clearTimeout(timer);
-                    // Ensure results container exists inside suggestions element so existing renderers can write into it
-                    if (!suggEl.querySelector('#refineLocationResultsContainer')) {
-                        suggEl.innerHTML = '<div id="refineLocationResultsContainer" style="padding:10px;color:#999;text-align:center;font-size:13px"></div>';
-                    }
-                    const resultsContainer = suggEl.querySelector('#refineLocationResultsContainer');
-
-                    if (!v) {
-                        // show defaults
-                        try {
-                            resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Loading top locations and POIs...</div>';
-                            if (typeof fetchRefineDefaults === 'function') fetchRefineDefaults();
-                        } catch (e) {
-                            resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">No matches</div>';
-                        }
-                        suggEl.style.display = 'block';
-                        suggEl.setAttribute('aria-hidden','false');
-                        return;
-                    }
-
-                    timer = setTimeout(() => {
-                        try {
-                            // Use the same DB-backed search pipeline
-                            const rendered = (typeof filterRefineLocationSearch === 'function') ? filterRefineLocationSearch(v) : 0;
-                            if (!rendered) {
-                                // remote fallback: use remote geocode dropdown if available
-                                try {
-                                    const remote = (typeof ensureRemoteGeocodeDropdown === 'function') ? ensureRemoteGeocodeDropdown() : null;
-                                    if (remote && typeof remote.handleInput === 'function') {
-                                        remote.handleInput(v);
-                                    } else {
-                                        resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">No matches</div>';
-                                    }
-                                } catch (e) { resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">No matches</div>'; }
-                            }
-                            suggEl.style.display = 'block';
-                            suggEl.setAttribute('aria-hidden','false');
-                        } catch (err) { console.warn('changeGrid DB search failed', err); }
-                    }, v.length <= 2 ? 120 : 260);
-                });
-            } catch (e) { console.warn('changeGrid autocomplete attach failed', e); }
         })();
     </script>
     <script>
@@ -36363,21 +36324,16 @@
                     if (!suggestionsEl) return;
                     suggestionsEl.innerHTML = '';
                     if (!list || list.length === 0) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); return; }
-
-                    // Header to match refineLocation dropdown styling
-                    const headerHTML = `
-                        <div style="padding: 8px 12px; background-color: #1f2937; border-bottom: 2px solid #667eea; font-size:11px; font-weight:600; color:#667eea; text-transform:uppercase; letter-spacing:0.5px;">💡 Recommended Areas</div>
-                    `;
-
-                    const itemsHTML = list.map((it, idx) => {
-                        const display = String(it.label || it.display || it.name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                        const safeJs = String(display).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-                        return `
-                            <div style="padding:10px 12px;border-bottom:1px solid #333;cursor:pointer;color:#ddd;font-size:13px;transition:background-color .15s, color .15s;display:flex;align-items:center;gap:8px;background-color:transparent;user-select:none;" onmouseover="this.style.backgroundColor='#2d3748'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='transparent'; this.style.color='#ddd'" onmousedown="event.preventDefault();" onclick="(function(){ try{ selectSuggestion(JSON.parse('' + JSON.stringify(${JSON.stringify(it)})) ); }catch(e){ try{ selectSuggestion({ label: '${safeJs}', lat:null, lon:null }); }catch(e){} } })()" title="${display}">${display}</div>
-                        `;
-                    }).join('');
-
-                    suggestionsEl.innerHTML = headerHTML + itemsHTML;
+                    list.forEach((it, idx) => {
+                        const div = document.createElement('div');
+                        div.className = 'change-grid-suggestion-item';
+                        div.setAttribute('role','button');
+                        div.setAttribute('tabindex','0');
+                        div.textContent = it.label;
+                        div.addEventListener('click', function(){ selectSuggestion(it); });
+                        div.addEventListener('keypress', function(e){ if (e.key === 'Enter' || e.key === ' ') selectSuggestion(it); });
+                        suggestionsEl.appendChild(div);
+                    });
                     suggestionsEl.style.display = 'block';
                     suggestionsEl.setAttribute('aria-hidden','false');
                     // Ensure dropdown doesn't overlap modal actions: compute available space
