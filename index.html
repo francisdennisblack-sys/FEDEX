@@ -17953,7 +17953,7 @@
             });
         }
 
-        function sharePost() {
+        async function sharePost() {
             // Search for post first in gridContent[currentUserId], then in postCache, then in other gridContent keys
             let post = gridContent[currentUserId] ? gridContent[currentUserId].find(p => p.id === selectedPostId) : null;
             if (!post && postCache[selectedPostId]) {
@@ -17976,7 +17976,67 @@
             const maxLen = 280; // keep share text reasonably sized for platforms
             const contentPreview = rawContent.length > maxLen ? rawContent.substring(0, maxLen - 3) + '...' : rawContent || 'A photo';
             const shareText = `"${contentPreview}"`;
-            // Intentionally omit shareUrl so only the quoted post content is shared
+
+            // If post has media (photoURL/imageData/video), attempt to include it in the share.
+            try {
+                const mediaUrl = post.photoURL || null;
+                const mediaDataUrl = post.imageData || null; // base64 data URL fallback
+                const mediaType = post.mediaType || null; // 'image' or 'video'
+
+                // Prefer fetch of hosted URL if available
+                if (mediaUrl) {
+                    try {
+                        const resp = await fetch(mediaUrl);
+                        if (resp && resp.ok) {
+                            const blob = await resp.blob();
+                            const filename = (mediaUrl.split('/').pop().split('?')[0]) || (`post-${post.id}.${blob.type.split('/')[1] || 'jpg'}`);
+                            const file = new File([blob], filename, { type: blob.type });
+
+                            // If the browser supports sharing files, use native share with file
+                            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                                await navigator.share({ files: [file], text: shareText });
+                                return;
+                            }
+
+                            // Try writing image/video to clipboard (best-effort)
+                            if (navigator.clipboard && window.ClipboardItem) {
+                                try {
+                                    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+                                    // Also write text to clipboard separately
+                                    try { await navigator.clipboard.writeText(shareText); } catch(e){}
+                                    alert('Post content and media copied to clipboard. Paste into your app.');
+                                    return;
+                                } catch (cbErr) {
+                                    // ignore clipboard failures and fall back
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Could not fetch media for sharing:', e);
+                    }
+                }
+
+                // If we have inline base64 image data, try to convert and share
+                if (mediaDataUrl && mediaDataUrl.indexOf('data:') === 0) {
+                    try {
+                        const res = await fetch(mediaDataUrl);
+                        const blob = await res.blob();
+                        const mime = blob.type || 'image/png';
+                        const file = new File([blob], `post-${post.id}.${mime.split('/')[1]||'png'}`, { type: mime });
+                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                            await navigator.share({ files: [file], text: shareText });
+                            return;
+                        }
+                        if (navigator.clipboard && window.ClipboardItem) {
+                            try { await navigator.clipboard.write([new ClipboardItem({ [mime]: blob })]); await navigator.clipboard.writeText(shareText); alert('Post content and media copied to clipboard.'); return; } catch(e){}
+                        }
+                    } catch (e) { console.warn('Could not convert inline image data for sharing', e); }
+                }
+            } catch (err) {
+                console.warn('Media share attempt failed:', err);
+            }
+
+            // Fallback: share/copy only the quoted text
             
             if (navigator.share) {
                 // Use native share if available
