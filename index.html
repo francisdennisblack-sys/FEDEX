@@ -44,49 +44,77 @@
             // Keep it attached even if the grid re-renders by observing mutations.
             (function moveBrandGlobeToCreatePost(){
                 const globeId = 'brandGlobeCanvas';
+                const OVERRIDE_STYLE_ID = 'brand-globe-inline-override';
 
-                function styleAndInsert(globe, target) {
-                    if (!globe || !target) return;
-                    try {
-                        // Ensure inline layout
-                        target.style.display = 'inline-flex';
-                        target.style.alignItems = 'center';
+                // Inject a CSS rule that takes effect when the canvas is inside the add-content box.
+                function ensureOverrideStyle() {
+                    if (document.getElementById(OVERRIDE_STYLE_ID)) return;
+                    const s = document.createElement('style');
+                    s.id = OVERRIDE_STYLE_ID;
+                    s.textContent = `
+                        .add-content-box #brandGlobeCanvas {
+                            width: 18px !important;
+                            height: 18px !important;
+                            display: inline-block !important;
+                            margin-left: 6px !important;
+                            vertical-align: middle !important;
+                            transform: scale(0.28) translateY(4px) !important;
+                            transform-origin: center center !important;
+                            pointer-events: none !important;
+                        }
+                    `;
+                    document.head.appendChild(s);
+                }
 
-                        // Append globe immediately after the text
-                        target.appendChild(globe);
-
-                        // Compact sizing and slight downward nudge to align with the 't'
-                        globe.style.width = '18px';
-                        globe.style.height = '18px';
-                        globe.style.display = 'inline-block';
-                        globe.style.marginLeft = '6px';
-                        globe.style.verticalAlign = 'middle';
-                        globe.style.transform = 'scale(0.28) translateY(3px)';
-                    } catch (e) { console.warn('brandGlobe insert error', e); }
+                function findCreatePostTextNode(createBox) {
+                    if (!createBox) return null;
+                    // prefer the inner div that contains the text "Create Post"
+                    const candidates = Array.from(createBox.querySelectorAll('div'));
+                    for (const c of candidates) {
+                        if (String(c.textContent || '').trim().toLowerCase().includes('create post')) return c;
+                    }
+                    // fallback to first child div
+                    return createBox.querySelector('div') || createBox;
                 }
 
                 function tryMoveOnce() {
                     const globe = document.getElementById(globeId);
                     const createBox = document.querySelector('.add-content-box');
-                    if (!globe || !createBox) return false;
-                    const innerTextDiv = createBox.querySelector('div > div') || createBox.querySelector('div') || createBox;
-                    styleAndInsert(globe, innerTextDiv);
-                    return true;
+                    if (!globe) return false;
+                    if (!createBox) return false;
+
+                    const textNodeContainer = findCreatePostTextNode(createBox);
+                    if (!textNodeContainer) return false;
+
+                    try {
+                        ensureOverrideStyle();
+
+                        // If globe already inside expected container, nothing to do
+                        if (textNodeContainer.contains(globe) && globe.parentElement === textNodeContainer) return true;
+
+                        // Append the globe as the last child of the text container so it appears inline after the text
+                        textNodeContainer.appendChild(globe);
+
+                        return true;
+                    } catch (e) {
+                        console.warn('brandGlobe insert error', e);
+                        return false;
+                    }
                 }
 
-                // Keep trying until initial move succeeds
-                const initial = setInterval(()=>{ if (tryMoveOnce()) clearInterval(initial); }, 200);
+                // Robust retry loop until initial move succeeds
+                const initial = setInterval(()=>{ if (tryMoveOnce()) { clearInterval(initial); } }, 180);
 
                 // Observe the grid container for changes and re-append globe if needed
                 const gridRoot = document.body;
                 const observer = new MutationObserver((mutations) => {
                     for (const m of mutations) {
-                        if (m.type === 'childList' || m.type === 'subtree' || m.type === 'attributes') {
+                        if (m.type === 'childList' || m.type === 'subtree') {
                             tryMoveOnce();
                         }
                     }
                 });
-                observer.observe(gridRoot, { childList: true, subtree: true, attributes: false });
+                observer.observe(gridRoot, { childList: true, subtree: true });
 
                 if (document.readyState !== 'loading') tryMoveOnce();
                 else document.addEventListener('DOMContentLoaded', tryMoveOnce);
