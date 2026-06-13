@@ -36201,55 +36201,43 @@
                 input.addEventListener('input', function(e){
                     const v = String(e.target.value || '').trim();
                     if (timer) clearTimeout(timer);
+                    // Ensure results container exists inside suggestions element so existing renderers can write into it
+                    if (!suggEl.querySelector('#refineLocationResultsContainer')) {
+                        suggEl.innerHTML = '<div id="refineLocationResultsContainer" style="padding:10px;color:#999;text-align:center;font-size:13px"></div>';
+                    }
+                    const resultsContainer = suggEl.querySelector('#refineLocationResultsContainer');
+
                     if (!v) {
-                        suggEl.innerHTML = '';
-                        suggEl.style.display = 'none';
-                        suggEl.setAttribute('aria-hidden','true');
+                        // show defaults
+                        try {
+                            resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">Loading top locations and POIs...</div>';
+                            if (typeof fetchRefineDefaults === 'function') fetchRefineDefaults();
+                        } catch (e) {
+                            resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">No matches</div>';
+                        }
+                        suggEl.style.display = 'block';
+                        suggEl.setAttribute('aria-hidden','false');
                         return;
                     }
-                    timer = setTimeout(async () => {
-                        try {
-                            // Use the main autocomplete search to get rich suggestions
-                            const results = (typeof getAutocompleteSuggestions === 'function') ? getAutocompleteSuggestions(v) : [];
-                            if (!Array.isArray(results) || results.length === 0) {
-                                suggEl.innerHTML = '<div style="padding:10px;color:#999;text-align:center">No matches</div>';
-                                suggEl.style.display = 'block';
-                                suggEl.setAttribute('aria-hidden','false');
-                                return;
-                            }
 
-                            // Render list
-                            const rows = results.slice(0,200).map(item => {
-                                const display = String(item.display || item.value || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                                const clickVal = (item.type === 'poi' && item.value) ? item.value : (item.display || item.value || '');
-                                const safeJs = String(clickVal).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-                                return `<div class=\"change-grid-suggestion-item\" tabindex=\"0\" role=\"button\" data-val='${safeJs}' title="${display}">${display}</div>`;
-                            }).join('');
-                            suggEl.innerHTML = rows;
+                    timer = setTimeout(() => {
+                        try {
+                            // Use the same DB-backed search pipeline
+                            const rendered = (typeof filterRefineLocationSearch === 'function') ? filterRefineLocationSearch(v) : 0;
+                            if (!rendered) {
+                                // remote fallback: use remote geocode dropdown if available
+                                try {
+                                    const remote = (typeof ensureRemoteGeocodeDropdown === 'function') ? ensureRemoteGeocodeDropdown() : null;
+                                    if (remote && typeof remote.handleInput === 'function') {
+                                        remote.handleInput(v);
+                                    } else {
+                                        resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">No matches</div>';
+                                    }
+                                } catch (e) { resultsContainer.innerHTML = '<div style="padding:12px;color:#999;text-align:center">No matches</div>'; }
+                            }
                             suggEl.style.display = 'block';
                             suggEl.setAttribute('aria-hidden','false');
-
-                            // Attach handlers
-                            Array.from(suggEl.querySelectorAll('.change-grid-suggestion-item')).forEach(el => {
-                                el.addEventListener('click', function(ev){
-                                    const val = el.getAttribute('data-val');
-                                    if (!val) return;
-                                    try {
-                                        // route selection through unified flow when possible
-                                        if (typeof selectLocationFromSpecifyField === 'function') {
-                                            selectLocationFromSpecifyField(val, ev, { preserveInputValue: true, zoneLabel: val });
-                                        } else {
-                                            // fallback: populate input and trigger existing selectSuggestion path
-                                            input.value = val;
-                                            try { selectSuggestion({ label: val, lat: null, lon: null }); } catch(e){}
-                                        }
-                                    } catch (e) { console.warn('changeGrid selection failed', e); }
-                                    // hide suggestions
-                                    try { suggEl.style.display='none'; suggEl.setAttribute('aria-hidden','true'); } catch(e){}
-                                });
-                                el.addEventListener('keypress', function(ev){ if (ev.key === 'Enter' || ev.key === ' ') el.click(); });
-                            });
-                        } catch (err) { console.warn('changeGrid suggestion fetch failed', err); }
+                        } catch (err) { console.warn('changeGrid DB search failed', err); }
                     }, v.length <= 2 ? 120 : 260);
                 });
             } catch (e) { console.warn('changeGrid autocomplete attach failed', e); }
