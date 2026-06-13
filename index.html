@@ -39,146 +39,6 @@
             window.POI_BASE_URL = window.DATA_SOURCES.samplePath;
             console.log('🔰 SAFETY: Using sample data and skipping mega/ultra DB loads — heavy tasks disabled');
         </script>
-        <script>
-            // Move the spinning brand globe from header to the Create Post add-content box
-            // Keep it attached even if the grid re-renders by observing mutations.
-            (function moveBrandGlobeToCreatePost(){
-                const globeId = 'brandGlobeCanvas';
-                const OVERRIDE_STYLE_ID = 'brand-globe-inline-override';
-
-                // Inject a CSS rule that takes effect when the canvas is inside the add-content box.
-                function ensureOverrideStyle() {
-                    if (document.getElementById(OVERRIDE_STYLE_ID)) return;
-                    const s = document.createElement('style');
-                    s.id = OVERRIDE_STYLE_ID;
-                    s.textContent = `
-                        .add-content-box #brandGlobeCanvas {
-                            width: 18px !important;
-                            height: 18px !important;
-                            display: inline-block !important;
-                            margin-left: 6px !important;
-                            vertical-align: middle !important;
-                            transform: scale(0.28) translateY(4px) !important;
-                            transform-origin: center center !important;
-                            pointer-events: none !important;
-                        }
-                    `;
-                    document.head.appendChild(s);
-                }
-
-                function findCreatePostTextNode(createBox) {
-                    if (!createBox) return null;
-                    // prefer the inner div that contains the text "Create Post"
-                    const candidates = Array.from(createBox.querySelectorAll('div'));
-                    for (const c of candidates) {
-                        if (String(c.textContent || '').trim().toLowerCase().includes('create post')) return c;
-                    }
-                    // fallback to first child div
-                    return createBox.querySelector('div') || createBox;
-                }
-
-                function tryMoveOnce() {
-                    const globe = document.getElementById(globeId);
-                    const createBox = document.querySelector('.add-content-box');
-                    console.debug && console.debug('globeMove: attempt, globe=', !!globe, 'createBox=', !!createBox);
-                    if (!globe) return false;
-                    if (!createBox) return false;
-
-                    const textNodeContainer = findCreatePostTextNode(createBox);
-                    console.debug && console.debug('globeMove: found textNodeContainer=', !!textNodeContainer, textNodeContainer);
-                    if (!textNodeContainer) return false;
-
-                    try {
-                        ensureOverrideStyle();
-
-                        // If globe already inside expected container, nothing to do
-                        if (textNodeContainer.contains(globe) && globe.parentElement === textNodeContainer) {
-                            console.debug && console.debug('globeMove: already in place');
-                            return true;
-                        }
-
-                        // Append the globe as the last child of the text container so it appears inline after the text
-                        textNodeContainer.appendChild(globe);
-                        console.debug && console.debug('globeMove: appended globe into createBox');
-
-                        // If a fallback overlay exists from previous attempts, remove it
-                        const existingOverlay = textNodeContainer.querySelector('#brandGlobeOverlay');
-                        if (existingOverlay) {
-                            try { clearInterval(existingOverlay.__bg_copy_interval); } catch(e){}
-                            try { existingOverlay.remove(); } catch(e){}
-                        }
-
-                        return true;
-                    } catch (e) {
-                        console.warn('brandGlobe insert error', e);
-                        return false;
-                    }
-                }
-
-                // Fallback: create an inline overlay canvas that copies pixels from the protected globe
-                function ensureOverlay(textNodeContainer) {
-                    if (!textNodeContainer) return null;
-                    if (textNodeContainer.querySelector('#brandGlobeOverlay')) return textNodeContainer.querySelector('#brandGlobeOverlay');
-                    const overlay = document.createElement('canvas');
-                    overlay.id = 'brandGlobeOverlay';
-                    overlay.width = 64; overlay.height = 64; // drawing buffer
-                    overlay.style.width = '18px';
-                    overlay.style.height = '18px';
-                    overlay.style.display = 'inline-block';
-                    overlay.style.marginLeft = '6px';
-                    overlay.style.verticalAlign = 'middle';
-                    overlay.style.pointerEvents = 'none';
-                    overlay.style.zIndex = 2147483647;
-                    // copy loop
-                    const ctx = overlay.getContext && overlay.getContext('2d');
-                    let lastInterval = null;
-                    function startCopy() {
-                        const src = document.getElementById(globeId);
-                        if (!src || !ctx) return;
-                        try {
-                            // clear and draw scaled
-                            ctx.clearRect(0,0,overlay.width, overlay.height);
-                            ctx.drawImage(src, 0, 0, overlay.width, overlay.height);
-                        } catch (e) { /* ignore drawing errors while engine not ready */ }
-                    }
-                    // keep copying so overlay updates if original animates
-                    lastInterval = setInterval(startCopy, 120);
-                    overlay.__bg_copy_interval = lastInterval;
-                    // initial draw attempt
-                    startCopy();
-                    textNodeContainer.appendChild(overlay);
-                    return overlay;
-                }
-
-                // Robust retry loop until initial move succeeds
-                let attempts = 0;
-                const initial = setInterval(()=>{
-                    attempts++;
-                    const ok = tryMoveOnce();
-                    if (ok) { clearInterval(initial); return; }
-                    // After a few failed attempts, attach overlay fallback so users see the globe
-                    if (attempts === 8) {
-                        const createBox = document.querySelector('.add-content-box');
-                        const textNodeContainer = createBox && findCreatePostTextNode(createBox);
-                        if (textNodeContainer) ensureOverlay(textNodeContainer);
-                    }
-                }, 180);
-
-                // Observe the grid container for changes and re-append globe if needed
-                const gridRoot = document.body;
-                const observer = new MutationObserver((mutations) => {
-                    for (const m of mutations) {
-                        if (m.type === 'childList' || m.type === 'subtree') {
-                            tryMoveOnce();
-                        }
-                    }
-                });
-                observer.observe(gridRoot, { childList: true, subtree: true });
-
-                if (document.readyState !== 'loading') tryMoveOnce();
-                else document.addEventListener('DOMContentLoaded', tryMoveOnce);
-            })();
-        </script>
     <script>
         /* Script moved out of style block to avoid CSS/JS mixing */
         async function updatePostZoneOnServer(postId, newZone, oldZone = null) {
@@ -2309,6 +2169,91 @@
             })();
         </script>
     </div>
+
+    <script>
+        // Immediate overlay attach: clone-proxy the protected header globe and
+        // display a small inline copy next to the "Create Post" text so users
+        // always see the spinning globe on the add-content button.
+        (function immediateGlobeOverlay(){
+            const SRC_ID = 'brandGlobeCanvas';
+            const OVERLAY_ID = 'brandGlobeOverlayImmediate';
+
+            function makeOverlay() {
+                const overlay = document.createElement('canvas');
+                overlay.id = OVERLAY_ID;
+                overlay.width = 64; overlay.height = 64;
+                overlay.style.width = '18px';
+                overlay.style.height = '18px';
+                overlay.style.display = 'inline-block';
+                overlay.style.marginLeft = '6px';
+                overlay.style.verticalAlign = 'middle';
+                overlay.style.pointerEvents = 'none';
+                overlay.style.zIndex = '2147483647';
+                return overlay;
+            }
+
+            function attachToCreateBox(overlay) {
+                const createBox = document.querySelector('.add-content-box');
+                if (!createBox) return false;
+                // find inner element that has the "Create Post" text
+                const candidates = Array.from(createBox.querySelectorAll('div'));
+                let textNodeContainer = candidates.find(c => String(c.textContent||'').toLowerCase().includes('create post')) || createBox.querySelector('div') || createBox;
+                if (!textNodeContainer) return false;
+                // avoid duplicates
+                if (textNodeContainer.querySelector('#'+OVERLAY_ID)) return true;
+                try {
+                    textNodeContainer.appendChild(overlay);
+                    return true;
+                } catch (e) { return false; }
+            }
+
+            function startCopyLoop(overlay) {
+                const ctx = overlay.getContext && overlay.getContext('2d');
+                if (!ctx) return null;
+                const src = document.getElementById(SRC_ID);
+                if (!src) return null;
+                function tick() {
+                    try {
+                        ctx.clearRect(0,0,overlay.width, overlay.height);
+                        ctx.drawImage(src, 0, 0, overlay.width, overlay.height);
+                    } catch (e) { /* engine may not be ready yet */ }
+                }
+                tick();
+                const id = setInterval(tick, 60);
+                overlay.__copyLoop = id;
+                return id;
+            }
+
+            // Try immediately and keep retrying until attached or attempts exhausted
+            const overlay = makeOverlay();
+            let attempts = 0;
+            const interval = setInterval(() => {
+                attempts++;
+                const attached = attachToCreateBox(overlay);
+                if (attached) {
+                    clearInterval(interval);
+                    // start copying pixels from the protected globe
+                    const loop = startCopyLoop(overlay);
+                    // watch for the original canvas being moved into the createBox; if so, remove overlay
+                    const observer = new MutationObserver(() => {
+                        const src = document.getElementById(SRC_ID);
+                        if (!src) return;
+                        const createBox = document.querySelector('.add-content-box');
+                        const textNodeContainer = createBox && Array.from(createBox.querySelectorAll('div')).find(c => String(c.textContent||'').toLowerCase().includes('create post')) || createBox && createBox.querySelector('div');
+                        if (textNodeContainer && textNodeContainer.contains(src)) {
+                            try { clearInterval(overlay.__copyLoop); } catch(e){}
+                            try { overlay.remove(); } catch(e){}
+                            observer.disconnect();
+                        }
+                    });
+                    observer.observe(document.body, { childList:true, subtree:true, attributes:false });
+                } else if (attempts > 60) {
+                    // give up after ~60 attempts (approx 6s)
+                    clearInterval(interval);
+                }
+            }, 100);
+        })();
+    </script>
 
         <script>
             // Email/password signup + profile modal (replaces Google sign-in flows)
