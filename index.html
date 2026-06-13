@@ -12405,58 +12405,83 @@
             };
         })();
 
-        // Persistent clone: keep a local copy of the globe visible in the Create Post box
-        (function persistentGlobeClone(){
-            function ensureClonePresent(){
+        // Persistent absolute-positioned clone: stable, anchored copy of the globe
+        (function persistentAbsoluteGlobe(){
+            const CLONE_ID = 'brandGlobePersistent';
+            const SOURCE_ID = 'brandGlobeCanvas';
+            const SIZE_PX = 18;
+
+            function createClone() {
+                let clone = document.getElementById(CLONE_ID);
+                if (clone) return clone;
+                clone = document.createElement('canvas');
+                clone.id = CLONE_ID;
+                // backing store for crisp scaling
+                clone.width = 64; clone.height = 64;
+                Object.assign(clone.style, {
+                    position: 'fixed',
+                    width: SIZE_PX + 'px',
+                    height: SIZE_PX + 'px',
+                    pointerEvents: 'none',
+                    zIndex: '2147483646',
+                    display: 'block',
+                    transform: 'translateZ(0)'
+                });
+                document.body.appendChild(clone);
+                return clone;
+            }
+
+            function positionClone(clone) {
                 try {
-                    const createBox = document.querySelector('.add-content-box');
-                    if (!createBox) return false;
-                    let clone = document.getElementById('brandGlobeClone');
-                    if (!clone) {
-                        clone = document.createElement('canvas');
-                        clone.id = 'brandGlobeClone';
-                        // Use larger backing store to keep crispness, but display small
-                        clone.width = 64; clone.height = 64;
-                        Object.assign(clone.style, {
-                            width: '18px',
-                            height: '18px',
-                            display: 'inline-block',
-                            verticalAlign: 'middle',
-                            marginLeft: '6px',
-                            pointerEvents: 'none'
-                        });
-                        const label = createBox.querySelector('div') || createBox;
-                        label.appendChild(clone);
-                    }
+                    const createText = (document.querySelector('.add-content-box') || document.body).querySelector('div');
+                    if (!createText) return false;
+                    const rect = createText.getBoundingClientRect();
+                    const left = rect.right + 6;
+                    const top = rect.top + (rect.height - SIZE_PX) / 2;
+                    clone.style.left = Math.round(left) + 'px';
+                    clone.style.top = Math.round(top) + 'px';
+                    clone.style.display = 'block';
                     return true;
                 } catch (e) { return false; }
             }
 
-            // Keep trying to create the clone until the create box exists
-            let created = ensureClonePresent();
-            const createInterval = setInterval(() => { if (!created) created = ensureClonePresent(); else clearInterval(createInterval); }, 500);
-
-            // Copy loop: draw frames from protected canvas into the clone
-            let raf = null;
-            function copyFrame(){
+            // Continuous copy loop to keep clone updated
+            let rafId = null;
+            function copyLoop(){
                 try {
-                    const src = document.getElementById('brandGlobeCanvas');
-                    const dst = document.getElementById('brandGlobeClone');
-                    if (dst && dst.getContext) {
-                        const ctx = dst.getContext('2d');
-                        if (src && src.getContext) {
-                            // drawImage will copy current frame even if source is re-rendered
-                            try { ctx.clearRect(0,0,dst.width,dst.height); ctx.drawImage(src, 0, 0, dst.width, dst.height); } catch(e) {}
+                    const src = document.getElementById(SOURCE_ID);
+                    const dst = createClone();
+                    if (!dst || !dst.getContext) return;
+                    const ctx = dst.getContext('2d');
+                    if (src && src.getContext) {
+                        try { ctx.clearRect(0,0,dst.width,dst.height); ctx.drawImage(src, 0, 0, dst.width, dst.height); } catch(e){}
+                    }
+                    positionClone(dst);
+                } catch (e) {}
+                rafId = requestAnimationFrame(copyLoop);
+            }
+
+            // Start loop
+            copyLoop();
+
+            // Reposition on resize/scroll and DOM mutations
+            window.addEventListener('resize', () => { const d = document.getElementById(CLONE_ID); if (d) positionClone(d); }, { passive: true });
+            window.addEventListener('scroll', () => { const d = document.getElementById(CLONE_ID); if (d) positionClone(d); }, { passive: true });
+
+            const mo = new MutationObserver(() => { const d = document.getElementById(CLONE_ID); if (d) positionClone(d); });
+            mo.observe(document.body, { childList: true, subtree: true });
+
+            // Defensive: ensure clone exists if removed
+            const removeObserver = new MutationObserver((mutations) => {
+                for (const m of mutations) {
+                    for (const n of m.removedNodes || []) {
+                        if (n && n.id === CLONE_ID) {
+                            createClone();
                         }
                     }
-                } catch (e){}
-                raf = requestAnimationFrame(copyFrame);
-            }
-            raf = requestAnimationFrame(copyFrame);
-
-            // Ensure clone exists when DOM changes (re-append if needed)
-            const mo = new MutationObserver(() => { ensureClonePresent(); });
-            mo.observe(document.body, { childList: true, subtree: true });
+                }
+            });
+            removeObserver.observe(document.body, { childList: true, subtree: true });
         })();
         window.GeoIndex = GeoIndex;
 
