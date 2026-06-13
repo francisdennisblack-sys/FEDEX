@@ -3744,6 +3744,58 @@
         const storage = getStorage(app);
         const auth = getAuth(app);
 
+        // Lightweight debug overlay: shows auth state, storage bucket, and last upload error
+        try {
+            window.lastUploadError = window.lastUploadError || null;
+            function createDebugOverlay() {
+                if (document.getElementById('debugOverlay')) return;
+                const el = document.createElement('div');
+                el.id = 'debugOverlay';
+                el.style.position = 'fixed';
+                el.style.left = '8px';
+                el.style.bottom = '8px';
+                el.style.zIndex = '99999';
+                el.style.background = 'rgba(0,0,0,0.6)';
+                el.style.color = '#fff';
+                el.style.fontSize = '12px';
+                el.style.padding = '8px 10px';
+                el.style.borderRadius = '8px';
+                el.style.maxWidth = '320px';
+                el.style.fontFamily = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial';
+                el.style.backdropFilter = 'blur(4px)';
+                el.style.boxShadow = '0 6px 18px rgba(0,0,0,0.6)';
+                el.innerHTML = `
+                    <div style="font-weight:700; margin-bottom:6px;">Debug</div>
+                    <div id="dbgAuth">Auth: -</div>
+                    <div id="dbgAnon">Anonymous: -</div>
+                    <div id="dbgBucket">Bucket: ${firebaseConfig.storageBucket || 'unknown'}</div>
+                    <div id="dbgLastErr" style="margin-top:6px; color:#f8d7da;">Last upload: none</div>
+                `;
+                document.body.appendChild(el);
+
+                // Update values periodically
+                setInterval(() => {
+                    try {
+                        const a = document.getElementById('dbgAuth');
+                        const b = document.getElementById('dbgAnon');
+                        const c = document.getElementById('dbgBucket');
+                        const d = document.getElementById('dbgLastErr');
+                        const u = (auth && auth.currentUser) ? (auth.currentUser.uid || '(no-uid)') : '(not signed)';
+                        const isAnon = (auth && auth.currentUser) ? !!auth.currentUser.isAnonymous : false;
+                        if (a) a.textContent = 'Auth UID: ' + u;
+                        if (b) b.textContent = 'Is anonymous: ' + isAnon;
+                        if (c) c.textContent = 'Bucket: ' + (firebaseConfig.storageBucket || 'unknown');
+                        const last = window.lastUploadError || null;
+                        if (d) d.textContent = last ? (last.time ? new Date(last.time).toLocaleTimeString() + ' — ' : '') + (last.code || last.message || JSON.stringify(last)) : 'Last upload: none';
+                    } catch (e) { /* ignore overlay update errors */ }
+                }, 2000);
+            }
+
+            // Create overlay once DOM is ready
+            if (document.readyState === 'complete' || document.readyState === 'interactive') createDebugOverlay();
+            else window.addEventListener('DOMContentLoaded', createDebugOverlay);
+        } catch (e) { console.warn('Failed to initialize debug overlay', e); }
+
         // Ensure global DB containers exist early to avoid TDZ ReferenceErrors
         window.globalLocationDatabase = window.globalLocationDatabase || [];
         window.globalPOIDatabase = window.globalPOIDatabase || [];
@@ -15034,6 +15086,16 @@
                     console.error('  Full error object:', error);
                     console.error('  error.customData:', error && error.customData);
                     console.error('  error.serverResponse:', error && error.serverResponse);
+                    // capture into a global var for the debug overlay
+                    try {
+                        window.lastUploadError = {
+                            code: error && error.code ? String(error.code) : null,
+                            message: error && error.message ? String(error.message) : null,
+                            serverResponse: error && error.serverResponse ? error.serverResponse : null,
+                            time: Date.now(),
+                            path: photoPath
+                        };
+                    } catch (e_win) { console.warn('Failed to set window.lastUploadError', e_win); }
                     // Attempt to serialize all properties for deeper inspection
                     try {
                         const serialized = JSON.stringify(error, Object.getOwnPropertyNames(error));
