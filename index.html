@@ -756,6 +756,18 @@
             ENABLE_CONTENT_FRESHNESS: true // enable feed freshness waterfall and stale fallback injection
         };
 
+        // Hide any leftover debug UI elements (IDs/classes containing debug/dbg)
+        try {
+            const style = document.createElement('style');
+            style.id = 'hide-debug-ui-styles';
+            style.textContent = `
+                [id*="debug"], [id*="dbg"], [class*="debug"], [class*="dbg"] {
+                    display: none !important;
+                }
+            `;
+            document.head.appendChild(style);
+        } catch (e) { console.warn('Could not inject debug-hide CSS', e); }
+
         // Feed freshness controls. Kept separate so rollout/risk can be tuned live.
         window.CONTENT_FRESHNESS_CONFIG = window.CONTENT_FRESHNESS_CONFIG || {
             enabled: true,
@@ -3773,6 +3785,9 @@
                     <div id="dbgAnon">Anonymous: -</div>
                     <div id="dbgBucket">Bucket: ${firebaseConfig.storageBucket || 'unknown'}</div>
                     <div id="dbgLastErr" style="margin-top:6px; color:#f8d7da;">Last upload: none</div>
+                    <div id="dbgLastMedia" style="margin-top:6px; max-width:280px;">
+                        Last media: none
+                    </div>
                 `;
                 document.body.appendChild(el);
 
@@ -3790,13 +3805,34 @@
                         if (c) c.textContent = 'Bucket: ' + (firebaseConfig.storageBucket || 'unknown');
                         const last = window.lastUploadError || null;
                         if (d) d.textContent = last ? (last.time ? new Date(last.time).toLocaleTimeString() + ' — ' : '') + (last.code || last.message || JSON.stringify(last)) : 'Last upload: none';
+
+                        // Show last uploaded media (if any) as a small preview/link
+                        try {
+                            const m = document.getElementById('dbgLastMedia');
+                            const lm = window.lastUploadedMedia || null;
+                            if (m) {
+                                if (!lm) {
+                                    m.textContent = 'Last media: none';
+                                } else {
+                                    const safeUrl = lm.url || '';
+                                    if (lm.mediaType === 'video') {
+                                        m.innerHTML = `Last media: <div style="margin-top:6px;"><video controls style="max-width:260px; max-height:140px; display:block;"><source src="${safeUrl}"></video><div style="font-size:11px;color:#ddd;">${lm.filename || ''}</div></div>`;
+                                    } else {
+                                        m.innerHTML = `Last media: <div style="margin-top:6px;"><img src="${safeUrl}" style="max-width:260px; max-height:140px; display:block;" alt="last media"><div style="font-size:11px;color:#ddd;">${lm.filename || ''}</div></div>`;
+                                    }
+                                }
+                            }
+                        } catch (e) { /* ignore debug overlay media render errors */ }
                     } catch (e) { /* ignore overlay update errors */ }
                 }, 2000);
             }
 
-            // Create overlay once DOM is ready
-            if (document.readyState === 'complete' || document.readyState === 'interactive') createDebugOverlay();
-            else window.addEventListener('DOMContentLoaded', createDebugOverlay);
+            // Debug overlay disabled per user request — do not attach to DOM
+            try {
+                const existing = document.getElementById('debugOverlay');
+                if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+            } catch (e) { /* ignore */ }
+            console.log('Debug overlay disabled.');
         } catch (e) { console.warn('Failed to initialize debug overlay', e); }
 
         // Ensure global DB containers exist early to avoid TDZ ReferenceErrors
@@ -15079,7 +15115,18 @@
                 
                 const downloadURL = await getDownloadURL(snapshot.ref);
                 console.log('✅ PHOTO URL OBTAINED:', downloadURL);
-                
+
+                // Record last uploaded media for debug overlay (safe best-effort)
+                try {
+                    window.lastUploadedMedia = {
+                        url: downloadURL,
+                        mediaType: (file && file.type && file.type.startsWith('video')) ? 'video' : 'image',
+                        time: Date.now(),
+                        postId: postId,
+                        filename: file && file.name ? file.name : null
+                    };
+                } catch (e) { console.warn('Could not set window.lastUploadedMedia', e); }
+
                 return downloadURL;
             } catch (error) {
                 // Enhanced diagnostics for storage/unknown errors
