@@ -7,7 +7,103 @@
     <script>
     </script>
 
-    <script>
+        <script>
+            // Strong absolute-position overlay for the spinning globe.
+            (function absoluteGlobeOverlay(){
+                const SRC_ID = 'brandGlobeCanvas';
+                const ABS_ID = 'brandGlobeAbsoluteOverlay';
+                const OVERLAY_SIZE_PX = 18;
+
+                function createOverlay() {
+                    if (document.getElementById(ABS_ID)) return document.getElementById(ABS_ID);
+                    const c = document.createElement('canvas');
+                    c.id = ABS_ID;
+                    c.width = 64; c.height = 64;
+                    Object.assign(c.style, {
+                        position: 'fixed',
+                        width: OVERLAY_SIZE_PX + 'px',
+                        height: OVERLAY_SIZE_PX + 'px',
+                        pointerEvents: 'none',
+                        zIndex: '2147483647',
+                        display: 'none',
+                        transform: 'translateZ(0)'
+                    });
+                    document.body.appendChild(c);
+                    return c;
+                }
+
+                function findCreateTextEl() {
+                    const createBox = document.querySelector('.add-content-box');
+                    if (!createBox) return null;
+                    const candidates = Array.from(createBox.querySelectorAll('div'));
+                    return candidates.find(c => String(c.textContent||'').toLowerCase().includes('create post')) || createBox.querySelector('div') || createBox;
+                }
+
+                function positionOverlay(overlay) {
+                    const textEl = findCreateTextEl();
+                    if (!textEl) { overlay.style.display = 'none'; return false; }
+                    const rect = textEl.getBoundingClientRect();
+                    const left = rect.right + 6; // small gap to the right of text
+                    const top = rect.top + (rect.height - OVERLAY_SIZE_PX)/2;
+                    overlay.style.left = Math.round(left) + 'px';
+                    overlay.style.top = Math.round(top) + 'px';
+                    overlay.style.display = 'block';
+                    return true;
+                }
+
+                function startCopyLoop(overlay) {
+                    const ctx = overlay.getContext && overlay.getContext('2d');
+                    if (!ctx) return null;
+                    const src = document.getElementById(SRC_ID);
+                    if (!src) return null;
+                    function tick() {
+                        try {
+                            ctx.clearRect(0,0,overlay.width, overlay.height);
+                            ctx.drawImage(src, 0, 0, overlay.width, overlay.height);
+                        } catch (e) {}
+                    }
+                    tick();
+                    const id = setInterval(tick, 60);
+                    overlay.__copyLoop = id;
+                    return id;
+                }
+
+                const overlay = createOverlay();
+                let copyStarted = false;
+
+                // Try to position immediately and whenever layout changes.
+                function tryEnsure() {
+                    const positioned = positionOverlay(overlay);
+                    const src = document.getElementById(SRC_ID);
+                    if (positioned && src && !copyStarted) {
+                        startCopyLoop(overlay);
+                        copyStarted = true;
+                    }
+                    // If the protected canvas ever moves into the create text element, remove overlay
+                    const srcInPlace = (function(){
+                        try {
+                            const textEl = findCreateTextEl();
+                            const s = document.getElementById(SRC_ID);
+                            return textEl && s && textEl.contains(s);
+                        } catch (e) { return false; }
+                    })();
+                    if (srcInPlace) {
+                        try { if (overlay.__copyLoop) clearInterval(overlay.__copyLoop); } catch(e){}
+                        try { overlay.remove(); } catch(e){}
+                        return;
+                    }
+                }
+
+                // initial attempts
+                tryEnsure();
+                window.addEventListener('resize', tryEnsure);
+                window.addEventListener('scroll', tryEnsure, { passive: true });
+
+                // MutationObserver to catch rerenders of the create box
+                const mo = new MutationObserver(() => { tryEnsure(); });
+                mo.observe(document.body, { childList: true, subtree: true });
+
+            })();
         // POI fetch helper: if `window.POI_BASE_URL` is set (e.g. https://cdn.example.com),
         // requests for `/pois/...` will be routed there. Otherwise fall back to relative `/pois/`.
         // This lets us exclude heavy `pois/tiles/` from deployments and host them on S3/CDN.
@@ -2169,91 +2265,6 @@
             })();
         </script>
     </div>
-
-    <script>
-        // Immediate overlay attach: clone-proxy the protected header globe and
-        // display a small inline copy next to the "Create Post" text so users
-        // always see the spinning globe on the add-content button.
-        (function immediateGlobeOverlay(){
-            const SRC_ID = 'brandGlobeCanvas';
-            const OVERLAY_ID = 'brandGlobeOverlayImmediate';
-
-            function makeOverlay() {
-                const overlay = document.createElement('canvas');
-                overlay.id = OVERLAY_ID;
-                overlay.width = 64; overlay.height = 64;
-                overlay.style.width = '18px';
-                overlay.style.height = '18px';
-                overlay.style.display = 'inline-block';
-                overlay.style.marginLeft = '6px';
-                overlay.style.verticalAlign = 'middle';
-                overlay.style.pointerEvents = 'none';
-                overlay.style.zIndex = '2147483647';
-                return overlay;
-            }
-
-            function attachToCreateBox(overlay) {
-                const createBox = document.querySelector('.add-content-box');
-                if (!createBox) return false;
-                // find inner element that has the "Create Post" text
-                const candidates = Array.from(createBox.querySelectorAll('div'));
-                let textNodeContainer = candidates.find(c => String(c.textContent||'').toLowerCase().includes('create post')) || createBox.querySelector('div') || createBox;
-                if (!textNodeContainer) return false;
-                // avoid duplicates
-                if (textNodeContainer.querySelector('#'+OVERLAY_ID)) return true;
-                try {
-                    textNodeContainer.appendChild(overlay);
-                    return true;
-                } catch (e) { return false; }
-            }
-
-            function startCopyLoop(overlay) {
-                const ctx = overlay.getContext && overlay.getContext('2d');
-                if (!ctx) return null;
-                const src = document.getElementById(SRC_ID);
-                if (!src) return null;
-                function tick() {
-                    try {
-                        ctx.clearRect(0,0,overlay.width, overlay.height);
-                        ctx.drawImage(src, 0, 0, overlay.width, overlay.height);
-                    } catch (e) { /* engine may not be ready yet */ }
-                }
-                tick();
-                const id = setInterval(tick, 60);
-                overlay.__copyLoop = id;
-                return id;
-            }
-
-            // Try immediately and keep retrying until attached or attempts exhausted
-            const overlay = makeOverlay();
-            let attempts = 0;
-            const interval = setInterval(() => {
-                attempts++;
-                const attached = attachToCreateBox(overlay);
-                if (attached) {
-                    clearInterval(interval);
-                    // start copying pixels from the protected globe
-                    const loop = startCopyLoop(overlay);
-                    // watch for the original canvas being moved into the createBox; if so, remove overlay
-                    const observer = new MutationObserver(() => {
-                        const src = document.getElementById(SRC_ID);
-                        if (!src) return;
-                        const createBox = document.querySelector('.add-content-box');
-                        const textNodeContainer = createBox && Array.from(createBox.querySelectorAll('div')).find(c => String(c.textContent||'').toLowerCase().includes('create post')) || createBox && createBox.querySelector('div');
-                        if (textNodeContainer && textNodeContainer.contains(src)) {
-                            try { clearInterval(overlay.__copyLoop); } catch(e){}
-                            try { overlay.remove(); } catch(e){}
-                            observer.disconnect();
-                        }
-                    });
-                    observer.observe(document.body, { childList:true, subtree:true, attributes:false });
-                } else if (attempts > 60) {
-                    // give up after ~60 attempts (approx 6s)
-                    clearInterval(interval);
-                }
-            }, 100);
-        })();
-    </script>
 
         <script>
             // Email/password signup + profile modal (replaces Google sign-in flows)
