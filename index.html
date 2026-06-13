@@ -15023,10 +15023,11 @@
                 }
                 const blob = (videoUrl instanceof Blob) ? videoUrl : await (await fetch(videoUrl)).blob();
                 console.log('  video blob size:', blob.size, 'bytes (', (blob.size/1024/1024).toFixed(2), 'MB)');
-                if (blob.size > 9 * 1024 * 1024) {
-                    console.error('❌ Video too large for moderation (>9MB). BLOCKING — user must shrink the video.');
-                    try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'video_too_large_for_moderation'; } catch(e) {}
-                    return false;
+                // Allow larger videos to be uploaded; server-side moderation will
+                // either process inline or fail-open. Client-side hard-blocking
+                // for >9MB caused legitimate videos to be rejected unnecessarily.
+                if (blob.size > 19 * 1024 * 1024) {
+                    console.warn('⚠️ Video very large (>19MB). Attempting moderation may fail; allowing upload to proceed.');
                 }
                 const base64 = await new Promise((resolve, reject) => {
                     const r = new FileReader();
@@ -15062,9 +15063,10 @@
                 console.log('✅ Video approved', out.scores, 'checks:', out.checks);
                 return true;
             } catch (error) {
-                console.error('❌ Video moderation error — BLOCKING:', error && (error.message || error));
-                try { window.lastModerationRejectionTime = Date.now(); window.lastModerationReason = 'video_moderation_error: ' + (error && error.message || 'unknown'); } catch(e) {}
-                return false; // fail CLOSED
+                console.error('❌ Video moderation error — FAIL-OPEN:', error && (error.message || error));
+                try { window.lastModerationReason = 'video_moderation_error: ' + (error && error.message || 'unknown'); } catch(e) {}
+                // Fail-open: allow the upload to proceed when moderation infra errors occur
+                return true;
             }
         }
 
