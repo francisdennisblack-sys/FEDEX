@@ -14947,41 +14947,45 @@
         };
 
         async function uploadPhotoToFirebase(postId, file) {
-            try {
-                const photoPath = `posts/${postId}/photo`;
-                console.log('🔥 STARTING PHOTO UPLOAD TO STORAGE');
-                console.log('  Post ID:', postId);
-                console.log('  Storage path:', photoPath);
-                console.log('  File details:', { name: file.name, size: file.size, type: file.type });
-                
-                const photoRef = storageRef(storage, photoPath);
-                console.log('  Storage reference created');
-                
-                // Ensure Storage stores a correct Content-Type so the browser will
-                // play videos served from the resulting download URL. Raw Blobs
-                // sometimes upload as application/octet-stream which prevents
-                // <video> playback.
-                let contentType = (file && file.type) ? file.type : '';
-                if (!contentType) {
-                    const name = (file && file.name) ? file.name.toLowerCase() : '';
-                    if (name.endsWith('.mp4')) contentType = 'video/mp4';
-                    else if (name.endsWith('.webm')) contentType = 'video/webm';
-                    else if (name.endsWith('.mov')) contentType = 'video/quicktime';
-                    else if (name.endsWith('.png')) contentType = 'image/png';
-                    else if (name.endsWith('.jpg') || name.endsWith('.jpeg')) contentType = 'image/jpeg';
-                    else contentType = 'application/octet-stream';
-                }
-                const metadata = { contentType };
-                console.log('  Upload metadata:', metadata);
+            // Implement a single retry that signs in anonymously if storage
+            // returns an unauthorized error (common when client isn't signed).
+            let retried = false;
+            while (true) {
+                try {
+                    const photoPath = `posts/${postId}/photo`;
+                    console.log('🔥 STARTING PHOTO UPLOAD TO STORAGE');
+                    console.log('  Post ID:', postId);
+                    console.log('  Storage path:', photoPath);
+                    console.log('  File details:', { name: file.name, size: file.size, type: file.type });
+                    
+                    const photoRef = storageRef(storage, photoPath);
+                    console.log('  Storage reference created');
+                    
+                    // Ensure Storage stores a correct Content-Type so the browser will
+                    // play videos served from the resulting download URL. Raw Blobs
+                    // sometimes upload as application/octet-stream which prevents
+                    // <video> playback.
+                    let contentType = (file && file.type) ? file.type : '';
+                    if (!contentType) {
+                        const name = (file && file.name) ? file.name.toLowerCase() : '';
+                        if (name.endsWith('.mp4')) contentType = 'video/mp4';
+                        else if (name.endsWith('.webm')) contentType = 'video/webm';
+                        else if (name.endsWith('.mov')) contentType = 'video/quicktime';
+                        else if (name.endsWith('.png')) contentType = 'image/png';
+                        else if (name.endsWith('.jpg') || name.endsWith('.jpeg')) contentType = 'image/jpeg';
+                        else contentType = 'application/octet-stream';
+                    }
+                    const metadata = { contentType };
+                    console.log('  Upload metadata:', metadata);
 
-                const snapshot = await uploadBytes(photoRef, file, metadata);
-                console.log('✅ File uploaded to Storage');
-                
-                const downloadURL = await getDownloadURL(snapshot.ref);
-                console.log('✅ PHOTO URL OBTAINED:', downloadURL);
-                
-                return downloadURL;
-            } catch (error) {
+                    const snapshot = await uploadBytes(photoRef, file, metadata);
+                    console.log('✅ File uploaded to Storage');
+                    
+                    const downloadURL = await getDownloadURL(snapshot.ref);
+                    console.log('✅ PHOTO URL OBTAINED:', downloadURL);
+                    
+                    return downloadURL;
+                } catch (error) {
                 // Enhanced diagnostics for storage/unknown errors
                 try {
                     console.error('❌ ERROR UPLOADING PHOTO:', error && error.message);
@@ -14999,12 +15003,31 @@
                 } catch (logErr) {
                     console.error('Failed to log upload error details', logErr);
                 }
+                    // If this is an unauthorized error, try anonymous sign-in once
+                    const code = (error && error.code) || String(error || '').toLowerCase();
+                    if (!retried && (code === 'storage/unauthorized' || code === 'storage/unauthorized.' || String(code).includes('unauthorized') || String(error && error.message).toLowerCase().includes('permission'))) {
+                        retried = true;
+                        try {
+                            console.warn('storage/unauthorized detected — attempting anonymous sign-in and retry');
+                            if (typeof signInAnonymously === 'function' && auth) {
+                                await signInAnonymously(auth);
+                                console.log('Anonymous sign-in succeeded; retrying upload');
+                                // loop will retry
+                                continue;
+                            }
+                        } catch (siErr) {
+                            console.error('Anonymous sign-in failed:', siErr);
+                            // fall through to throw below
+                        }
+                    }
 
-                // Re-throw so calling code can handle it, include an augmented message
-                const err = new Error('Photo upload failed: ' + (error && error.message));
-                err.code = error && error.code;
-                err.original = error;
-                throw err;
+                    // Re-throw so calling code can handle it, include an augmented message
+                    const err = new Error('Photo upload failed: ' + (error && error.message));
+                    err.code = error && error.code;
+                    err.original = error;
+                    throw err;
+                }
+            }
             }
         }
 
