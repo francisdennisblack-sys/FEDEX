@@ -14954,6 +14954,14 @@
                 console.log('  Storage path:', photoPath);
                 console.log('  File details:', { name: file.name, size: file.size, type: file.type });
                 
+                // Ensure client is authenticated (anonymous sign-in counts)
+                try {
+                    if (auth && !auth.currentUser) {
+                        console.log('Auth: no current user - attempting anonymous sign-in before upload');
+                        try { await signInAnonymously(auth); } catch (e) { console.warn('Anonymous sign-in failed', e); }
+                    }
+                } catch (e) { console.warn('Auth ensure check failed', e); }
+
                 const photoRef = storageRef(storage, photoPath);
                 console.log('  Storage reference created');
                 
@@ -14974,8 +14982,27 @@
                 const metadata = { contentType };
                 console.log('  Upload metadata:', metadata);
 
-                const snapshot = await uploadBytes(photoRef, file, metadata);
-                console.log('✅ File uploaded to Storage');
+                let snapshot;
+                try {
+                    snapshot = await uploadBytes(photoRef, file, metadata);
+                    console.log('✅ File uploaded to Storage');
+                } catch (uploadErr) {
+                    // If unauthorized, try anonymous sign-in and retry once
+                    console.error('Upload error:', uploadErr && uploadErr.code, uploadErr && uploadErr.message);
+                    if (uploadErr && String(uploadErr.code).includes('storage/unauthorized')) {
+                        console.warn('Received storage/unauthorized - attempting anonymous sign-in and retry');
+                        try {
+                            await signInAnonymously(auth);
+                            snapshot = await uploadBytes(photoRef, file, metadata);
+                            console.log('✅ File uploaded to Storage after anonymous sign-in retry');
+                        } catch (retryErr) {
+                            console.error('Retry after anonymous sign-in failed:', retryErr);
+                            throw retryErr;
+                        }
+                    } else {
+                        throw uploadErr;
+                    }
+                }
                 
                 const downloadURL = await getDownloadURL(snapshot.ref);
                 console.log('✅ PHOTO URL OBTAINED:', downloadURL);
