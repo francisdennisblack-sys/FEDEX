@@ -17117,13 +17117,20 @@
 
                     // Defensive: remove any dynamic overlay if present
                     const overlay = document.getElementById('brandGlobeAbsoluteOverlay');
-                    if (overlay && overlay.parentNode) try { overlay.parentNode.removeChild(overlay); } catch(e){}
+                    if (overlay && overlay.parentNode) try { overlay.parentNode.removeChild(overlay); console.log('moveGlobe: removed overlay', new Date().toISOString()); } catch(e){}
 
+                    // Make visible and force opacity in case a style hides it later
+                    try { globe.style.setProperty('visibility','visible','important'); globe.style.setProperty('opacity','1','important'); globe.style.setProperty('transition','none','important'); } catch(e){}
+
+                    console.log('moveGlobe: moved globe into create box', new Date().toISOString());
                     return true;
                 } catch (e) { return false; }
             }
 
             let succeeded = false;
+            // Expose for debugging
+            try { window.__ensureMoveGlobe = ensureMove; } catch(e){}
+
             // Immediate attempt
             if (ensureMove()) succeeded = true;
 
@@ -17141,8 +17148,38 @@
             }, 250);
 
             // Observe DOM mutations and re-apply move if the create box or globe is re-rendered
-            const mo = new MutationObserver(() => { if (!succeeded) { if (ensureMove()) succeeded = true; } else { ensureMove(); } });
+            const mo = new MutationObserver((mutations) => {
+                for (const m of mutations) {
+                    if (m.removedNodes) for (const n of m.removedNodes) {
+                        if (n && n.id === 'brandGlobeCanvas') console.log('moveGlobe: detected globe removed', new Date().toISOString());
+                    }
+                    if (m.addedNodes) for (const n of m.addedNodes) {
+                        if (!n) continue;
+                        if (n.id === 'brandGlobeCanvas' || (n.querySelector && n.querySelector('#brandGlobeCanvas'))) {
+                            console.log('moveGlobe: detected new/recreated brandGlobeCanvas, reapplying move', new Date().toISOString());
+                            try { ensureMove(); } catch(e){}
+                        }
+                    }
+                }
+                // keep trying to ensure move
+                if (!succeeded) { if (ensureMove()) succeeded = true; } else { ensureMove(); }
+            });
             mo.observe(document.body, { childList: true, subtree: true, attributes: false });
+
+            // Additionally monitor all future mutations specifically for canvas appearance
+            const canvasMonitor = new MutationObserver((mutations) => {
+                for (const m of mutations) {
+                    if (m.addedNodes) for (const n of m.addedNodes) {
+                        try {
+                            if (n && (n.id === 'brandGlobeCanvas' || (n.querySelector && n.querySelector('#brandGlobeCanvas')))) {
+                                console.log('canvasMonitor: brandGlobeCanvas added - enforcing move', new Date().toISOString());
+                                ensureMove();
+                            }
+                        } catch(e){}
+                    }
+                }
+            });
+            canvasMonitor.observe(document.body, { childList: true, subtree: true });
         })();
 
         function toggleDislike() {
