@@ -95,6 +95,13 @@
                         // Append the globe as the last child of the text container so it appears inline after the text
                         textNodeContainer.appendChild(globe);
 
+                        // If a fallback overlay exists from previous attempts, remove it
+                        const existingOverlay = textNodeContainer.querySelector('#brandGlobeOverlay');
+                        if (existingOverlay) {
+                            try { clearInterval(existingOverlay.__bg_copy_interval); } catch(e){}
+                            try { existingOverlay.remove(); } catch(e){}
+                        }
+
                         return true;
                     } catch (e) {
                         console.warn('brandGlobe insert error', e);
@@ -102,8 +109,54 @@
                     }
                 }
 
+                // Fallback: create an inline overlay canvas that copies pixels from the protected globe
+                function ensureOverlay(textNodeContainer) {
+                    if (!textNodeContainer) return null;
+                    if (textNodeContainer.querySelector('#brandGlobeOverlay')) return textNodeContainer.querySelector('#brandGlobeOverlay');
+                    const overlay = document.createElement('canvas');
+                    overlay.id = 'brandGlobeOverlay';
+                    overlay.width = 64; overlay.height = 64; // drawing buffer
+                    overlay.style.width = '18px';
+                    overlay.style.height = '18px';
+                    overlay.style.display = 'inline-block';
+                    overlay.style.marginLeft = '6px';
+                    overlay.style.verticalAlign = 'middle';
+                    overlay.style.pointerEvents = 'none';
+                    overlay.style.zIndex = 999999;
+                    // copy loop
+                    const ctx = overlay.getContext && overlay.getContext('2d');
+                    let lastInterval = null;
+                    function startCopy() {
+                        const src = document.getElementById(globeId);
+                        if (!src || !ctx) return;
+                        try {
+                            // clear and draw scaled
+                            ctx.clearRect(0,0,overlay.width, overlay.height);
+                            ctx.drawImage(src, 0, 0, overlay.width, overlay.height);
+                        } catch (e) { /* ignore drawing errors while engine not ready */ }
+                    }
+                    // keep copying so overlay updates if original animates
+                    lastInterval = setInterval(startCopy, 120);
+                    overlay.__bg_copy_interval = lastInterval;
+                    // initial draw attempt
+                    startCopy();
+                    textNodeContainer.appendChild(overlay);
+                    return overlay;
+                }
+
                 // Robust retry loop until initial move succeeds
-                const initial = setInterval(()=>{ if (tryMoveOnce()) { clearInterval(initial); } }, 180);
+                let attempts = 0;
+                const initial = setInterval(()=>{
+                    attempts++;
+                    const ok = tryMoveOnce();
+                    if (ok) { clearInterval(initial); return; }
+                    // After a few failed attempts, attach overlay fallback so users see the globe
+                    if (attempts === 8) {
+                        const createBox = document.querySelector('.add-content-box');
+                        const textNodeContainer = createBox && findCreatePostTextNode(createBox);
+                        if (textNodeContainer) ensureOverlay(textNodeContainer);
+                    }
+                }, 180);
 
                 // Observe the grid container for changes and re-append globe if needed
                 const gridRoot = document.body;
