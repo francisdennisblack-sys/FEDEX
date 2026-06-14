@@ -35695,6 +35695,23 @@
         // Apply purchase badges to a post and persist to Firebase & local caches
         async function applyPurchaseBadges(postId, { boost = false, sell = false } = {}) {
             if (!postId) return;
+            // Safety: only allow applying purchase badges to posts owned by the current user
+            try {
+                const ownerFields = ['authId','userId','createdBy','ownerUid','ownerId'];
+                let candidate = null;
+                if (typeof postCache !== 'undefined' && postCache && postCache[postId]) candidate = postCache[postId];
+                if (!candidate && typeof gridContent !== 'undefined') {
+                    for (const key in gridContent) {
+                        const found = (gridContent[key] || []).find(p => p.id === postId);
+                        if (found) { candidate = found; break; }
+                    }
+                }
+                const owner = candidate ? ownerFields.map(f=>candidate[f]).find(v=>v!=null) : null;
+                if (owner && window.currentUserId && String(owner) !== String(window.currentUserId)) {
+                    console.warn('applyPurchaseBadges: refusing to apply purchased badge to post not owned by current user', postId, owner);
+                    return; // do not apply badges to posts owned by others
+                }
+            } catch (e) { /* ignore ownership check failures but proceed safely below */ }
             try {
                 // Find post in local caches
                 let post = null;
@@ -35933,6 +35950,14 @@
                 } catch (e) {
                     console.warn('applyBadgeToPost: failed to read existing post from server', e);
                 }
+                // Ownership guard: only allow persisting badge updates when current user owns the post
+                try {
+                    const owner = existing && (existing.authId || existing.userId || existing.createdBy || existing.ownerUid || existing.ownerId);
+                    if (owner && window.currentUserId && String(owner) !== String(window.currentUserId)) {
+                        console.warn('applyBadgeToPost: aborting server update - current user does not own post', postId, 'owner=', owner, 'currentUser=', window.currentUserId);
+                        return;
+                    }
+                } catch (e) { /* ignore and proceed with caution */ }
                 // Fallback to local cache if server read wasn't possible
                 if (!existing && window.postCache && window.postCache[postId]) existing = window.postCache[postId];
                 const existingBadges = Array.isArray(existing && existing.badges) ? existing.badges.slice() : [];
