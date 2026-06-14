@@ -119,6 +119,32 @@
                     document.body.appendChild(c);
                     return c;
                 }
+                // Register service worker to handle background location updates
+                try {
+                    if ('serviceWorker' in navigator) {
+                        navigator.serviceWorker.register('/sw.js').then(reg => {
+                            console.log('ServiceWorker registered:', reg.scope);
+                        }).catch(err => console.warn('ServiceWorker register failed', err));
+
+                        navigator.serviceWorker.addEventListener('message', (ev) => {
+                            try {
+                                const data = ev.data || {};
+                                if (data && data.type === 'locationUpdated') {
+                                    const p = data.payload || {};
+                                    try {
+                                        // Mirror the SW-stored location into localStorage and refresh
+                                        localStorage.setItem('userLocationCache', JSON.stringify({ lat: p.lat, lon: p.lon, source: 'sw', timestamp: p.ts }));
+                                        localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: p.lat, lon: p.lon, label: p.label }));
+                                        console.log('ServiceWorker: locationUpdated received, reloading to apply new location');
+                                        location.reload();
+                                    } catch (e) { console.warn('Failed to apply SW location', e); }
+                                } else if (data && data.type === 'locationUpdateFailed') {
+                                    console.warn('ServiceWorker failed to persist location:', data.error);
+                                }
+                            } catch (e) { /* ignore */ }
+                        });
+                    }
+                } catch (e) { /* ignore registration errors */ }
 
                 function findCreateTextEl() {
                     const createBox = document.querySelector('.add-content-box');
@@ -36623,23 +36649,33 @@
                             // Refresh grid immediately to reflect the chosen location without waiting for network
                             try { if (typeof renderGrid === 'function') renderGrid(); else if (typeof forceGridRefresh === 'function') forceGridRefresh(); } catch (e) {}
 
-                            // Attempt to persist server-side in the background; do not block UI or reload
-                            (async () => {
-                                try {
-                                    if (!window.functions) {
-                                        const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
-                                        window.functions = getFunctions(window.app, 'us-central1');
-                                        window.httpsCallable = httpsCallable;
-                                    }
-                                    const setUserLocation = window.httpsCallable(window.functions, 'setUserLocation');
-                                    await setUserLocation({ lat: Number(sel.lat), lon: Number(sel.lon), label: sel.label || '', source: 'manual' });
-                                    console.info('✅ setUserLocation: persisted to server', sel);
-                                    try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'success', sel: sel, ts: Date.now() })); } catch(e){}
-                                } catch (fnErr) {
-                                    console.warn('⚠️ setUserLocation failed (background), kept local copy', fnErr);
-                                    try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'fallback', error: String(fnErr && (fnErr.message || fnErr)), sel: sel, ts: Date.now() })); } catch(e){}
+                            // Inform the service worker to persist location in background and notify when done
+                            try {
+                                if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+                                    navigator.serviceWorker.controller.postMessage({ type: 'updateLocation', lat: Number(sel.lat), lon: Number(sel.lon), label: sel.label || '' });
+                                    console.log('Posted updateLocation to ServiceWorker');
+                                } else if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+                                    navigator.serviceWorker.ready.then(reg => { if (reg.active) reg.active.postMessage({ type: 'updateLocation', lat: Number(sel.lat), lon: Number(sel.lon), label: sel.label || '' }); });
+                                } else {
+                                    // Fallback: try server-side function as before
+                                    (async () => {
+                                        try {
+                                            if (!window.functions) {
+                                                const { getFunctions, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js');
+                                                window.functions = getFunctions(window.app, 'us-central1');
+                                                window.httpsCallable = httpsCallable;
+                                            }
+                                            const setUserLocation = window.httpsCallable(window.functions, 'setUserLocation');
+                                            await setUserLocation({ lat: Number(sel.lat), lon: Number(sel.lon), label: sel.label || '', source: 'manual' });
+                                            console.info('✅ setUserLocation: persisted to server (fallback) ', sel);
+                                            try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'success', sel: sel, ts: Date.now() })); } catch(e){}
+                                        } catch (fnErr) {
+                                            console.warn('⚠️ setUserLocation failed (fallback), kept local copy', fnErr);
+                                            try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'fallback', error: String(fnErr && (fnErr.message || fnErr)), sel: sel, ts: Date.now() })); } catch(e){}
+                                        }
+                                    })();
                                 }
-                            })();
+                            } catch (e) { console.warn('Failed to message service worker', e); }
                         } else {
                             console.log('Change location (manual):', { primary });
                         }
