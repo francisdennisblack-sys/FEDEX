@@ -3674,38 +3674,6 @@
             <div id="mediaRow" style="display:flex; align-items:center; gap:8px; margin-top: 8px; margin-bottom: 12px;">
                 <button id="mediaBtn" type="button" aria-label="Add photo or video" title="Add photo or video" style="width:64px; height:36px; border-radius:8px; background:#f3f4f6; border:1px solid #e5e7eb; color:#111827; font-size:16px; cursor:pointer; display:flex; align-items:center; justify-content:center; font-weight:700;">📷</button>
                 <button id="sellBtn" type="button" aria-pressed="false" title="Mark as Sell post" style="width:64px; height:36px; border-radius:8px; background:#ffffff; border:2px solid #000000; color:#000000; font-size:13px; cursor:pointer; font-weight:800;">SELL</button>
-                <script>
-                    (function enforceSellNeutral(){
-                        try {
-                            const btn = document.getElementById('sellBtn');
-                            function reset() {
-                                if (!btn) return;
-                                try {
-                                    // If visually selected state exists but aria-pressed is not true, remove selection
-                                    if (btn.classList && btn.classList.contains('badge-selected') && btn.getAttribute('aria-pressed') !== 'true') {
-                                        btn.classList.remove('badge-selected');
-                                    }
-                                    btn.setAttribute('aria-pressed','false');
-                                    // Force neutral styling to counter inline/JS overrides
-                                    btn.style.setProperty('background', '#ffffff', 'important');
-                                    btn.style.setProperty('color', '#000000', 'important');
-                                    btn.style.setProperty('border', '2px solid #000000', 'important');
-                                    btn.style.setProperty('box-shadow', 'none', 'important');
-                                } catch(e){}
-                            }
-                            reset();
-                            // Observe attribute changes and re-apply neutral state if needed
-                            try {
-                                const mo = new MutationObserver(() => reset());
-                                mo.observe(btn, { attributes: true, attributeFilter: ['class','style','aria-pressed'] });
-                            } catch(e){}
-                            // Fallback periodic enforcement to catch sporadic inline style flips
-                            if (!window.__sellNeutralInterval) {
-                                window.__sellNeutralInterval = setInterval(reset, 1500);
-                            }
-                        } catch (e) { console.warn('enforceSellNeutral failed', e); }
-                    })();
-                </script>
                 <div style="display:flex; align-items:center; gap:8px; margin-left:6px;">
                     <div id="uploadPreviewText" style="font-size:13px; color:#bbb;">No media selected</div>
                     <button id="deleteMediaBtn" style="display:none; background:transparent; border:none; color:#ff6b6b; font-size:18px; cursor:pointer; padding:6px; border-radius:6px;">×</button>
@@ -37262,4 +37230,51 @@
             } catch (e) { console.warn('changeGrid modal init failed', e); }
         })();
     </script>
+<!-- Safety: enforce neutral Sell button appearance when not selected.
+     Small, time-limited observer that only touches the sell button and
+     does not block or modify other UI flows. It times out after 5 minutes.
+-->
+<script>
+(function enforceSellNeutral(){
+    try {
+        function applyNeutral(btn){
+            if(!btn) return;
+            var selected = btn.getAttribute && btn.getAttribute('aria-pressed') === 'true';
+            selected = selected || (btn.classList && btn.classList.contains && btn.classList.contains('badge-selected'));
+            if(!selected){
+                btn.style.background = '#ffffff';
+                btn.style.color = '#000000';
+                btn.style.border = '2px solid #000000';
+                btn.style.boxShadow = 'none';
+            }
+        }
+
+        function attachToButton(btn){
+            if(!btn) return;
+            applyNeutral(btn);
+            var obs = new MutationObserver(function(mutations){
+                try{ applyNeutral(btn); }catch(e){}
+            });
+            obs.observe(btn, { attributes: true, attributeFilter: ['style','class','aria-pressed'] });
+            var timer = setInterval(function(){ try{ applyNeutral(btn); }catch(e){} }, 5000);
+            // Stop observers after 5 minutes to avoid long-running listeners
+            setTimeout(function(){ try{ obs.disconnect(); clearInterval(timer); }catch(e){} }, 5 * 60 * 1000);
+        }
+
+        // Try to find the button now; if not present wait briefly for it to appear
+        var btn = document.getElementById('sellBtn');
+        if(btn) { attachToButton(btn); return; }
+
+        var bodyObs = new MutationObserver(function(muts, obs){
+            try{
+                var b = document.getElementById('sellBtn');
+                if(b){ attachToButton(b); obs.disconnect(); }
+            }catch(e){}
+        });
+        bodyObs.observe(document.documentElement || document.body, { childList: true, subtree: true });
+        // Give up searching after 10s
+        setTimeout(function(){ try{ bodyObs.disconnect(); }catch(e){} }, 10000);
+    } catch (e) { /* silent safe-fail */ }
+})();
+</script>
 </html>
