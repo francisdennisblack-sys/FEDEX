@@ -36695,8 +36695,29 @@
                                 try { if (comeHomeBtn) comeHomeBtn.focus(); } catch (e) {}
                                 console.log('LOCATION_OVERRIDE: manual override applied; reloading to apply new location');
                             } catch (e) {}
-                            // Full reload so the site uses the saved lon/lat as the authoritative location
-                            try { location.reload(); return; } catch (e) { /* if reload blocked, keep modal closed */ }
+                            // Wait for service worker confirmation to reload; fallback to reload after 5s
+                            try {
+                                let didReload = false;
+                                const fallback = setTimeout(() => {
+                                    if (!didReload) {
+                                        try { location.reload(); } catch (e) { /* ignore */ }
+                                    }
+                                }, 5000);
+                                // Global SW message listener (registered above) will perform reload when it receives confirmation.
+                                // Mark reloaded if that happens; also attach a short-lived listener to be safe.
+                                const onMsg = (ev) => {
+                                    try {
+                                        const d = ev.data || {};
+                                        if (d && d.type === 'locationUpdated') {
+                                            didReload = true;
+                                            clearTimeout(fallback);
+                                            try { location.reload(); } catch (e) {}
+                                            navigator.serviceWorker.removeEventListener('message', onMsg);
+                                        }
+                                    } catch (e) {}
+                                };
+                                if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('message', onMsg);
+                            } catch (e) { /* if anything fails, allow existing flow to continue */ }
                         } else {
                             console.log('Change location pressed with no selected suggestion');
                         }
