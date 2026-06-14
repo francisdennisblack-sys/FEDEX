@@ -136,8 +136,8 @@
                                         localStorage.setItem('userLocationCache', JSON.stringify({ lat: p.lat, lon: p.lon, source: 'sw', timestamp: p.ts }));
                                         localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: p.lat, lon: p.lon, label: p.label }));
                                         console.log('ServiceWorker: locationUpdated received, reloading to apply new location');
-                                        try { sessionStorage.setItem('programmaticReload', String(Date.now())); } catch (e) {}
-                                        location.reload();
+                                        try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
+                                        programmaticReload();
                                     } catch (e) { console.warn('Failed to apply SW location', e); }
                                 } else if (data && data.type === 'locationUpdateFailed') {
                                     console.warn('ServiceWorker failed to persist location:', data.error);
@@ -146,6 +146,12 @@
                         });
                     }
                 } catch (e) { /* ignore registration errors */ }
+
+                    // Centralized programmatic reload helper (marks cross-tab flag)
+                    function programmaticReload() {
+                        try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
+                        try { programmaticReload(); } catch (e) { try { location.reload(); } catch(e2){} }
+                    }
 
                 function findCreateTextEl() {
                     const createBox = document.querySelector('.add-content-box');
@@ -3131,7 +3137,7 @@
                     // This guarantees no data leakage between users on the same device
                     console.log('🔄 Refreshing page to ensure complete device isolation...');
                     setTimeout(() => {
-                        window.location.reload();
+                        try { programmaticReload(); } catch (e) { try { location.reload(); } catch(e2){} }
                     }, 800);
                 }
 
@@ -4672,11 +4678,11 @@
                 try {
                     // Give the indicator one frame to paint before reload.
                     setTimeout(() => {
-                        try { window.location.reload(); }
+                        try { programmaticReload(); }
                         catch (e) { window.location.href = window.location.href; }
                     }, 50);
                 } catch (e) {
-                    window.location.reload();
+                    try { programmaticReload(); } catch(e) { try { location.reload(); } catch(e2){} }
                 }
                 touchstartY = 0;
                 return;
@@ -5918,16 +5924,15 @@
             }
             // If this page load immediately follows a programmatic reload, suppress the geolocation prompt
             try {
-                const prog = sessionStorage.getItem('programmaticReload');
+                const prog = Number(localStorage.getItem('programmaticReloadTS') || 0) || 0;
                 if (prog) {
-                    const ts = Number(prog) || 0;
-                    const age = Date.now() - ts;
+                    const age = Date.now() - prog;
                     // If reload happened within last 10s, treat this as programmatic and avoid re-prompting
                     if (age >= 0 && age < 10000) {
                         console.log('Programmatic reload detected; skipping geolocation prompt (age ms):', age);
                         geolocationRequested = true; // prevent requestGeolocation from prompting
                         // clear the marker so future manual reloads behave normally
-                        try { sessionStorage.removeItem('programmaticReload'); } catch(e) {}
+                        try { localStorage.removeItem('programmaticReloadTS'); } catch(e) {}
                     }
                 }
             } catch (e) {}
@@ -11246,11 +11251,11 @@
                                 if (reg && reg.waiting) {
                                     try { reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch (e) { console.warn('postMessage SKIP_WAITING failed', e); }
                                     // wait briefly for activation then reload
-                                    setTimeout(() => { try { window.location.reload(); } catch (e) { location.reload(); } }, 600);
+                                    setTimeout(() => { try { programmaticReload(); } catch (e) { try { location.reload(); } catch(e2){} } }, 600);
                                 } else {
-                                    try { window.location.reload(); } catch (e) { location.reload(); }
+                                    try { programmaticReload(); } catch (e) { try { location.reload(); } catch(e2){} }
                                 }
-                            }).catch(() => { try { window.location.reload(); } catch (e) { location.reload(); } });
+                            }).catch(() => { try { programmaticReload(); } catch (e) { try { location.reload(); } catch(e2){} } });
                         };
 
                         const dismiss = document.createElement('button');
@@ -11352,7 +11357,7 @@
                                     }
                                 }).finally(() => {
                                     // Prompt user to reload (non-blocking)
-                                    try { showUpdatePrompt(); } catch (e) { try { window.location.reload(); } catch(e2) { location.reload(); } }
+                                    try { showUpdatePrompt(); } catch (e) { try { programmaticReload(); } catch(e2) { try { location.reload(); } catch(e3){} } }
                                 });
                             }
                         }).catch(() => {});
@@ -36725,8 +36730,8 @@
                                     let didReload = false;
                                     const fallback = setTimeout(() => {
                                             if (!didReload) {
-                                                try { sessionStorage.setItem('programmaticReload', String(Date.now())); } catch(e) {}
-                                                try { location.reload(); } catch (e) { /* ignore */ }
+                                                try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch(e) {}
+                                                programmaticReload();
                                             }
                                         }, 250);
                                 // Global SW message listener (registered above) will perform reload when it receives confirmation.
@@ -36737,7 +36742,7 @@
                                         if (d && d.type === 'locationUpdated') {
                                             didReload = true;
                                             clearTimeout(fallback);
-                                            try { location.reload(); } catch (e) {}
+                                            try { programmaticReload(); } catch (e) { try { location.reload(); } catch(e2){} }
                                             navigator.serviceWorker.removeEventListener('message', onMsg);
                                         }
                                     } catch (e) {}
@@ -36783,7 +36788,7 @@
                     try { comeHomeBtn.classList.remove('btn-highlight'); comeHomeBtn.removeAttribute('aria-pressed'); } catch (e) {}
                     closeModal();
                     // After restore, reload so the app uses the restored cached location
-                    try { location.reload(); return; } catch (e) {}
+                    try { programmaticReload(); return; } catch (e) { try { location.reload(); } catch(e2){} }
                 });
                 if (backdrop) backdrop.addEventListener('click', function(e){ if (e.target === backdrop) closeModal(); });
                 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeModal(); });
