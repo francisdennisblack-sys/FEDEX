@@ -2302,6 +2302,34 @@
                 return match;
             } catch (e) { console.warn('checkSavedLocationAreaMatch failed', e); return false; }
         }
+
+        // Apply saved manual location authoritatively in-memory and refresh grid
+        function applySavedLocationAuthoritative() {
+            try {
+                const raw = localStorage.getItem('lastChosenLocation');
+                if (!raw) return false;
+                const saved = JSON.parse(raw);
+                const coords = { lat: Number(saved.lat), lon: Number(saved.lon), accuracy: saved.accuracy || 100, manual: true };
+                // Set runtime userLocation and persist into cache (force)
+                try { userLocation = coords; } catch(e){}
+                try { setUserLocationCache(coords, { force: true }); } catch(e){}
+                try { localStorage.setItem('manualLocationActive', '1'); } catch(e){}
+
+                // Compute area from saved coords and make it current
+                try {
+                    const detected = computeAreaForCoords(coords);
+                    if (detected) {
+                        currentZoneTag = detected;
+                        try { updateZonePredictor(); } catch(e){}
+                    }
+                } catch(e) {}
+
+                // Refresh grid so posts reflect the saved location immediately
+                try { if (typeof forceGridRefresh === 'function') forceGridRefresh(); else if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
+                try { checkSavedLocationAreaMatch(); } catch(e){}
+                return true;
+            } catch (e) { console.warn('applySavedLocationAuthoritative failed', e); return false; }
+        }
         
         // Force service worker to update
         if ('serviceWorker' in navigator) {
@@ -9858,6 +9886,12 @@
                         currentZoneTag = immediateArea;
                         console.log(`✅ Immediate area resolved on load: ${currentZoneTag}`);
                     }
+                    // If a manual saved location exists, enforce it now so persistence is authoritative
+                    try {
+                        if (localStorage.getItem('lastChosenLocation')) {
+                            try { applySavedLocationAuthoritative(); } catch(e){}
+                        }
+                    } catch(e){}
                     updateZonePredictor();
                 } catch (e) {
                     console.warn('Immediate area resolution failed:', e);
