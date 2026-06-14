@@ -133,11 +133,11 @@
                                     const p = data.payload || {};
                                     try {
                                         // Mirror the SW-stored location into localStorage and refresh
-                                        localStorage.setItem('userLocationCache', JSON.stringify({ lat: p.lat, lon: p.lon, source: 'sw', timestamp: p.ts }));
-                                        localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: p.lat, lon: p.lon, label: p.label }));
+                                        try { setUserLocationCache({ lat: p.lat, lon: p.lon, source: 'sw', timestamp: p.ts }, { force: true }); } catch(e) {}
+                                        try { localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: p.lat, lon: p.lon, label: p.label })); } catch(e) {}
                                         console.log('ServiceWorker: locationUpdated received, reloading to apply new location');
                                         try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
-                                        programmaticReload();
+                                        try { location.reload(); } catch(e) {}
                                     } catch (e) { console.warn('Failed to apply SW location', e); }
                                 } else if (data && data.type === 'locationUpdateFailed') {
                                     console.warn('ServiceWorker failed to persist location:', data.error);
@@ -150,7 +150,7 @@
                     // Centralized programmatic reload helper (marks cross-tab flag)
                     function programmaticReload() {
                         try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
-                        try { programmaticReload(); } catch (e) { try { location.reload(); } catch(e2){} }
+                        try { location.reload(); } catch (e) { /* ignore */ }
                     }
 
                 function findCreateTextEl() {
@@ -5530,8 +5530,8 @@
         function setUserLocation(lat, lon) {
             userLocation = { lat: parseFloat(lat), lon: parseFloat(lon), accuracy: 5, manual: true };
             const timestamp = new Date().toISOString();
-            localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
-            localStorage.setItem('userLocationTimestamp', timestamp);
+            setUserLocationCache(userLocation, { force: true });
+            try { localStorage.setItem('userLocationTimestamp', timestamp); } catch(e) {}
             console.log(`✅ Manual location set: ${lat}, ${lon}`);
             updateLocationStatus('✅ Manual', `${lat.substring(0,7)}, ${lon.substring(0,7)}`);
             updateAdminLocationDisplay();
@@ -5909,6 +5909,28 @@
 
         // User location state
         let userLocation = null;
+        // Helper to persist userLocationCache while respecting manual overrides
+        function setUserLocationCache(locObj, opts) {
+            opts = opts || {};
+            const force = !!opts.force;
+            try {
+                const hasManual = !!localStorage.getItem('lastChosenLocation');
+                const isManualObj = Boolean(locObj && (locObj.manual || locObj.source === 'manual'));
+                if (hasManual && !force && !isManualObj) {
+                    // Respect user's manual override: do not overwrite automatic location
+                    console.log('Skipping userLocationCache write due to manual override');
+                    return false;
+                }
+                const toWrite = Object.assign({}, locObj || {});
+                if (!toWrite.timestamp) toWrite.timestamp = Date.now();
+                localStorage.setItem('userLocationCache', JSON.stringify(toWrite));
+                try { localStorage.setItem('userLocationTimestamp', String(toWrite.timestamp)); } catch(e) {}
+                return true;
+            } catch (e) {
+                console.warn('setUserLocationCache failed', e);
+                return false;
+            }
+        }
         // If a user previously chose a location via Change Location, restore it early
         try {
             const saved = localStorage.getItem('lastChosenLocation');
@@ -6582,8 +6604,8 @@
                                         lon: position.coords.longitude,
                                         accuracy: position.coords.accuracy
                                     };
-                                    localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
-                                    localStorage.setItem('lastLocationTimestamp', Date.now().toString());
+                                    setUserLocationCache(userLocation);
+                                    try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e) {}
                                     persistContinuousLocationConsent('browser granted');
                                     console.log('💾 Location cached in localStorage');
                                     console.log('📍 User Location Acquired');
@@ -6621,8 +6643,8 @@
                                         lon: position.coords.longitude,
                                         accuracy: position.coords.accuracy
                                     };
-                                    localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
-                                    localStorage.setItem('lastLocationTimestamp', Date.now().toString());
+                                    setUserLocationCache(userLocation);
+                                    try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e) {}
                                     persistContinuousLocationConsent('browser prompt');
                                     console.log('💾 Location cached in localStorage');
                                     console.log('📍 User Location Acquired & Cached');
@@ -6652,8 +6674,8 @@
                                 lon: position.coords.longitude,
                                 accuracy: position.coords.accuracy
                             };
-                            localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
-                            localStorage.setItem('lastLocationTimestamp', Date.now().toString());
+                            setUserLocationCache(userLocation);
+                            try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e) {}
                             persistContinuousLocationConsent('permissions api unavailable');
                             console.log('💾 Location cached in localStorage');
                             console.log('📍 User Location Acquired');
@@ -6843,12 +6865,12 @@
                         newLocation.lat, newLocation.lon
                     );
 
-                    // Update location and cache
+                    // Update location and cache (respect manual override)
                     userLocation = newLocation;
-                    localStorage.setItem('userLocationCache', JSON.stringify(userLocation));
+                    try { setUserLocationCache(userLocation); } catch(e) {}
                     
                     // Update timestamp of last successful location
-                    localStorage.setItem('lastLocationTimestamp', Date.now().toString());
+                    try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e) {}
 
                     // Log movement
                     if (distanceChanged > 0.01) { // ~1 km
@@ -36666,8 +36688,8 @@
 
                                 // Overwrite the cached browser location with the selected manual location
                                 try {
-                                    const cacheObj = { lat: Number(sel.lat), lon: Number(sel.lon), accuracy: sel.accuracy || 100, timestamp: Date.now(), source: 'manual' };
-                                    localStorage.setItem('userLocationCache', JSON.stringify(cacheObj));
+                                    const cacheObj = { lat: Number(sel.lat), lon: Number(sel.lon), accuracy: sel.accuracy || 100, timestamp: Date.now(), source: 'manual', manual: true };
+                                    try { setUserLocationCache(cacheObj, { force: true }); } catch(e) {}
                                     console.log('LOCATION_OVERRIDE: wrote userLocationCache (manual override):', cacheObj);
                                 } catch (ce) { console.warn('Failed to write userLocationCache', ce); }
 
@@ -36753,8 +36775,8 @@
                     try {
                         const backup = localStorage.getItem('userLocationCacheBackup');
                         if (backup) {
-                            localStorage.setItem('userLocationCache', backup);
-                            localStorage.removeItem('userLocationCacheBackup');
+                            try { setUserLocationCache(JSON.parse(backup), { force: true }); } catch(e) { try { localStorage.setItem('userLocationCache', backup); } catch(e2){} }
+                            try { localStorage.removeItem('userLocationCacheBackup'); } catch(e) {}
                             console.info('Restored userLocationCache from backup');
                             console.log('LOCATION_OVERRIDE: restored backup to userLocationCache; clearing manual override flags');
                         } else {
@@ -36762,7 +36784,7 @@
                             localStorage.removeItem('userLocationCache');
                             try { localStorage.removeItem('lastChosenLocation'); } catch(e){}
                             console.log('LOCATION_OVERRIDE: no backup found; requesting fresh geolocation to repopulate cache');
-                            try { if (typeof requestGeolocation === 'function') requestGeolocation().then(loc => { try { localStorage.setItem('userLocationCache', JSON.stringify(loc)); console.info('Fetched fresh geolocation and cached'); console.log('LOCATION_OVERRIDE: fresh geolocation cached', loc); } catch(e){} }).catch((err)=>{ console.warn('requestGeolocation failed', err); }); } catch(e){}
+                            try { if (typeof requestGeolocation === 'function') requestGeolocation().then(loc => { try { setUserLocationCache(loc, { force: true }); console.info('Fetched fresh geolocation and cached'); console.log('LOCATION_OVERRIDE: fresh geolocation cached', loc); } catch(e){} }).catch((err)=>{ console.warn('requestGeolocation failed', err); }); } catch(e){}
                         }
                     } catch (e) { console.warn('Error restoring userLocationCache backup', e); }
 
