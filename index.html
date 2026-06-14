@@ -136,6 +136,7 @@
                                         localStorage.setItem('userLocationCache', JSON.stringify({ lat: p.lat, lon: p.lon, source: 'sw', timestamp: p.ts }));
                                         localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: p.lat, lon: p.lon, label: p.label }));
                                         console.log('ServiceWorker: locationUpdated received, reloading to apply new location');
+                                        try { sessionStorage.setItem('programmaticReload', String(Date.now())); } catch (e) {}
                                         location.reload();
                                     } catch (e) { console.warn('Failed to apply SW location', e); }
                                 } else if (data && data.type === 'locationUpdateFailed') {
@@ -5915,6 +5916,21 @@
                     try { window.lastRenderGridTime = 0; renderGrid(); } catch (e) {}
                 }
             }
+            // If this page load immediately follows a programmatic reload, suppress the geolocation prompt
+            try {
+                const prog = sessionStorage.getItem('programmaticReload');
+                if (prog) {
+                    const ts = Number(prog) || 0;
+                    const age = Date.now() - ts;
+                    // If reload happened within last 10s, treat this as programmatic and avoid re-prompting
+                    if (age >= 0 && age < 10000) {
+                        console.log('Programmatic reload detected; skipping geolocation prompt (age ms):', age);
+                        geolocationRequested = true; // prevent requestGeolocation from prompting
+                        // clear the marker so future manual reloads behave normally
+                        try { sessionStorage.removeItem('programmaticReload'); } catch(e) {}
+                    }
+                }
+            } catch (e) {}
         } catch (e) { /* ignore JSON parse errors */ }
         let currentNearestPOI = null;
         let currentGrid = null;
@@ -36708,10 +36724,11 @@
                             try {
                                     let didReload = false;
                                     const fallback = setTimeout(() => {
-                                        if (!didReload) {
-                                            try { location.reload(); } catch (e) { /* ignore */ }
-                                        }
-                                    }, 250);
+                                            if (!didReload) {
+                                                try { sessionStorage.setItem('programmaticReload', String(Date.now())); } catch(e) {}
+                                                try { location.reload(); } catch (e) { /* ignore */ }
+                                            }
+                                        }, 250);
                                 // Global SW message listener (registered above) will perform reload when it receives confirmation.
                                 // Mark reloaded if that happens; also attach a short-lived listener to be safe.
                                 const onMsg = (ev) => {
