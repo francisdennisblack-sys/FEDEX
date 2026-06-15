@@ -4929,14 +4929,7 @@
             getCachedPostsForUser(userId) {
                 const cached = Object.values(this.cache)
                     .filter(post => post && post.id)
-                    .sort((a, b) => {
-                        // Smart ranking: engagement > recency > randomness
-                        const engagementA = (a.likes || 0) - (a.dislikes || 0);
-                        const engagementB = (b.likes || 0) - (b.dislikes || 0);
-                        
-                        if (engagementA !== engagementB) return engagementB - engagementA;
-                        return (b.timestamp || 0) - (a.timestamp || 0);
-                    });
+                    .sort((a, b) => compareFeedPriority(a, b));
                 
                 console.log(`📦 Using ${cached.length} cached posts for instant display`);
                 return cached;
@@ -4989,7 +4982,12 @@
                     
                     return { ...post, mlScore: score };
                 })
-                .sort((a, b) => (b.mlScore || 0) - (a.mlScore || 0));
+                .sort((a, b) => {
+                    // Preserve ML score ordering but ensure HOT vs DISLIKED rule via comparator tie-break
+                    const delta = (Number(b.mlScore || 0) - Number(a.mlScore || 0));
+                    if (delta !== 0) return delta;
+                    return compareFeedPriority(a, b);
+                });
             },
             
             /**
@@ -5010,11 +5008,7 @@
                 
                 // Keep top posts (by engagement) to avoid cache bloat
                 const topPosts = Object.values(uniquePosts)
-                    .sort((a, b) => {
-                        const engA = (a.likes || 0) - (a.dislikes || 0);
-                        const engB = (b.likes || 0) - (b.dislikes || 0);
-                        return engB - engA;
-                    })
+                    .sort((a, b) => compareFeedPriority(a, b))
                     .slice(0, 350); // Keep only top 350 posts
                 
                 // Update cache
@@ -8186,6 +8180,41 @@
             // NEW POSTS: Highest priority for cross-geographic visibility
             if (isNew && likes === 0 && dislikes === 0) {
                 return { tier: 'NEW', priority: 0, label: '✨ NEW', isNew: true };
+            }
+
+            // Comparator used across feed sorts to ensure engagement tiers (NEW,PODIUM,HOT,...) are respected.
+            // Specifically enforces that HOT-tier posts always rank above DISLIKED-tier posts regardless of recency.
+            function compareFeedPriority(a, b) {
+                try {
+                    if (!a || !b) return 0;
+                    const ta = (typeof getPostEngagementTier === 'function') ? getPostEngagementTier(a) : { priority: 4 };
+                    const tb = (typeof getPostEngagementTier === 'function') ? getPostEngagementTier(b) : { priority: 4 };
+
+                    // Lower priority number = higher placement (0 = NEW, 1 = PODIUM, 2 = HOT, ...)
+                    if (ta.priority !== tb.priority) return ta.priority - tb.priority;
+
+                    // If badges explicitly mark hot/trending, prefer them
+                    const aBadges = Array.isArray(a.badges) ? a.badges.map(x => String(x).toLowerCase()) : [];
+                    const bBadges = Array.isArray(b.badges) ? b.badges.map(x => String(x).toLowerCase()) : [];
+                    const aIsHot = aBadges.some(bb => bb.includes('hot') || bb.includes('trend')) || String(a.primaryBadge || '').toLowerCase().includes('hot');
+                    const bIsHot = bBadges.some(bb => bb.includes('hot') || bb.includes('trend')) || String(b.primaryBadge || '').toLowerCase().includes('hot');
+                    if (aIsHot !== bIsHot) return aIsHot ? -1 : 1;
+
+                    // Fallback: prefer higher net engagement
+                    const netA = (Number(a.likes || 0) - Number(a.dislikes || 0));
+                    const netB = (Number(b.likes || 0) - Number(b.dislikes || 0));
+                    if (netA !== netB) return netB - netA;
+
+                    // If ML score is present, prefer higher ML score
+                    const mA = Number(a.mlScore || 0);
+                    const mB = Number(b.mlScore || 0);
+                    if (mA !== mB) return mB - mA;
+
+                    // Final tiebreaker: recency
+                    return (Number(b.timestamp || 0) - Number(a.timestamp || 0));
+                } catch (e) {
+                    return 0;
+                }
             }
 
             // PODIUM: Top tier (50+ likes, or 10+ more likes than dislikes)
