@@ -2524,16 +2524,13 @@
             <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
                 <!-- Total user count removed from UI per request -->
             </div>
-            <!-- Floating sign-in button hidden; account pill used for profile actions -->
-            <button id="signInBtn" class="sign-in-mode" title="Signup - Click to sign up or sign out" style="display:none;">Signup</button>
+            <button id="signInBtn" class="sign-in-mode" title="Signup - Click to sign up or sign out" style="position:fixed;right:34.5px;bottom:4px;z-index:40000;background:#000000;color:#ffffff;padding:8px 12px;border-radius:999px;border:1px solid #ffffff;transform:scale(0.9);box-shadow:0 8px 30px rgba(2,6,23,0.6);">Signup</button>
         </div>
         <!-- Centered Google sign-in removed; use profile menu in top-right -->
         <script>
             // Ensure the signup button is appended to document.body so fixed positioning
             // is relative to the viewport (avoids transformed ancestor clipping).
             (function ensureSignupFixed(){
-                // Disabled: do not move/duplicate the signInBtn to the body (prevents off-screen floating button)
-                try { return; } catch(e) {}
                 function moveBtn(){
                     const btn = document.getElementById('signInBtn');
                     if (!btn) return;
@@ -2559,6 +2556,27 @@
                 }
                 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', moveBtn);
                 else moveBtn();
+            })();
+            // Ensure there's only one visible signInBtn in the document.
+            (function enforceSingleSignInBtn(){
+                function dedupe(){
+                    try{
+                        const nodes = Array.from(document.querySelectorAll('#signInBtn'));
+                        if (!nodes || nodes.length <= 1) return;
+                        // Prefer the one appended to document.body if present
+                        const preferred = nodes.find(n => n.parentNode === document.body) || nodes[0];
+                        nodes.forEach(n => { if (n !== preferred) { try { n.parentNode && n.parentNode.removeChild(n); } catch(e){} } });
+                    } catch(e){ console.warn('dedupe signInBtn failed', e); }
+                }
+                if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', dedupe);
+                else dedupe();
+                // Run shortly after load to catch late dynamic inserts
+                setTimeout(dedupe, 600);
+                // Observe DOM for any future duplicates and clean them up
+                try{
+                    const mo = new MutationObserver(dedupe);
+                    mo.observe(document.body, { childList: true, subtree: true });
+                } catch(e) { /* ignore */ }
             })();
         </script>
     </div>
@@ -36832,35 +36850,8 @@
                     }
                     // Keep floating account pill clickable but focus header sign-in
                     if (accountPill && signInBtn) {
-                        accountPill.addEventListener('click', function(e){
-                            e.preventDefault();
-                            try {
-                                if (typeof showProfileModal === 'function') return showProfileModal();
-                                const s = document.getElementById('signInBtn'); if (s) try { s.focus(); } catch(e){}
-                            } catch(e) {}
-                        });
+                        accountPill.addEventListener('click', function(){ try { signInBtn.focus(); } catch(e){} });
                     }
-                    // Defensive dedupe: remove stray Signup/Profile buttons that may be created
-                    try {
-                        const candidates = Array.from(document.querySelectorAll('button, [role="button"], a'));
-                        const isSignupLike = (el) => {
-                            if (!el || !el.textContent) return false;
-                            const t = String(el.textContent || '').trim();
-                            if (!t) return false;
-                            const lower = t.toLowerCase();
-                            if (lower === 'signup' || lower === 'profile' || lower === 'sign in' || lower === 'sign-in') return true;
-                            // short usernames (3-24 chars) sometimes render as a button; consider those too
-                            if (/^[A-Za-z0-9_\-]{3,24}$/.test(t)) return true;
-                            return false;
-                        };
-                        const matches = candidates.filter(isSignupLike);
-                        if (matches.length > 1) {
-                            const headerAccount = document.getElementById('accountArea') || document.getElementById('accountPill');
-                            let keep = matches.find(m => headerAccount && headerAccount.contains(m));
-                            if (!keep) keep = matches[0];
-                            matches.forEach(m => { if (m !== keep) { try { m.remove(); } catch(e) { if (m.parentNode) m.parentNode.removeChild(m); } } });
-                        }
-                    } catch (e) { /* harmless if cleanup fails */ }
                 } catch (e) { console.warn('account pill init failed', e); }
 
                 // Suggestions UI + logic
