@@ -11379,32 +11379,33 @@
                     window.lastRenderGridTime = 0;
                     renderGrid();
 
-                    // Increment repost count on the original post locally and persist update
+                    // Refresh visible repost counters and persist root repost totals (best-effort)
                     try {
-                        orig.repostCount = (orig.repostCount || orig.reposts || 0) + 1;
-                        // update caches
-                        try { if (postCache && postCache[orig.id]) postCache[orig.id].repostCount = orig.repostCount; } catch(e){}
-                        try {
-                            for (const k in gridContent) {
-                                if (!Array.isArray(gridContent[k])) continue;
-                                const found = gridContent[k].find(p => p && p.id === orig.id);
-                                if (found) found.repostCount = orig.repostCount;
-                            }
-                        } catch(e){}
-                        // Update any visible DOM counters for this post
-                        try {
-                            const els = document.querySelectorAll(`.grid-box[data-post-id="${orig.id}"] .repost-count`);
-                            els.forEach(el => { el.textContent = orig.repostCount > 0 ? String(orig.repostCount) : ''; });
-                        } catch(e){}
+                        // Update all visible repost squares based on current caches
+                        try { updateVisibleRepostSquares(); } catch(e) {}
 
-                        // Persist to Firebase in background (best-effort)
+                        // Persist aggregated total for the root original (if reachable)
                         try {
+                            const rootId = findRootOriginalId(orig.id || orig);
+                            const total = computeTotalReposts(rootId) || 0;
+                            // update local caches for root
+                            try { if (postCache && postCache[rootId]) postCache[rootId].repostCount = total; } catch(e){}
+                            try {
+                                for (const k in gridContent) {
+                                    if (!Array.isArray(gridContent[k])) continue;
+                                    const found = gridContent[k].find(p => p && p.id === rootId);
+                                    if (found) found.repostCount = total;
+                                }
+                            } catch(e){}
+
                             if (typeof getDatabase === 'function' && typeof update === 'function' && typeof ref === 'function') {
-                                const db = getDatabase();
-                                update(ref(db, `posts/${orig.id}`), { repostCount: orig.repostCount }).catch(() => {});
+                                try {
+                                    const db = getDatabase();
+                                    update(ref(db, `posts/${rootId}`), { repostCount: total }).catch(() => {});
+                                } catch (e) { /* ignore */ }
                             }
                         } catch (e) { /* ignore persistence failures */ }
-                    } catch (e) { console.warn('Failed updating original repost count', e); }
+                    } catch (e) { console.warn('Failed to insert repost locally', e); }
                 } catch (e) { console.warn('Failed to insert repost locally', e); }
 
                 // Persist to Firebase/shared collection in background
@@ -12671,6 +12672,82 @@
         function normalizePostId(id) {
             if (id === null || id === undefined) return '';
             return String(id).trim();
+        }
+
+        // Helper: build a map of known posts from caches (postCache + gridContent)
+        function _buildKnownPostsMap() {
+            const map = {};
+            try { if (postCache && typeof postCache === 'object') Object.values(postCache).forEach(p => { if (p && p.id) map[p.id] = p; }); } catch(e) {}
+            try {
+                for (const k in gridContent) {
+                    if (!Array.isArray(gridContent[k])) continue;
+                    gridContent[k].forEach(p => { if (p && p.id) map[p.id] = p; });
+                }
+            } catch (e) {}
+            return map;
+        }
+
+        // Find the root/original post id for a given post id by following repostOf chain
+        function findRootOriginalId(postId) {
+            if (!postId) return postId;
+            const map = _buildKnownPostsMap();
+            let cur = map[postId] || null;
+            const seen = new Set();
+            // If we don't have the post locally, assume the provided id is root
+            if (!cur) return postId;
+            while (cur && cur.repostOf) {
+                if (seen.has(cur.id)) break;
+                seen.add(cur.id);
+                const parent = map[cur.repostOf];
+                if (!parent) {
+                    // Can't resolve parent locally; treat current cur as root
+                    return cur.repostOf || cur.id;
+                }
+                cur = parent;
+            }
+            return (cur && cur.id) ? cur.id : postId;
+        }
+
+        // Compute total reposts (including reposts-of-reposts) for a given original id
+        function computeTotalReposts(originalId) {
+            if (!originalId) return 0;
+            const map = _buildKnownPostsMap();
+            let count = 0;
+            try {
+                Object.keys(map).forEach(k => {
+                    const p = map[k];
+                    if (!p || !p.repostOf) return;
+                    // walk up chain
+                    let cur = p;
+                    const seen = new Set();
+                    while (cur && cur.repostOf && !seen.has(cur.id)) {
+                        seen.add(cur.id);
+                        const parent = map[cur.repostOf];
+                        if (!parent) {
+                            // if parent is missing, but the repostOf equals originalId, count it
+                            if (cur.repostOf === originalId) count++;
+                            break;
+                        }
+                        if (parent.id === originalId) { count++; break; }
+                        cur = parent;
+                    }
+                });
+            } catch (e) { /* ignore */ }
+            return count;
+        }
+
+        // Update all visible repost square elements with up-to-date counts
+        function updateVisibleRepostSquares() {
+            try {
+                const nodes = Array.from(document.querySelectorAll('.repost-square[data-post-id]'));
+                nodes.forEach(n => {
+                    try {
+                        const id = n.getAttribute('data-post-id');
+                        const c = computeTotalReposts(id) || 0;
+                        n.textContent = c > 0 ? String(c) : '';
+                    } catch(e){}
+                });
+            } catch (e) { /* ignore DOM update errors */ }
         }
 
         function getHiddenPostsViewerKeys(viewerId) {
@@ -28707,6 +28784,8 @@
                     const mediaEmoji = isVideo ? '🎥' : '📷';
                     const mediaIndicatorHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; display:flex; align-items:center; justify-content:center;"><div style="font-size: 64px;" title="Tap to view ${isVideo ? 'video' : 'photo'}">${mediaEmoji}</div></div>`;
 
+                    const totalRepostsForPost = computeTotalReposts(post.id);
+                    const totalRepostsForPost = computeTotalReposts(post.id);
                     let voteBadge = '';
                     try {
                         if (!currentUserId) {
@@ -28718,6 +28797,7 @@
                             voteBadge = `<div style="position: absolute; bottom: 8px; right: 8px; left: auto; display: flex; flex-direction: row; gap: 6px; align-items: center;">
                                 <button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;">↓</button>
                                 <button class="aux-btn" onclick="event.stopPropagation(); auxActionOnPost('${post.id}')" title="Aux action" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#444;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:16px;">+</button>
+                                <div class="repost-square" data-post-id="${post.id}" style="width:28px;height:28px;margin-left:6px;background:#222;color:#fff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;">${totalRepostsForPost > 0 ? totalRepostsForPost : ''}</div>
                                 <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count">${likes > 0 ? likes : ''}</span></button>
                             </div>`;
                         }
@@ -28755,9 +28835,6 @@
                     let badgeClasses = '';
                     let badgeHTML = '';
 
-                    // Repost counter badge (small square). Show empty when zero to avoid visual clutter.
-                    const repostCount = post.repostCount || post.reposts || 0;
-                    const repostBadgeHTML = `<div class="repost-count" style="position:absolute; top:8px; left:8px; min-width:30px; height:20px; background:rgba(0,0,0,0.48); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; border-radius:4px; font-weight:700;">🔁 ${repostCount > 0 ? repostCount : ''}</div>`;
 
                     // 📷/🎥 mode: render the post text + media emoji on the tile.
                     // The actual photo/video is shown only inside the pop-out modal.
@@ -28765,7 +28842,7 @@
                         // Remove any stale grid-media container left over from prior renders
                         const staleMedia = box.querySelector('.grid-media');
                         if (staleMedia) staleMedia.remove();
-                        box.innerHTML = `${repostBadgeHTML}${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
+                        box.innerHTML = `${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
                     } catch (e) {
                         box.innerHTML = `${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
                     }
@@ -28791,16 +28868,18 @@
                         } else {
                             voteBadge = `<div style="position: absolute; bottom: 8px; right: 8px; left: auto; display: flex; flex-direction: row; gap: 8px; align-items: center;">
                                 <button class="aux-btn" onclick="event.stopPropagation(); auxActionOnPost('${post.id}')" title="Aux action" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#444;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:16px;">+</button>
+                                <div class="repost-square" data-post-id="${post.id}" style="width:28px;height:28px;margin-left:6px;background:#222;color:#fff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;">${totalRepostsForPost > 0 ? totalRepostsForPost : ''}</div>
                                 <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count">${likes > 0 ? likes : ''}</span></button>
                                 <button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;">↓</button>
                             </div>`;
                         }
                     } catch (e) {
-                        voteBadge = `<div style="position: absolute; bottom: 36px; right: 8px; left: auto; display: flex; flex-direction: row; gap: 6px; align-items: center;">
-                                <div style="width:36px;height:36px;background:#222;color:#888;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;">↓ ${dislikes > 0 ? dislikes : ''}</div>
-                                <div style="width:36px;height:36px;background:#222;color:#888;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;">↑ ${likes > 0 ? likes : ''}</div>
+                            voteBadge = `<div style="position: absolute; bottom: 36px; right: 8px; left: auto; display: flex; flex-direction: row; gap: 8px; align-items: center;">
+                                <button class="aux-btn" onclick="event.stopPropagation(); auxActionOnPost('${post.id}')" title="Aux action" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#444;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:16px;">+</button>
+                                <div class="repost-square" data-post-id="${post.id}" style="width:28px;height:28px;margin-left:6px;background:#222;color:#fff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;">${totalRepostsForPost > 0 ? totalRepostsForPost : ''}</div>
+                                <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count">${likes > 0 ? likes : ''}</span></button>
+                                <button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;">↓</button>
                             </div>`;
-                    }
                     // Area tag pinned to the very bottom, BELOW the like/dislike buttons.
                     // When `post.displayAreaTag` is set we use it verbatim (one read, zero formatter cost).
                     const renderedAreaTag = post.displayAreaTag
@@ -28808,9 +28887,7 @@
                         : (typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(areaTagText) : areaTagText);
                     // Do not render area tag on grid tiles (keep details in modal only)
                     const areaTagHTML = ``;
-                    const repostCountText = post.repostCount || post.reposts || 0;
-                    const repostBadgeHTMLText = `<div class="repost-count" style="position:absolute; top:8px; left:8px; min-width:30px; height:20px; background:rgba(0,0,0,0.48); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; border-radius:4px; font-weight:700;">🔁 ${repostCountText > 0 ? repostCountText : ''}</div>`;
-                    box.innerHTML = `${repostBadgeHTMLText}<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${areaTagHTML}`;
+                    box.innerHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${areaTagHTML}`;
                 }
                 
                 // Set attributes and classes
