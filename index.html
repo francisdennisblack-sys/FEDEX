@@ -4444,6 +4444,62 @@
         window.getStorage = getStorage;
         window.getAuth = getAuth;
         window.runTransaction = runTransaction;
+        // Like display helpers: format counts and assign size classes based on magnitude
+        (function(){
+            // Inject CSS for like-count sizing
+            try {
+                const s = document.createElement('style');
+                s.id = 'like-count-sizing-styles';
+                s.textContent = `
+                    .like-count { font-weight: 700; display: inline-block; line-height:1; }
+                    .like-count--normal { font-size: 12px; }
+                    .like-count--small { font-size: 11px; }
+                    .like-count--smaller { font-size: 10px; }
+                    .like-count--xsmall { font-size: 9px; }
+                    .like-count--xxsmall { font-size: 8px; }
+                `;
+                document.head.appendChild(s);
+            } catch(e) { /* ignore style injection failures */ }
+
+            // Format likes according to magnitude and display rules
+            window.formatLikeCount = function(count) {
+                count = Number(count) || 0;
+                if (count < 1000) return String(count);
+                if (count >= 1000 && count < 10000) {
+                    // show 1.1k, 1.2k ... updating every 100 likes
+                    const v = Math.round((count/1000)*10)/10; // one decimal
+                    // Avoid trailing .0 (show 1k instead of 1.0k)
+                    return (v % 1 === 0) ? `${Math.round(v)}k` : `${v.toFixed(1)}k`;
+                }
+                if (count >= 10000 && count < 100000) {
+                    // show 10k,11k,12k - update per 1k
+                    return `${Math.round(count/1000)}k`;
+                }
+                if (count >= 100000 && count < 1000000) {
+                    // large: keep k but smaller font
+                    return `${Math.round(count/1000)}k`;
+                }
+                if (count >= 1000000 && count < 10000000) {
+                    // show 1.1m increments (one decimal)
+                    const v = Math.round((count/1000000)*10)/10;
+                    return (v % 1 === 0) ? `${Math.round(v)}m` : `${v.toFixed(1)}m`;
+                }
+                // >= 10,000,000 show 10.3m style with one decimal and very small font
+                const v = Math.round((count/1000000)*10)/10;
+                return (v % 1 === 0) ? `${Math.round(v)}m` : `${v.toFixed(1)}m`;
+            };
+
+            // Choose a CSS size class for the like-count element
+            window.getLikeFontClass = function(count) {
+                count = Number(count) || 0;
+                if (count < 1000) return 'like-count--normal';
+                if (count >= 1000 && count < 10000) return 'like-count--small';
+                if (count >= 10000 && count < 100000) return 'like-count--smaller';
+                if (count >= 100000 && count < 1000000) return 'like-count--xsmall';
+                if (count >= 1000000 && count < 10000000) return 'like-count--xsmall';
+                return 'like-count--xxsmall';
+            };
+        })();
         // Phone auth helpers
         window.RecaptchaVerifier = RecaptchaVerifier;
         window.signInWithPhoneNumber = signInWithPhoneNumber;
@@ -11032,20 +11088,29 @@
             const postBoxes = document.querySelectorAll(`[data-post-id="${postId}"]`);
             postBoxes.forEach(box => {
                 // Helper to update a single button's count with multiple selector support
-                function ensureCount(btn, countValue) {
+                function ensureCount(btn, countValue, isLike) {
                     if (!btn) return;
                     // Try common count selectors used across demo/index markup
-                    let countEl = btn.querySelector('.vote-count, .count, span.count');
+                    let countEl = btn.querySelector('.vote-count, .count, span.count, .like-count');
                     if (!countEl) {
                         // Create a span to hold the count so live updates always work
                         countEl = document.createElement('span');
-                        // Prefer the legacy class when present
-                        countEl.className = btn.classList.contains('vote-button') ? 'count' : 'vote-count';
+                        // use unified like-count helper class when appropriate
+                        countEl.className = isLike ? ('like-count ' + (window.getLikeFontClass ? window.getLikeFontClass(countValue) : '')) : (btn.classList.contains('vote-button') ? 'count' : 'vote-count');
                         // append to button (icon-first layout preserved if present)
                         btn.appendChild(countEl);
                     }
-                    // Render empty string for zero to match UI requirement
-                    countEl.textContent = countValue > 0 ? countValue : '';
+                    // Render formatted text for likes, raw for dislikes
+                    if (isLike && typeof window.formatLikeCount === 'function') {
+                        countEl.textContent = countValue > 0 ? window.formatLikeCount(countValue) : '';
+                        // update size class
+                        try {
+                            countEl.classList.remove('like-count--normal','like-count--small','like-count--smaller','like-count--xsmall','like-count--xxsmall');
+                            countEl.classList.add(window.getLikeFontClass(countValue));
+                        } catch(e) {}
+                    } else {
+                        countEl.textContent = countValue > 0 ? countValue : '';
+                    }
 
                     // Toggle unified has-count class for CSS-driven visibility
                     if (btn.classList.contains('vote-button') || btn.classList.contains('like-btn') || btn.classList.contains('dislike-btn')) {
@@ -11055,11 +11120,11 @@
 
                 // Update likes display (support .like-btn and .vote-button.like variants)
                 const likeBtn = box.querySelector('.like-btn, .vote-button.like, .vote-button.like-button');
-                ensureCount(likeBtn, newLikes);
+                ensureCount(likeBtn, newLikes, true);
 
                 // Update dislikes display
                 const dislikeBtn = box.querySelector('.dislike-btn, .vote-button.dislike');
-                ensureCount(dislikeBtn, newDislikes);
+                ensureCount(dislikeBtn, newDislikes, false);
 
                 // If buttons use inline color swaps, only adjust when necessary
                 try {
@@ -28731,7 +28796,7 @@
                                 <button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;">↓</button>
                                 <button class="left-square-btn" onclick="event.stopPropagation(); leftSquareActionOnPost('${post.id}')" title="Left square" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#555;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"> </button>
                                 <button class="aux-btn" onclick="event.stopPropagation(); auxActionOnPost('${post.id}')" title="Aux action" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#444;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:16px;">+</button>
-                                <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count">${likes > 0 ? likes : ''}</span></button>
+                                <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count like-count ${"" + (typeof window.getLikeFontClass === 'function' ? window.getLikeFontClass(likes) : '')}">${likes > 0 ? (typeof window.formatLikeCount === 'function' ? window.formatLikeCount(likes) : likes) : ''}</span></button>
                             </div>`;
                         }
                     } catch (e) {
@@ -28805,7 +28870,7 @@
                             voteBadge = `<div style="position: absolute; bottom: 8px; right: 8px; left: auto; display: flex; flex-direction: row; gap: 8px; align-items: center;">
                                 <button class="left-square-btn" onclick="event.stopPropagation(); leftSquareActionOnPost('${post.id}')" title="Left square" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#555;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"> </button>
                                 <button class="aux-btn" onclick="event.stopPropagation(); auxActionOnPost('${post.id}')" title="Aux action" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#444;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:16px;">+</button>
-                                <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count">${likes > 0 ? likes : ''}</span></button>
+                                <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count like-count ${"" + (typeof window.getLikeFontClass === 'function' ? window.getLikeFontClass(likes) : '')}">${likes > 0 ? (typeof window.formatLikeCount === 'function' ? window.formatLikeCount(likes) : likes) : ''}</span></button>
                                 <button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;">↓</button>
                             </div>`;
                         }
