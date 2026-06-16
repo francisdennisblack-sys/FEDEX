@@ -11496,21 +11496,69 @@
 
                 // Prevent duplicate reposts: allow one repost per root original per user
                 try {
-                    const mapKey = `reposts_by_${currentUserId}`;
-                    let repostMap = {};
-                    try { repostMap = JSON.parse(localStorage.getItem(mapKey) || '{}'); } catch(e) { repostMap = {}; }
+                    function resolveRootIdFromPost(postObj) {
+                        try {
+                            if (!postObj) return null;
+                            let cur = postObj;
+                            let lastId = cur.id;
+                            while (cur && cur.repostOf) {
+                                lastId = cur.repostOf;
+                                cur = (postCache && postCache[cur.repostOf]) || null;
+                            }
+                            return lastId;
+                        } catch (e) { return postObj && postObj.id ? postObj.id : null; }
+                    }
 
-                    const alreadyReposted = !!(repostMap[rootId] ||
-                        Object.values(postCache || {}).find(p => p && p.userId === currentUserId && (p.id === rootId || isRepostOfRoot(p, rootId))) ||
-                        Object.keys(gridContent || {}).some(k => Array.isArray(gridContent[k]) && gridContent[k].find(p => p && p.userId === currentUserId && (p.id === rootId || isRepostOfRoot(p, rootId))))
-                    );
+                    function hasUserRepostedRoot(userId, rootIdCheck) {
+                        try {
+                            if (!userId || !rootIdCheck) return false;
+                            const mapKey = `reposts_by_${userId}`;
+                            let repostMap = {};
+                            try { repostMap = JSON.parse(localStorage.getItem(mapKey) || '{}'); } catch(e) { repostMap = {}; }
+                            if (repostMap[rootIdCheck]) return true;
+
+                            // scan postCache for any post by this user whose resolved root matches
+                            const seen = new Set();
+                            const checkPost = (p) => {
+                                if (!p || !p.id || seen.has(p.id)) return false;
+                                seen.add(p.id);
+                                if (String(p.userId) !== String(userId)) return false;
+                                if (!p.repostOf) return false;
+                                const pRoot = resolveRootIdFromPost(p);
+                                if (String(pRoot) === String(rootIdCheck)) return true;
+                                return false;
+                            };
+
+                            for (const p of Object.values(postCache || {})) {
+                                if (checkPost(p)) return true;
+                            }
+
+                            for (const arrKey of Object.keys(gridContent || {})) {
+                                const arr = gridContent[arrKey];
+                                if (!Array.isArray(arr)) continue;
+                                for (const p of arr) {
+                                    if (checkPost(p)) return true;
+                                }
+                            }
+
+                            return false;
+                        } catch (e) { return false; }
+                    }
+
+                    const alreadyReposted = hasUserRepostedRoot(currentUserId, rootId);
                     if (alreadyReposted) {
                         showNotification && showNotification('You have already reposted this');
                         return;
                     }
+
                     // mark now to prevent race on subsequent clicks
-                    repostMap[rootId] = true;
-                    try { localStorage.setItem(mapKey, JSON.stringify(repostMap)); } catch(e) { /* ignore */ }
+                    try {
+                        const mapKey = `reposts_by_${currentUserId}`;
+                        let repostMap = {};
+                        try { repostMap = JSON.parse(localStorage.getItem(mapKey) || '{}'); } catch(e) { repostMap = {}; }
+                        repostMap[rootId] = true;
+                        try { localStorage.setItem(mapKey, JSON.stringify(repostMap)); } catch(e) { /* ignore */ }
+                    } catch (e) { /* ignore */ }
                 } catch(e) { /* ignore duplicate-check failures */ }
 
                 // Add new repost to local caches for immediate feedback
