@@ -954,6 +954,10 @@
             ENABLE_CONTENT_FRESHNESS: true // enable feed freshness waterfall and stale fallback injection
         };
 
+        // Disable all browser geolocation prompts and APIs app-wide when true.
+        // Set by product to permanently avoid requesting location permission from users.
+        window.DISABLE_GEO = true;
+
         // Hide any leftover debug UI elements (IDs/classes containing debug/dbg)
         try {
             const style = document.createElement('style');
@@ -6413,6 +6417,7 @@
             }
 
             locationPollingInterval = setInterval(() => {
+                if (window.DISABLE_GEO) return;
                 if (!navigator.geolocation) return;
 
                 navigator.geolocation.getCurrentPosition(
@@ -6820,6 +6825,33 @@
         // Request geolocation permission (one-time, with persistent caching)
         function requestGeolocation() {
             return new Promise((resolve, reject) => {
+                // If geo is globally disabled, never prompt — return cached or lastChosenLocation only
+                if (window.DISABLE_GEO) {
+                    geolocationRequested = true;
+                    try {
+                        const saved = localStorage.getItem('lastChosenLocation');
+                        if (saved) {
+                            const obj = JSON.parse(saved);
+                            const loc = { lat: Number(obj.lat), lon: Number(obj.lon), accuracy: obj.accuracy || 100, manual: true };
+                            userLocation = loc;
+                            try { setTimeout(() => { if (typeof forceGridRefresh === 'function') forceGridRefresh(); else if (typeof renderGrid === 'function') renderGrid(); }, 30); } catch(e){}
+                            resolve(userLocation);
+                            return;
+                        }
+                        const cached = localStorage.getItem('userLocationCache');
+                        if (cached) {
+                            const loc = JSON.parse(cached);
+                            userLocation = loc;
+                            try { setTimeout(() => { if (typeof forceGridRefresh === 'function') forceGridRefresh(); else if (typeof renderGrid === 'function') renderGrid(); }, 30); } catch(e){}
+                            resolve(userLocation);
+                            return;
+                        }
+                    } catch (e) { /* ignore parse errors */ }
+
+                    // Final fallback: resolve with null so callers know no fresh location is available
+                    resolve(null);
+                    return;
+                }
                 // CRITICAL: Only request geolocation ONCE
                 if (geolocationRequested) {
                     console.log('✅ Geolocation already requested, using cached location');
@@ -6895,67 +6927,88 @@
                 if (navigator.permissions && navigator.permissions.query) {
                     navigator.permissions.query({ name: 'geolocation' }).then((result) => {
                         if (result.state === 'granted') {
-                            console.log('✅ Permission already granted in browser settings - using geolocation');
-                            // Permission already granted, just get location
-                            navigator.geolocation.getCurrentPosition(
-                                (position) => {
-                                    userLocation = {
-                                        lat: position.coords.latitude,
-                                        lon: position.coords.longitude,
-                                        accuracy: position.coords.accuracy
-                                    };
-                                    setUserLocationCache(userLocation);
-                                    try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e) {}
-                                    persistContinuousLocationConsent('browser granted');
-                                    console.log('💾 Location cached in localStorage');
-                                    console.log('📍 User Location Acquired');
-                                    updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
-                                    
-                                    // 📍 Track location for proximity system
-                                    if (currentUserId) {
-                                        trackUserLocation(currentUserId, userLocation.lat, userLocation.lon);
+                            console.log('✅ Permission already granted in browser settings');
+                            // Do not call browser geolocation APIs when DISABLE_GEO is set.
+                            if (!window.DISABLE_GEO && navigator.geolocation) {
+                                // Permission granted and geo allowed by policy — request position
+                                navigator.geolocation.getCurrentPosition(
+                                    (position) => {
+                                        userLocation = {
+                                            lat: position.coords.latitude,
+                                            lon: position.coords.longitude,
+                                            accuracy: position.coords.accuracy
+                                        };
+                                        setUserLocationCache(userLocation);
+                                        try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e) {}
+                                        persistContinuousLocationConsent('browser granted');
+                                        console.log('💾 Location cached in localStorage');
+                                        console.log('📍 User Location Acquired');
+                                        updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
+                                        if (currentUserId) {
+                                            trackUserLocation(currentUserId, userLocation.lat, userLocation.lon);
+                                        }
+                                        resolve(userLocation);
+                                        startContinuousLocationTracking();
+                                    },
+                                    () => {
+                                        console.log('⚠️ Location access failed');
+                                        userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
+                                        updateLocationStatus('❌ Failed', 'Using NYC fallback');
+                                        resolve(userLocation);
+                                    },
+                                    { enableHighAccuracy: true, timeout: 8000, maximumAge: 300000 }
+                                );
+                            } else {
+                                // Either DISABLE_GEO is set, or geolocation not available — use cached or fallback
+                                try {
+                                    const saved = localStorage.getItem('lastChosenLocation');
+                                    if (saved) {
+                                        const obj = JSON.parse(saved);
+                                        userLocation = { lat: Number(obj.lat), lon: Number(obj.lon), accuracy: obj.accuracy || 100, manual: true };
+                                        resolve(userLocation);
+                                        return;
                                     }
-                                    
-                                    resolve(userLocation);
-                                    
-                                    // NOW: Start continuous location watching for real-time updates
-                                    startContinuousLocationTracking();
-                                },
-                                () => {
-                                    console.log('⚠️ Location access failed');
+                                } catch (e) {}
+                                if (localStorage.getItem('userLocationCache')) {
+                                    try { userLocation = JSON.parse(localStorage.getItem('userLocationCache')); resolve(userLocation); } catch(e) { userLocation = { lat:40.7150, lon:-74.0070, accuracy:100 }; resolve(userLocation); }
+                                } else {
                                     userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
-                                    updateLocationStatus('❌ Failed', 'Using NYC fallback');
                                     resolve(userLocation);
-                                },
-                                { enableHighAccuracy: true, timeout: 8000, maximumAge: 300000 }
-                            );
+                                }
+                            }
                         } else if (result.state === 'denied') {
                             console.log('🚫 User denied location permission - using fallback');
                             userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
                             resolve(userLocation);
                         } else {
-                                        // Permission is 'prompt' - avoid triggering the browser prompt on load.
-                                        // Instead, show our persistent banner which only requests geolocation
-                                        // if the user explicitly taps 'Allow Always'. Resolve now with a
-                                        // fallback (cached location if present or a safe default) so page
-                                        // loads without the browser permission dialog repeating on refresh.
-                                        console.log('❓ Location permission not yet decided - showing banner instead of immediate prompt');
-                                        try { showContinuousLocationPermissionUI(); } catch(e) { console.warn('showContinuousLocationPermissionUI failed', e); }
-                                        // If we have a cached location use it; otherwise return a safe default
-                                        if (userLocation && userLocation.lat && userLocation.lon) {
-                                            resolve(userLocation);
-                                        } else if (localStorage.getItem('userLocationCache')) {
-                                            try { userLocation = JSON.parse(localStorage.getItem('userLocationCache')); resolve(userLocation); } catch(e) { userLocation = { lat:40.7150, lon:-74.0070, accuracy:100 }; resolve(userLocation); }
-                                        } else {
-                                            userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
-                                            resolve(userLocation);
-                                        }
+                            // Permission is 'prompt' — do not trigger browser prompt. Respect global
+                            // DISABLE_GEO flag and fall back to cached values or safe default.
+                            console.log('❓ Location permission not yet decided - skipping browser prompt due to policy');
+                            try {
+                                const saved = localStorage.getItem('lastChosenLocation');
+                                if (saved) {
+                                    const obj = JSON.parse(saved);
+                                    userLocation = { lat: Number(obj.lat), lon: Number(obj.lon), accuracy: obj.accuracy || 100, manual: true };
+                                    resolve(userLocation);
+                                    return;
+                                }
+                            } catch (e) {}
+                            if (userLocation && userLocation.lat && userLocation.lon) {
+                                resolve(userLocation);
+                            } else if (localStorage.getItem('userLocationCache')) {
+                                try { userLocation = JSON.parse(localStorage.getItem('userLocationCache')); resolve(userLocation); } catch(e) { userLocation = { lat:40.7150, lon:-74.0070, accuracy:100 }; resolve(userLocation); }
+                            } else {
+                                userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
+                                resolve(userLocation);
+                            }
+                        }
                         }
                     });
                 } else {
                     // Fallback for browsers without Permissions API
-                    console.log('❓ Permissions API not available - requesting geolocation');
-                    navigator.geolocation.getCurrentPosition(
+                    console.log('❓ Permissions API not available - skipping browser geolocation due to DISABLE_GEO policy');
+                    if (!window.DISABLE_GEO) {
+                        navigator.geolocation.getCurrentPosition(
                         (position) => {
                             userLocation = {
                                 lat: position.coords.latitude,
@@ -7076,7 +7129,7 @@
                 try { persistContinuousLocationConsent('banner approval'); } catch(e){}
                 // Attempt to acquire a one-time current position now (will prompt only once)
                 try {
-                    if (navigator.geolocation) {
+                    if (!window.DISABLE_GEO && navigator.geolocation) {
                         navigator.geolocation.getCurrentPosition((position) => {
                             try {
                                 const loc = { lat: position.coords.latitude, lon: position.coords.longitude, accuracy: position.coords.accuracy };
@@ -7090,6 +7143,8 @@
                         }, (err) => {
                             console.warn('Banner-based geolocation failed or was denied:', err && err.message);
                         }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 300000 });
+                    } else {
+                        console.log('Banner allow pressed but geolocation disabled by DISABLE_GEO policy; skipping browser prompt');
                     }
                 } catch (e) { console.warn('Failed to request geolocation from banner allow', e); }
 
@@ -7138,6 +7193,10 @@
                 cLog('Continuous location tracking skipped by CLEANUP_FLAGS.RUN_BACKGROUND_TRACKING');
                 return;
             }
+            if (window.DISABLE_GEO) {
+                cLog('Continuous location tracking skipped by DISABLE_GEO');
+                return;
+            }
             if (locationWatchId !== null) {
                 console.log('✅ Continuous location tracking already active');
                 return;
@@ -7157,7 +7216,8 @@
             }
             
             // High accuracy watchPosition for continuous real-time updates
-            locationWatchId = navigator.geolocation.watchPosition(
+            if (!window.DISABLE_GEO) {
+                locationWatchId = navigator.geolocation.watchPosition(
                 (position) => {
                     const newLocation = {
                         lat: position.coords.latitude,
@@ -7264,13 +7324,16 @@
                 }
             );
 
-            console.log('✅ Continuous location tracking active (watchPosition ID: ' + locationWatchId + ')');
+            }
+            if (locationWatchId !== null) console.log('✅ Continuous location tracking active (watchPosition ID: ' + locationWatchId + ')');
         }
 
         function stopContinuousLocationTracking() {
             if (locationWatchId !== null) {
-                navigator.geolocation.clearWatch(locationWatchId);
-                console.log('🛑 Continuous location tracking stopped');
+                if (!window.DISABLE_GEO && navigator.geolocation) {
+                    navigator.geolocation.clearWatch(locationWatchId);
+                    console.log('🛑 Continuous location tracking stopped');
+                }
                 locationWatchId = null;
             }
         }
@@ -19562,7 +19625,7 @@
             if (!userLocation || !userLocation.lat || !userLocation.lon) {
                 console.log('⚠️  Location not ready - requesting geolocation...');
                 // Request geolocation synchronously if not available
-                if (navigator.geolocation) {
+                if (!window.DISABLE_GEO && navigator.geolocation) {
                     navigator.geolocation.getCurrentPosition(
                         (position) => {
                             userLocation = {
@@ -27857,7 +27920,7 @@
             // but request geolocation in background so results can be refined shortly after.
             if (!uLat || !uLon) {
                 console.log('⚠️ User location not available — showing cached POIs and requesting geolocation in background');
-                if (navigator.geolocation) {
+                if (!window.DISABLE_GEO && navigator.geolocation) {
                     navigator.geolocation.getCurrentPosition(
                         (position) => {
                             userLocation = {
@@ -36924,9 +36987,11 @@
             if (isContinuousTrackingPermitted) {
                 startContinuousLocationTracking();
             } else if (locationWatchId !== null) {
-                navigator.geolocation.clearWatch(locationWatchId);
+                if (!window.DISABLE_GEO && navigator.geolocation) {
+                    navigator.geolocation.clearWatch(locationWatchId);
+                    console.log('📍 Continuous location tracking stopped');
+                }
                 locationWatchId = null;
-                console.log('📍 Continuous location tracking stopped');
             }
             
             return isContinuousTrackingPermitted;
