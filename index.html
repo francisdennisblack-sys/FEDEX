@@ -336,7 +336,7 @@
                                 window.gridContent = window.gridContent || {};
                                 window.gridContent['shared-posts'] = window.gridContent['shared-posts'] || [];
                                 window.gridContent['shared-posts'] = window.gridContent['shared-posts'].filter(p => !p || !p.id || String(p.id) !== String(best.id));
-                                window.gridContent['shared-posts'].unshift(best);
+                                ensureUniqueAndInsert('shared-posts', best);
                                 if (window.gridContent['shared-posts'].length > 200) window.gridContent['shared-posts'].length = 200;
                                 try { requestGridUpdate('best-post-sse'); } catch(e){}
                             } catch (e) { /* ignore */ }
@@ -364,7 +364,7 @@
                                     window.gridContent['shared-posts'] = window.gridContent['shared-posts'] || [];
                                     // remove existing instance
                                     window.gridContent['shared-posts'] = window.gridContent['shared-posts'].filter(p => !p || !p.id || String(p.id) !== String(best.id));
-                                    window.gridContent['shared-posts'].unshift(best);
+                                    ensureUniqueAndInsert('shared-posts', best);
                                     // cap size
                                     if (window.gridContent['shared-posts'].length > 200) window.gridContent['shared-posts'].length = 200;
                                     // Trigger a gentle incremental update
@@ -979,6 +979,18 @@
     .badge--sell { background: linear-gradient(135deg,#06b6d4,#3b82f6); color: #04121a; box-shadow: 0 6px 18px rgba(59,130,246,0.28); }
     .badge--new  { background: rgba(255,255,255,0.04); color:#e6e6e6; box-shadow: none; }
     .badge--default { background: rgba(0,0,0,0.5); }
+
+    /* Position badges (top-3) - styled like a 'dislike' chip but in gold */
+    .badge--position1, .badge--position2, .badge--position3 {
+        background: linear-gradient(135deg,#ffd54a,#f59e0b);
+        color: #1f1f1f;
+        box-shadow: 0 8px 26px rgba(245,158,11,0.22), inset 0 0 18px rgba(255,255,255,0.06);
+        font-weight: 900;
+        letter-spacing: 0.6px;
+    }
+    .badge--position1 { border-radius: 12px; padding: 6px 10px; }
+    .badge--position2 { border-radius: 10px; padding: 5px 9px; }
+    .badge--position3 { border-radius: 10px; padding: 5px 8px; }
 
     .boost-badge-prominent { position:absolute; top:8px; left:8px; z-index:25; display:flex; align-items:center; gap:var(--badge-gap); pointer-events:auto; }
     .boost-badge-prominent .boost-inner {
@@ -8949,12 +8961,7 @@
 
                         // MY badge removed per user request (no longer showing owner badge)
 
-                        // podium overrides other badges
-                        if (podium.includes(post.id)) {
-                            badges.push({ kind: 'podium', label: '🏆 Top' });
-                        } else if (tierInfo.tier === 'PODIUM') {
-                            badges.push({ kind: 'podium', label: '🏆' });
-                        }
+                        // podium glow handled separately; position badges are applied later
 
                         // Boost / Buy badges (persisted flags)
                         const hasBoostFlag = isStrictBoostActive(post) || hasBadgeKind(post, 'boost');
@@ -9047,14 +9054,14 @@
                                 if (b.kind === 'new') {
                                     return `<div class="badge badge--new">${b.label}</div>`;
                                 }
-                                if (b.kind === 'crowned') {
-                                    return `<div class="badge badge--default badge--crowned">${b.label}</div>`;
+                                if (b.kind === 'crowned' || b.kind === 'runner-up' || b.kind === 'podium') {
+                                    // legacy kinds: map to new position styles where possible
+                                    const map = { 'crowned': 'position1', 'runner-up': 'position2', 'podium': 'position3' };
+                                    const k = map[b.kind] || b.kind;
+                                    return `<div class="badge badge--default badge--${k}">${b.label}</div>`;
                                 }
-                                if (b.kind === 'runner-up') {
-                                    return `<div class="badge badge--default badge--runner-up">${b.label}</div>`;
-                                }
-                                if (b.kind === 'podium') {
-                                    return `<div class="badge badge--default badge--podium">${b.label}</div>`;
+                                if (b.kind === 'position1' || b.kind === 'position2' || b.kind === 'position3') {
+                                    return `<div class="badge badge--default badge--${b.kind}">${b.label}</div>`;
                                 }
                                 // fallback: generic badge with kind-specific class
                                 return `<div class="badge badge--default badge--${b.kind}">${b.label}</div>`;
@@ -11629,23 +11636,18 @@
                     // updates the virtual scroller efficiently when available.
                     try {
                         if (typeof insertNewPostIntoGrid === 'function') {
+                            // insertNewPostIntoGrid already guards duplicates, use it
                             insertNewPostIntoGrid(key, newPost);
-                        } else if (typeof safeAddItemsToGridScroller === 'function') {
-                            // Fallback: add to content then add to scroller safely
-                            gridContent[key].unshift(newPost);
-                            safeAddItemsToGridScroller([newPost]);
                         } else {
-                            // Basic fallback: prepend and trigger a full render
-                            gridContent[key].unshift(newPost);
-                            window.lastRenderGridTime = 0;
-                            renderGrid();
+                            // Use ensureUniqueAndInsert to prevent transient duplicates
+                            ensureUniqueAndInsert(key, newPost);
                         }
 
                         // Ensure the new repost is visible to the user immediately.
                         try { ensureNewPostVisible(newPost); } catch (e) { /* ignore visibility failures */ }
                     } catch(e) {
-                        // If insertion helper fails, fallback to naive prepend + render
-                        gridContent[key].unshift(newPost);
+                        // If insertion helper fails, fallback to naive dedupe + render
+                        try { ensureUniqueAndInsert(key, newPost); } catch (ee) { gridContent[key].unshift(newPost); }
                         window.lastRenderGridTime = 0;
                         renderGrid();
                     }
@@ -11826,6 +11828,34 @@
                     gridContent[key] = out;
                 }
             } catch (e) { console.warn('dedupeGridContent failed', e); }
+        }
+
+        // Ensure a post is unique across all gridContent keys, then insert into the given key.
+        function ensureUniqueAndInsert(contentKey, post) {
+            try {
+                if (!post || !post.id) return;
+                // Remove existing occurrences across all keys
+                try {
+                    Object.keys(gridContent || {}).forEach(k => {
+                        if (!Array.isArray(gridContent[k])) return;
+                        gridContent[k] = gridContent[k].filter(p => !(p && p.id === post.id));
+                    });
+                } catch (e) { /* ignore */ }
+                // Ensure target key exists
+                gridContent[contentKey] = gridContent[contentKey] || [];
+                // Insert at front
+                gridContent[contentKey].unshift(post);
+                // Update cache
+                try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
+                // Update scroller safely if available
+                try {
+                    if (window.gridScroller && typeof safeAddItemsToGridScroller === 'function') {
+                        safeAddItemsToGridScroller([post]);
+                    } else if (window.gridScroller && typeof gridScroller.setItems === 'function') {
+                        rebuildGridScrollerFromGridContent();
+                    }
+                } catch (e) { /* ignore scroller update failures */ }
+            } catch (e) { console.warn('ensureUniqueAndInsert failed', e); }
         }
         
         // ============================================================================
@@ -33262,9 +33292,11 @@
         }
 
         function getPositionBadgeForIndex(index) {
-            if (index === 0) return { kind: 'crowned', label: '🏆 1st' };
-            if (index === 1) return { kind: 'runner-up', label: '2nd' };
-            if (index === 2) return { kind: 'podium', label: '3rd' };
+            // New position badges: visual badge for top 3 posts
+            // Kind names map to CSS classes: badge--position1, badge--position2, badge--position3
+            if (index === 0) return { kind: 'position1', label: '1' };
+            if (index === 1) return { kind: 'position2', label: '2' };
+            if (index === 2) return { kind: 'position3', label: '3' };
             return null;
         }
 
@@ -33378,8 +33410,7 @@
                     console.log(`   ✅ Updated badges for post: [${newBadges.join(', ')}]`);
                 }
                 
-                // ALSO recalculate top 3 position badges (CROWNED, RUNNER-UP, PODIUM)
-                // because vote might have changed rankings
+                // ALSO recalculate top 3 position badges because vote might have changed rankings
                 console.log(`🏅 Recalculating top 3 position badges due to vote change...`);
                 updateTopPositionBadges(postsInGrid);
                 try { refreshVisiblePostGlowOutlines('recalculateBadgesForCurrentGrid-voted'); } catch (e) {}
@@ -33391,35 +33422,34 @@
             }
         }
         
-        // 🥇 Helper: Update CROWNED, RUNNER-UP, PODIUM badges based on POSITION (index in grid)
+        // 🥇 Helper: Update top-3 position badges based on POSITION (index in grid)
+        // This replaces old crowned/runner-up/podium markers with new gold position badges
         function updateTopPositionBadges(postsInGrid) {
             if (!postsInGrid || postsInGrid.length === 0) return;
-            
-            // Position markers are slot-based only.
-            const positionBadges = ['crowned', 'runner-up', 'podium'];
-
-            // First remove any existing position badges from all visible posts
+            // First remove any existing legacy position badge classes
             postsInGrid.forEach(post => {
                 if (!post || !post.id) return;
                 const el = document.querySelector(`[data-post-id="${post.id}"]`);
-                if (el) el.classList.remove('badge-crowned', 'badge-runner-up', 'badge-podium');
+                if (el) {
+                    el.classList.remove('badge-crowned', 'badge-runner-up', 'badge-podium', 'badge-position1', 'badge-position2', 'badge-position3');
+                }
             });
 
-            // Apply badges for positions 1, 2, 3 (indexes 0, 1, 2)
+            // Apply new position badges for positions 1,2,3
             postsInGrid.slice(0, 3).forEach((post, idx) => {
                 if (!post || !post.id) return;
                 if (!isPostEligibleForPositionBadge(post)) {
-                    console.log(`   ⏭️ Post ${post.id.substring(0,8)}: position ${idx + 1} skipped for ${positionBadges[idx]} (net-negative)`);
+                    console.log(`   ⏭️ Post ${post.id.substring(0,8)}: position ${idx + 1} skipped (net-negative)`);
                     return;
                 }
                 const el = document.querySelector(`[data-post-id="${post.id}"]`);
                 if (el) {
-                    el.classList.add(`badge-${positionBadges[idx]}`);
-                    console.log(`   ✅ Post ${post.id.substring(0,8)}: position ${idx + 1} → badge-${positionBadges[idx]}`);
+                    el.classList.add(`badge-position${idx+1}`);
+                    console.log(`   ✅ Post ${post.id.substring(0,8)}: position ${idx + 1} → badge-position${idx+1}`);
                 }
             });
 
-            console.log(`✅ Top position badges updated: crowned/runner-up/podium by position`);
+            console.log(`✅ Top position badges updated: position1/2/3 applied`);
             try { refreshVisiblePostGlowOutlines('updateTopPositionBadges'); } catch (e) {}
         }
         window.getPostBadgesForArea = getPostBadgesForArea;
@@ -37734,7 +37764,7 @@
                     if (closeBtn) closeBtn.focus();
                     // Always show the built-in suggestions dropdown when opening the modal
                     try {
-                        const defaults = generateFreshRandomLocations(12).map((it, idx) => normalizeItem(it, idx));
+                        const defaults = generateMixedLocationSuggestions(12).map((it, idx) => normalizeItem(it, idx));
                         renderSuggestions(defaults);
                         if (refineInput) refineInput.setAttribute('aria-expanded','true');
                     } catch (e) { /* ignore */ }
@@ -37839,6 +37869,47 @@
                         try { return getCombinedSources().slice(0, count); } catch (ee) { return []; }
                     }
                     return out;
+                }
+                // Generate a mixed list of nearby real areas and far-away random/real places.
+                function generateMixedLocationSuggestions(count = 12, nearbyRatio = 0.5) {
+                    try {
+                        const base = (window.userLocation && window.userLocation.lat != null && window.userLocation.lon != null) ? { lat: window.userLocation.lat, lon: window.userLocation.lon } : { lat: 37.7749, lon: -122.4194 };
+                        const srcRaw = Array.isArray(getCombinedSources()) ? getCombinedSources() : [];
+                        const src = srcRaw.map((it, i) => normalizeItem(it, i));
+                        // Attach distance in meters from user
+                        src.forEach(s => { try { s.__dist = Math.abs(haversineMeters(base.lat, base.lon, Number(s.lat) || 0, Number(s.lon) || 0) || 0); } catch(e){ s.__dist = Infinity; } });
+                        // Split into nearby and far candidates
+                        const nearbyThresholdMeters = 50000; // ~50km
+                        const nearbyCandidates = src.filter(s => Number.isFinite(s.__dist) && s.__dist <= nearbyThresholdMeters).sort((a,b) => a.__dist - b.__dist);
+                        const farCandidates = src.filter(s => !Number.isFinite(s.__dist) || s.__dist > nearbyThresholdMeters);
+                        const nearbyCount = Math.max(3, Math.round(count * nearbyRatio));
+                        const farCount = Math.max(1, count - nearbyCount);
+                        const nearbyPicked = nearbyCandidates.slice(0, nearbyCount);
+                        let farPicked = farCandidates.slice(0, farCount);
+                        // If not enough far candidates, supplement with generated fresh randoms forced to be far
+                        if (farPicked.length < farCount) {
+                            const need = farCount - farPicked.length;
+                            const supplement = generateFreshRandomLocations(need);
+                            supplement.forEach(s => {
+                                // push coords far away by adding large offsets (ensures far distance from base)
+                                const latShift = (Math.random() > 0.5 ? 1 : -1) * (20 + Math.random() * 40);
+                                const lonShift = (Math.random() > 0.5 ? 1 : -1) * (20 + Math.random() * 80);
+                                s.lat = base.lat + latShift;
+                                s.lon = base.lon + lonShift;
+                            });
+                            farPicked = farPicked.concat(supplement);
+                        }
+                        // Final assembly: nearby first, then far; renderSuggestions will shuffle them
+                        const combined = nearbyPicked.concat(farPicked).slice(0, count);
+                        // If still short, pad with fresh randoms
+                        if (combined.length < count) {
+                            const pad = generateFreshRandomLocations(count - combined.length);
+                            return combined.concat(pad).slice(0, count);
+                        }
+                        return combined;
+                    } catch (e) {
+                        return generateFreshRandomLocations(count);
+                    }
                 }
                 // Remote geocoding fallback (Nominatim) to find arbitrary places when local POIs miss
                 async function fetchGeocode(q, limit=8) {
