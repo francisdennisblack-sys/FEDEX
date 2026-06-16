@@ -6411,6 +6411,15 @@
                 console.log('ℹ️ Location polling already running');
                 return;
             }
+            // Do not start polling unless user has explicitly allowed continuous
+            // location tracking or we've already requested geolocation (post-time).
+            try {
+                const consent = (localStorage.getItem('poiContentContinuousLocation') === 'true');
+                if (!consent && !geolocationRequested) {
+                    console.log('⏸️ Location polling skipped — no continuous consent and geolocation not requested');
+                    return;
+                }
+            } catch (e) {}
 
             locationPollingInterval = setInterval(() => {
                 if (!navigator.geolocation) return;
@@ -7151,6 +7160,15 @@
             console.log('🔄 Starting continuous location tracking...');
             console.log('📌 Continuous Tracking Permitted:', isContinuousTrackingPermitted);
             
+            // Respect explicit user consent: do not start continuous tracking unless
+            // the user previously allowed it or we've explicitly requested geolocation.
+            try {
+                if (!isContinuousTrackingPermitted && !geolocationRequested) {
+                    console.log('⏸️ Continuous tracking not started — no consent and geolocation not requested');
+                    return;
+                }
+            } catch (e) {}
+
             // Show custom permission UI if not already permitted
             if (!isContinuousTrackingPermitted && typeof showContinuousLocationPermissionUI === 'function') {
                 showContinuousLocationPermissionUI();
@@ -19556,33 +19574,26 @@
                 }
             } catch (e) {}
             
-            // CRITICAL: Ensure location is determined BEFORE showing modal
-            // Never disappoint users with "Detecting location..." on first load
+            // CRITICAL: Ensure location is available before showing modal, but
+            // do NOT trigger a browser geolocation prompt here. Prefer cached
+            // location or defer live requests until the user explicitly acts (Post).
             if (!userLocation || !userLocation.lat || !userLocation.lon) {
-                console.log('⚠️  Location not ready - requesting geolocation...');
-                // Request geolocation synchronously if not available
-                if (navigator.geolocation) {
-                    navigator.geolocation.getCurrentPosition(
-                        (position) => {
-                            userLocation = {
-                                lat: position.coords.latitude,
-                                lon: position.coords.longitude,
-                                latitude: position.coords.latitude,
-                                longitude: position.coords.longitude
-                            };
-                            console.log('📍 Location acquired:', userLocation);
+                console.log('⚠️ Location not ready for modal — using cached/fallback and deferring prompt');
+                try {
+                    const cached = localStorage.getItem('userLocationCache');
+                    if (cached) {
+                        try {
+                            userLocation = JSON.parse(cached);
+                            console.log('📍 Using cached location for modal:', userLocation);
                             updateZonePredictor();
                             populateNearbyLocations();
-                            // Auto-populate area with nearest location
                             autoPopulateNearestArea();
-                        },
-                        (error) => {
-                            console.warn('Geolocation error:', error);
-                            // Use fallback or default location
-                        }
-                    );
-                }
-            } else {
+                        } catch (e) { console.warn('Failed parsing cached location for modal', e); }
+                    } else {
+                        console.log('No cached location; modal will show without triggering browser prompt');
+                    }
+                } catch (e) { console.warn('Modal location guard failed', e); }
+            }
                 // Location already available - auto-populate area with nearest location
                 autoPopulateNearestArea();
             }
@@ -27852,34 +27863,40 @@
             
             console.log('📍 Nearby Locations & POIs: Current userLocation:', userLocation);
             
-            // If location not available, continue and show cached POIs/locations immediately
-            // but request geolocation in background so results can be refined shortly after.
+            // If location not available, continue and show cached POIs/locations immediately.
+            // Do NOT request geolocation in background unless the user previously
+            // granted continuous consent or we've explicitly requested geolocation.
             if (!uLat || !uLon) {
-                console.log('⚠️ User location not available — showing cached POIs and requesting geolocation in background');
-                if (navigator.geolocation) {
-                    navigator.geolocation.getCurrentPosition(
-                        (position) => {
-                            userLocation = {
-                                lat: position.coords.latitude,
-                                lon: position.coords.longitude,
-                                latitude: position.coords.latitude,
-                                longitude: position.coords.longitude
-                            };
-                            console.log('📍 Background geolocation acquired:', userLocation);
-                            // Refresh dropdown results to include distances if still open
-                            try {
-                                if (dropdown && dropdown.style.display === 'block') {
-                                    // small debounce to allow UI to settle
-                                    setTimeout(() => { try { showNearbyPOIsDropdown(); } catch(e){} }, 250);
-                                }
-                            } catch(e){}
-                        },
-                        (error) => {
-                            console.warn('⚠️ Background geolocation error:', error.message);
-                        },
-                        { enableHighAccuracy: true, timeout: 8000, maximumAge: 5000 }
-                    );
-                }
+                console.log('⚠️ User location not available — showing cached POIs and deferring background geolocation');
+                try {
+                    const consent = (localStorage.getItem('poiContentContinuousLocation') === 'true');
+                    if (consent || geolocationRequested) {
+                        if (navigator.geolocation) {
+                            navigator.geolocation.getCurrentPosition(
+                                (position) => {
+                                    userLocation = {
+                                        lat: position.coords.latitude,
+                                        lon: position.coords.longitude,
+                                        latitude: position.coords.latitude,
+                                        longitude: position.coords.longitude
+                                    };
+                                    console.log('📍 Background geolocation acquired:', userLocation);
+                                    try {
+                                        if (dropdown && dropdown.style.display === 'block') {
+                                            setTimeout(() => { try { showNearbyPOIsDropdown(); } catch(e){} }, 250);
+                                        }
+                                    } catch(e){}
+                                },
+                                (error) => {
+                                    console.warn('⚠️ Background geolocation error:', error.message);
+                                },
+                                { enableHighAccuracy: true, timeout: 8000, maximumAge: 5000 }
+                            );
+                        }
+                    } else {
+                        console.log('⏸️ Background geolocation skipped — no consent and geolocation not requested');
+                    }
+                } catch (e) { console.warn('Background geolocation guard failed', e); }
                 // Do not return — proceed to display cached/global POIs below
             }
             // If both location and POI DBs are empty, attempt a fast fallback fetch
