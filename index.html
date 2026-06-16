@@ -11208,16 +11208,76 @@
         window.voteOnPost = voteOnPost;
 
         // Auxiliary action for the new small icon next to like/dislike
-        function auxActionOnPost(postId) {
+        async function auxActionOnPost(postId) {
             try {
-                console.log(`🔧 auxActionOnPost: postId=${postId}`);
-                showNotification && showNotification('Action clicked');
-                const container = document.querySelector(`[data-post-id="${postId}"]`);
-                const btn = container ? container.querySelector('.aux-btn') : null;
-                if (btn) {
-                    btn.classList.toggle('active');
+                console.log(`🔧 auxActionOnPost (repost) called: postId=${postId}`);
+                // Require sign-in to repost (matches uploadPost behavior)
+                const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
+                if (!currentUserId || !isSignedIn) {
+                    showNotification && showNotification('Please sign in to repost');
+                    return;
                 }
-            } catch (e) { console.warn('auxActionOnPost failed', e); }
+
+                // Find original post
+                const orig = findPostAcrossVisibleFeeds(postId) || (postCache && postCache[postId]) || null;
+                if (!orig) {
+                    showNotification && showNotification('Original post not found');
+                    return;
+                }
+
+                // Generate a client id / post id
+                function generateClientId() {
+                    try { if (window.crypto && window.crypto.randomUUID) return `cli-${window.crypto.randomUUID()}`; } catch(e){}
+                    return 'cli-' + Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4);
+                }
+
+                const newId = generateClientId();
+                const now = Date.now();
+
+                // Build new post object: copy content/media/location but reset engagement fields
+                const newPost = Object.assign({}, {
+                    id: newId,
+                    content: orig.content || orig.text || orig.description || '',
+                    photoURL: orig.photoURL || orig.imageData || null,
+                    imageData: orig.imageData || null,
+                    mediaType: orig.mediaType || null,
+                    zoneTag: orig.zoneTag || orig.county || window.currentZoneTag || null,
+                    displayAreaTag: orig.displayAreaTag || null,
+                    county: orig.county || null,
+                    poiName: orig.poiName || null,
+                    tags: orig.tags ? JSON.parse(JSON.stringify(orig.tags)) : null,
+                    authId: currentUserId,
+                    userId: currentUserId,
+                    createdBy: (typeof getCurrentUsername === 'function') ? getCurrentUsername() : (window.currentDisplayName || currentUserId),
+                    timestamp: now,
+                    likes: 0,
+                    dislikes: 0,
+                    clientId: generateClientId()
+                });
+
+                // Add to local caches for immediate feedback
+                try { postCache = postCache || {}; postCache[newId] = newPost; } catch(e){}
+                try {
+                    const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
+                    gridContent[key] = gridContent[key] || [];
+                    // Prepend so it appears at top
+                    gridContent[key].unshift(newPost);
+                    // Force immediate re-render
+                    window.lastRenderGridTime = 0;
+                    renderGrid();
+                } catch (e) { console.warn('Failed to insert repost locally', e); }
+
+                // Persist to Firebase/shared collection in background
+                (async () => {
+                    try {
+                        await savePostToFirebaseShared(newId, newPost);
+                        showNotification && showNotification('Post reposted');
+                    } catch (saveErr) {
+                        console.warn('Repost save failed, enqueued for retry', saveErr);
+                        showNotification && showNotification('Repost queued for upload');
+                    }
+                })();
+            } catch (e) { console.warn('auxActionOnPost (repost) failed', e); }
         }
         window.auxActionOnPost = auxActionOnPost;
 
