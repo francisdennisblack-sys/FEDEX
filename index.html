@@ -136,6 +136,7 @@
                                         // Mirror the SW-stored location into localStorage and refresh
                                         try { setUserLocationCache({ lat: p.lat, lon: p.lon, source: 'sw', timestamp: p.ts }, { force: true }); } catch(e) {}
                                         try { localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: p.lat, lon: p.lon, label: p.label })); } catch(e) {}
+                                        try { window.latestUserAreaTag = (p && (p.label || '') ) ? String(p.label || '').trim() : window.latestUserAreaTag; } catch(e) {}
                                             console.log('ServiceWorker: locationUpdated received, reloading to apply new location');
                                             try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
                                             try { applySavedLocationAuthoritative(); } catch(e) {}
@@ -6232,6 +6233,20 @@
                 const latest = (window.latestUserAreaTag || '').trim();
                 if (latest && !__isStaleAreaTag(latest)) return latest;
 
+                // If the user has chosen a manual location via Change Location, prefer its label
+                try {
+                    const raw = localStorage.getItem('lastChosenLocation');
+                    if (raw) {
+                        const parsed = JSON.parse(raw);
+                        const lbl = (parsed && (parsed.label || parsed.name || parsed.display)) ? String(parsed.label || parsed.name || parsed.display).trim() : '';
+                        if (lbl && !__isStaleAreaTag(lbl)) {
+                            // Mirror into in-memory latest tag for other parts of the app
+                            try { window.latestUserAreaTag = lbl; } catch (e) {}
+                            return lbl;
+                        }
+                    }
+                } catch (e) { /* ignore parse errors and continue fallback */ }
+
                 // If the user explicitly selected a zone from the dropdown, use that
                 if (userSelectedZone && currentZoneTag && !__isStaleAreaTag(currentZoneTag)) return currentZoneTag;
 
@@ -11604,7 +11619,7 @@
                                 changedAt: loc.changedAt || Date.now()
                             };
                             window.userLocation = { lat: sel.lat, lon: sel.lon, accuracy: sel.accuracy, timestamp: sel.changedAt };
-                            try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); localStorage.setItem('lastLocationTimestamp', String(sel.changedAt || Date.now())); } catch (e) {}
+                            try { localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); localStorage.setItem('lastLocationTimestamp', String(sel.changedAt || Date.now())); try { window.latestUserAreaTag = (sel && (sel.label || '')) ? String(sel.label || '').trim() : window.latestUserAreaTag; } catch(e) {} } catch (e) {}
                             console.log('Restored server-side user location for', currentUserId, sel);
                             try { if (typeof renderGrid === 'function') renderGrid(); } catch (e) {}
                         }
@@ -37567,6 +37582,7 @@
                                 } catch (ce) { console.warn('Failed to write userLocationCache', ce); }
 
                                 localStorage.setItem('lastChosenLocation', JSON.stringify(sel));
+                                try { window.latestUserAreaTag = (sel && (sel.label || '')) ? String(sel.label || '').trim() : window.latestUserAreaTag; } catch(e) {}
                                 try { localStorage.setItem('manualLocationActive', '1'); } catch(e) {}
                                 localStorage.setItem('lastLocationTimestamp', String(sel.changedAt || Date.now()));
                                 try { checkSavedLocationAreaMatch(); } catch(e) {}
@@ -37651,6 +37667,7 @@
                             // No backup: remove manual override and request fresh geolocation
                             localStorage.removeItem('userLocationCache');
                             try { localStorage.removeItem('lastChosenLocation'); } catch(e){}
+                            try { window.latestUserAreaTag = ''; } catch(e) {}
                             try { localStorage.removeItem('manualLocationActive'); } catch(e) {}
                             console.log('LOCATION_OVERRIDE: no backup found; requesting fresh geolocation to repopulate cache');
                             try { if (typeof requestGeolocation === 'function') requestGeolocation().then(loc => { try { setUserLocationCache(loc, { force: true }); console.info('Fetched fresh geolocation and cached'); console.log('LOCATION_OVERRIDE: fresh geolocation cached', loc); } catch(e){} }).catch((err)=>{ console.warn('requestGeolocation failed', err); }); } catch(e){}
@@ -37661,6 +37678,7 @@
                     try {
                         localStorage.removeItem('lastChosenLocation');
                         try { localStorage.removeItem('manualLocationActive'); } catch(e) {}
+                        try { window.latestUserAreaTag = ''; } catch(e) {}
                         localStorage.removeItem('shouldHighlightComeHome');
                         localStorage.removeItem('transferBg');
                         localStorage.removeItem('transferColor');
