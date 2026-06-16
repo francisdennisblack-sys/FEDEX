@@ -718,6 +718,16 @@
     }
     /* Pause the color cycle when user hovers or focuses the pill for clarity */
     #changeGridLocationPill:hover .c-pill-label, #changeGridLocationPill:focus .c-pill-label { animation-play-state: paused; -webkit-animation-play-state: paused; }
+
+    /* Mobile-only grid spacing adjustments for small devices (≈5.4")
+       Increase left/right and vertical spacing without affecting desktop. */
+    @media (max-width: 420px) {
+        .grid-wrapper { padding-left: 10px; padding-right: 10px; }
+        /* Slightly larger row & column gaps to give posts more breathing room */
+        #grid { gap: 22px 16px !important; }
+        /* Add modest inner padding on each tile so content doesn't touch edges */
+        #grid .grid-box { padding: 10px !important; box-sizing: border-box; border-radius: 12px; }
+    }
     #changeGridLocationPill .c-pill-label { color: #ffffff !important; }
     /* remove decorative backcard and keep pill visually minimal */
     #changeGridLocationPill::before { display: none; }
@@ -11368,6 +11378,33 @@
                     // Force immediate re-render
                     window.lastRenderGridTime = 0;
                     renderGrid();
+
+                    // Increment repost count on the original post locally and persist update
+                    try {
+                        orig.repostCount = (orig.repostCount || orig.reposts || 0) + 1;
+                        // update caches
+                        try { if (postCache && postCache[orig.id]) postCache[orig.id].repostCount = orig.repostCount; } catch(e){}
+                        try {
+                            for (const k in gridContent) {
+                                if (!Array.isArray(gridContent[k])) continue;
+                                const found = gridContent[k].find(p => p && p.id === orig.id);
+                                if (found) found.repostCount = orig.repostCount;
+                            }
+                        } catch(e){}
+                        // Update any visible DOM counters for this post
+                        try {
+                            const els = document.querySelectorAll(`.grid-box[data-post-id="${orig.id}"] .repost-count`);
+                            els.forEach(el => { el.textContent = orig.repostCount > 0 ? String(orig.repostCount) : ''; });
+                        } catch(e){}
+
+                        // Persist to Firebase in background (best-effort)
+                        try {
+                            if (typeof getDatabase === 'function' && typeof update === 'function' && typeof ref === 'function') {
+                                const db = getDatabase();
+                                update(ref(db, `posts/${orig.id}`), { repostCount: orig.repostCount }).catch(() => {});
+                            }
+                        } catch (e) { /* ignore persistence failures */ }
+                    } catch (e) { console.warn('Failed updating original repost count', e); }
                 } catch (e) { console.warn('Failed to insert repost locally', e); }
 
                 // Persist to Firebase/shared collection in background
@@ -28718,13 +28755,17 @@
                     let badgeClasses = '';
                     let badgeHTML = '';
 
+                    // Repost counter badge (small square). Show empty when zero to avoid visual clutter.
+                    const repostCount = post.repostCount || post.reposts || 0;
+                    const repostBadgeHTML = `<div class="repost-count" style="position:absolute; top:8px; left:8px; min-width:30px; height:20px; background:rgba(0,0,0,0.48); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; border-radius:4px; font-weight:700;">🔁 ${repostCount > 0 ? repostCount : ''}</div>`;
+
                     // 📷/🎥 mode: render the post text + media emoji on the tile.
                     // The actual photo/video is shown only inside the pop-out modal.
                     try {
                         // Remove any stale grid-media container left over from prior renders
                         const staleMedia = box.querySelector('.grid-media');
                         if (staleMedia) staleMedia.remove();
-                        box.innerHTML = `${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
+                        box.innerHTML = `${repostBadgeHTML}${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
                     } catch (e) {
                         box.innerHTML = `${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
                     }
@@ -28767,7 +28808,9 @@
                         : (typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(areaTagText) : areaTagText);
                     // Do not render area tag on grid tiles (keep details in modal only)
                     const areaTagHTML = ``;
-                    box.innerHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${areaTagHTML}`;
+                    const repostCountText = post.repostCount || post.reposts || 0;
+                    const repostBadgeHTMLText = `<div class="repost-count" style="position:absolute; top:8px; left:8px; min-width:30px; height:20px; background:rgba(0,0,0,0.48); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; border-radius:4px; font-weight:700;">🔁 ${repostCountText > 0 ? repostCountText : ''}</div>`;
+                    box.innerHTML = `${repostBadgeHTMLText}<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${areaTagHTML}`;
                 }
                 
                 // Set attributes and classes
