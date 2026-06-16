@@ -11566,11 +11566,44 @@
                 try {
                     const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
                     gridContent[key] = gridContent[key] || [];
-                    // Prepend so it appears at top
-                    gridContent[key].unshift(newPost);
-                    // Force immediate re-render
-                    window.lastRenderGridTime = 0;
-                    renderGrid();
+                    // Prefer the helper insertion which respects reserved slots and
+                    // updates the virtual scroller efficiently when available.
+                    try {
+                        if (typeof insertNewPostIntoGrid === 'function') {
+                            insertNewPostIntoGrid(key, newPost);
+                        } else if (typeof safeAddItemsToGridScroller === 'function') {
+                            // Fallback: add to content then add to scroller safely
+                            gridContent[key].unshift(newPost);
+                            safeAddItemsToGridScroller([newPost]);
+                        } else {
+                            // Basic fallback: prepend and trigger a full render
+                            gridContent[key].unshift(newPost);
+                            window.lastRenderGridTime = 0;
+                            renderGrid();
+                        }
+
+                        // Ensure the new repost is visible to the user immediately.
+                        try {
+                            if (window.gridScroller && Array.isArray(gridScroller.items)) {
+                                const idx = (gridScroller.items || []).findIndex(i => i && i.id === newId);
+                                if (idx >= 0) {
+                                    if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(idx);
+                                    else if (typeof gridScroller.scrollToItem === 'function') gridScroller.scrollToItem(idx);
+                                } else {
+                                    // As a best-effort, scroll to top where new posts are expected
+                                    try { if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(0); } catch(e){}
+                                }
+                            } else {
+                                // force a render and scroll the window to top
+                                window.lastRenderGridTime = 0; renderGrid(); try { window.scrollTo(0,0); } catch(e){}
+                            }
+                        } catch (e) { /* ignore visibility failures */ }
+                    } catch(e) {
+                        // If insertion helper fails, fallback to naive prepend + render
+                        gridContent[key].unshift(newPost);
+                        window.lastRenderGridTime = 0;
+                        renderGrid();
+                    }
 
                     // Increment repost count on the root original post locally and persist update
                     try {
