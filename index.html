@@ -11237,6 +11237,7 @@
                 // Build new post object: copy content/media/location but reset engagement fields
                 const newPost = Object.assign({}, {
                     id: newId,
+                    repostOf: orig.id,
                     content: orig.content || orig.text || orig.description || '',
                     photoURL: orig.photoURL || orig.imageData || null,
                     imageData: orig.imageData || null,
@@ -11254,6 +11255,26 @@
                     dislikes: 0,
                     clientId: generateClientId()
                 });
+
+                // Prevent duplicate reposts: allow one repost per original per user
+                try {
+                    // Check localStorage map first
+                    const mapKey = `reposts_by_${currentUserId}`;
+                    let repostMap = {};
+                    try { repostMap = JSON.parse(localStorage.getItem(mapKey) || '{}'); } catch(e) { repostMap = {}; }
+                    // Also scan in-memory grid/postCache for existing reposts by this user
+                    const alreadyReposted = !!(repostMap[orig.id] ||
+                        Object.values(postCache || {}).find(p => p && p.repostOf === orig.id && p.userId === currentUserId) ||
+                        Object.keys(gridContent || {}).some(k => Array.isArray(gridContent[k]) && gridContent[k].find(p => p && p.repostOf === orig.id && p.userId === currentUserId))
+                    );
+                    if (alreadyReposted) {
+                        showNotification && showNotification('You have already reposted this');
+                        return;
+                    }
+                    // mark now to prevent race on subsequent clicks
+                    repostMap[orig.id] = true;
+                    try { localStorage.setItem(mapKey, JSON.stringify(repostMap)); } catch(e) { /* ignore */ }
+                } catch(e) { /* ignore duplicate-check failures */ }
 
                 // Add to local caches for immediate feedback
                 try { postCache = postCache || {}; postCache[newId] = newPost; } catch(e){}
