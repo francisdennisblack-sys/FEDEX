@@ -744,6 +744,18 @@
         color: #0f172a !important; /* dark text */
         border: 1px solid #e5e7eb !important;
     }
+    /* Apply same black highlight to the Return Home (cancel) button when highlighted */
+    #changeGridModal .change-grid-actions #comeHomeBtn.btn-highlight {
+        outline: 4px solid #000000 !important;
+        outline-offset: 0;
+        box-shadow: 0 6px 30px rgba(0,0,0,0.18);
+        padding: 10px 16px;
+        transition: outline 160ms ease, box-shadow 160ms ease;
+        background: #ffffff !important;
+        background-image: none !important;
+        color: #0f172a !important;
+        border: 1px solid #e5e7eb !important;
+    }
     #changeGridLocationPill .c-pill-icon {
         width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
         background: rgba(255,255,255,0.04); border-radius: 4px; flex: 0 0 18px;
@@ -2331,8 +2343,23 @@
         // Helper: compute area tag for given coords using existing auto-detect helpers
         function computeAreaForCoords(coords) {
             try {
-                if (!coords || typeof coords.lat !== 'number' || typeof coords.lon !== 'number') return null;
-                // Prefer autoDetectClosestArea if available
+                // If no explicit coords provided, prefer auto-detect from live/user location
+                if (!coords || typeof coords.lat !== 'number' || typeof coords.lon !== 'number') {
+                    if (typeof autoDetectClosestArea === 'function') {
+                        try {
+                            const area = autoDetectClosestArea(); // will use canonical user coords internally
+                            if (area) return area;
+                        } catch (e) { /* fall through */ }
+                    }
+                    // If still no area, attempt to use canonical user coords directly
+                    const canonical = (typeof getCanonicalUserCoords === 'function') ? getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 }) : null;
+                    if (canonical && typeof getLocationName === 'function') {
+                        return getLocationName(canonical.lat, canonical.lon);
+                    }
+                    return null;
+                }
+
+                // Prefer autoDetectClosestArea if available for explicit coords
                 if (typeof autoDetectClosestArea === 'function') {
                     const area = autoDetectClosestArea(coords);
                     if (area) return area;
@@ -37032,8 +37059,8 @@
                 }
                 const r = document.getElementById('comeHomeBtn');
                 if (r) {
-                    r.textContent = 'cancel';
-                    r.setAttribute('aria-label', 'cancel');
+                    r.textContent = 'Return Home';
+                    r.setAttribute('aria-label', 'Return Home');
                 }
             } catch(e) {}
         })();
@@ -37269,6 +37296,13 @@
                             changeBtn.setAttribute('aria-pressed','true');
                             try { changeBtn.focus(); } catch (e) {}
                         }
+                        // also highlight the Return Home button with the same visual affordance
+                        try {
+                            if (comeHomeBtn) {
+                                comeHomeBtn.classList.add('btn-highlight');
+                                comeHomeBtn.setAttribute('aria-pressed','true');
+                            }
+                        } catch (e) {}
                         // Immediately inform the service worker of the selection so it's ready by the time user presses Change
                         try {
                             if (navigator.serviceWorker && navigator.serviceWorker.controller) {
@@ -37397,16 +37431,23 @@
                         const hasManualOverride = Boolean(localStorage.getItem('lastChosenLocation')) || localStorage.getItem('shouldHighlightComeHome') === '1';
                         console.log('LOCATION_OVERRIDE_STATUS: init hasManualOverride=', hasManualOverride, 'userLocationCache=', !!localStorage.getItem('userLocationCache'), 'lastChosenLocation=', !!localStorage.getItem('lastChosenLocation'));
                         if (hasManualOverride) {
-                            // Apply persisted transfer (if present) or default Come Home green
-                            const tBg = localStorage.getItem('transferBg') || '#10B981';
-                            const tColor = localStorage.getItem('transferColor') || '#ffffff';
-                            if (comeHomeBtn) { comeHomeBtn.style.background = tBg; comeHomeBtn.style.color = tColor; }
-                            if (changeBtn) { changeBtn.style.background = '#ffffff'; changeBtn.style.color = '#111827'; }
+                            // Apply persisted transfer by toggling highlight class on Come Home
+                            const shouldHighlight = localStorage.getItem('shouldHighlightComeHome') === '1';
+                            if (comeHomeBtn) {
+                                if (shouldHighlight) {
+                                    comeHomeBtn.classList.add('btn-highlight');
+                                    comeHomeBtn.setAttribute('aria-pressed','true');
+                                } else {
+                                    comeHomeBtn.classList.remove('btn-highlight');
+                                    comeHomeBtn.removeAttribute('aria-pressed');
+                                }
+                            }
+                            if (changeBtn) { changeBtn.classList.remove('btn-highlight'); changeBtn.removeAttribute('aria-pressed'); }
                         } else {
-                            // No manual override: Change Location should be green (using real/location)
+                            // No manual override: Change Location should be visually prominent (use class)
                             console.log('LOCATION_OVERRIDE_STATUS: init using real/cached browser location');
-                            if (changeBtn) { changeBtn.style.background = '#10B981'; changeBtn.style.color = '#ffffff'; }
-                            if (comeHomeBtn) { comeHomeBtn.style.background = ''; comeHomeBtn.style.color = ''; }
+                            if (changeBtn) { changeBtn.classList.add('btn-highlight'); changeBtn.setAttribute('aria-pressed','true'); }
+                            if (comeHomeBtn) { comeHomeBtn.classList.remove('btn-highlight'); comeHomeBtn.removeAttribute('aria-pressed'); }
                         }
                     } catch (e) {}
                 } catch (e) {}
@@ -37452,13 +37493,12 @@
                             try { if (typeof renderGrid === 'function') renderGrid(); else if (typeof forceGridRefresh === 'function') forceGridRefresh(); } catch (e) {}
 
                             // Immediately apply visual transfer flags and reload the page so the saved location is authoritative.
-                            try {
-                                localStorage.setItem('shouldHighlightComeHome','1');
-                                localStorage.setItem('transferBg', '#10B981');
-                                localStorage.setItem('transferColor', '#ffffff');
-                                if (comeHomeBtn) { comeHomeBtn.style.background = '#10B981'; comeHomeBtn.style.color = '#ffffff'; }
-                                if (changeBtn) { changeBtn.style.background = '#ffffff'; changeBtn.style.color = '#111827'; }
-                            } catch (e) {}
+                                try {
+                                    // Persist that Come Home should be highlighted and apply class-based highlight
+                                    localStorage.setItem('shouldHighlightComeHome','1');
+                                    if (comeHomeBtn) { comeHomeBtn.classList.add('btn-highlight'); comeHomeBtn.setAttribute('aria-pressed','true'); }
+                                    if (changeBtn) { changeBtn.classList.remove('btn-highlight'); changeBtn.removeAttribute('aria-pressed'); }
+                                } catch (e) {}
 
                             // Post to the service worker (best-effort) and then reload immediately so the new manual location takes effect without prompting.
                             try {
@@ -37476,28 +37516,25 @@
                     } catch (e) { console.warn('changeBtn handler error', e); }
 
                     // Only transfer highlight/fill if a temp selection exists
-                    try {
-                        if (window.__tempLocationOverride) {
-                            try {
-                                // Mark that Come Home should be highlighted after reload
-                                localStorage.setItem('shouldHighlightComeHome','1');
-                                // Persist simple transfer colors: make Come Home green and Change white
-                                localStorage.setItem('transferBg', '#10B981');
-                                localStorage.setItem('transferColor', '#ffffff');
-                                if (comeHomeBtn) { comeHomeBtn.style.background = '#10B981'; comeHomeBtn.style.color = '#ffffff'; }
-                                if (changeBtn) { changeBtn.style.background = '#ffffff'; changeBtn.style.color = '#111827'; }
-                                try { if (comeHomeBtn) comeHomeBtn.focus(); } catch (e) {}
-                                console.log('LOCATION_OVERRIDE: manual override applied; reloading to apply new location');
-                            } catch (e) {}
-                            // Wait for service worker confirmation to reload; fallback to reload after 5s
-                            try {
-                                    let didReload = false;
-                                    const fallback = setTimeout(() => {
-                                            if (!didReload) {
-                                                try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch(e) {}
-                                                programmaticReload();
-                                            }
-                                        }, 250);
+                                try {
+                                if (window.__tempLocationOverride) {
+                                    try {
+                                        // Mark that Come Home should be highlighted after reload
+                                        localStorage.setItem('shouldHighlightComeHome','1');
+                                        if (comeHomeBtn) { comeHomeBtn.classList.add('btn-highlight'); comeHomeBtn.setAttribute('aria-pressed','true'); }
+                                        if (changeBtn) { changeBtn.classList.remove('btn-highlight'); changeBtn.removeAttribute('aria-pressed'); }
+                                        try { if (comeHomeBtn) comeHomeBtn.focus(); } catch (e) {}
+                                        console.log('LOCATION_OVERRIDE: manual override applied; reloading to apply new location');
+                                    } catch (e) {}
+                                    // Wait for service worker confirmation to reload; fallback to reload after 5s
+                                    try {
+                                            let didReload = false;
+                                            const fallback = setTimeout(() => {
+                                                    if (!didReload) {
+                                                        try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch(e) {}
+                                                        programmaticReload();
+                                                    }
+                                                }, 250);
                                 // Global SW message listener (registered above) will perform reload when it receives confirmation.
                                 // Mark reloaded if that happens; also attach a short-lived listener to be safe.
                                 const onMsg = (ev) => {
