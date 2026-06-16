@@ -11414,27 +11414,55 @@
                     clientId: generateClientId()
                 });
 
-                // Prevent duplicate reposts: allow one repost per original per user
+                // Resolve root original post (follow repostOf chain where possible)
+                let rootId = orig.id;
                 try {
-                    // Check localStorage map first
+                    let walker = orig;
+                    while (walker && walker.repostOf) {
+                        const parent = (postCache && postCache[walker.repostOf]) || null;
+                        if (parent && parent.id) {
+                            walker = parent;
+                            rootId = walker.id;
+                            continue;
+                        }
+                        // Cannot resolve further via postCache — use the explicit repostOf id as root
+                        rootId = walker.repostOf;
+                        break;
+                    }
+                } catch (e) { /* fallback: keep rootId = orig.id */ }
+
+                function isRepostOfRoot(postObj, rootIdCheck) {
+                    try {
+                        if (!postObj || !rootIdCheck) return false;
+                        let cur = postObj;
+                        while (cur && cur.repostOf) {
+                            if (String(cur.repostOf) === String(rootIdCheck)) return true;
+                            cur = (postCache && postCache[cur.repostOf]) || null;
+                        }
+                        return false;
+                    } catch (e) { return false; }
+                }
+
+                // Prevent duplicate reposts: allow one repost per root original per user
+                try {
                     const mapKey = `reposts_by_${currentUserId}`;
                     let repostMap = {};
                     try { repostMap = JSON.parse(localStorage.getItem(mapKey) || '{}'); } catch(e) { repostMap = {}; }
-                    // Also scan in-memory grid/postCache for existing reposts by this user
-                    const alreadyReposted = !!(repostMap[orig.id] ||
-                        Object.values(postCache || {}).find(p => p && p.repostOf === orig.id && p.userId === currentUserId) ||
-                        Object.keys(gridContent || {}).some(k => Array.isArray(gridContent[k]) && gridContent[k].find(p => p && p.repostOf === orig.id && p.userId === currentUserId))
+
+                    const alreadyReposted = !!(repostMap[rootId] ||
+                        Object.values(postCache || {}).find(p => p && p.userId === currentUserId && (p.id === rootId || isRepostOfRoot(p, rootId))) ||
+                        Object.keys(gridContent || {}).some(k => Array.isArray(gridContent[k]) && gridContent[k].find(p => p && p.userId === currentUserId && (p.id === rootId || isRepostOfRoot(p, rootId))))
                     );
                     if (alreadyReposted) {
                         showNotification && showNotification('You have already reposted this');
                         return;
                     }
                     // mark now to prevent race on subsequent clicks
-                    repostMap[orig.id] = true;
+                    repostMap[rootId] = true;
                     try { localStorage.setItem(mapKey, JSON.stringify(repostMap)); } catch(e) { /* ignore */ }
                 } catch(e) { /* ignore duplicate-check failures */ }
 
-                // Add to local caches for immediate feedback
+                // Add new repost to local caches for immediate feedback
                 try { postCache = postCache || {}; postCache[newId] = newPost; } catch(e){}
                 try {
                     const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
@@ -11445,61 +11473,61 @@
                     window.lastRenderGridTime = 0;
                     renderGrid();
 
-                    // Increment repost count on the original post locally and persist update
+                    // Increment repost count on the root original post locally and persist update
                     try {
-                        orig.repostCount = (orig.repostCount || orig.reposts || 0) + 1;
-                        // update caches
-                        try { if (postCache && postCache[orig.id]) postCache[orig.id].repostCount = orig.repostCount; } catch(e){}
+                        // compute current root count (from cache if present)
+                        const currentRoot = (postCache && postCache[rootId]) || null;
+                        const prev = (currentRoot && (currentRoot.repostCount || currentRoot.reposts)) || 0;
+                        const newRootCount = prev + 1;
+
+                        // Update postCache/root placeholder
+                        try {
+                            postCache = postCache || {};
+                            if (!postCache[rootId]) postCache[rootId] = { id: rootId };
+                            postCache[rootId].repostCount = newRootCount;
+                        } catch(e) {}
+
+                        // Propagate into gridContent entries that are the root or reposts (direct or indirect)
                         try {
                             for (const k in gridContent) {
                                 if (!Array.isArray(gridContent[k])) continue;
-                                const found = gridContent[k].find(p => p && p.id === orig.id);
-                                if (found) found.repostCount = orig.repostCount;
-                            }
-                        } catch(e){}
-                        // Sync repostCount into caches for original and all reposts
-                        try {
-                            // Update postCache for original
-                            if (postCache && postCache[orig.id]) postCache[orig.id].repostCount = orig.repostCount;
-                            // Update any repost entries in gridContent and postCache
-                            try {
-                                for (const k in gridContent) {
-                                    if (!Array.isArray(gridContent[k])) continue;
-                                    for (const p of gridContent[k]) {
-                                        if (!p || !p.id) continue;
-                                        if (p.id === orig.id || p.repostOf === orig.id) {
-                                            p.repostCount = orig.repostCount;
-                                            try { if (postCache && postCache[p.id]) postCache[p.id].repostCount = orig.repostCount; } catch(e){}
-                                            // Update visible DOM node if present
-                                            try {
-                                                const node = document.querySelector(`.grid-box[data-post-id="${p.id}"]`);
-                                                if (node) {
-                                                    let span = node.querySelector('.left-square-btn .repost-count-circle');
-                                                    if (!span) {
-                                                        const leftBtn = node.querySelector('.left-square-btn');
-                                                        if (leftBtn) {
-                                                            span = document.createElement('span');
-                                                            span.className = 'repost-count-circle';
-                                                            leftBtn.appendChild(span);
-                                                        }
+                                for (const p of gridContent[k]) {
+                                    if (!p || !p.id) continue;
+                                    let matches = false;
+                                    if (String(p.id) === String(rootId)) matches = true;
+                                    else if (isRepostOfRoot(p, rootId)) matches = true;
+                                    if (matches) {
+                                        p.repostCount = newRootCount;
+                                        try { if (postCache && postCache[p.id]) postCache[p.id].repostCount = newRootCount; } catch(e){}
+                                        // Update visible DOM node if present
+                                        try {
+                                            const node = document.querySelector(`.grid-box[data-post-id="${p.id}"]`);
+                                            if (node) {
+                                                let span = node.querySelector('.left-square-btn .repost-count-circle');
+                                                if (!span) {
+                                                    const leftBtn = node.querySelector('.left-square-btn');
+                                                    if (leftBtn) {
+                                                        span = document.createElement('span');
+                                                        span.className = 'repost-count-circle';
+                                                        leftBtn.appendChild(span);
                                                     }
-                                                    if (span) span.textContent = orig.repostCount > 0 ? String(orig.repostCount) : '';
                                                 }
-                                            } catch(e) { /* ignore DOM update failures */ }
-                                        }
+                                                if (span) span.textContent = newRootCount > 0 ? String(newRootCount) : '';
+                                            }
+                                        } catch(e) { /* ignore DOM update failures */ }
                                     }
                                 }
-                            } catch(e) { /* ignore gridContent sync failures */ }
+                            }
+                        } catch(e) { /* ignore gridContent sync failures */ }
 
-                            // Persist to Firebase in background (best-effort)
-                            try {
-                                if (typeof getDatabase === 'function' && typeof update === 'function' && typeof ref === 'function') {
-                                    const db = getDatabase();
-                                    update(ref(db, `posts/${orig.id}`), { repostCount: orig.repostCount }).catch(() => {});
-                                }
-                            } catch (e) { /* ignore persistence failures */ }
-                        } catch (e) { /* ignore sync failures */ }
-                    } catch (e) { console.warn('Failed updating original repost count', e); }
+                        // Persist to Firebase in background (best-effort)
+                        try {
+                            if (typeof getDatabase === 'function' && typeof update === 'function' && typeof ref === 'function') {
+                                const db = getDatabase();
+                                update(ref(db, `posts/${rootId}`), { repostCount: newRootCount }).catch(() => {});
+                            }
+                        } catch (e) { /* ignore persistence failures */ }
+                    } catch (e) { console.warn('Failed updating root repost count', e); }
                 } catch (e) { console.warn('Failed to insert repost locally', e); }
 
                 // Persist to Firebase/shared collection in background
