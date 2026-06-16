@@ -400,6 +400,47 @@
                 console.error('❌ Failed to update post zone on server for', postId, error);
             }
         }
+
+        // Ensure a newly created/inserted post is visible immediately to the user.
+        // This forces the virtual scroller to include the item at the front and
+        // scroll to it so reposts appear without waiting for a refresh.
+        function ensureNewPostVisible(post) {
+            try {
+                if (!post || !post.id) return;
+                const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
+                gridContent[key] = gridContent[key] || [];
+
+                // If not present in the content bucket, add to front
+                if (!gridContent[key].some(p => p && p.id === post.id)) {
+                    gridContent[key].unshift(post);
+                }
+
+                // Update postCache
+                try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
+
+                // Force scroller items to include this post at the front
+                if (window.gridScroller && Array.isArray(gridScroller.items)) {
+                    const items = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
+                    const foundIdx = items.findIndex(i => i && i.id === post.id);
+                    if (foundIdx === -1) {
+                        // Prepend
+                        const newItems = [post, ...items];
+                        try { if (typeof gridScroller.setItems === 'function') gridScroller.setItems(newItems); else gridScroller.items = newItems; } catch(e) { gridScroller.items = newItems; }
+                    } else if (foundIdx > 0) {
+                        // Move to front
+                        const item = items.splice(foundIdx, 1)[0];
+                        items.unshift(item);
+                        try { if (typeof gridScroller.setItems === 'function') gridScroller.setItems(items); else gridScroller.items = items; } catch(e) { gridScroller.items = items; }
+                    }
+                    try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
+                    try { if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(0); } catch(e){}
+                } else {
+                    // Fallback: force immediate render and scroll top
+                    try { window.lastRenderGridTime = 0; renderGrid(); } catch(e){}
+                    try { window.scrollTo(0,0); } catch(e){}
+                }
+            } catch (e) { console.warn('ensureNewPostVisible failed', e); }
+        }
                     // Use transparent BG and dark text for custom updates (guard if element missing)
                     const zonePredictor = (function(){ try { return document.getElementById('zonePredictor'); } catch(e) { return null; } })();
                     try { if (zonePredictor) { zonePredictor.style.color = '#111827'; zonePredictor.style.background = 'transparent'; } } catch(e) {}
@@ -11601,21 +11642,7 @@
                         }
 
                         // Ensure the new repost is visible to the user immediately.
-                        try {
-                            if (window.gridScroller && Array.isArray(gridScroller.items)) {
-                                const idx = (gridScroller.items || []).findIndex(i => i && i.id === newId);
-                                if (idx >= 0) {
-                                    if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(idx);
-                                    else if (typeof gridScroller.scrollToItem === 'function') gridScroller.scrollToItem(idx);
-                                } else {
-                                    // As a best-effort, scroll to top where new posts are expected
-                                    try { if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(0); } catch(e){}
-                                }
-                            } else {
-                                // force a render and scroll the window to top
-                                window.lastRenderGridTime = 0; renderGrid(); try { window.scrollTo(0,0); } catch(e){}
-                            }
-                        } catch (e) { /* ignore visibility failures */ }
+                        try { ensureNewPostVisible(newPost); } catch (e) { /* ignore visibility failures */ }
                     } catch(e) {
                         // If insertion helper fails, fallback to naive prepend + render
                         gridContent[key].unshift(newPost);
@@ -16496,18 +16523,67 @@
                 console.log('🗑️ DELETING FROM SHARED COLLECTION:');
                 console.log('  postId:', postId);
                 console.log('  Firebase path: posts/' + postId);
-                // Broadcast a lightweight tombstone event so other clients can react
+                // Read the post first so we can include repost/root metadata in the tombstone
                 try {
-                    const evRef = ref(database, `post_events/removed/${postId}`);
-                    await set(evRef, { removedBy: currentUserId || null, timestamp: Date.now() });
-                    console.log('📣 Emitted post_removed event for', postId);
-                } catch (evErr) {
-                    console.warn('⚠️ Could not write post_removed event for', postId, evErr);
-                }
+                    const postRef = ref(database, `posts/${postId}`);
+                    const snap = await get(postRef);
+                    const postData = snap && snap.exists() ? snap.val() : null;
 
-                const postRef = ref(database, `posts/${postId}`);
-                await remove(postRef);
-                console.log('✅ Post successfully deleted from shared collection:', postId);
+                    // Attempt to resolve rootId for reposts (best-effort, limited depth)
+                    async function findRootIdFrom(postObj, maxDepth = 6) {
+                        try {
+                            if (!postObj) return null;
+                            if (!postObj.repostOf) return postObj.id || null;
+                            let curId = postObj.repostOf;
+                            for (let i = 0; i < maxDepth; i++) {
+                                if (!curId) break;
+                                const s = await get(ref(database, `posts/${curId}`));
+                                if (!s.exists()) break;
+                                const p = s.val();
+                                if (!p) break;
+                                if (!p.repostOf) return curId;
+                                curId = p.repostOf;
+                            }
+                            return curId || (postObj.repostOf || null);
+                        } catch (e) { return postObj && postObj.repostOf ? postObj.repostOf : null; }
+                    }
+
+                    let rootId = null;
+                    let isRepost = false;
+                    try {
+                        if (postData && postData.repostOf) {
+                            isRepost = true;
+                            rootId = await findRootIdFrom(postData);
+                        }
+                    } catch (e) { /* ignore resolution failures */ }
+
+                    // Broadcast a lightweight tombstone event so other clients can react
+                    try {
+                        const evRef = ref(database, `post_events/removed/${postId}`);
+                        await set(evRef, { removedBy: currentUserId || null, timestamp: Date.now(), isRepost: !!isRepost, rootId: rootId || null, repostOf: (postData && postData.repostOf) || null });
+                        console.log('📣 Emitted post_removed event for', postId, 'isRepost:', !!isRepost, 'rootId:', rootId);
+                    } catch (evErr) {
+                        console.warn('⚠️ Could not write post_removed event for', postId, evErr);
+                    }
+
+                    // Now remove the post from shared collection
+                    try {
+                        await remove(postRef);
+                        console.log('✅ Post successfully deleted from shared collection:', postId);
+                    } catch (rmErr) {
+                        console.warn('⚠️ Failed to remove post after tombstone write - attempting remove again', rmErr);
+                        await remove(postRef);
+                    }
+                } catch (errorReading) {
+                    // Fallback: if reading failed, still try to emit a simple tombstone and remove
+                    try {
+                        const evRef = ref(database, `post_events/removed/${postId}`);
+                        await set(evRef, { removedBy: currentUserId || null, timestamp: Date.now() });
+                    } catch (evErr) { /* ignore */ }
+                    const postRef = ref(database, `posts/${postId}`);
+                    await remove(postRef);
+                    console.log('✅ Post removed (fallback) from shared collection:', postId);
+                }
             } catch (error) {
                 console.error('❌ Error deleting post from Firebase:', error);
                 throw error;
@@ -16578,6 +16654,68 @@
                         window.pendingRemovedPosts.add(postId);
                         window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
                         window.globallyDeletedPostIds.add(postId);
+
+                        // If the tombstone includes repost/root metadata, atomically decrement the root's repostCount
+                        try {
+                            const ev = snap.val() || {};
+                            const tombstoneRoot = ev.rootId || null;
+                            const tombstoneIsRepost = !!ev.isRepost;
+                            if (tombstoneIsRepost && tombstoneRoot) {
+                                (async () => {
+                                    try {
+                                        const rootCountRef = ref(database, `posts/${tombstoneRoot}/repostCount`);
+                                        const txResult = await runTransaction(rootCountRef, (current) => {
+                                            const cur = Number(current || 0);
+                                            return Math.max(0, cur - 1);
+                                        });
+
+                                        // Extract new count from transaction result (best-effort)
+                                        let newCount = null;
+                                        try {
+                                            if (txResult && txResult.snapshot && typeof txResult.snapshot.val === 'function') newCount = txResult.snapshot.val();
+                                            else if (txResult && typeof txResult.val === 'number') newCount = txResult.val;
+                                        } catch (e) { /* ignore */ }
+
+                                        if (newCount === null || newCount === undefined) return;
+
+                                        // Update local caches and visible DOM for root and its reposts
+                                        try { postCache = postCache || {}; if (!postCache[tombstoneRoot]) postCache[tombstoneRoot] = { id: tombstoneRoot }; postCache[tombstoneRoot].repostCount = newCount; } catch(e){}
+                                        try {
+                                            for (const k in gridContent) {
+                                                if (!Array.isArray(gridContent[k])) continue;
+                                                for (const p of gridContent[k]) {
+                                                    if (!p || !p.id) continue;
+                                                    let matches = false;
+                                                    if (String(p.id) === String(tombstoneRoot)) matches = true;
+                                                    else if (isRepostOfRoot(p, tombstoneRoot)) matches = true;
+                                                    if (matches) {
+                                                        p.repostCount = newCount;
+                                                        try { if (postCache && postCache[p.id]) postCache[p.id].repostCount = newCount; } catch(e){}
+                                                        try {
+                                                            const node = document.querySelector(`.grid-box[data-post-id="${p.id}"]`);
+                                                            if (node) {
+                                                                let span = node.querySelector('.left-square-btn .repost-count-circle');
+                                                                if (!span) {
+                                                                    const leftBtn = node.querySelector('.left-square-btn');
+                                                                    if (leftBtn) {
+                                                                        span = document.createElement('span');
+                                                                        span.className = 'repost-count-circle';
+                                                                        leftBtn.appendChild(span);
+                                                                    }
+                                                                }
+                                                                if (span) span.textContent = String(newCount);
+                                                            }
+                                                        } catch(e) { /* ignore DOM update errors */ }
+                                                    }
+                                                }
+                                            }
+                                        } catch(e) { /* ignore cache/propagate errors */ }
+                                    } catch (e) {
+                                        console.warn('Failed to decrement root repostCount for', tombstoneRoot, e);
+                                    }
+                                })();
+                            }
+                        } catch (e) { /* ignore tombstone handling errors */ }
                         // Drop from in-memory caches
                         try { if (window.postCache) delete window.postCache[postId]; } catch(e){}
                         try {
@@ -19315,6 +19453,72 @@
                 window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
                 window.pendingRemovedPosts.add(deletedPostId);
             } catch(e) { console.warn('pendingDeletedPosts write failed', e); }
+
+            // If this deleted post is a repost (we have it locally), optimistically
+            // decrement the root's repostCount in local caches & DOM so UI updates
+            // immediately. The background tombstone will ensure server-side update.
+            try {
+                let localPost = (postCache && postCache[deletedPostId]) || null;
+                // fallback: search gridContent buckets
+                if (!localPost) {
+                    for (const k in gridContent) {
+                        if (!Array.isArray(gridContent[k])) continue;
+                        const found = (gridContent[k] || []).find(p => p && p.id === deletedPostId);
+                        if (found) { localPost = found; break; }
+                    }
+                }
+                if (localPost && localPost.repostOf) {
+                    // resolve root id by walking local postCache (best-effort)
+                    let cur = localPost;
+                    let rootId = cur.id;
+                    try {
+                        while (cur && cur.repostOf) {
+                            rootId = cur.repostOf;
+                            cur = (postCache && postCache[cur.repostOf]) || null;
+                        }
+                    } catch (e) { /* ignore */ }
+
+                    if (rootId) {
+                        try {
+                            const prev = (postCache && postCache[rootId] && (postCache[rootId].repostCount || postCache[rootId].reposts)) || 0;
+                            const newCount = Math.max(0, prev - 1);
+                            if (!postCache) postCache = {};
+                            if (!postCache[rootId]) postCache[rootId] = { id: rootId };
+                            postCache[rootId].repostCount = newCount;
+
+                            // propagate into gridContent & DOM
+                            for (const k in gridContent) {
+                                if (!Array.isArray(gridContent[k])) continue;
+                                for (const p of gridContent[k]) {
+                                    if (!p || !p.id) continue;
+                                    let matches = false;
+                                    if (String(p.id) === String(rootId)) matches = true;
+                                    else if (isRepostOfRoot(p, rootId)) matches = true;
+                                    if (matches) {
+                                        p.repostCount = newCount;
+                                        try { if (postCache && postCache[p.id]) postCache[p.id].repostCount = newCount; } catch(e){}
+                                        try {
+                                            const node = document.querySelector(`.grid-box[data-post-id="${p.id}"]`);
+                                            if (node) {
+                                                let span = node.querySelector('.left-square-btn .repost-count-circle');
+                                                if (!span) {
+                                                    const leftBtn = node.querySelector('.left-square-btn');
+                                                    if (leftBtn) {
+                                                        span = document.createElement('span');
+                                                        span.className = 'repost-count-circle';
+                                                        leftBtn.appendChild(span);
+                                                    }
+                                                }
+                                                if (span) span.textContent = String(newCount);
+                                            }
+                                        } catch(e) { /* ignore DOM errors */ }
+                                    }
+                                }
+                            }
+                        } catch (e) { /* ignore propagation errors */ }
+                    }
+                }
+            } catch (e) { console.warn('Optimistic local repostCount decrement failed', e); }
 
             // Also hide from memory for immediate UI update
             try { persistHiddenPostForViewer(deletedPostId, currentUserId); } catch (e) { console.warn('Failed to persist delete hide state', e); }
