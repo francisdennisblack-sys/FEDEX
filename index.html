@@ -6919,34 +6919,22 @@
                             userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
                             resolve(userLocation);
                         } else {
-                            // Permission is 'prompt' - we need to ask
-                            console.log('❓ Location permission not yet decided - asking user (browser will show dialog once)');
-                            navigator.geolocation.getCurrentPosition(
-                                (position) => {
-                                    userLocation = {
-                                        lat: position.coords.latitude,
-                                        lon: position.coords.longitude,
-                                        accuracy: position.coords.accuracy
-                                    };
-                                    setUserLocationCache(userLocation);
-                                    try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e) {}
-                                    persistContinuousLocationConsent('browser prompt');
-                                    console.log('💾 Location cached in localStorage');
-                                    console.log('📍 User Location Acquired & Cached');
-                                    updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
-                                    resolve(userLocation);
-                                    
-                                    // NOW: Start continuous location watching for real-time updates
-                                    startContinuousLocationTracking();
-                                },
-                                () => {
-                                    console.log('⚠️ User denied or location access failed');
-                                    userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
-                                    updateLocationStatus('🚫 Denied', 'Using NYC fallback');
-                                    resolve(userLocation);
-                                },
-                                { enableHighAccuracy: true, timeout: 8000, maximumAge: 300000 }
-                            );
+                                        // Permission is 'prompt' - avoid triggering the browser prompt on load.
+                                        // Instead, show our persistent banner which only requests geolocation
+                                        // if the user explicitly taps 'Allow Always'. Resolve now with a
+                                        // fallback (cached location if present or a safe default) so page
+                                        // loads without the browser permission dialog repeating on refresh.
+                                        console.log('❓ Location permission not yet decided - showing banner instead of immediate prompt');
+                                        try { showContinuousLocationPermissionUI(); } catch(e) { console.warn('showContinuousLocationPermissionUI failed', e); }
+                                        // If we have a cached location use it; otherwise return a safe default
+                                        if (userLocation && userLocation.lat && userLocation.lon) {
+                                            resolve(userLocation);
+                                        } else if (localStorage.getItem('userLocationCache')) {
+                                            try { userLocation = JSON.parse(localStorage.getItem('userLocationCache')); resolve(userLocation); } catch(e) { userLocation = { lat:40.7150, lon:-74.0070, accuracy:100 }; resolve(userLocation); }
+                                        } else {
+                                            userLocation = { lat: 40.7150, lon: -74.0070, accuracy: 100 };
+                                            resolve(userLocation);
+                                        }
                         }
                     });
                 } else {
@@ -7069,11 +7057,29 @@
             allowBtn.onmouseover = () => allowBtn.style.transform = 'scale(1.05)';
             allowBtn.onmouseout = () => allowBtn.style.transform = 'scale(1)';
             allowBtn.onclick = () => {
-                console.log('✅ User allowed continuous location tracking for this session');
-                persistContinuousLocationConsent('banner approval');
+                console.log('✅ User allowed continuous location tracking for this session (banner)');
+                try { persistContinuousLocationConsent('banner approval'); } catch(e){}
+                // Attempt to acquire a one-time current position now (will prompt only once)
+                try {
+                    if (navigator.geolocation) {
+                        navigator.geolocation.getCurrentPosition((position) => {
+                            try {
+                                const loc = { lat: position.coords.latitude, lon: position.coords.longitude, accuracy: position.coords.accuracy };
+                                userLocation = loc;
+                                try { setUserLocationCache(loc); } catch(e){}
+                                try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e){}
+                                updateLocationStatus('✅ Cached', `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`);
+                                // Start continuous tracking if allowed
+                                try { startContinuousLocationTracking(); } catch(e){}
+                            } catch(e) { console.warn('banner geolocation success handler failed', e); }
+                        }, (err) => {
+                            console.warn('Banner-based geolocation failed or was denied:', err && err.message);
+                        }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 300000 });
+                    }
+                } catch (e) { console.warn('Failed to request geolocation from banner allow', e); }
+
                 banner.classList.add('hide');
                 setTimeout(() => banner.remove(), 300);
-                // Already tracking due to requestGeolocation() startup
             };
 
             const dismissBtn = document.createElement('button');
