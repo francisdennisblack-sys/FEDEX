@@ -37280,6 +37280,19 @@
                         if (!window.__originalUserLocation) window.__originalUserLocation = window.userLocation || null;
                         // set temporary override and update the input immediately
                         window.__tempLocationOverride = { lat: it.lat, lon: it.lon, label: it.label };
+                        // Compute delta (meters) from the original location to the selected location
+                        try {
+                            const prev = window.__originalUserLocation || (localStorage.getItem('userLocationCache') ? JSON.parse(localStorage.getItem('userLocationCache')) : null) || { lat: 0, lon: 0 };
+                            if (prev && Number.isFinite(Number(prev.lat)) && Number.isFinite(Number(prev.lon))) {
+                                const km = calculateDistance(Number(prev.lat), Number(prev.lon), Number(it.lat), Number(it.lon));
+                                const meters = Math.round(km * 1000);
+                                window.__tempLocationOverride.deltaMeters = meters;
+                            } else {
+                                window.__tempLocationOverride.deltaMeters = null;
+                            }
+                        } catch (e) { window.__tempLocationOverride.deltaMeters = null; }
+                        // Mirror the tentative area label for immediate UI use
+                        try { window.latestUserAreaTag = (it.label || '').trim(); } catch(e) {}
                         if (refineInput) refineInput.value = it.label;
                         // Populate other related inputs (e.g., coffee shop search fields) so user can press Change Location on the same page
                         try {
@@ -37297,6 +37310,7 @@
                         } catch (e) {}
                         // notify other components
                         try { document.dispatchEvent(new CustomEvent('locationSelected', { detail: window.__tempLocationOverride })); } catch (e) {}
+                        try { document.dispatchEvent(new CustomEvent('locationSelectedWithDelta', { detail: window.__tempLocationOverride })); } catch (e) {}
                         // apply as current user location for immediate preview
                         try { window.userLocation = { lat: it.lat, lon: it.lon }; } catch (e) {}
                         // attempt to re-render grid immediately so selection 'works first time'
@@ -37492,8 +37506,10 @@
                                     console.log('LOCATION_OVERRIDE: wrote userLocationCache (manual override):', cacheObj);
                                 } catch (ce) { console.warn('Failed to write userLocationCache', ce); }
 
-                                localStorage.setItem('lastChosenLocation', JSON.stringify(sel));
-                                try { window.latestUserAreaTag = (sel && (sel.label || '')) ? String(sel.label || '').trim() : window.latestUserAreaTag; } catch(e) {}
+                                    // Include computed delta (if present) so downstream code can use distance info
+                                    try { if (!sel.deltaMeters && window.__tempLocationOverride && window.__tempLocationOverride.deltaMeters) sel.deltaMeters = window.__tempLocationOverride.deltaMeters; } catch(e){}
+                                    localStorage.setItem('lastChosenLocation', JSON.stringify(sel));
+                                    try { window.latestUserAreaTag = (sel && (sel.label || '')) ? String(sel.label || '').trim() : window.latestUserAreaTag; } catch(e) {}
                                 try { localStorage.setItem('manualLocationActive', '1'); } catch(e) {}
                                 localStorage.setItem('lastLocationTimestamp', String(sel.changedAt || Date.now()));
                                 try { checkSavedLocationAreaMatch(); } catch(e) {}
