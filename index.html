@@ -4457,6 +4457,7 @@
                     .like-count--smaller { font-size: 10px; }
                     .like-count--xsmall { font-size: 9px; }
                     .like-count--xxsmall { font-size: 8px; }
+                    .repost-count-circle { display:inline-block; font-weight:700; font-size:12px; line-height:1; padding:0 4px; }
                 `;
                 document.head.appendChild(s);
             } catch(e) { /* ignore style injection failures */ }
@@ -11456,15 +11457,48 @@
                                 if (found) found.repostCount = orig.repostCount;
                             }
                         } catch(e){}
-                        // Repost badge UI removed — do not attempt to update DOM elements for repost count
-
-                        // Persist to Firebase in background (best-effort)
+                        // Sync repostCount into caches for original and all reposts
                         try {
-                            if (typeof getDatabase === 'function' && typeof update === 'function' && typeof ref === 'function') {
-                                const db = getDatabase();
-                                update(ref(db, `posts/${orig.id}`), { repostCount: orig.repostCount }).catch(() => {});
-                            }
-                        } catch (e) { /* ignore persistence failures */ }
+                            // Update postCache for original
+                            if (postCache && postCache[orig.id]) postCache[orig.id].repostCount = orig.repostCount;
+                            // Update any repost entries in gridContent and postCache
+                            try {
+                                for (const k in gridContent) {
+                                    if (!Array.isArray(gridContent[k])) continue;
+                                    for (const p of gridContent[k]) {
+                                        if (!p || !p.id) continue;
+                                        if (p.id === orig.id || p.repostOf === orig.id) {
+                                            p.repostCount = orig.repostCount;
+                                            try { if (postCache && postCache[p.id]) postCache[p.id].repostCount = orig.repostCount; } catch(e){}
+                                            // Update visible DOM node if present
+                                            try {
+                                                const node = document.querySelector(`.grid-box[data-post-id="${p.id}"]`);
+                                                if (node) {
+                                                    let span = node.querySelector('.left-square-btn .repost-count-circle');
+                                                    if (!span) {
+                                                        const leftBtn = node.querySelector('.left-square-btn');
+                                                        if (leftBtn) {
+                                                            span = document.createElement('span');
+                                                            span.className = 'repost-count-circle';
+                                                            leftBtn.appendChild(span);
+                                                        }
+                                                    }
+                                                    if (span) span.textContent = orig.repostCount > 0 ? String(orig.repostCount) : '';
+                                                }
+                                            } catch(e) { /* ignore DOM update failures */ }
+                                        }
+                                    }
+                                }
+                            } catch(e) { /* ignore gridContent sync failures */ }
+
+                            // Persist to Firebase in background (best-effort)
+                            try {
+                                if (typeof getDatabase === 'function' && typeof update === 'function' && typeof ref === 'function') {
+                                    const db = getDatabase();
+                                    update(ref(db, `posts/${orig.id}`), { repostCount: orig.repostCount }).catch(() => {});
+                                }
+                            } catch (e) { /* ignore persistence failures */ }
+                        } catch (e) { /* ignore sync failures */ }
                     } catch (e) { console.warn('Failed updating original repost count', e); }
                 } catch (e) { console.warn('Failed to insert repost locally', e); }
 
@@ -28780,6 +28814,7 @@
                     const mediaEmoji = isVideo ? '🎥' : '📷';
                     const mediaIndicatorHTML = `<div class="post-text-content" style="padding: 14px 14px 72px 14px; overflow-y: auto; height: 100%; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; display:flex; align-items:center; justify-content:center;"><div style="font-size: 64px;" title="Tap to view ${isVideo ? 'video' : 'photo'}">${mediaEmoji}</div></div>`;
 
+                    const displayRepostCount = Number(post.repostCount || post.reposts || (post.repostOf && postCache && postCache[post.repostOf] && postCache[post.repostOf].repostCount) || 0);
                     let voteBadge = '';
                     try {
                         if (!currentUserId) {
@@ -28790,7 +28825,7 @@
                         } else {
                             voteBadge = `<div style="position: absolute; bottom: 8px; right: 8px; left: auto; display: flex; flex-direction: row; gap: 6px; align-items: center;">
                                 <button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;">↓</button>
-                                <button class="left-square-btn" onclick="event.stopPropagation(); leftSquareActionOnPost('${post.id}')" title="Left square" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#555;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"> </button>
+                                <button class="left-square-btn" onclick="event.stopPropagation(); leftSquareActionOnPost('${post.id}')" title="Reposts" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#555;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:13px;"><span class="repost-count-circle">${displayRepostCount>0?displayRepostCount:''}</span></button>
                                 <button class="aux-btn" onclick="event.stopPropagation(); auxActionOnPost('${post.id}')" title="Aux action" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#444;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:16px;">+</button>
                                 <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count like-count ${"" + (typeof window.getLikeFontClass === 'function' ? window.getLikeFontClass(likes) : '')}">${likes > 0 ? (typeof window.formatLikeCount === 'function' ? window.formatLikeCount(likes) : likes) : ''}</span></button>
                             </div>`;
@@ -28837,12 +28872,14 @@
                     // 📷/🎥 mode: render the post text + media emoji on the tile.
                     // The actual photo/video is shown only inside the pop-out modal.
                     try {
+                        // Resolve display repost count: prefer post's own count, else lookup original's count
+                        const displayRepostCount = Number(post.repostCount || post.reposts || (post.repostOf && postCache && postCache[post.repostOf] && postCache[post.repostOf].repostCount) || 0);
                         // Remove any stale grid-media container left over from prior renders
                         const staleMedia = box.querySelector('.grid-media');
                         if (staleMedia) staleMedia.remove();
-                        box.innerHTML = `${repostBadgeHTML}${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
+                            box.innerHTML = `${repostBadgeHTML}${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
                     } catch (e) {
-                        box.innerHTML = `${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
+                            box.innerHTML = `${mediaIndicatorHTML}${voteBadge}${boostTimerHTML}${badgeHTML}${zoneTagHTML}`;
                     }
                 } else {
                     // Text-only post
@@ -28858,6 +28895,7 @@
                     // Vote buttons sit just above the area tag (28px tall) at the bottom
                     let voteBadge = '';
                     try {
+                        const displayRepostCount = Number(post.repostCount || post.reposts || (post.repostOf && postCache && postCache[post.repostOf] && postCache[post.repostOf].repostCount) || 0);
                         if (!currentUserId) {
                             voteBadge = `<div style="position: absolute; bottom: 36px; right: 8px; left: auto; display: flex; flex-direction: row; gap: 8px; align-items: center;">
                                 <div style="width:36px;height:36px;background:#222;color:#888;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;">↑ ${likes > 0 ? likes : ''}</div>
@@ -28865,7 +28903,7 @@
                             </div>`;
                         } else {
                             voteBadge = `<div style="position: absolute; bottom: 8px; right: 8px; left: auto; display: flex; flex-direction: row; gap: 8px; align-items: center;">
-                                <button class="left-square-btn" onclick="event.stopPropagation(); leftSquareActionOnPost('${post.id}')" title="Left square" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#555;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"> </button>
+                                <button class="left-square-btn" onclick="event.stopPropagation(); leftSquareActionOnPost('${post.id}')" title="Reposts" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#555;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:13px;"><span class=\"repost-count-circle\">${displayRepostCount>0?displayRepostCount:''}</span></button>
                                 <button class="aux-btn" onclick="event.stopPropagation(); auxActionOnPost('${post.id}')" title="Aux action" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#444;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:16px;">+</button>
                                 <button class="like-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count like-count ${"" + (typeof window.getLikeFontClass === 'function' ? window.getLikeFontClass(likes) : '')}">${likes > 0 ? (typeof window.formatLikeCount === 'function' ? window.formatLikeCount(likes) : likes) : ''}</span></button>
                                 <button class="dislike-btn" onclick="event.stopPropagation(); voteOnPost('${post.id}', 'dislike')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;">↓</button>
