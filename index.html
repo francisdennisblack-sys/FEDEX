@@ -141,8 +141,7 @@
                                             try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
                                             try { applySavedLocationAuthoritative(); } catch(e) {}
                                             try { checkSavedLocationAreaMatch(); } catch(e) {}
-                                            // Do not reload — apply saved location in-place
-                                            try { applySavedLocationAuthoritative(); } catch(e) {}
+                                            try { location.reload(); } catch(e) {}
                                     } catch (e) { console.warn('Failed to apply SW location', e); }
                                 } else if (data && data.type === 'locationUpdateFailed') {
                                     console.warn('ServiceWorker failed to persist location:', data.error);
@@ -38185,6 +38184,35 @@
                 const closeBtn = modal && modal.querySelector('.modal-close');
                 const changeBtn = document.getElementById('changeLocationBtn');
                 const comeHomeBtn = document.getElementById('comeHomeBtn');
+                // Apply saved manual location in-place and refresh UI without reloading
+                function applySavedLocationAndRefreshUI(sel) {
+                    try {
+                        // Mirror persisted label into memory
+                        try {
+                            const raw = localStorage.getItem('lastChosenLocation');
+                            if (raw) {
+                                const parsed = JSON.parse(raw);
+                                const lbl = (parsed && (parsed.label || parsed.name || parsed.display)) ? String(parsed.label || parsed.name || parsed.display).trim() : null;
+                                if (lbl) try { window.latestUserAreaTag = lbl; } catch(e) {}
+                                if ((!window.userLocation || !window.userLocation.lat || !window.userLocation.lon) && parsed && parsed.lat != null && parsed.lon != null) {
+                                    try { window.userLocation = { lat: Number(parsed.lat), lon: Number(parsed.lon) }; } catch(e) {}
+                                }
+                            }
+                        } catch (e) {}
+                        try { checkSavedLocationAreaMatch && checkSavedLocationAreaMatch(); } catch (e) {}
+                        try {
+                            if (typeof renderGrid === 'function') {
+                                window.lastRenderGridTime = 0;
+                                try { window.postPublishImmediateRefresh = true; } catch(e){}
+                                renderGrid();
+                                try { window.postPublishImmediateRefresh = false; } catch(e){}
+                            }
+                        } catch (e) {}
+                        try { if (typeof window.requestGridUpdate === 'function') window.requestGridUpdate('location'); } catch(e){}
+                        try { if (typeof closeModal === 'function') closeModal(); } catch(e){}
+                        try { if (typeof showNotification === 'function') showNotification('Location applied'); } catch(e){}
+                    } catch (e) { console.warn('applySavedLocationAndRefreshUI failed', e); }
+                }
                 function openModal(){
                     if (!backdrop) return;
                     backdrop.style.display = 'flex';
@@ -38701,7 +38729,7 @@
                                 }
                             } catch (e) { console.warn('Failed to message service worker', e); }
 
-                            try { applySavedLocationAuthoritative(); return; } catch (e) { /* best-effort fallback ignored */ }
+                            try { applySavedLocationAndRefreshUI(); return; } catch (e) { console.warn('applySavedLocationAndRefreshUI failed', e); }
                         } else {
                             console.log('Change location (manual):', { primary });
                         }
@@ -38721,7 +38749,8 @@
                                             let didReload = false;
                                             const fallback = setTimeout(() => {
                                                     if (!didReload) {
-                                                        try { applySavedLocationAuthoritative(); } catch(e) {}
+                                                        try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch(e) {}
+                                                        applySavedLocationAndRefreshUI();
                                                     }
                                                 }, 250);
                                 // Global SW message listener (registered above) will perform reload when it receives confirmation.
@@ -38732,12 +38761,12 @@
                                         if (d && d.type === 'locationUpdated') {
                                             didReload = true;
                                             clearTimeout(fallback);
-                                            try { applySavedLocationAuthoritative(); } catch (e) { /* ignore */ }
+                                            try { applySavedLocationAndRefreshUI(); } catch (e) { console.warn('applySavedLocationAndRefreshUI failed in SW message', e); }
                                             navigator.serviceWorker.removeEventListener('message', onMsg);
                                         }
                                     } catch (e) {}
                                 };
-                                            if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('message', onMsg);
+                                if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('message', onMsg);
                             } catch (e) { /* if anything fails, allow existing flow to continue */ }
                         } else {
                             console.log('Change location pressed with no selected suggestion');
@@ -38783,24 +38812,7 @@
                     closeModal();
                     // After restore, reload so the app uses the restored cached location
                     try { checkSavedLocationAreaMatch(); } catch(e) {}
-                    try { checkSavedLocationAreaMatch(); } catch() {}
-                    try {
-                        // Apply restored userLocationCache (if any) into runtime and refresh UI without reloading
-                        try {
-                            const cacheRaw = localStorage.getItem('userLocationCache');
-                            if (cacheRaw) {
-                                const parsedCache = JSON.parse(cacheRaw);
-                                try { userLocation = { lat: Number(parsedCache.lat), lon: Number(parsedCache.lon), accuracy: parsedCache.accuracy || 100 }; } catch(e) {}
-                                try { setUserLocationCache(parsedCache, { force: true }); } catch(e) {}
-                                try { if (typeof computeAreaForCoords === 'function') currentZoneTag = computeAreaForCoords(userLocation.lat, userLocation.lon); } catch(e) {}
-                                try { updateZonePredictor(); } catch(e) {}
-                                try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
-                                return;
-                            }
-                        } catch(e) {}
-                        // Fallback: apply saved manual location routine
-                        try { applySavedLocationAuthoritative(); return; } catch(e) {}
-                    } catch (e) { /* ignore */ }
+                    try { programmaticReload(); return; } catch (e) { try { location.reload(); } catch(e2){} }
                 });
                 if (backdrop) backdrop.addEventListener('click', function(e){ if (e.target === backdrop) closeModal(); });
                 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeModal(); });
