@@ -141,7 +141,8 @@
                                             try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
                                             try { applySavedLocationAuthoritative(); } catch(e) {}
                                             try { checkSavedLocationAreaMatch(); } catch(e) {}
-                                            try { location.reload(); } catch(e) {}
+                                            // Do not reload — apply saved location in-place
+                                            try { applySavedLocationAuthoritative(); } catch(e) {}
                                     } catch (e) { console.warn('Failed to apply SW location', e); }
                                 } else if (data && data.type === 'locationUpdateFailed') {
                                     console.warn('ServiceWorker failed to persist location:', data.error);
@@ -38700,7 +38701,7 @@
                                 }
                             } catch (e) { console.warn('Failed to message service worker', e); }
 
-                            try { programmaticReload(); return; } catch (e) { try { location.reload(); } catch (e2) {} }
+                            try { applySavedLocationAuthoritative(); return; } catch (e) { /* best-effort fallback ignored */ }
                         } else {
                             console.log('Change location (manual):', { primary });
                         }
@@ -38720,8 +38721,7 @@
                                             let didReload = false;
                                             const fallback = setTimeout(() => {
                                                     if (!didReload) {
-                                                        try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch(e) {}
-                                                        programmaticReload();
+                                                        try { applySavedLocationAuthoritative(); } catch(e) {}
                                                     }
                                                 }, 250);
                                 // Global SW message listener (registered above) will perform reload when it receives confirmation.
@@ -38732,12 +38732,12 @@
                                         if (d && d.type === 'locationUpdated') {
                                             didReload = true;
                                             clearTimeout(fallback);
-                                            try { programmaticReload(); } catch (e) { try { location.reload(); } catch(e2){} }
+                                            try { applySavedLocationAuthoritative(); } catch (e) { /* ignore */ }
                                             navigator.serviceWorker.removeEventListener('message', onMsg);
                                         }
                                     } catch (e) {}
                                 };
-                                if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('message', onMsg);
+                                            if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('message', onMsg);
                             } catch (e) { /* if anything fails, allow existing flow to continue */ }
                         } else {
                             console.log('Change location pressed with no selected suggestion');
@@ -38783,7 +38783,24 @@
                     closeModal();
                     // After restore, reload so the app uses the restored cached location
                     try { checkSavedLocationAreaMatch(); } catch(e) {}
-                    try { programmaticReload(); return; } catch (e) { try { location.reload(); } catch(e2){} }
+                    try { checkSavedLocationAreaMatch(); } catch() {}
+                    try {
+                        // Apply restored userLocationCache (if any) into runtime and refresh UI without reloading
+                        try {
+                            const cacheRaw = localStorage.getItem('userLocationCache');
+                            if (cacheRaw) {
+                                const parsedCache = JSON.parse(cacheRaw);
+                                try { userLocation = { lat: Number(parsedCache.lat), lon: Number(parsedCache.lon), accuracy: parsedCache.accuracy || 100 }; } catch(e) {}
+                                try { setUserLocationCache(parsedCache, { force: true }); } catch(e) {}
+                                try { if (typeof computeAreaForCoords === 'function') currentZoneTag = computeAreaForCoords(userLocation.lat, userLocation.lon); } catch(e) {}
+                                try { updateZonePredictor(); } catch(e) {}
+                                try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
+                                return;
+                            }
+                        } catch(e) {}
+                        // Fallback: apply saved manual location routine
+                        try { applySavedLocationAuthoritative(); return; } catch(e) {}
+                    } catch (e) { /* ignore */ }
                 });
                 if (backdrop) backdrop.addEventListener('click', function(e){ if (e.target === backdrop) closeModal(); });
                 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeModal(); });
