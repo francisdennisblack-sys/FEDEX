@@ -11998,6 +11998,132 @@
                 } catch (e) { /* ignore scroller update failures */ }
             } catch (e) { console.warn('ensureUniqueAndInsert failed', e); }
         }
+
+        // Realtime WebSocket client: connects to a WS server, batches incoming
+        // post metadata, dedupes and merges into `gridContent` via
+        // `ensureUniqueAndInsert`. Includes reconnect/backoff and a small
+        // batching window to avoid layout thrash.
+        window._realtimeWS = window._realtimeWS || {
+            ws: null,
+            url: null,
+            backoff: 1000,
+            maxBackoff: 30000,
+            reconnectTimer: null,
+            buffer: [],
+            flushTimer: null,
+            enabled: false
+        };
+
+        function _wsScheduleFlush(delay = 250) {
+            try {
+                if (window._realtimeWS.flushTimer) return;
+                window._realtimeWS.flushTimer = setTimeout(() => {
+                    try {
+                        const batch = window._realtimeWS.buffer.splice(0, window._realtimeWS.buffer.length);
+                        window._realtimeWS.flushTimer = null;
+                        if (!batch || batch.length === 0) return;
+                        // Merge each incoming post into the active feed key
+                        const key = (typeof getActiveViewerFeedKey === 'function') ? getActiveViewerFeedKey() : 'shared-posts';
+                        for (const p of batch) {
+                            try {
+                                if (!p || !p.id) continue;
+                                // merge into gridContent and update scroller safely
+                                ensureUniqueAndInsert(key, p);
+                            } catch (e) { /* ignore per-item errors */ }
+                        }
+                        // Trigger a gentle grid update and badge recalculation
+                        try { if (typeof requestGridUpdate === 'function') requestGridUpdate('realtime-ws'); } catch(e){}
+                        try { if (typeof recalculateBadgesForCurrentGrid === 'function') recalculateBadgesForCurrentGrid(); } catch(e){}
+                    } catch (e) { console.warn('Realtime WS flush failed', e); }
+                }, delay);
+            } catch (e) { console.warn('wsScheduleFlush failed', e); }
+        }
+
+        function _wsHandleMessage(msg) {
+            try {
+                if (!msg) return;
+                let data = msg;
+                if (typeof msg === 'string') {
+                    try { data = JSON.parse(msg); } catch (e) { data = null; }
+                }
+                if (!data) return;
+                // Accept both single post and bulk lists
+                if (data.type === 'new_post' && data.post) {
+                    window._realtimeWS.buffer.push(data.post);
+                } else if (data.type === 'bulk_posts' && Array.isArray(data.posts)) {
+                    for (const p of data.posts) if (p && p.id) window._realtimeWS.buffer.push(p);
+                } else if (data.post && data.post.id) {
+                    // fallback: some servers just send { post: {...} }
+                    window._realtimeWS.buffer.push(data.post);
+                }
+                _wsScheduleFlush();
+            } catch (e) { console.warn('wsHandleMessage failed', e); }
+        }
+
+        function _wsConnect() {
+            try {
+                const state = window._realtimeWS;
+                if (!state || !state.url) return false;
+                try { if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) return true; } catch(e){}
+                const ws = new WebSocket(state.url);
+                state.ws = ws;
+
+                ws.onopen = () => {
+                    try {
+                        state.backoff = 1000; // reset backoff
+                        state.enabled = true;
+                        if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
+                        console.log('📡 Realtime WS connected');
+                    } catch (e) {}
+                };
+
+                ws.onmessage = (ev) => {
+                    try { _wsHandleMessage(ev.data); } catch (e) { console.warn('ws onmessage error', e); }
+                };
+
+                ws.onerror = (ev) => {
+                    try { console.warn('Realtime WS error', ev); } catch (e) {}
+                };
+
+                ws.onclose = (ev) => {
+                    try {
+                        state.ws = null;
+                        state.enabled = false;
+                        console.log('📡 Realtime WS closed; scheduling reconnect...');
+                        if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+                        state.reconnectTimer = setTimeout(() => {
+                            try { _wsConnect(); } catch (e) { console.warn('ws reconnect failed', e); }
+                        }, state.backoff);
+                        state.backoff = Math.min(state.backoff * 2, state.maxBackoff);
+                    } catch (e) { console.warn('ws onclose handling failed', e); }
+                };
+
+                return true;
+            } catch (e) { console.warn('wsConnect failed', e); return false; }
+        }
+
+        window.startRealtimeWebSocket = function(url) {
+            try {
+                if (!url) return false;
+                window._realtimeWS.url = url;
+                window._realtimeWS.backoff = 1000;
+                // immediately connect
+                return _wsConnect();
+            } catch (e) { console.warn('startRealtimeWebSocket failed', e); return false; }
+        };
+
+        window.stopRealtimeWebSocket = function() {
+            try {
+                const s = window._realtimeWS;
+                if (!s) return;
+                try { if (s.flushTimer) { clearTimeout(s.flushTimer); s.flushTimer = null; } } catch(e){}
+                try { if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; } } catch(e){}
+                try { if (s.ws) { s.ws.close(); s.ws = null; } } catch(e){}
+                s.enabled = false;
+                s.buffer = [];
+                console.log('📡 Realtime WS stopped');
+            } catch (e) { console.warn('stopRealtimeWebSocket failed', e); }
+        };
         
         // ============================================================================
         // 🚀 BOOTSTRAP SEQUENCE: Auth → Grid → Posts (in correct order)
