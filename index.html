@@ -17171,6 +17171,47 @@
             }
         }
 
+        // Subscribe to per-post update events (likes/dislikes changes)
+        function subscribeToPostUpdatedEvents() {
+            try {
+                if (!database) return;
+                if (window._postUpdatedListenerAttached) return;
+                window._postUpdatedListenerAttached = true;
+
+                const evRoot = ref(database, 'post_events/updated');
+                console.log('🎧 Subscribing to post_events/updated for vote-count broadcasts');
+                onChildAdded(evRoot, (snap) => {
+                    try {
+                        const postId = snap.key;
+                        if (!postId) return;
+                        const payload = snap.val() || {};
+                        const likes = Number(payload.likes) || 0;
+                        const dislikes = Number(payload.dislikes) || 0;
+                        // Apply counts into local caches and visible DOM
+                        try { syncPostVoteCountsEverywhere(postId, likes, dislikes); } catch(e) {}
+                        try { updateVoteDisplayInDOM(postId, likes, dislikes); } catch(e) {}
+                        // Also update any gridScroller items and gridContent buckets
+                        try {
+                            if (postCache && postCache[postId]) { postCache[postId].likes = likes; postCache[postId].dislikes = dislikes; }
+                            for (const k of Object.keys(gridContent || {})) {
+                                const arr = gridContent[k];
+                                if (!Array.isArray(arr)) continue;
+                                for (const p of arr) {
+                                    if (p && p.id === postId) { p.likes = likes; p.dislikes = dislikes; }
+                                }
+                            }
+                            if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                                for (const it of window.gridScroller.items) if (it && it.id === postId) { it.likes = likes; it.dislikes = dislikes; }
+                            }
+                        } catch (e) { /* ignore cache updates */ }
+                        try { refreshVisiblePostGlowOutlines('post-updated-event'); } catch(e) {}
+                    } catch (e) { console.warn('post_updated handler failed', e); }
+                });
+            } catch (e) {
+                console.warn('subscribeToPostUpdatedEvents failed', e);
+            }
+        }
+
         function showSoftRefreshBanner() {
             try {
                 if (document.getElementById('softRefreshBanner')) return;
@@ -17455,6 +17496,16 @@
                 try {
                     const postRef = ref(database, `posts/${postId}`);
                     await update(postRef, { likes: likeCount, dislikes: dislikeCount });
+                    // Emit lightweight per-post update event so other clients
+                    // receive the new counts immediately (mirrors added/removed events)
+                    try {
+                        const updRef = ref(database, `post_events/updated/${postId}`);
+                        const ev = { id: postId, likes: likeCount, dislikes: dislikeCount, timestamp: Date.now() };
+                        // best-effort fire-and-forget
+                        await set(updRef, ev).catch(() => {});
+                    } catch (evErr) {
+                        console.warn('Could not emit post_updated event for', postId, evErr);
+                    }
                 } catch (e) {
                     console.warn('Failed to update posts/{postId} counts after transaction:', e);
                 }
@@ -24186,6 +24237,7 @@
                     try {
                         if (typeof subscribeToPostRemovedEvents === 'function') subscribeToPostRemovedEvents();
                         if (typeof subscribeToPostAddedEvents === 'function') subscribeToPostAddedEvents();
+                        if (typeof subscribeToPostUpdatedEvents === 'function') subscribeToPostUpdatedEvents();
                     } catch (e) { console.warn('subscribeToPostRemovedEvents wiring failed', e); }
 
                     console.log('  uniquePosts length after dedupe:', uniquePosts.length, 'missingOwnerCount:', missingOwnerCount);
