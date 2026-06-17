@@ -1069,7 +1069,7 @@
             LOAD_MEGA_POI: false,          // disable loading 1.5M+ location/POI chunks
             ENABLE_POI_LOADING: true,      // allow minimal POI loads; set false to skip all POI work
             ENABLE_VERBOSE_SW: false,      // disable verbose service-worker console logs
-            RUN_BACKGROUND_TRACKING: false, // disable continuous location tracking loops
+            RUN_BACKGROUND_TRACKING: true, // enable continuous location tracking for accurate area tagging
             ENABLE_CONTENT_FRESHNESS: true // enable feed freshness waterfall and stale fallback injection
         };
 
@@ -7188,10 +7188,10 @@
             return { name: 'Regional', tier: 5 };
         }
 
-        // Request geolocation (NO browser permission prompt by default)
-        // We intentionally avoid calling `navigator.geolocation` unless `window.USE_BROWSER_GEO === true`.
-        // Instead we use a privacy-friendly IP-based fallback and an in-app prompt for manual entry.
-        window.USE_BROWSER_GEO = window.USE_BROWSER_GEO || false;
+        // Request geolocation with the user's permission for accurate, real-time area tagging.
+        // When enabled, we use the browser's GPS (high accuracy). We still fall back to
+        // IP-based geolocation if the user denies permission or GPS is unavailable.
+        window.USE_BROWSER_GEO = (window.USE_BROWSER_GEO === false) ? false : true;
         async function getIpLocation() {
             try {
                 const res = await fetch('https://ipapi.co/json/');
@@ -7370,18 +7370,50 @@
             allowBtn.onclick = () => {
                 console.log('✅ User allowed continuous location tracking for this session (banner)');
                 try { persistContinuousLocationConsent('banner approval'); } catch(e){}
-                // Use privacy-first acquisition (IP-based or cached). We avoid the OS/browser permission prompt.
+                // Request the REAL browser GPS permission so we get accurate coordinates.
+                // This surfaces the OS/browser permission prompt. If granted, we use the
+                // precise GPS fix and start continuous tracking. If denied or unavailable,
+                // we fall back to the privacy-friendly IP/cached acquisition.
                 try {
-                    requestGeolocation().then((loc) => {
-                        if (loc && loc.lat && loc.lon) {
+                    if (window.USE_BROWSER_GEO && navigator.geolocation) {
+                        navigator.geolocation.getCurrentPosition((position) => {
+                            const loc = {
+                                lat: position.coords.latitude,
+                                lon: position.coords.longitude,
+                                accuracy: position.coords.accuracy,
+                                source: 'gps'
+                            };
                             userLocation = loc;
                             try { setUserLocationCache(loc); } catch(e){}
                             try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e){}
-                            updateLocationStatus('✅ Cached', `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`);
+                            updateLocationStatus('📍 LIVE', `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`);
                             try { startContinuousLocationTracking(); } catch(e){}
-                        }
-                    }).catch((err) => { console.warn('requestGeolocation failed from banner', err); });
-                } catch (e) { console.warn('Failed to run requestGeolocation from banner allow', e); }
+                        }, (err) => {
+                            console.warn('Browser GPS permission denied/failed; falling back to IP/cached', err);
+                            try {
+                                requestGeolocation().then((loc) => {
+                                    if (loc && loc.lat && loc.lon) {
+                                        userLocation = loc;
+                                        try { setUserLocationCache(loc); } catch(e){}
+                                        try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e){}
+                                        updateLocationStatus('✅ Approx', `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`);
+                                    }
+                                }).catch((e2) => { console.warn('requestGeolocation fallback failed', e2); });
+                            } catch (e3) { console.warn('Fallback acquisition failed', e3); }
+                        }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+                    } else {
+                        // Browser GPS disabled by policy; use privacy-friendly acquisition.
+                        requestGeolocation().then((loc) => {
+                            if (loc && loc.lat && loc.lon) {
+                                userLocation = loc;
+                                try { setUserLocationCache(loc); } catch(e){}
+                                try { localStorage.setItem('lastLocationTimestamp', Date.now().toString()); } catch(e){}
+                                updateLocationStatus('✅ Approx', `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`);
+                                try { startContinuousLocationTracking(); } catch(e){}
+                            }
+                        }).catch((err) => { console.warn('requestGeolocation failed from banner', err); });
+                    }
+                } catch (e) { console.warn('Failed to run geolocation from banner allow', e); }
 
                 banner.classList.add('hide');
                 setTimeout(() => banner.remove(), 300);
