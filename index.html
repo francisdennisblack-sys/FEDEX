@@ -10932,6 +10932,77 @@
         } else {
             document.addEventListener('DOMContentLoaded', startPlaceholderRotator);
         }
+
+        // Ensure the rotator works even if the composer textarea is added later
+        function ensurePostTextObserver() {
+            try {
+                const existing = document.getElementById('postText');
+                if (existing) {
+                    // Ensure placeholder color visible via injected style
+                    try { injectPostTextPlaceholderStyle(); } catch(e){}
+                    attachPostTextListeners(existing);
+                    return; // already present
+                }
+
+                const mo = new MutationObserver((records, obs) => {
+                    for (const r of records) {
+                        for (const n of r.addedNodes) {
+                            try {
+                                if (n && n.querySelector) {
+                                    const found = n.querySelector('#postText');
+                                    if (found) {
+                                        injectPostTextPlaceholderStyle();
+                                        attachPostTextListeners(found);
+                                        // Initialize placeholder immediately
+                                        try { found.placeholder = placeholderTexts[currentPlaceholderIndex % placeholderTexts.length]; } catch(e){}
+                                        // Start rotator if not running
+                                        startPlaceholderRotator();
+                                        obs.disconnect();
+                                        return;
+                                    }
+                                }
+                                // Direct node might be the textarea itself
+                                if (n && n.id === 'postText') {
+                                    injectPostTextPlaceholderStyle();
+                                    attachPostTextListeners(n);
+                                    try { n.placeholder = placeholderTexts[currentPlaceholderIndex % placeholderTexts.length]; } catch(e){}
+                                    startPlaceholderRotator();
+                                    obs.disconnect();
+                                    return;
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+                    }
+                });
+                mo.observe(document.body || document.documentElement, { childList: true, subtree: true });
+            } catch (e) { console.warn('Failed to install postText MutationObserver', e); }
+        }
+
+        function attachPostTextListeners(el) {
+            try {
+                el.removeEventListener('focus', el.__placeholderFocusHandler || (()=>{}));
+                el.removeEventListener('blur', el.__placeholderBlurHandler || (()=>{}));
+                const focusHandler = function(){ try{ stopPlaceholderRotator(); }catch(e){} };
+                const blurHandler = function(){ try{ startPlaceholderRotator(); }catch(e){} };
+                el.addEventListener('focus', focusHandler);
+                el.addEventListener('blur', blurHandler);
+                el.__placeholderFocusHandler = focusHandler;
+                el.__placeholderBlurHandler = blurHandler;
+            } catch (e) { console.warn('Failed to attach postText listeners', e); }
+        }
+
+        function injectPostTextPlaceholderStyle() {
+            try {
+                if (document.getElementById('__postTextPlaceholderStyle')) return;
+                const s = document.createElement('style');
+                s.id = '__postTextPlaceholderStyle';
+                s.textContent = `#postText::placeholder { color: #6b7280 !important; opacity: 1 !important; }`;
+                document.head.appendChild(s);
+            } catch (e) { console.warn('Failed to inject placeholder style', e); }
+        }
+
+        // Ensure observer installed
+        try { ensurePostTextObserver(); } catch (e) { console.warn('ensurePostTextObserver failed', e); }
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) stopPlaceholderRotator(); else startPlaceholderRotator();
         });
