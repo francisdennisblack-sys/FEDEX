@@ -38213,6 +38213,29 @@
                         try { if (typeof showNotification === 'function') showNotification('Location applied'); } catch(e){}
                     } catch (e) { console.warn('applySavedLocationAndRefreshUI failed', e); }
                 }
+
+                // Apply restored userLocation cache (from backup or fresh geolocation) and refresh UI
+                function applyRestoredLocationAndRefreshUI(cacheObj) {
+                    try {
+                        if (cacheObj && cacheObj.lat != null && cacheObj.lon != null) {
+                            try { window.userLocation = { lat: Number(cacheObj.lat), lon: Number(cacheObj.lon), accuracy: cacheObj.accuracy || null }; } catch(e) {}
+                        }
+                        // If cache has a label/name, mirror into latestUserAreaTag
+                        try { if (cacheObj && (cacheObj.label || cacheObj.name)) window.latestUserAreaTag = String(cacheObj.label || cacheObj.name).trim(); } catch(e) {}
+                        try { checkSavedLocationAreaMatch && checkSavedLocationAreaMatch(); } catch (e) {}
+                        try {
+                            if (typeof renderGrid === 'function') {
+                                window.lastRenderGridTime = 0;
+                                try { window.postPublishImmediateRefresh = true; } catch(e){}
+                                renderGrid();
+                                try { window.postPublishImmediateRefresh = false; } catch(e){}
+                            }
+                        } catch (e) {}
+                        try { if (typeof window.requestGridUpdate === 'function') window.requestGridUpdate('location'); } catch(e){}
+                        try { if (typeof closeModal === 'function') closeModal(); } catch(e){}
+                        try { if (typeof showNotification === 'function') showNotification('Returned home'); } catch(e){}
+                    } catch (e) { console.warn('applyRestoredLocationAndRefreshUI failed', e); }
+                }
                 function openModal(){
                     if (!backdrop) return;
                     backdrop.style.display = 'flex';
@@ -38789,7 +38812,18 @@
                             try { window.latestUserAreaTag = ''; } catch(e) {}
                             try { localStorage.removeItem('manualLocationActive'); } catch(e) {}
                             console.log('LOCATION_OVERRIDE: no backup found; requesting fresh geolocation to repopulate cache');
-                            try { if (typeof requestGeolocation === 'function') requestGeolocation().then(loc => { try { setUserLocationCache(loc, { force: true }); console.info('Fetched fresh geolocation and cached'); console.log('LOCATION_OVERRIDE: fresh geolocation cached', loc); } catch(e){} }).catch((err)=>{ console.warn('requestGeolocation failed', err); }); } catch(e){}
+                            try {
+                                if (typeof requestGeolocation === 'function') {
+                                    requestGeolocation().then(loc => {
+                                        try {
+                                            setUserLocationCache(loc, { force: true });
+                                            console.info('Fetched fresh geolocation and cached');
+                                            console.log('LOCATION_OVERRIDE: fresh geolocation cached', loc);
+                                        } catch(e){}
+                                        try { applyRestoredLocationAndRefreshUI(loc); } catch(e) { console.warn('applyRestoredLocationAndRefreshUI failed after geolocation', e); }
+                                    }).catch((err)=>{ console.warn('requestGeolocation failed', err); });
+                                }
+                            } catch(e){}
                         }
                     } catch (e) { console.warn('Error restoring userLocationCache backup', e); }
 
@@ -38810,9 +38844,15 @@
                     // remove highlight UI markers
                     try { comeHomeBtn.classList.remove('btn-highlight'); comeHomeBtn.removeAttribute('aria-pressed'); } catch (e) {}
                     closeModal();
-                    // After restore, reload so the app uses the restored cached location
+                    // After restore, apply restored cache in-place so the app uses the restored cached location
                     try { checkSavedLocationAreaMatch(); } catch(e) {}
-                    try { programmaticReload(); return; } catch (e) { try { location.reload(); } catch(e2){} }
+                    try {
+                        let cacheObj = null;
+                        try { const raw = localStorage.getItem('userLocationCache'); if (raw) cacheObj = JSON.parse(raw); } catch(e) {}
+                        try { applyRestoredLocationAndRefreshUI(cacheObj); return; } catch(e) { console.warn('applyRestoredLocationAndRefreshUI failed', e); }
+                    } catch (e) {
+                        try { programmaticReload(); return; } catch (e2) { try { location.reload(); } catch(e3){} }
+                    }
                 });
                 if (backdrop) backdrop.addEventListener('click', function(e){ if (e.target === backdrop) closeModal(); });
                 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeModal(); });
