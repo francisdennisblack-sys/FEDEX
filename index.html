@@ -4323,7 +4323,7 @@
         // Import Firebase functions
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
         import { getDatabase, ref, set, get, update, remove, onValue, runTransaction } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
-        import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
+        import { getStorage, ref as storageRef, uploadBytes, uploadBytesResumable, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
         import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, browserSessionPersistence, RecaptchaVerifier, signInWithPhoneNumber, signOut } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
 
         const firebaseConfig = {
@@ -16816,8 +16816,24 @@
 
                 let snapshot;
                 try {
-                    snapshot = await uploadBytes(photoRef, file, metadata);
-                    console.log('✅ File uploaded to Storage');
+                    // Use resumable upload to better handle large video files and network retries
+                    snapshot = await new Promise((resolve, reject) => {
+                        try {
+                            const uploadTask = uploadBytesResumable(photoRef, file, metadata);
+                            uploadTask.on('state_changed', (snap) => {
+                                try {
+                                    const progress = snap.totalBytes ? (snap.bytesTransferred / snap.totalBytes) * 100 : 0;
+                                    console.log(`  Upload progress: ${progress.toFixed(1)}%`);
+                                    window.lastUploadProgress = progress;
+                                } catch (e) { /* ignore progress log errors */ }
+                            }, (err) => {
+                                reject(err);
+                            }, () => {
+                                resolve(uploadTask.snapshot);
+                            });
+                        } catch (e) { reject(e); }
+                    });
+                    console.log('✅ File uploaded to Storage (resumable)');
                 } catch (uploadErr) {
                     // Enhanced diagnostics
                     console.error('Upload error:', uploadErr && uploadErr.code, uploadErr && uploadErr.message);
