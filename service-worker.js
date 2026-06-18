@@ -78,13 +78,13 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(event.request)
         .then((response) => {
-          if (response.ok && event.request.url.includes('/posts')) {
+          if (response && response.ok && event.request.url.includes('/posts')) {
             const responseToCache = response.clone();
             caches.open(POSTS_CACHE).then((cache) => cache.put(event.request, responseToCache));
           }
           return response;
         })
-        .catch(() => caches.match(event.request))
+        .catch(() => caches.match(event.request).then((cached) => cached || new Response('Not Found', { status: 404 })))
     );
     return;
   }
