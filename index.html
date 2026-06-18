@@ -16753,10 +16753,14 @@
                 console.log('  Storage path:', photoPath);
                 console.log('  File details:', { name: file.name, size: file.size, type: file.type });
                 
-                // Ensure client is authenticated (anonymous sign-in counts).
-                // Also try to refresh token if a user is present to avoid expired-token denials.
+                // Ensure client is authenticated (anonymous sign-in allowed only when
+                // there is no existing authenticated session). Refresh token first
+                // and fail with a clear error if token refresh is not possible.
                 try {
-                    if (auth && auth.currentUser) {
+                    if (!auth) throw new Error('Firebase Auth not initialized');
+
+                    // If we have a signed-in user, try to refresh their token.
+                    if (auth.currentUser) {
                         try {
                             console.log('Auth: current user exists - attempting token refresh');
                             if (typeof auth.currentUser.getIdToken === 'function') {
@@ -16764,14 +16768,37 @@
                                 console.log('Auth: token refresh success');
                             }
                         } catch (tokErr) {
-                            console.warn('Auth token refresh failed, will attempt anonymous sign-in fallback', tokErr);
-                            try { await signInAnonymously(auth); } catch (e) { console.warn('Anonymous sign-in fallback failed', e); }
+                            console.warn('Auth token refresh failed for existing user', tokErr);
+                            // Do NOT automatically swap out the current signed-in user with an anonymous
+                            // account — that would change the UID and likely fail rules that expect
+                            // the user's UID. Instead, surface a clear diagnostic and attempt a
+                            // conservative anonymous sign-in only if no user was present.
+                            try {
+                                window.lastUploadError = Object.assign({}, window.lastUploadError || {}, { authIssue: true, authError: String(tokErr && tokErr.message || tokErr) });
+                            } catch (ee) {}
+                            throw new Error('Auth token refresh failed; user must re-authenticate.');
                         }
-                    } else if (auth && !auth.currentUser) {
-                        console.log('Auth: no current user - attempting anonymous sign-in before upload');
-                        try { await signInAnonymously(auth); console.log('Anonymous sign-in succeeded'); } catch (e) { console.warn('Anonymous sign-in failed', e); }
+                    } else {
+                        // No current user: attempt anonymous sign-in so uploads can proceed in debug/dev flows.
+                        try {
+                            console.log('Auth: no current user - attempting anonymous sign-in before upload');
+                            await signInAnonymously(auth);
+                            console.log('Anonymous sign-in succeeded');
+                        } catch (anonErr) {
+                            console.warn('Anonymous sign-in failed', anonErr);
+                            try { window.lastUploadError = Object.assign({}, window.lastUploadError || {}, { authIssue: true, authError: String(anonErr && anonErr.message || anonErr) }); } catch (ee) {}
+                            throw new Error('Not authenticated and anonymous sign-in failed');
+                        }
                     }
-                } catch (e) { console.warn('Auth ensure check failed', e); }
+                } catch (e) {
+                    console.error('Pre-upload auth check failed:', e && e.message ? e.message : e);
+                    try {
+                        window.lastUploadError = window.lastUploadError || {};
+                        window.lastUploadError.authStateAtUpload = auth && auth.currentUser ? auth.currentUser.uid : null;
+                        window.lastUploadError.authMessage = e && e.message ? String(e.message) : String(e);
+                    } catch (le) {}
+                    throw e;
+                }
                 // Log current auth UID and token (preview) for debugging upload auth issues
                 try {
                     if (auth && auth.currentUser) {
