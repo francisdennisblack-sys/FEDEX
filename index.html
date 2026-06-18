@@ -17532,7 +17532,8 @@
 
                 const evRoot = ref(database, 'post_events/removed');
                 console.log('🎧 Subscribing to post_events/removed for tombstone broadcasts');
-                onChildAdded(evRoot, (snap) => {
+
+                const handleRemovedEvent = async (snap) => {
                     try {
                         const postId = snap.key;
                         if (!postId) return;
@@ -17550,23 +17551,21 @@
                             const tombstoneRoot = ev.rootId || null;
                             const tombstoneIsRepost = !!ev.isRepost;
                             if (tombstoneIsRepost && tombstoneRoot) {
-                                (async () => {
+                                try {
+                                    const rootCountRef = ref(database, `posts/${tombstoneRoot}/repostCount`);
+                                    const txResult = await runTransaction(rootCountRef, (current) => {
+                                        const cur = Number(current || 0);
+                                        return Math.max(0, cur - 1);
+                                    });
+
+                                    // Extract new count from transaction result (best-effort)
+                                    let newCount = null;
                                     try {
-                                        const rootCountRef = ref(database, `posts/${tombstoneRoot}/repostCount`);
-                                        const txResult = await runTransaction(rootCountRef, (current) => {
-                                            const cur = Number(current || 0);
-                                            return Math.max(0, cur - 1);
-                                        });
+                                        if (txResult && txResult.snapshot && typeof txResult.snapshot.val === 'function') newCount = txResult.snapshot.val();
+                                        else if (txResult && typeof txResult.val === 'number') newCount = txResult.val;
+                                    } catch (e) { /* ignore */ }
 
-                                        // Extract new count from transaction result (best-effort)
-                                        let newCount = null;
-                                        try {
-                                            if (txResult && txResult.snapshot && typeof txResult.snapshot.val === 'function') newCount = txResult.snapshot.val();
-                                            else if (txResult && typeof txResult.val === 'number') newCount = txResult.val;
-                                        } catch (e) { /* ignore */ }
-
-                                        if (newCount === null || newCount === undefined) return;
-
+                                    if (newCount !== null && newCount !== undefined) {
                                         // Update local caches and visible DOM for root and its reposts
                                         try { postCache = postCache || {}; if (!postCache[tombstoneRoot]) postCache[tombstoneRoot] = { id: tombstoneRoot }; postCache[tombstoneRoot].repostCount = newCount; } catch(e){}
                                         try {
@@ -17591,51 +17590,6 @@
                                                                         span.className = 'repost-count-circle';
                                                                         leftBtn.appendChild(span);
                                                                     }
-
-                                                                    function subscribeToPostAddedEvents() {
-                                                                        try {
-                                                                            if (!database) return;
-                                                                            if (window._postAddedListenerAttached) return;
-                                                                            window._postAddedListenerAttached = true;
-
-                                                                            const evRoot = ref(database, 'post_events/added');
-                                                                            console.log('🎧 Subscribing to post_events/added for immediate new-post broadcasts');
-                                                                            onChildAdded(evRoot, async (snap) => {
-                                                                                try {
-                                                                                    const postId = snap.key;
-                                                                                    if (!postId) return;
-                                                                                    // Avoid inserting if we already know about this post
-                                                                                    if (postCache && postCache[postId]) return;
-
-                                                                                    // Fetch full post data (best-effort) then insert into shared grid
-                                                                                    try {
-                                                                                        const pRef = ref(database, `posts/${postId}`);
-                                                                                        const pSnap = await get(pRef);
-                                                                                        if (!pSnap || !pSnap.exists()) return;
-                                                                                        const postObj = pSnap.val();
-                                                                                        postObj.id = postId;
-                                                                                        try { normalizePostFields(postObj); } catch(e){}
-
-                                                                                        // Cache and insert safely without breaking dedupe
-                                                                                        try { addToPostCache(postObj); } catch(e){}
-                                                                                        try {
-                                                                                            const key = 'shared-posts';
-                                                                                            gridContent[key] = gridContent[key] || [];
-                                                                                            if (!isPostHiddenForViewer(postObj, currentUserId)) {
-                                                                                                if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(key, postObj);
-                                                                                                else ensureUniqueAndInsert(key, postObj);
-                                                                                                console.log('➕ Inserted new post from post_events/added into shared-posts:', postId);
-                                                                                            }
-                                                                                        } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
-                                                                                    } catch (fetchErr) {
-                                                                                        console.warn('Failed to fetch post for post_added event', postId, fetchErr);
-                                                                                    }
-                                                                                } catch (e) { console.warn('post_added handler failed', e); }
-                                                                            });
-                                                                        } catch (e) {
-                                                                            console.warn('subscribeToPostAddedEvents failed', e);
-                                                                        }
-                                                                    }
                                                                 }
                                                                 if (span) span.textContent = String(newCount);
                                                             }
@@ -17644,12 +17598,13 @@
                                                 }
                                             }
                                         } catch(e) { /* ignore cache/propagate errors */ }
-                                    } catch (e) {
-                                        console.warn('Failed to decrement root repostCount for', tombstoneRoot, e);
                                     }
-                                })();
+                                } catch (err) {
+                                    console.warn('Failed to decrement root repostCount for', tombstoneRoot, err);
+                                }
                             }
                         } catch (e) { /* ignore tombstone handling errors */ }
+
                         // Drop from in-memory caches
                         try { if (window.postCache) delete window.postCache[postId]; } catch(e){}
                         try {
@@ -17674,7 +17629,10 @@
                         try { window.lastRenderGridTime = 0; } catch(e){}
                         try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
                     } catch (e) { console.warn('post_removed handler failed', e); }
-                });
+                };
+
+                onChildAdded(evRoot, handleRemovedEvent);
+                onChildChanged(evRoot, handleRemovedEvent);
             } catch (e) {
                 console.warn('subscribeToPostRemovedEvents failed', e);
             }
@@ -17727,6 +17685,54 @@
                 onChildChanged(evRoot, applyUpdatedEvent);
             } catch (e) {
                 console.warn('subscribeToPostUpdatedEvents failed', e);
+            }
+        }
+
+        // Subscribe to post_added broadcasts so new posts (including reposts)
+        // are pushed into viewers' grids immediately without requiring a
+        // hard refresh. Defined at top-level so it can be invoked reliably.
+        function subscribeToPostAddedEvents() {
+            try {
+                if (!database) return;
+                if (window._postAddedListenerAttached) return;
+                window._postAddedListenerAttached = true;
+
+                const evRoot = ref(database, 'post_events/added');
+                console.log('🎧 Subscribing to post_events/added for immediate new-post broadcasts');
+                onChildAdded(evRoot, async (snap) => {
+                    try {
+                        const postId = snap.key;
+                        if (!postId) return;
+                        // Avoid inserting if we already know about this post
+                        if (postCache && postCache[postId]) return;
+
+                        // Fetch full post data (best-effort) then insert into shared grid
+                        try {
+                            const pRef = ref(database, `posts/${postId}`);
+                            const pSnap = await get(pRef);
+                            if (!pSnap || !pSnap.exists()) return;
+                            const postObj = pSnap.val();
+                            postObj.id = postId;
+                            try { normalizePostFields(postObj); } catch(e){}
+
+                            // Cache and insert safely without breaking dedupe
+                            try { addToPostCache(postObj); } catch(e){}
+                            try {
+                                const key = 'shared-posts';
+                                gridContent[key] = gridContent[key] || [];
+                                if (!isPostHiddenForViewer(postObj, currentUserId)) {
+                                    if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(key, postObj);
+                                    else ensureUniqueAndInsert(key, postObj);
+                                    console.log('➕ Inserted new post from post_events/added into shared-posts:', postId);
+                                }
+                            } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
+                        } catch (fetchErr) {
+                            console.warn('Failed to fetch post for post_added event', postId, fetchErr);
+                        }
+                    } catch (e) { console.warn('post_added handler failed', e); }
+                });
+            } catch (e) {
+                console.warn('subscribeToPostAddedEvents failed', e);
             }
         }
 
