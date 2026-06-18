@@ -7362,6 +7362,67 @@
             });
         }
 
+        // Attempt to get a fresh high-accuracy geolocation (prompts user if needed)
+        function getFreshGeolocation(timeoutMs = 5000) {
+            return new Promise(async (resolve) => {
+                // Respect manual override
+                try {
+                    const manualActive = localStorage.getItem('manualLocationActive') === '1' || !!localStorage.getItem('lastChosenLocation');
+                    if (manualActive) {
+                        try {
+                            const saved = JSON.parse(localStorage.getItem('lastChosenLocation') || '{}');
+                            if (saved && saved.lat != null && saved.lon != null) {
+                                userLocation = { lat: Number(saved.lat), lon: Number(saved.lon), accuracy: saved.accuracy || 100, manual: true };
+                                return resolve(userLocation);
+                            }
+                        } catch (e) { /* ignore parse errors */ }
+                    }
+                } catch (e) { /* ignore */ }
+
+                if (!window.USE_BROWSER_GEO || !navigator.geolocation) {
+                    // Fallback to requestGeolocation behavior (IP or cached)
+                    const fallback = await requestGeolocation();
+                    return resolve(fallback);
+                }
+
+                let handled = false;
+                const onSuccess = (position) => {
+                    try {
+                        userLocation = { lat: position.coords.latitude, lon: position.coords.longitude, accuracy: position.coords.accuracy };
+                        setUserLocationCache && setUserLocationCache(userLocation);
+                        geolocationRequested = true;
+                    } catch (e) { /* ignore */ }
+                    if (!handled) {
+                        handled = true;
+                        resolve(userLocation);
+                    }
+                };
+                const onError = async (err) => {
+                    if (!handled) {
+                        handled = true;
+                        // Fall back to cached or IP
+                        const fallback = await requestGeolocation();
+                        resolve(fallback);
+                    }
+                };
+
+                try {
+                    navigator.geolocation.getCurrentPosition(onSuccess, onError, { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 });
+                    // Also set a hard timeout in case callback never fires
+                    setTimeout(async () => {
+                        if (!handled) {
+                            handled = true;
+                            const fallback = await requestGeolocation();
+                            resolve(fallback);
+                        }
+                    }, timeoutMs + 300);
+                } catch (e) {
+                    const fallback = await requestGeolocation();
+                    return resolve(fallback);
+                }
+            });
+        }
+
         // ============================================
         // CONTINUOUS LOCATION TRACKING ENHANCED
         // Watch position and update zone tag as user moves
@@ -35591,9 +35652,13 @@
                 // Ensure geolocation is requested at post-time (only when user presses Post)
                 try {
                     const manualActive = localStorage.getItem('manualLocationActive') === '1' || !!localStorage.getItem('lastChosenLocation');
-                    if (!manualActive && !geolocationRequested) {
-                        console.log('📍 Requesting geolocation now because user pressed Post');
-                        try { await requestGeolocation(); } catch (e) { console.warn('Post-time geolocation failed', e); }
+                    if (!manualActive) {
+                        console.log('📍 Requesting fresh geolocation now because user pressed Post');
+                        try {
+                            // Attempt a fresh high-accuracy position (prompts user if needed)
+                            const fresh = await getFreshGeolocation(5000);
+                            console.log('  Fresh geolocation obtained for post-time:', fresh && fresh.lat ? `${fresh.lat.toFixed(6)}, ${fresh.lon.toFixed(6)} (acc ${fresh.accuracy})` : fresh);
+                        } catch (e) { console.warn('Post-time fresh geolocation failed', e); }
                     }
                 } catch (e) { /* ignore */ }
                 
