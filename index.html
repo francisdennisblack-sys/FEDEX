@@ -34155,6 +34155,60 @@
                 console.warn('⚠️ FINAL OWNER-FIRST enforcement failed:', e);
             }
 
+            // ========================================================================
+            // 🥇 POSITION-1 = BEST LOCAL POST (authoritative final pass)
+            // Position 1 must hold the BEST engaged local post — never the newest post.
+            // Brand-new, zero-vote posts are excluded from position 1 so freshly
+            // created posts stack AFTER engaged (liked) posts instead of on top.
+            // ========================================================================
+            try {
+                if (Array.isArray(sortedPosts) && sortedPosts.length > 1) {
+                    const NEW_AGE_MS = 60 * 60 * 1000; // < 1 hour with no votes = brand new
+                    const now = Date.now();
+                    const isBrandNew = (p) => p && (now - (p.timestamp || 0)) < NEW_AGE_MS &&
+                        (Number(p.likes || 0) === 0) && (Number(p.dislikes || 0) === 0);
+                    const isLocal = (p) => p && (
+                        p.county === userAreaTag ||
+                        p.county === currentAreaName ||
+                        p.proximityClass === 'nearby' ||
+                        p.proximityClass === 'community'
+                    );
+                    const netEng = (p) => Number(p.likes || 0) - Number(p.dislikes || 0);
+                    const byBest = (a, b) => {
+                        const nb = netEng(b), na = netEng(a);
+                        if (nb !== na) return nb - na;
+                        const lb = Number(b.likes || 0), la = Number(a.likes || 0);
+                        if (lb !== la) return lb - la;
+                        return (Number(b.timestamp || 0) - Number(a.timestamp || 0));
+                    };
+
+                    // Prefer the best engaged LOCAL post; fall back to best engaged post overall.
+                    let pool = sortedPosts.filter(p => p && p.id && isLocal(p) && !isBrandNew(p) && netEng(p) > 0);
+                    if (pool.length === 0) pool = sortedPosts.filter(p => p && p.id && !isBrandNew(p) && netEng(p) > 0);
+
+                    if (pool.length > 0) {
+                        pool.sort(byBest);
+                        const best = pool[0];
+                        if (best && best.id && hasRenderableGridPayload(best)) {
+                            sortedPosts = [best, ...sortedPosts.filter(p => p.id !== best.id)];
+                            console.log(`🥇 POSITION-1: best local post ${best.id.substring(0,8)} (net ${netEng(best)}) pinned to slot 1`);
+                        }
+                    } else if (isBrandNew(sortedPosts[0])) {
+                        // No engaged post exists yet, but slot 1 is a brand-new post.
+                        // Push brand-new posts below any non-new posts so position 1 is
+                        // never occupied by the newest post when alternatives exist.
+                        const nonNew = sortedPosts.filter(p => !isBrandNew(p));
+                        const brandNew = sortedPosts.filter(p => isBrandNew(p));
+                        if (nonNew.length > 0) {
+                            sortedPosts = [...nonNew, ...brandNew];
+                            console.log('🥇 POSITION-1: moved brand-new posts below existing posts');
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ POSITION-1 best-local pass failed:', e);
+            }
+
             // Vote-specific stability pass: update vote counts immediately but avoid
             // large feed reshuffles from a single vote event.
             try {
