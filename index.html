@@ -16823,6 +16823,18 @@
                 const photoRef = storageRef(storage, photoPath);
                 console.log('  Storage reference created');
                 try { console.log('  Configured storage bucket (app.options.storageBucket):', app?.options?.storageBucket || '(none)'); } catch(e) {}
+                // Pre-upload metadata probe: this will reveal permission/CORS/rules issues
+                try {
+                    console.log('  Attempting pre-upload getMetadata probe on target ref...');
+                    try {
+                        const preMeta = await getMetadata(photoRef);
+                        console.log('  Pre-upload metadata read succeeded:', preMeta);
+                        try { window.lastUploadError = Object.assign({}, window.lastUploadError || {}, { preUploadMetadata: preMeta, preUploadMetadataExists: true }); } catch(e) {}
+                    } catch (metaErr) {
+                        console.warn('  Pre-upload getMetadata failed (expected on write-only refs):', metaErr && metaErr.code, metaErr && metaErr.message);
+                        try { window.lastUploadError = Object.assign({}, window.lastUploadError || {}, { preUploadMetadataError: String(metaErr && (metaErr.message || metaErr)), preUploadMetadataExists: false }); } catch(e) {}
+                    }
+                } catch (probeErr) { console.warn('  Pre-upload probe unexpected error', probeErr); }
                 
                 // Ensure Storage stores a correct Content-Type so the browser will
                 // play videos served from the resulting download URL. Raw Blobs
@@ -16864,6 +16876,16 @@
                 } catch (uploadErr) {
                     // Enhanced diagnostics
                     console.error('Upload error:', uploadErr && uploadErr.code, uploadErr && uploadErr.message);
+                    // If serverResponse exists, try to parse it for structured info
+                    try {
+                        if (uploadErr && uploadErr.serverResponse) {
+                            let parsed = null;
+                            try { parsed = JSON.parse(uploadErr.serverResponse); } catch (e) { parsed = uploadErr.serverResponse; }
+                            console.error('  uploadErr.serverResponse (parsed):', parsed);
+                            try { window.lastUploadError = Object.assign({}, window.lastUploadError || {}, { serverResponse: uploadErr.serverResponse, serverResponseParsed: parsed }); } catch(e) {}
+                        }
+                    } catch (e_srv) { console.warn('Failed to parse uploadErr.serverResponse', e_srv); }
+                    try { window.lastUploadError = Object.assign({}, window.lastUploadError || {}, { navigatorOnLine: (typeof navigator !== 'undefined' && 'onLine' in navigator) ? navigator.onLine : null, appStorageBucket: app?.options?.storageBucket || null }); } catch(e) {}
                     // If unauthorized, try to refresh token / anonymous sign-in and retry once
                     const code = String(uploadErr && uploadErr.code || '');
                     if (code.includes('storage/unauthorized')) {
