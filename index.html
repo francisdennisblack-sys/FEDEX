@@ -16908,6 +16908,31 @@
                     }
                 }
                 
+                // If the upload produced a storage/unknown with empty serverResponse,
+                // attempt a REST metadata probe to capture HTTP status/body for diagnosis.
+                async function restProbe() {
+                    try {
+                        const bucket = app && app.options && app.options.storageBucket ? app.options.storageBucket : null;
+                        const token = (auth && auth.currentUser && typeof auth.currentUser.getIdToken === 'function') ? await auth.currentUser.getIdToken().catch(()=>null) : null;
+                        const probeUrl = bucket ? `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(photoPath)}` : null;
+                        if (!probeUrl) return null;
+                        console.log('  REST probe URL:', probeUrl);
+                        const headers = {};
+                        if (token) headers['Authorization'] = 'Bearer ' + token;
+                        const res = await fetch(probeUrl, { method: 'GET', headers });
+                        const txt = await res.text().catch(()=>null);
+                        console.log('  REST probe status:', res.status, res.statusText);
+                        console.log('  REST probe body (first 2000 chars):', txt ? txt.slice(0,2000) : '(no body)');
+                        try { window.lastUploadError = Object.assign({}, window.lastUploadError || {}, { restProbe: { url: probeUrl, status: res.status, statusText: res.statusText, body: txt } }); } catch(e) {}
+                        return { status: res.status, statusText: res.statusText, body: txt };
+                    } catch (e) {
+                        console.warn('  REST probe failed', e);
+                        try { window.lastUploadError = Object.assign({}, window.lastUploadError || {}, { restProbeError: String(e) }); } catch(e2) {}
+                        return null;
+                    }
+                }
+                try { await restProbe(); } catch(e) { /* ignore */ }
+                
                 const downloadURL = await getDownloadURL(snapshot.ref);
                 console.log('✅ PHOTO URL OBTAINED:', downloadURL);
 
