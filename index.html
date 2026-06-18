@@ -7306,36 +7306,63 @@
 
                 geolocationRequested = true;
 
-                // Use cached location if available
+                // Use cached location if available — but ONLY when it's a precise
+                // (GPS-quality) fix. Coarse IP-derived caches (accuracy ≥ 5km or
+                // source 'ip') are skipped so we can acquire real GPS below instead
+                // of sticking to an inaccurate location that yields the wrong POI.
                 try {
                     const cached = localStorage.getItem('userLocationCache');
                     if (cached) {
-                        userLocation = JSON.parse(cached);
-                        console.log('📍 Using cached location');
-                        updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
-                        startContinuousLocationTracking();
-                        return resolve(userLocation);
+                        const parsed = JSON.parse(cached);
+                        const acc = Number(parsed && parsed.accuracy);
+                        const isCoarse = (parsed && parsed.source === 'ip') || (Number.isFinite(acc) && acc >= 5000);
+                        if (parsed && !isCoarse) {
+                            userLocation = parsed;
+                            console.log(`📍 Using cached GPS location (±${Number.isFinite(acc) ? Math.round(acc) : '?'}m)`);
+                            updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
+                            startContinuousLocationTracking();
+                            return resolve(userLocation);
+                        }
+                        console.log('📍 Skipping coarse/IP cached location — will try real GPS');
                     }
                 } catch (e) { /* ignore */ }
 
                 // If browser geolocation is explicitly enabled by app config, fall back to original behavior
                 if (window.USE_BROWSER_GEO && navigator.geolocation) {
                     try {
-                        // Try permissions API first
-                        if (navigator.permissions && navigator.permissions.query) {
-                            const p = await navigator.permissions.query({ name: 'geolocation' });
-                            if (p.state === 'granted') {
-                                navigator.geolocation.getCurrentPosition((position) => {
-                                    userLocation = { lat: position.coords.latitude, lon: position.coords.longitude, accuracy: position.coords.accuracy };
-                                    setUserLocationCache(userLocation);
-                                    updateLocationStatus('✅ Cached', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
-                                    startContinuousLocationTracking();
-                                    return resolve(userLocation);
-                                }, () => { return resolve({ lat:40.7150, lon:-74.0070, accuracy:100 }); }, { enableHighAccuracy:true, timeout:8000, maximumAge:300000 });
-                                return;
+                        // Determine current permission state (best-effort).
+                        let permState = 'prompt';
+                        try {
+                            if (navigator.permissions && navigator.permissions.query) {
+                                const p = await navigator.permissions.query({ name: 'geolocation' });
+                                permState = p && p.state ? p.state : 'prompt';
                             }
+                        } catch (e) { /* permissions API unavailable — assume prompt */ }
+
+                        // Request REAL GPS when permission is granted OR not-yet-decided (prompt).
+                        // For `prompt`, getCurrentPosition() will trigger the browser's
+                        // permission dialog so we can use the user's true coordinates
+                        // instead of coarse IP geolocation. Only `denied` skips GPS.
+                        if (permState === 'granted' || permState === 'prompt') {
+                            const gotGps = await new Promise((resolveGps) => {
+                                navigator.geolocation.getCurrentPosition(
+                                    (position) => {
+                                        userLocation = { lat: position.coords.latitude, lon: position.coords.longitude, accuracy: position.coords.accuracy };
+                                        setUserLocationCache(userLocation);
+                                        updateLocationStatus('✅ GPS', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
+                                        startContinuousLocationTracking();
+                                        console.log(`📍 Real GPS acquired: ${userLocation.lat.toFixed(5)}, ${userLocation.lon.toFixed(5)} (±${Math.round(position.coords.accuracy)}m)`);
+                                        resolveGps(true);
+                                    },
+                                    (err) => {
+                                        console.warn('⚠️ GPS unavailable/denied, falling back to IP:', err && err.message);
+                                        resolveGps(false);
+                                    },
+                                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 }
+                                );
+                            });
+                            if (gotGps && userLocation) return resolve(userLocation);
                         }
-                        // If permission is prompt or unknown, avoid prompting here. Fall through to IP lookup.
                     } catch (e) { console.warn('Browser geolocation fallback failed', e); }
                 }
 
