@@ -4322,7 +4322,7 @@
         console.log('📦 Firebase module loading...');
         // Import Firebase functions
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
-        import { getDatabase, ref, set, get, update, remove, onValue, runTransaction } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
+        import { getDatabase, ref, set, get, update, remove, onValue, onChildAdded, onChildChanged, onChildRemoved, runTransaction } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
         import { getStorage, ref as storageRef, uploadBytes, uploadBytesResumable, getDownloadURL, getMetadata, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
         import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, browserSessionPersistence, RecaptchaVerifier, signInWithPhoneNumber, signOut } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
 
@@ -4632,6 +4632,9 @@
         window.update = update;
         window.remove = remove;
         window.onValue = onValue;
+        window.onChildAdded = onChildAdded;
+        window.onChildChanged = onChildChanged;
+        window.onChildRemoved = onChildRemoved;
         window.getDatabase = getDatabase;
         window.getStorage = getStorage;
         window.getAuth = getAuth;
@@ -17670,7 +17673,7 @@
 
                 const evRoot = ref(database, 'post_events/updated');
                 console.log('🎧 Subscribing to post_events/updated for vote-count broadcasts');
-                onChildAdded(evRoot, (snap) => {
+                const applyUpdatedEvent = (snap) => {
                     try {
                         const postId = snap.key;
                         if (!postId) return;
@@ -17694,9 +17697,18 @@
                                 for (const it of window.gridScroller.items) if (it && it.id === postId) { it.likes = likes; it.dislikes = dislikes; }
                             }
                         } catch (e) { /* ignore cache updates */ }
+                        // Also update the open post modal's vote counts if this post is being viewed
+                        try { if (selectedPostId === postId && typeof updateVoteDisplay === 'function') updateVoteDisplay(); } catch(e) {}
                         try { refreshVisiblePostGlowOutlines('post-updated-event'); } catch(e) {}
                     } catch (e) { console.warn('post_updated handler failed', e); }
-                });
+                };
+                // onChildAdded catches the FIRST vote-event for each post (and replays
+                // existing ones on attach). onChildChanged is REQUIRED because every
+                // subsequent vote does set() on the SAME post_events/updated/<id> node,
+                // which is a child *change*, not an *add* — without it, repeat votes
+                // from other users would not appear until a hard refresh.
+                onChildAdded(evRoot, applyUpdatedEvent);
+                onChildChanged(evRoot, applyUpdatedEvent);
             } catch (e) {
                 console.warn('subscribeToPostUpdatedEvents failed', e);
             }
