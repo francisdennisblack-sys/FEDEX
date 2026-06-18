@@ -17718,12 +17718,38 @@
                             // Cache and insert safely without breaking dedupe
                             try { addToPostCache(postObj); } catch(e){}
                             try {
-                                const key = 'shared-posts';
-                                gridContent[key] = gridContent[key] || [];
-                                if (!isPostHiddenForViewer(postObj, currentUserId)) {
-                                    if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(key, postObj);
-                                    else ensureUniqueAndInsert(key, postObj);
-                                    console.log('➕ Inserted new post from post_events/added into shared-posts:', postId);
+                                // Determine candidate feed keys to merge this post into so
+                                // viewers who subscribe to zone-specific or shared feeds
+                                // will see it immediately.
+                                const candidateKeys = new Set();
+                                candidateKeys.add('shared-posts');
+                                // zoneTag / county / network fallbacks
+                                try {
+                                    if (postObj.zoneTag) {
+                                        candidateKeys.add(`zone:${postObj.zoneTag}`);
+                                        candidateKeys.add(postObj.zoneTag);
+                                        candidateKeys.add(`zone-${postObj.zoneTag}`);
+                                    }
+                                    if (postObj.county) {
+                                        candidateKeys.add(`county:${postObj.county}`);
+                                        candidateKeys.add(postObj.county);
+                                    }
+                                    if (postObj.networkId) candidateKeys.add(postObj.networkId);
+                                    if (postObj.authId) candidateKeys.add(String(postObj.authId));
+                                } catch (e) { /* ignore key derivation errors */ }
+
+                                // Insert into each candidate feed the viewer might be using
+                                for (const key of Array.from(candidateKeys)) {
+                                    try {
+                                        gridContent[key] = gridContent[key] || [];
+                                        if (!isPostHiddenForViewer(postObj, currentUserId)) {
+                                            if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(key, postObj);
+                                            else ensureUniqueAndInsert(key, postObj);
+                                            // Trim bucket to reasonable length to avoid unbounded growth
+                                            try { if (gridContent[key].length > 300) gridContent[key].length = 300; } catch(e){}
+                                            console.log('➕ Inserted new post from post_events/added into', key, postId);
+                                        }
+                                    } catch (e) { console.warn('Failed to insert new post into gridContent for key', key, e); }
                                 }
                             } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
                         } catch (fetchErr) {
