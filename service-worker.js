@@ -72,9 +72,16 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   const requestUrl = new URL(event.request.url);
+  // Avoid intercepting Cloud Storage requests entirely — let the browser handle them
+  // to prevent the service worker from interfering with Firebase SDK upload/download flows.
+  const isCloudStorage = event.request.url.includes('firebasestorage.googleapis.com') || event.request.url.includes('storage.googleapis');
+  if (isCloudStorage) {
+    if (VERBOSE_SW) console.log('[Service Worker] Passing through Cloud Storage request (no interception):', event.request.url);
+    return; // do not call respondWith so browser handles request normally
+  }
 
-  // Firebase endpoints: network first, cache fallback (keep previous behavior)
-  if (event.request.url.includes('firebase') || event.request.url.includes('firestore') || event.request.url.includes('storage.googleapis')) {
+  // Firebase endpoints (non-storage): network first, cache fallback (keep previous behavior)
+  if (event.request.url.includes('firebase') || event.request.url.includes('firestore')) {
     event.respondWith(
       fetch(event.request)
         .then((response) => {
