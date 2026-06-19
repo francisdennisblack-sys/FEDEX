@@ -11276,6 +11276,58 @@
 
         try { ensureRefineObserver(); } catch (e) { console.warn('ensureRefineObserver failed', e); }
 
+        // Ensure refine/autocomplete dropdowns are sanitized to white theme even when
+        // other code injects dark-themed HTML or virtual scroller nodes.
+        function ensureDropdownSanitizers() {
+            try {
+                const ids = ['refineLocationDropdown','autocompleteDropdown','changeGridSuggestions'];
+                function sanitizeNode(n) {
+                    try {
+                        if (!n || n.nodeType !== 1) return;
+                        // Force light theme
+                        n.style.background = '#ffffff';
+                    } catch(e){}
+                    try { n.style.backgroundColor = '#ffffff'; } catch(e){}
+                    try { n.style.color = '#111827'; } catch(e){}
+                    try { n.style.borderColor = '#e5e7eb'; } catch(e){}
+                    try { n.style.boxShadow = 'none'; } catch(e){}
+                    try { n.style.outline = 'none'; } catch(e){}
+                    // remove intrusive mouse handlers that toggle dark backgrounds
+                    try { n.onmouseover = null; n.onmouseout = null; } catch(e){}
+                    try { n.removeAttribute('onmouseover'); n.removeAttribute('onmouseout'); } catch(e){}
+                    // sanitize children
+                    try { const kids = Array.from(n.children || []); kids.forEach(sanitizeNode); } catch(e){}
+                }
+
+                ids.forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) sanitizeNode(el);
+                });
+
+                const mo = new MutationObserver((records) => {
+                    for (const r of records) {
+                        for (const n of r.addedNodes) {
+                            try {
+                                if (!n) continue;
+                                if (n.nodeType === 1) {
+                                    const nid = (n.id || '').toString();
+                                    if (ids.includes(nid) || (n.className && String(n.className).includes('change-grid-suggestions'))) {
+                                        sanitizeNode(n);
+                                    } else {
+                                        // also sanitize any matching descendants
+                                        ids.forEach(id => { try { const found = n.querySelector && n.querySelector('#' + id); if (found) sanitizeNode(found); } catch(e){} });
+                                    }
+                                }
+                            } catch(e){}
+                        }
+                    }
+                });
+                mo.observe(document.body || document.documentElement, { childList: true, subtree: true });
+            } catch (e) { console.warn('ensureDropdownSanitizers failed', e); }
+        }
+
+        try { ensureDropdownSanitizers(); } catch(e) { console.warn('ensureDropdownSanitizers init failed', e); }
+
         // Rotating placeholder for composer refine field (`customZoneTag`) — appears on posting page
         const composerPlaceholders = [
             'Downtown', 'Riverside', 'Midtown', 'Uptown', 'Old Town',
