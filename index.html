@@ -21061,26 +21061,49 @@
                     }
                 })();
                 viewMediaEl.innerHTML = mediaHTML;
-                // Attach overlay handler: when user activates the overlay, enable
-                // native controls and begin playback. This prevents native control
-                // chrome from being visible before the user explicitly interacts.
+                // Attach overlay handler and attempt muted autoplay. Only hide
+                // the overlay if playback actually starts; otherwise keep it
+                // visible so the user can explicitly start/unmute the video.
                 try {
                     const wrapper = viewMediaEl.querySelector('.video-player-wrapper');
                     if (wrapper) {
                         const vidEl = wrapper.querySelector('video');
                         const overlay = wrapper.querySelector('.video-play-overlay');
                         if (overlay && vidEl) {
+                            // Explicit tap: unmute and play with controls
                             overlay.addEventListener('click', function(e){
                                 try {
-                                    // Reveal controls and start playback (keep muted state until user unmutes)
                                     vidEl.controls = true;
-                                    // Play after adding controls
+                                    vidEl.muted = false;
+                                    vidEl.defaultMuted = false;
                                     const p = vidEl.play();
                                     if (p && typeof p.then === 'function') p.catch(()=>{});
-                                    // Hide overlay once playback attempted
                                     overlay.style.display = 'none';
                                 } catch (err) { /* ignore */ }
                             });
+
+                            // Attempt muted autoplay now and only hide overlay on success
+                            try {
+                                vidEl.muted = true;
+                                vidEl.defaultMuted = true;
+                                vidEl.autoplay = true;
+                                vidEl.loop = true;
+                                vidEl.playsInline = true;
+                                try { vidEl.load(); } catch(e){}
+                                const p = vidEl.play();
+                                if (p && typeof p.then === 'function') {
+                                    p.then(() => {
+                                        try { vidEl.controls = true; overlay.style.display = 'none'; } catch(e){}
+                                    }).catch(() => {
+                                        // Autoplay blocked — keep overlay visible
+                                        try { overlay.style.display = ''; } catch(e){}
+                                    });
+                                } else {
+                                    vidEl.addEventListener('playing', () => { try { vidEl.controls = true; overlay.style.display = 'none'; } catch(e){} }, { once: true });
+                                }
+                            } catch (e) {
+                                try { overlay.style.display = ''; } catch(e){}
+                            }
                         }
                     }
                 } catch (e) { /* ignore setup errors */ }
