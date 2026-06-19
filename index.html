@@ -2714,6 +2714,14 @@
         <style id="hide-brand-globe-styles">
             #brandGlobeCanvas, #brandGlobeAbsoluteOverlay, #brandGlobePersistent { display: none !important; opacity: 0 !important; pointer-events: none !important; }
         </style>
+
+    <style>
+        /* Modal video play overlay styling fallback (in-case external CSS overrides exist) */
+        .video-player-wrapper .video-play-overlay {
+            -webkit-appearance: none;
+            appearance: none;
+        }
+    </style>
         <script>
             (function removeBrandGlobeAndMoveEmoji(){
                 try {
@@ -21041,60 +21049,47 @@
                         // autoplay + muted + playsinline is required for browsers
                         // (especially iOS Safari) to allow auto-start without a
                         // user gesture. User can unmute via controls.
-                        return `<video id="viewMediaVideo" controls autoplay muted playsinline webkit-playsinline preload="auto" loop style="max-width:100%; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;"><source src="${src}"${typeAttr}>Your browser does not support this video.</video>`;
+                        // Render a video WITHOUT native controls or autoplay. We show
+                        // a custom large play overlay; controls are added only when
+                        // the user explicitly activates the video (by pressing the post).
+                        return `
+                            <div class="video-player-wrapper" style="position:relative; display:block; max-width:100%; max-height:60vh;">
+                                <video id="viewMediaVideo" playsinline webkit-playsinline preload="metadata" style="width:100%; height:auto; max-height:60vh; object-fit:contain; background:#000; display:block; margin:0 auto;">
+                                    <source src="${src}"${typeAttr}>
+                                    Your browser does not support this video.
+                                </video>
+                                <button class="video-play-overlay" aria-label="Play video" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:72px;height:72px;border-radius:50%;border:none;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;cursor:pointer;box-shadow:0 8px 24px rgba(2,6,23,0.6);">
+                                    ▶
+                                </button>
+                            </div>`;
                     } else {
                         return `<img src="${src}" style="max-width:100%; max-height:60vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
                     }
                 })();
                 viewMediaEl.innerHTML = mediaHTML;
-                // Best-effort: kick off playback as soon as the element is in the DOM,
-                // and again on canplay (iOS Safari sometimes ignores the first play()).
+                // Attach overlay handler: when user activates the overlay, enable
+                // native controls and begin playback. This prevents native control
+                // chrome from being visible before the user explicitly interacts.
                 try {
-                    const vidEl = viewMediaEl.querySelector('video');
-                    if (vidEl) {
-                        // Set as PROPERTIES (not just attributes) — Safari respects
-                        // these more reliably for autoplay-without-gesture rules.
-                        vidEl.muted = true;
-                        vidEl.defaultMuted = true;
-                        vidEl.playsInline = true;
-                        vidEl.autoplay = true;
-                        vidEl.preload = 'auto';
-                        // Always loop while the post is open.
-                        vidEl.loop = true;
-                        vidEl.setAttribute('loop', '');
-                        const tryPlay = (label) => {
-                            try {
-                                const p = vidEl.play();
-                                if (p && typeof p.then === 'function') {
-                                    p.then(() => console.log(`▶️ video autoplay started (${label})`))
-                                     .catch(err => console.log(`⏸️ autoplay attempt failed (${label}):`, err && err.message));
-                                }
-                            } catch (e) {}
-                        };
-                        // 1) Force the network fetch to begin immediately.
-                        try { vidEl.load(); } catch (e) {}
-                        // 2) Try right now.
-                        tryPlay('immediate');
-                        // 3) Retry once metadata/data is available.
-                        vidEl.addEventListener('loadedmetadata', () => tryPlay('loadedmetadata'), { once: true });
-                        vidEl.addEventListener('canplay', () => tryPlay('canplay'), { once: true });
-                        // 4) Log load errors so we can see CORS/404 issues in console.
-                        vidEl.addEventListener('error', (ev) => {
-                            const err = vidEl.error;
-                            console.error('🎥 VIDEO ELEMENT ERROR', {
-                                code: err && err.code,
-                                message: err && err.message,
-                                networkState: vidEl.networkState,
-                                readyState: vidEl.readyState,
-                                src: vidEl.currentSrc || (vidEl.querySelector('source') && vidEl.querySelector('source').src)
+                    const wrapper = viewMediaEl.querySelector('.video-player-wrapper');
+                    if (wrapper) {
+                        const vidEl = wrapper.querySelector('video');
+                        const overlay = wrapper.querySelector('.video-play-overlay');
+                        if (overlay && vidEl) {
+                            overlay.addEventListener('click', function(e){
+                                try {
+                                    // Reveal controls and start playback (keep muted state until user unmutes)
+                                    vidEl.controls = true;
+                                    // Play after adding controls
+                                    const p = vidEl.play();
+                                    if (p && typeof p.then === 'function') p.catch(()=>{});
+                                    // Hide overlay once playback attempted
+                                    overlay.style.display = 'none';
+                                } catch (err) { /* ignore */ }
                             });
-                        });
-                        // Restart immediately on ended (some browsers add a small delay)
-                        vidEl.addEventListener('ended', () => {
-                            try { vidEl.currentTime = 0; vidEl.play(); } catch (e) { /* ignore */ }
-                        });
+                        }
                     }
-                } catch (e) { /* ignore autoplay errors */ }
+                } catch (e) { /* ignore setup errors */ }
                 // Show written content below media in the description area
                 viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
             } else {
