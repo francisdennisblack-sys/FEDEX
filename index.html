@@ -16773,20 +16773,20 @@
                 // waiting for a full `posts` snapshot. This mirrors the
                 // `post_events/removed` tombstone pattern used elsewhere.
                 try {
+                    // Emit a rich post_added event containing the essential post
+                    // fields so listeners can insert the repost immediately without
+                    // doing an extra fetch (improves latency and resilience).
                     const addedEvRef = ref(database, `post_events/added/${postId}`);
-                    const evPayload = {
-                        id: postId,
-                        timestamp: postData.timestamp || Date.now(),
-                        createdBy: postData.createdBy || null,
-                        authId: postData.authId || null,
-                        zoneTag: postData.zoneTag || postData.county || null,
-                        content: (postData.content && String(postData.content).substring(0, 400)) || null,
-                        photoURL: postData.photoURL || null,
-                        mediaType: postData.mediaType || null
-                    };
-                    // best-effort fire-and-forget; don't block the save path
+                    const evPayload = Object.assign({}, postData);
+                    evPayload.id = postId;
+                    // Strip potentially large inline imageData to keep event small
+                    if (evPayload.imageData && String(evPayload.imageData).startsWith('data:')) delete evPayload.imageData;
+                    if (evPayload.rawPixels) delete evPayload.rawPixels;
+                    // Truncate overly long content to a reasonable size for events
+                    if (evPayload.content && String(evPayload.content).length > 2000) evPayload.content = String(evPayload.content).substring(0, 2000);
+                    // best-effort fire-and-forget; do not block the save path
                     await set(addedEvRef, evPayload).catch(()=>{});
-                    console.log('📣 Emitted post_added event for', postId);
+                    console.log('📣 Emitted rich post_added event for', postId);
                 } catch (evErr) {
                     console.warn('⚠️ Could not emit post_added event for', postId, evErr);
                 }
@@ -17884,27 +17884,38 @@
                     try {
                         const postId = snap.key;
                         if (!postId) return;
-                        // Avoid inserting if we already know about this post
-                        if (postCache && postCache[postId]) return;
-
-                        // Fetch full post data (best-effort) then insert into shared grid
+                        // Use the event payload directly when available to avoid an
+                        // extra round-trip to `posts/{id}` and to improve immediacy.
+                        let eventPayload = snap.val() || {};
+                        let postObj = null;
                         try {
-                            const pRef = ref(database, `posts/${postId}`);
-                            const pSnap = await get(pRef);
-                            if (!pSnap || !pSnap.exists()) return;
-                            const postObj = pSnap.val();
-                            postObj.id = postId;
-                            try { normalizePostFields(postObj); } catch(e){}
+                            if (eventPayload && Object.keys(eventPayload).length > 0 && (eventPayload.content || eventPayload.photoURL || eventPayload.mediaType)) {
+                                postObj = Object.assign({}, eventPayload);
+                                postObj.id = postObj.id || postId;
+                                try { normalizePostFields(postObj); } catch(e){}
+                            } else {
+                                // Fallback: fetch the full post if the event contained only a minimal key
+                                try {
+                                    const pRef = ref(database, `posts/${postId}`);
+                                    const pSnap = await get(pRef);
+                                    if (pSnap && pSnap.exists()) {
+                                        postObj = pSnap.val();
+                                        postObj.id = postId;
+                                        try { normalizePostFields(postObj); } catch(e){}
+                                    } else {
+                                        return;
+                                    }
+                                } catch (fetchErr) {
+                                    console.warn('Failed to fetch post for post_added event', postId, fetchErr);
+                                    return;
+                                }
+                            }
 
                             // Cache and insert safely without breaking dedupe
                             try { addToPostCache(postObj); } catch(e){}
                             try {
-                                // Determine candidate feed keys to merge this post into so
-                                // viewers who subscribe to zone-specific or shared feeds
-                                // will see it immediately.
                                 const candidateKeys = new Set();
                                 candidateKeys.add('shared-posts');
-                                // zoneTag / county / network fallbacks
                                 try {
                                     if (postObj.zoneTag) {
                                         candidateKeys.add(`zone:${postObj.zoneTag}`);
@@ -17919,23 +17930,19 @@
                                     if (postObj.authId) candidateKeys.add(String(postObj.authId));
                                 } catch (e) { /* ignore key derivation errors */ }
 
-                                // Insert into each candidate feed the viewer might be using
                                 for (const key of Array.from(candidateKeys)) {
                                     try {
                                         gridContent[key] = gridContent[key] || [];
                                         if (!isPostHiddenForViewer(postObj, currentUserId)) {
                                             if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(key, postObj);
                                             else ensureUniqueAndInsert(key, postObj);
-                                            // Trim bucket to reasonable length to avoid unbounded growth
                                             try { if (gridContent[key].length > 300) gridContent[key].length = 300; } catch(e){}
                                             console.log('➕ Inserted new post from post_events/added into', key, postId);
                                         }
                                     } catch (e) { console.warn('Failed to insert new post into gridContent for key', key, e); }
                                 }
                             } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
-                        } catch (fetchErr) {
-                            console.warn('Failed to fetch post for post_added event', postId, fetchErr);
-                        }
+                        } catch (e) { console.warn('post_added handler processing failed', e); }
                     } catch (e) { console.warn('post_added handler failed', e); }
                 });
             } catch (e) {
