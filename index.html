@@ -3883,7 +3883,7 @@
         </div>
     </div>
 
-    <input type="file" id="fileInput" accept="image/*,video/*">
+    <input type="file" id="fileInput" accept="image/*,video/*" multiple>
 
     <div class="modal" id="uploadModal">
         <div class="modal-content" style="background: #ffffff;">
@@ -14000,6 +14000,8 @@
         let gridScroller = null; // 🚀 VIRTUAL GRID SCROLLER for main feed
         let selectedFile = null;
         let selectedMediaType = null; // Track if media is 'video' or 'image'
+        // Up to 10 moderated photos/videos for a single post. Each item: { file, type:'image'|'video'|'file', name }.
+        let selectedMediaItems = [];
         let lastModerationRejectionTime = 0; // Track when moderation last rejected a file
         let lastRejectedFileName = null; // Track the filename that was rejected
         
@@ -17624,9 +17626,10 @@
             }
         };
 
-        async function uploadPhotoToFirebase(postId, file) {
+        async function uploadPhotoToFirebase(postId, file, slotKey) {
             try {
-                const photoPath = `posts/${postId}/photo`;
+                const slot = (slotKey && typeof slotKey === 'string') ? slotKey : 'photo';
+                const photoPath = `posts/${postId}/${slot}`;
                 console.log('🔥 STARTING PHOTO UPLOAD TO STORAGE');
                 console.log('  Post ID:', postId);
                 console.log('  Storage path:', photoPath);
@@ -22267,6 +22270,7 @@
             setMediaIndicator('none');
             document.getElementById('fileInput').value = '';
             selectedFile = null;
+            selectedMediaItems = [];
         }
 
         // Update the lower-left media indicator with an icon that clearly shows
@@ -22287,6 +22291,7 @@
         function clearSelectedMedia() {
             selectedFile = null;
             selectedMediaType = null;
+            selectedMediaItems = [];
             isMediaProcessing = false; // Clear processing flag
             lastModerationRejectionTime = 0;
             lastRejectedFileName = null;
@@ -25687,6 +25692,7 @@
             document.getElementById('uploadModal').classList.remove('active');
             selectedBoxIndex = -1;
             selectedFile = null;
+            selectedMediaItems = [];
             document.getElementById('postText').value = ''; // Clear text
             const customTagInput = document.getElementById('customZoneTag');
             if (customTagInput) customTagInput.value = ''; // Clear custom tag
@@ -35800,6 +35806,7 @@
             isConnected = false;
             currentUserId = '';
             selectedFile = null;
+            selectedMediaItems = [];
             closeModal();
             closeViewModal();
             const poiInfoEl = document.getElementById('poiInfo');
@@ -36106,135 +36113,134 @@
             }
         }
 
-        function handleFiles(files) {
+        // Read a File/Blob into a data URL (used for client-side image moderation).
+        function readFileAsDataURL(file) {
+            return new Promise((resolve, reject) => {
+                const r = new FileReader();
+                r.onload = (e) => resolve(e.target.result);
+                r.onerror = reject;
+                r.readAsDataURL(file);
+            });
+        }
+
+        // Accept up to 10 photos/videos at once. Every image is moderated client-side
+        // and every video is processed before being added; if any image is rejected the
+        // entire batch is discarded so a post can never carry unmoderated media.
+        async function handleFiles(files) {
             if (!isConnected) {
                 showNotification('Uploads are allowed even if not near a POI. Proceeding to upload.');
             }
-            if (files.length > 0) {
-                const file = files[0];
+            if (!files || files.length === 0) return;
+
+            const MAX_MEDIA = 10;
+            const incoming = Array.from(files).slice(0, MAX_MEDIA);
+            if (files.length > MAX_MEDIA) {
+                showNotification(`Only the first ${MAX_MEDIA} files were added (max ${MAX_MEDIA} per post).`);
+            }
+
+            // Bump a generation token so stale results from a previous selection are ignored.
+            window._mediaUploadGen = (window._mediaUploadGen || 0) + 1;
+            const myGen = window._mediaUploadGen;
+            if (window._mediaOverlayTimer) {
+                clearTimeout(window._mediaOverlayTimer);
+                window._mediaOverlayTimer = null;
+            }
+            const superseded = () => myGen !== window._mediaUploadGen;
+
+            isMediaProcessing = true;
+            hideDeleteMediaButton();
+            selectedMediaItems = [];
+
+            const accepted = [];
+            let blockedReason = null;
+
+            for (let i = 0; i < incoming.length; i++) {
+                const file = incoming[i];
                 const isVideo = file.type.startsWith('video');
                 const isImage = file.type.startsWith('image');
+                const label = incoming.length > 1 ? `(${i + 1} of ${incoming.length})` : '';
+                console.log(`📁 handleFiles gen=${myGen} [${i + 1}/${incoming.length}] name=${file.name} size=${file.size} type=${file.type}`);
 
-                // Bump a generation token so stale moderation results / overlay timeouts
-                // from a previous (rejected) file can be ignored when a new file is picked.
-                window._mediaUploadGen = (window._mediaUploadGen || 0) + 1;
-                const myGen = window._mediaUploadGen;
-                // Cancel any pending "Image blocked: ..." overlay-clear timer so it doesn't
-                // hide the new "Checking image content..." overlay mid-check.
-                if (window._mediaOverlayTimer) {
-                    clearTimeout(window._mediaOverlayTimer);
-                    window._mediaOverlayTimer = null;
-                }
-                console.log(`📁 handleFiles gen=${myGen} name=${file.name} size=${file.size} type=${file.type}`);
-                
-                // Process video before accepting — show popout while processing, no inline preview
                 if (isVideo) {
-                    selectedMediaType = 'video';
-                    isMediaProcessing = true; // Set flag while processing
-                    showMediaLoadingOverlay('Processing video...');
-                    hideDeleteMediaButton();
-
-                    processVideo(file).then((processedBlob) => {
-                        if (myGen !== window._mediaUploadGen) {
-                            console.log(`  ⏭ stale video processVideo result (gen ${myGen} vs ${window._mediaUploadGen}), ignoring`);
-                            return;
-                        }
-                        hideMediaLoadingOverlay();
-                        if (processedBlob) {
-                            selectedFile = processedBlob;
-                            selectedMediaType = 'video';
-                            showDeleteMediaButton();
-                            setMediaIndicator('video');
-                            isMediaProcessing = false; // Clear flag when done
-                            console.log('Video processed and ready');
-                        } else {
-                            selectedFile = null;
-                            selectedMediaType = null;
-                            setMediaIndicator('none');
-                            hideDeleteMediaButton();
-                            isMediaProcessing = false; // Clear flag on error
-                            fileInput.value = '';
-                        }
-                    });
-                    return;
-                }
-                
-                // For images - check moderation first
-                if (isImage) {
-                    selectedMediaType = 'image';
-                    isMediaProcessing = true; // Set flag while checking
-                    // Show popout while checking image content; do not show inline image
-                    selectedMediaType = 'image';
-                    isMediaProcessing = true;
-                    showMediaLoadingOverlay('Checking image content...');
-                    hideDeleteMediaButton();
-                    
-                    const reader = new FileReader();
-                    reader.onload = async (e) => {
-                        let isSafe = false;
-                        try {
-                            // Check image moderation
-                            isSafe = await checkImageModeration(e.target.result);
-                        } catch (modErr) {
-                            console.error('handleFiles: moderation threw, treating as unsafe:', modErr);
-                            isSafe = false;
-                        }
-
-                        // If user picked another file while this one was being checked,
-                        // discard this result — the newer handleFiles call owns the UI.
-                        if (myGen !== window._mediaUploadGen) {
-                            console.log(`  ⏭ stale image moderation result for gen=${myGen} (current=${window._mediaUploadGen}), ignoring`);
-                            return;
-                        }
-
-                        if (!isSafe) {
-                            hideMediaLoadingOverlay();
-                            selectedFile = null;
-                            fileInput.value = '';
-                            hideDeleteMediaButton();
-                            isMediaProcessing = false; // Clear flag
-                            const reason = (window.lastModerationReason || 'not allowed').toString();
-                            // Show brief warning message in overlay area
-                            showMediaLoadingOverlay('Image blocked: ' + reason.replace(/_/g,' ').slice(0,80));
-                            if (window._mediaOverlayTimer) clearTimeout(window._mediaOverlayTimer);
-                            window._mediaOverlayTimer = setTimeout(() => {
-                                // Only clear if no newer upload has taken over.
-                                if (myGen === window._mediaUploadGen) hideMediaLoadingOverlay();
-                                window._mediaOverlayTimer = null;
-                            }, 3000);
-                            return;
-                        }
-
-                        // Image is safe - accept but do not render inline preview
-                        selectedFile = file;
-                        isMediaProcessing = false; // Clear flag when done
-                        hideMediaLoadingOverlay();
-                        showDeleteMediaButton();
-                        setMediaIndicator('photo');
-                    };
-                    reader.onerror = (err) => {
-                        if (myGen !== window._mediaUploadGen) return;
-                        console.error('FileReader error during image moderation prep:', err);
-                        hideMediaLoadingOverlay();
-                        selectedFile = null;
-                        fileInput.value = '';
-                        hideDeleteMediaButton();
-                        isMediaProcessing = false;
-                        showMediaLoadingOverlay('Could not read image — try another');
-                        if (window._mediaOverlayTimer) clearTimeout(window._mediaOverlayTimer);
-                        window._mediaOverlayTimer = setTimeout(() => {
-                            if (myGen === window._mediaUploadGen) hideMediaLoadingOverlay();
-                            window._mediaOverlayTimer = null;
-                        }, 2200);
-                    };
-                    reader.readAsDataURL(file);
+                    showMediaLoadingOverlay(`Processing video ${label}...`);
+                    let processedBlob = null;
+                    try { processedBlob = await processVideo(file); }
+                    catch (e) { console.error('processVideo failed', e); processedBlob = null; }
+                    if (superseded()) return; // a newer selection took over
+                    if (processedBlob) {
+                        accepted.push({ file: processedBlob, type: 'video', name: file.name });
+                    } else {
+                        console.warn('Video processing failed, skipping', file.name);
+                    }
+                } else if (isImage) {
+                    showMediaLoadingOverlay(`Checking image content ${label}...`);
+                    let dataUrl = null;
+                    try { dataUrl = await readFileAsDataURL(file); }
+                    catch (e) { console.error('FileReader error', e); dataUrl = null; }
+                    if (superseded()) return;
+                    let isSafe = false;
+                    if (dataUrl) {
+                        try { isSafe = await checkImageModeration(dataUrl); }
+                        catch (modErr) { console.error('handleFiles: moderation threw, treating as unsafe:', modErr); isSafe = false; }
+                    }
+                    if (superseded()) return;
+                    if (isSafe) {
+                        accepted.push({ file, type: 'image', name: file.name });
+                    } else {
+                        // Reject the whole batch the moment any image is unsafe.
+                        blockedReason = (window.lastModerationReason || 'not allowed').toString();
+                        break;
+                    }
                 } else {
-                    // For other files
-                    selectedFile = file;
-                    setMediaIndicator('file', file.name);
-                    showDeleteMediaButton();
+                    // Generic file — no media moderation applies.
+                    accepted.push({ file, type: 'file', name: file.name });
                 }
             }
+
+            if (superseded()) return;
+
+            if (blockedReason) {
+                selectedMediaItems = [];
+                selectedFile = null;
+                selectedMediaType = null;
+                try { if (fileInput) fileInput.value = ''; } catch (e) {}
+                hideDeleteMediaButton();
+                setMediaIndicator('none');
+                isMediaProcessing = false;
+                showMediaLoadingOverlay('Image blocked: ' + blockedReason.replace(/_/g, ' ').slice(0, 80));
+                if (window._mediaOverlayTimer) clearTimeout(window._mediaOverlayTimer);
+                window._mediaOverlayTimer = setTimeout(() => {
+                    if (myGen === window._mediaUploadGen) hideMediaLoadingOverlay();
+                    window._mediaOverlayTimer = null;
+                }, 3000);
+                return;
+            }
+
+            hideMediaLoadingOverlay();
+
+            if (accepted.length === 0) {
+                selectedMediaItems = [];
+                selectedFile = null;
+                selectedMediaType = null;
+                try { if (fileInput) fileInput.value = ''; } catch (e) {}
+                hideDeleteMediaButton();
+                setMediaIndicator('none');
+                isMediaProcessing = false;
+                return;
+            }
+
+            // Commit the accepted batch. Mirror the first item into the legacy
+            // single-file state so existing checks (hasFile, area-tag rules) keep working.
+            selectedMediaItems = accepted;
+            selectedFile = accepted[0].file;
+            selectedMediaType = accepted[0].type === 'video' ? 'video' : (accepted[0].type === 'image' ? 'image' : null);
+            isMediaProcessing = false;
+            showDeleteMediaButton();
+            const firstType = accepted[0].type;
+            const indicatorState = firstType === 'video' ? 'video' : (firstType === 'image' ? 'photo' : 'file');
+            const indicatorLabel = accepted.length > 1 ? `${accepted.length} items added` : (accepted[0].name || 'Media added to post');
+            setMediaIndicator(indicatorState, indicatorLabel);
+            console.log(`✅ ${accepted.length} media item(s) ready for post`);
         }
 
         // Content moderation - block derogatory and explicit language
@@ -36947,11 +36953,22 @@
                 }
                 
                 let photoURL = null;
+                const mediaItemsForPost = [];
 
-                // Upload photo to Firebase Storage if provided
-                if (imageFile) {
+                // Gather everything to upload. Prefer the multi-item batch (up to 10);
+                // fall back to the single legacy file for older/simple flows.
+                const itemsToUpload = (Array.isArray(selectedMediaItems) && selectedMediaItems.length > 0)
+                    ? selectedMediaItems.slice(0, 10)
+                    : (imageFile ? [{ file: imageFile, type: (selectedMediaType === 'video' ? 'video' : 'image'), name: imageFile.name }] : []);
+
+                // Upload + moderate EVERY media item. A single rejection fails the whole post.
+                for (let i = 0; i < itemsToUpload.length; i++) {
+                    const item = itemsToUpload[i];
+                    const itemType = (item.type === 'video') ? 'video' : 'image';
+                    const slotKey = itemsToUpload.length > 1 ? `media_${i}` : 'photo';
+                    let url = null;
                     try {
-                        photoURL = await uploadPhotoToFirebase(postId, imageFile);
+                        url = await uploadPhotoToFirebase(postId, item.file, slotKey);
                     } catch (photoError) {
                         // If the failure appears auth-related, prompt user to re-authenticate
                         try {
@@ -36967,20 +36984,26 @@
                         } catch (e2) { console.error('Error handling upload failure', e2); }
                         throw photoError;
                     }
-                    
-                    // If it's a video, run moderation check
-                    if (selectedMediaType === 'video') {
-                        const approved = await moderateVideo(photoURL, postId, currentUserId);
+
+                    // Server-side moderation for each uploaded item.
+                    if (itemType === 'video') {
+                        const approved = await moderateVideo(url, postId, currentUserId);
                         if (!approved) {
                             throw new Error('Video rejected by moderation');
                         }
-                    } else if (selectedMediaType === 'image') {
-                        // If it's an image, run moderation check
-                        const approved = await moderatePhoto(photoURL, postId, currentUserId);
+                    } else {
+                        const approved = await moderatePhoto(url, postId, currentUserId);
                         if (!approved) {
                             throw new Error('Photo rejected by moderation');
                         }
                     }
+
+                    mediaItemsForPost.push({ url, type: itemType });
+                }
+
+                // First item is the post's primary media (back-compat with single-media rendering).
+                if (mediaItemsForPost.length > 0) {
+                    photoURL = mediaItemsForPost[0].url;
                 }
 
                 // Create post data object
@@ -37157,6 +37180,9 @@
                     content: postText,
                     photoURL: photoURL,
                     mediaType: selectedMediaType,
+                    // Up to 10 moderated photos/videos for the swipeable carousel.
+                    // null for text-only or legacy single-media posts (photoURL still set).
+                    mediaItems: mediaItemsForPost.length > 0 ? mediaItemsForPost : null,
                     linkURL: postLink || null,
                     // Remove area tags for media posts (photos & videos)
                     county: (selectedMediaType === 'image' || selectedMediaType === 'video') ? null : areaTag,
@@ -37639,6 +37665,7 @@
                         sellBtnEl.style.border = '1px solid #e5e7eb';
                     }
                     setMediaIndicator('none');
+                    selectedMediaItems = [];
                     // Ensure full reset of payment UI (unmount Stripe elements,
                     // restore buttons) so payments are not pre-filled for next post.
                     try { if (typeof resetBoostButton === 'function') resetBoostButton(); } catch(e){}
