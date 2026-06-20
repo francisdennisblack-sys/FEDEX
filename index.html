@@ -36123,9 +36123,11 @@
             });
         }
 
-        // Accept up to 10 photos/videos at once. Every image is moderated client-side
-        // and every video is processed before being added; if any image is rejected the
-        // entire batch is discarded so a post can never carry unmoderated media.
+        // Accept up to 10 photos/videos for one post. Selections ACCUMULATE: the user
+        // can pick a few from their device, then tap the media button again to add more
+        // (up to 10 total). Every image is moderated client-side and every video is
+        // processed before being added; if a new image is rejected, only that new round
+        // is discarded — previously accepted media is kept.
         async function handleFiles(files) {
             if (!isConnected) {
                 showNotification('Uploads are allowed even if not near a POI. Proceeding to upload.');
@@ -36133,9 +36135,16 @@
             if (!files || files.length === 0) return;
 
             const MAX_MEDIA = 10;
-            const incoming = Array.from(files).slice(0, MAX_MEDIA);
-            if (files.length > MAX_MEDIA) {
-                showNotification(`Only the first ${MAX_MEDIA} files were added (max ${MAX_MEDIA} per post).`);
+            // Start from what's already selected so new picks add on rather than replace.
+            const existing = Array.isArray(selectedMediaItems) ? selectedMediaItems.slice() : [];
+            const remaining = MAX_MEDIA - existing.length;
+            if (remaining <= 0) {
+                showNotification(`You already have ${MAX_MEDIA} items — remove one to add another.`);
+                return;
+            }
+            const incoming = Array.from(files).slice(0, remaining);
+            if (files.length > remaining) {
+                showNotification(`Added ${remaining} more — that's the ${MAX_MEDIA}-item max per post.`);
             }
 
             // Bump a generation token so stale results from a previous selection are ignored.
@@ -36147,9 +36156,28 @@
             }
             const superseded = () => myGen !== window._mediaUploadGen;
 
+            // Re-commit the existing selection so the UI/state reflect it even if this
+            // round fails or is superseded.
+            const commit = (items) => {
+                selectedMediaItems = items;
+                if (items.length === 0) {
+                    selectedFile = null;
+                    selectedMediaType = null;
+                    hideDeleteMediaButton();
+                    setMediaIndicator('none');
+                    return;
+                }
+                selectedFile = items[0].file;
+                selectedMediaType = items[0].type === 'video' ? 'video' : (items[0].type === 'image' ? 'image' : null);
+                showDeleteMediaButton();
+                const firstType = items[0].type;
+                const indicatorState = firstType === 'video' ? 'video' : (firstType === 'image' ? 'photo' : 'file');
+                const indicatorLabel = items.length > 1 ? `${items.length} items added` : (items[0].name || 'Media added to post');
+                setMediaIndicator(indicatorState, indicatorLabel);
+            };
+
             isMediaProcessing = true;
             hideDeleteMediaButton();
-            selectedMediaItems = [];
 
             const accepted = [];
             let blockedReason = null;
@@ -36158,8 +36186,9 @@
                 const file = incoming[i];
                 const isVideo = file.type.startsWith('video');
                 const isImage = file.type.startsWith('image');
-                const label = incoming.length > 1 ? `(${i + 1} of ${incoming.length})` : '';
-                console.log(`📁 handleFiles gen=${myGen} [${i + 1}/${incoming.length}] name=${file.name} size=${file.size} type=${file.type}`);
+                const shownIndex = existing.length + i + 1;
+                const label = (existing.length + incoming.length) > 1 ? `(${shownIndex} of ${existing.length + incoming.length})` : '';
+                console.log(`📁 handleFiles gen=${myGen} [${shownIndex}] name=${file.name} size=${file.size} type=${file.type}`);
 
                 if (isVideo) {
                     showMediaLoadingOverlay(`Processing video ${label}...`);
@@ -36187,7 +36216,7 @@
                     if (isSafe) {
                         accepted.push({ file, type: 'image', name: file.name });
                     } else {
-                        // Reject the whole batch the moment any image is unsafe.
+                        // Reject this new round the moment any image is unsafe.
                         blockedReason = (window.lastModerationReason || 'not allowed').toString();
                         break;
                     }
@@ -36200,13 +36229,10 @@
             if (superseded()) return;
 
             if (blockedReason) {
-                selectedMediaItems = [];
-                selectedFile = null;
-                selectedMediaType = null;
+                // Keep anything already accepted; drop only the rejected new round.
                 try { if (fileInput) fileInput.value = ''; } catch (e) {}
-                hideDeleteMediaButton();
-                setMediaIndicator('none');
                 isMediaProcessing = false;
+                commit(existing);
                 showMediaLoadingOverlay('Image blocked: ' + blockedReason.replace(/_/g, ' ').slice(0, 80));
                 if (window._mediaOverlayTimer) clearTimeout(window._mediaOverlayTimer);
                 window._mediaOverlayTimer = setTimeout(() => {
@@ -36217,30 +36243,13 @@
             }
 
             hideMediaLoadingOverlay();
-
-            if (accepted.length === 0) {
-                selectedMediaItems = [];
-                selectedFile = null;
-                selectedMediaType = null;
-                try { if (fileInput) fileInput.value = ''; } catch (e) {}
-                hideDeleteMediaButton();
-                setMediaIndicator('none');
-                isMediaProcessing = false;
-                return;
-            }
-
-            // Commit the accepted batch. Mirror the first item into the legacy
-            // single-file state so existing checks (hasFile, area-tag rules) keep working.
-            selectedMediaItems = accepted;
-            selectedFile = accepted[0].file;
-            selectedMediaType = accepted[0].type === 'video' ? 'video' : (accepted[0].type === 'image' ? 'image' : null);
+            // Reset the input so picking the SAME file again still fires a change event.
+            try { if (fileInput) fileInput.value = ''; } catch (e) {}
             isMediaProcessing = false;
-            showDeleteMediaButton();
-            const firstType = accepted[0].type;
-            const indicatorState = firstType === 'video' ? 'video' : (firstType === 'image' ? 'photo' : 'file');
-            const indicatorLabel = accepted.length > 1 ? `${accepted.length} items added` : (accepted[0].name || 'Media added to post');
-            setMediaIndicator(indicatorState, indicatorLabel);
-            console.log(`✅ ${accepted.length} media item(s) ready for post`);
+
+            const combined = existing.concat(accepted).slice(0, MAX_MEDIA);
+            commit(combined);
+            console.log(`✅ ${combined.length} media item(s) ready for post (added ${accepted.length})`);
         }
 
         // Content moderation - block derogatory and explicit language
