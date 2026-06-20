@@ -32437,6 +32437,7 @@
                 console.warn('safeAddItemsToGridScroller failed:', e);
                 return 0;
             }
+        }
 
             /**
              * Insert a newly created post into the user's grid near the top while
@@ -32449,7 +32450,18 @@
                 if (!postData || !postData.id) return;
                 if (!gridContent[contentKey]) gridContent[contentKey] = [];
 
-                // If already present, update in place
+                // 🛡️ Cross-key de-dup: a post id must live in exactly ONE feed bucket.
+                // An optimistic insert (own grid key) plus a realtime 'shared-posts'
+                // merge could otherwise place the same id under two keys, which the
+                // grid pool would then render twice. Strip the id from every other key.
+                try {
+                    Object.keys(gridContent).forEach(k => {
+                        if (k === contentKey || !Array.isArray(gridContent[k])) return;
+                        gridContent[k] = gridContent[k].filter(p => !(p && p.id === postData.id));
+                    });
+                } catch (e) { /* ignore */ }
+
+                // If already present in this key, update in place
                 const already = gridContent[contentKey].findIndex(p => p && p.id === postData.id);
                 if (already !== -1) { gridContent[contentKey][already] = postData; return; }
 
@@ -32546,7 +32558,6 @@
                     }
                 } catch (e) { console.warn('rebuildGridScrollerFromGridContent failed', e); }
             }
-        }
 
         // ===== Grid update scheduler =====
         // Coalesce frequent triggers (location, votes, small updates) and
