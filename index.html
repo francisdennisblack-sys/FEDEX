@@ -3567,10 +3567,12 @@
                             try { await window.recaptchaVerifier.render(); } catch (e) { console.warn('recaptcha render failed', e); }
                         } catch (e) { console.warn('recaptcha init failed', e); }
                         const appVerifier = window.recaptchaVerifier;
-                        // Ensure auth state persists across page reloads in this browser
+                        // Ensure auth state persists across page reloads, tab closes,
+                        // and browser restarts (local persistence) so signed-in users keep
+                        // their identity — and ownership of their posts — after a refresh.
                         try {
-                            if (window.setPersistence && window.browserSessionPersistence && window.auth) {
-                                await window.setPersistence(window.auth, window.browserSessionPersistence);
+                            if (window.setPersistence && window.browserLocalPersistence && window.auth) {
+                                await window.setPersistence(window.auth, window.browserLocalPersistence);
                             }
                         } catch (e) { console.warn('Could not set auth persistence for phone sign-in', e); }
                         // track attempts locally — can't override server SMS quota, but allows us to
@@ -3678,11 +3680,14 @@
                             } catch (e) { console.warn('confirmPhoneCode DB handling failed', e); }
                         }
                         
-                        // 🔥 CRITICAL: Set auth persistence IMMEDIATELY after phone auth
+                        // 🔥 CRITICAL: Set auth persistence IMMEDIATELY after phone auth.
+                        // Use LOCAL persistence so the session survives refreshes, tab
+                        // closes and browser restarts — otherwise the user loses their
+                        // account identity (and post ownership) on the next visit.
                         try {
                             console.log('🔄 Setting auth persistence after phone auth...');
-                            await setPersistence(auth, browserSessionPersistence);
-                            console.log('✅ Auth persistence set to browserSessionPersistence');
+                            await setPersistence(auth, browserLocalPersistence);
+                            console.log('✅ Auth persistence set to browserLocalPersistence');
                         } catch (e) {
                             console.warn('⚠️ Could not set auth persistence:', e);
                         }
@@ -5503,10 +5508,14 @@
         window.setPersistence = setPersistence;
         window.browserLocalPersistence = browserLocalPersistence;
         window.browserSessionPersistence = browserSessionPersistence;
-        // Ensure auth persistence is set on initialization so sessions restore across reloads
+        // Ensure auth persistence is set on initialization so sessions restore across
+        // reloads AND browser restarts. LOCAL persistence (localStorage-backed) keeps a
+        // signed-in user authenticated after a refresh so they never lose ownership of
+        // their posts. (browserSessionPersistence was wiped on tab/browser close, which
+        // caused signed-in users to fall back to the anonymous device id on next visit.)
         try {
-            setPersistence(auth, browserSessionPersistence).then(()=>{
-                console.log('✅ Auth persistence initialized to browserSessionPersistence');
+            setPersistence(auth, browserLocalPersistence).then(()=>{
+                console.log('✅ Auth persistence initialized to browserLocalPersistence');
             }).catch(e=>{
                 console.warn('Could not initialize auth persistence on startup', e);
             });
