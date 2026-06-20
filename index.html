@@ -22374,7 +22374,13 @@
             } catch (e) {}
             
             // CRITICAL: Ensure location is determined BEFORE showing modal
-            // Never disappoint users with "Detecting location..." on first load
+            // Never disappoint users with "Detecting location..." on first load.
+            // NOTE: We intentionally do NOT call autoPopulateNearestArea() here.
+            // That helper overwrites the SENDING TO field with the nearest POI name
+            // (e.g. "Riverton Junction"). Running it on open — while userSelectedZone
+            // was still true from the PREVIOUS open — is exactly what made a stale
+            // POI name flash in for one reopen. The area tag must instead STICK to
+            // whatever the user chose (Change Location label or posting-page dropdown).
             if (!userLocation || !userLocation.lat || !userLocation.lon) {
                 console.log('⚠️  Location not ready - requesting geolocation...');
                 // Request geolocation synchronously if not available
@@ -22384,39 +22390,33 @@
                         if (loc && loc.lat && loc.lon) {
                             userLocation = { lat: loc.lat, lon: loc.lon, latitude: loc.lat, longitude: loc.lon };
                             console.log('📍 Location acquired (privacy-first):', userLocation);
-                            updateZonePredictor();
                             populateNearbyLocations();
-                            autoPopulateNearestArea();
+                            updateZonePredictor();
                         }
                     }).catch((err) => { console.warn('requestGeolocation failed in modal flow', err); });
                 } catch (e) { console.warn('requestGeolocation error', e); }
-            } else {
-                // Location already available - auto-populate area with nearest location
-                autoPopulateNearestArea();
             }
-            
+
             // Hide dropdown if open
             const dropdown = document.getElementById('autocompleteDropdown');
             if (dropdown) dropdown.style.display = 'none';
-            
-            // Always reset previously selected area tag when reopening posting.
-            userSelectedZone = false;
-            currentZoneTag = '';
-            window.currentSelectedAreaBbox = null;
-            window.currentSelectedAreaCenter = null;
-            try { window.persistZoneTagForUser && window.persistZoneTagForUser(null); } catch(e) {}
-            const clearZoneBtnOnReset = document.getElementById('clearZoneBtn');
-            if (clearZoneBtnOnReset) clearZoneBtnOnReset.style.display = 'none';
+
+            // Do NOT reset the previously selected area tag on reopen. The area the
+            // user chose — either by committing a location on the Change Location page
+            // (manualLocationActive) OR by picking one from the posting-page dropdown
+            // (userSelectedZone + currentZoneTag) — must persist across closing and
+            // reopening the posting page. updateZonePredictor() renders the right value:
+            // explicit posting selection → committed Change Location label → "Local area".
+            // Only clear the transient search input, never the committed selection.
             const customTagInputOnReset = document.getElementById('customZoneTag');
             if (customTagInputOnReset) customTagInputOnReset.value = '';
+            // Show the clear ("X") affordance only when an explicit selection is active.
+            const clearZoneBtnOnReset = document.getElementById('clearZoneBtn');
+            if (clearZoneBtnOnReset) clearZoneBtnOnReset.style.display = userSelectedZone ? 'inline-block' : 'none';
 
-            // Re-run auto-detect so the SENDING TO field shows the best current location.
-            if (typeof autoDetectClosestArea === 'function') {
-                try { autoDetectClosestArea(); } catch(e) { console.warn('autoDetectClosestArea failed on reset', e); }
-            } else {
-                updateZonePredictor();
-            }
-            
+            // Render the sticky area tag.
+            updateZonePredictor();
+
             // Show nearby locations for quick selection
             populateNearbyLocations();
             
