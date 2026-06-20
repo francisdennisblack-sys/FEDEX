@@ -40765,6 +40765,33 @@
                                 try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'pending', sel: sel, ts: Date.now() })); } catch(e){}
                             } catch (e) { console.warn('Failed to persist chosen location locally', e); }
 
+                            // 🌍 AUTHORITATIVE SAVE: write the chosen lat/lon to the signed-in
+                            // user's Firebase record so their *real* saved location becomes this
+                            // area on every device and survives refresh. This mirrors the shape
+                            // read back by the login restore (users/${uid}/location).
+                            try {
+                                const uid = window.currentUserId;
+                                if (uid && window.database && window.ref && window.set) {
+                                    const changedAt = Number(sel.changedAt) || Date.now();
+                                    const locLabel = (sel && sel.label) ? String(sel.label).trim() : '';
+                                    window.set(window.ref(window.database, `users/${uid}/location`), {
+                                        lat: Number(sel.lat),
+                                        lon: Number(sel.lon),
+                                        label: locLabel || null,
+                                        accuracy: Number(sel.accuracy) || 100,
+                                        source: 'manual',
+                                        changedAt: changedAt,
+                                        updatedAt: Date.now()
+                                    }).then(() => {
+                                        console.log('✅ Saved manual location to users/' + uid + '/location:', Number(sel.lat), Number(sel.lon));
+                                    }).catch((err) => console.warn('Could not save user location to Firebase', err));
+                                    // Update live presence + nearby-user matching with the new coords
+                                    try { if (typeof window.trackUserLocation === 'function') window.trackUserLocation(uid, Number(sel.lat), Number(sel.lon)); } catch (e) {}
+                                } else {
+                                    console.log('ℹ️ Skipping server location save (no signed-in user or DB not ready)');
+                                }
+                            } catch (e) { console.warn('Failed to persist chosen location to Firebase', e); }
+
                             // Refresh grid immediately to reflect the chosen location without waiting for network
                             try { if (typeof renderGrid === 'function') renderGrid(); else if (typeof forceGridRefresh === 'function') forceGridRefresh(); } catch (e) {}
 
@@ -40891,6 +40918,25 @@
                     try {
                         let cacheObj = null;
                         try { const raw = localStorage.getItem('userLocationCache'); if (raw) cacheObj = JSON.parse(raw); } catch(e) {}
+                        // 🌍 Sync the restored real location back to the signed-in user's Firebase
+                        // record so a refresh won't re-apply the manual override we just cleared.
+                        try {
+                            const uid = window.currentUserId;
+                            const rlat = cacheObj ? Number(cacheObj.lat) : NaN;
+                            const rlon = cacheObj ? Number(cacheObj.lon) : NaN;
+                            if (uid && window.database && window.ref && window.set && Number.isFinite(rlat) && Number.isFinite(rlon)) {
+                                window.set(window.ref(window.database, `users/${uid}/location`), {
+                                    lat: rlat,
+                                    lon: rlon,
+                                    label: (cacheObj.label || cacheObj.name || null),
+                                    accuracy: Number(cacheObj.accuracy) || 100,
+                                    source: 'auto',
+                                    changedAt: Date.now(),
+                                    updatedAt: Date.now()
+                                }).then(() => console.log('✅ Restored real location synced to users/' + uid + '/location')).catch((err) => console.warn('Could not sync restored location to Firebase', err));
+                                try { if (typeof window.trackUserLocation === 'function') window.trackUserLocation(uid, rlat, rlon); } catch (e) {}
+                            }
+                        } catch (e) { console.warn('Failed to sync restored location to Firebase', e); }
                         try { applyRestoredLocationAndRefreshUI(cacheObj); return; } catch(e) { console.warn('applyRestoredLocationAndRefreshUI failed', e); }
                     } catch (e) {
                         try { programmaticReload(); return; } catch (e2) { try { location.reload(); } catch(e3){} }
