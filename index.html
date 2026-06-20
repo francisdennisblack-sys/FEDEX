@@ -2110,38 +2110,62 @@
                         }
 
                         if (actualId !== expectedId || !hasVisualContent) {
-                            // If the expected post is already rendered elsewhere, swap contents
-                            try{
-                                if(expectedId){
-                                    const other = document.querySelector(`[data-post-id="${expectedId}"]`);
-                                    if(other && other !== box){
-                                        // swap innerHTML, data-post-id and classes to keep slots filled
-                                        try{
-                                            const tmpHTML = box.innerHTML;
-                                            const tmpId = box.getAttribute('data-post-id') || '';
-                                            const tmpClass = box.className || '';
-                                            // take other's content into this slot
-                                            box.innerHTML = other.innerHTML;
-                                            box.setAttribute('data-post-id', expectedId);
-                                            box.className = other.className || '';
-                                            // restore other's slot with this slot's previous content (or clear safely)
-                                            other.innerHTML = tmpHTML || '';
-                                            if(tmpId) other.setAttribute('data-post-id', tmpId); else other.removeAttribute('data-post-id');
-                                            other.className = tmpClass || '';
-                                            // ensure visibility and remove any accidental opacity
-                                            try{ box.style.opacity = ''; box.style.transition = ''; other.style.opacity = ''; other.style.transition = ''; }catch(e){}
-                                            continue; // move to next slot
-                                        }catch(e){ /* fallthrough to re-render below */ }
-                                    }
+                            // 🛡️ DUPLICATE-SAFE REPAIR (positional, no swaps):
+                            // The previous implementation SWAPPED innerHTML/data-post-id
+                            // with whatever other DOM box currently held `expectedId`.
+                            // That writes a post's content into a slot whose correct
+                            // occupant is something else, leaving the SAME post id in
+                            // two boxes at once. During a vote rerank (reconciler runs
+                            // every tick) that smear compounds and one post "takes over"
+                            // many slots. Instead: actively clear any OTHER box still
+                            // claiming this id, then render the expected post directly
+                            // into this positional slot. Because `this.items` is already
+                            // de-duplicated, positional rendering guarantees each post id
+                            // can occupy at most one box.
+                            try {
+                                if (expectedId) {
+                                    const dupes = document.querySelectorAll(`[data-post-id="${expectedId}"]`);
+                                    dupes.forEach(node => { if (node && node !== box) this.clearBoxElement(node); });
                                 }
-                            }catch(e){}
-                            // fallback: clear and (re)render expected into this slot
+                            } catch (e) { /* ignore */ }
                             this.clearBoxElement(box);
                             if (this.onRenderItem) {
                                 this.onRenderItem(box, expected);
+                            } else {
+                                this.renderItemDefault(box, expected);
                             }
+                            try { box.setAttribute('data-post-id', expectedId); } catch (e) { /* ignore */ }
+                            try { box.style.opacity = ''; box.style.transition = ''; } catch (e) { /* ignore */ }
                         }
                     }
+
+                    // 🧹 FINAL DUPLICATE SWEEP: guarantee no post id occupies more than
+                    // one DOM box after this pass. Keep the box whose positional index
+                    // matches `this.items`; clear any earlier/other box sharing that id.
+                    try {
+                        const seenIds = new Map(); // id -> boxIndex of the keeper
+                        for (let boxIndex = 1; boxIndex <= limit; boxIndex++) {
+                            const box = document.getElementById(`box-${boxIndex}`);
+                            if (!box) break;
+                            const id = String(box.getAttribute('data-post-id') || '');
+                            if (!id) continue;
+                            const expectedHere = this.items[boxIndex - 1];
+                            const expectedId = expectedHere && expectedHere.id ? String(expectedHere.id) : '';
+                            if (seenIds.has(id)) {
+                                if (id === expectedId) {
+                                    // This slot is the correct home; clear the earlier one.
+                                    const prevBox = document.getElementById(`box-${seenIds.get(id)}`);
+                                    if (prevBox && prevBox !== box) this.clearBoxElement(prevBox);
+                                    seenIds.set(id, boxIndex);
+                                } else {
+                                    // This slot is a stray copy; clear it.
+                                    this.clearBoxElement(box);
+                                }
+                            } else {
+                                seenIds.set(id, boxIndex);
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             }
 
