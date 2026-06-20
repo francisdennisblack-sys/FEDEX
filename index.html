@@ -40746,6 +40746,33 @@
                 if (closeBtn) closeBtn.addEventListener('click', closeModal);
                 if (changeBtn) changeBtn.addEventListener('click', async function(){
                     const primary = document.getElementById('refinePrimary')?.value || '';
+                    // 🔎 RESOLVE TYPED TEXT ON COMMIT: if the user typed a place but never
+                    // clicked a dropdown suggestion, there is no (or a stale) __tempLocationOverride,
+                    // so the commit below would do nothing and the chosen location would NOT be saved.
+                    // Geocode the typed text now (local curated list first, then Nominatim) so that
+                    // WHATEVER location is in the box gets saved when "Change Location" is pressed.
+                    try {
+                        const typed = String(primary || '').trim();
+                        const ov = window.__tempLocationOverride;
+                        const overrideMatchesTyped = ov && String(ov.label || '').trim().toLowerCase() === typed.toLowerCase();
+                        if (typed.length > 0 && !overrideMatchesTyped) {
+                            let match = null;
+                            try {
+                                const local = (typeof getLocationSuggestions === 'function') ? getLocationSuggestions(typed) : [];
+                                if (local && local.length && Number.isFinite(Number(local[0].lat)) && Number.isFinite(Number(local[0].lon))) match = local[0];
+                            } catch (e) { /* ignore local lookup errors */ }
+                            if (!match) {
+                                try {
+                                    const geo = (typeof fetchGeocode === 'function') ? await fetchGeocode(typed, 1) : [];
+                                    if (geo && geo.length && Number.isFinite(Number(geo[0].lat)) && Number.isFinite(Number(geo[0].lon))) match = geo[0];
+                                } catch (e) { /* ignore remote geocode errors */ }
+                            }
+                            if (match) {
+                                window.__tempLocationOverride = { lat: Number(match.lat), lon: Number(match.lon), label: match.label || typed };
+                                console.log('LOCATION_OVERRIDE: resolved typed text to coords on commit:', window.__tempLocationOverride);
+                            }
+                        }
+                    } catch (e) { console.warn('Failed to resolve typed location on commit', e); }
                     try {
                         if (window.__tempLocationOverride) {
                             const sel = window.__tempLocationOverride;
