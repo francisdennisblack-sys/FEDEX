@@ -4638,7 +4638,7 @@
         // Import Firebase functions
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
         import { getDatabase, ref, set, get, update, remove, onValue, onChildAdded, onChildChanged, onChildRemoved, runTransaction } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
-        import { getStorage, ref as storageRef, uploadBytes, uploadBytesResumable, getDownloadURL, getMetadata, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
+        import { getStorage, ref as storageRef, uploadBytes, uploadBytesResumable, getDownloadURL, getMetadata, deleteObject, listAll } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-storage.js';
         import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence, browserSessionPersistence, RecaptchaVerifier, signInWithPhoneNumber, signOut } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
 
         const firebaseConfig = {
@@ -18399,9 +18399,43 @@
                     await remove(postRef);
                     console.log('✅ Post removed (fallback) from shared collection:', postId);
                 }
+
+                // 🧹 Free Storage space: delete all media objects uploaded for this post
+                // (posts/${postId}/photo, posts/${postId}/media_0, …). Non-fatal so a
+                // storage failure never blocks the database deletion.
+                try { await deletePostMediaFromStorage(postId); } catch (e) { /* non-fatal */ }
             } catch (error) {
                 console.error('❌ Error deleting post from Firebase:', error);
                 throw error;
+            }
+        }
+
+        // Remove every Storage object stored under posts/{postId}/ so deleted posts
+        // do not keep consuming storage quota. Best-effort and recurses one level
+        // for any nested media folders.
+        async function deletePostMediaFromStorage(postId) {
+            try {
+                if (!postId || !storage || typeof listAll !== 'function') return;
+                const folderRef = storageRef(storage, `posts/${postId}`);
+                const listing = await listAll(folderRef);
+                const deletions = [];
+                (listing.items || []).forEach(itemRef => {
+                    deletions.push(deleteObject(itemRef).catch(() => {}));
+                });
+                for (const prefix of (listing.prefixes || [])) {
+                    try {
+                        const sub = await listAll(prefix);
+                        (sub.items || []).forEach(itemRef => {
+                            deletions.push(deleteObject(itemRef).catch(() => {}));
+                        });
+                    } catch (e) { /* ignore nested listing errors */ }
+                }
+                if (deletions.length) {
+                    await Promise.all(deletions);
+                    console.log(`🧹 Deleted ${deletions.length} storage object(s) for post ${postId}`);
+                }
+            } catch (e) {
+                console.warn('Storage cleanup failed for post', postId, e && e.message ? e.message : e);
             }
         }
 
