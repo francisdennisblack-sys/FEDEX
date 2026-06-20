@@ -5010,6 +5010,16 @@
         window.signInWithPhoneNumber = signInWithPhoneNumber;
         window.signOut = signOut;
 
+        // 📞 Permanent accessor for the signed-in user's signup phone number.
+        // Returns the phone tracked at signup, or '' if not signed in / not on record.
+        window.getCurrentUserPhone = function getCurrentUserPhone() {
+            try {
+                if (window.currentUserPhone) return String(window.currentUserPhone).trim();
+                const stored = localStorage.getItem('lastSignedInPhone');
+                return stored ? String(stored).trim() : '';
+            } catch (e) { return ''; }
+        };
+
         // ==========================================================================
         // 💳 STRIPE PAYMENT FLOW
         // ==========================================================================
@@ -12918,6 +12928,32 @@
                 } catch (e) {
                     console.warn('Failed to rehydrate username from auth state', e);
                 }
+
+                // 📞 Restore the signup phone number so it's permanently accessible while signed in.
+                //   1) Use Firebase Auth's own phoneNumber if present
+                //   2) Fall back to the last persisted phone in localStorage
+                //   3) Refresh from the user's saved profile record in the database
+                try {
+                    if (isSignedInUser) {
+                        let restoredPhone = (user.phoneNumber || '').trim()
+                            || (localStorage.getItem('lastSignedInPhone') || '').trim();
+                        if (restoredPhone) {
+                            window.currentUserPhone = restoredPhone;
+                            try { localStorage.setItem('lastSignedInPhone', restoredPhone); } catch (e) {}
+                        }
+                        // Authoritative refresh from the saved profile (async, non-blocking)
+                        try {
+                            const profSnap = await get(ref(database, `users/${user.uid}/profile`));
+                            const prof = profSnap && profSnap.exists() ? profSnap.val() : null;
+                            const profilePhone = prof && prof.phone ? String(prof.phone).trim() : '';
+                            if (profilePhone) {
+                                window.currentUserPhone = profilePhone;
+                                try { localStorage.setItem('lastSignedInPhone', profilePhone); } catch (e) {}
+                            }
+                        } catch (e) { console.warn('Could not refresh phone from profile', e); }
+                        console.log('📞 currentUserPhone restored:', window.currentUserPhone || '(none on record)');
+                    }
+                } catch (e) { console.warn('Failed to restore signup phone number', e); }
 
                 isConnected = true;
                 try { updateAccountUI(); } catch (err) { console.warn('updateAccountUI failed', err); }
