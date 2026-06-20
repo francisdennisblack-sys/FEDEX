@@ -9122,14 +9122,136 @@
         // ============================================
         // POST ENGAGEMENT TIER SYSTEM
         // ============================================
+        // ============================================================
+        // NEW BADGE — adaptive, turnover-aware system
+        // Decides whether a post should display the NEW badge based on how
+        // quickly the user's LOCAL grid is actually turning over:
+        //   • Low local turnover (posts persist; only other-area posts are
+        //     backfilled/replaced) → NEW lasts up to 1 hour.
+        //   • High local turnover (lots of fresh local posts arriving) → NEW
+        //     is removed after as little as 2 minutes.
+        // The duration scales smoothly between those bounds from the measured
+        // local arrival rate, so the badge "feels new" relative to the feed.
+        // ============================================================
+        function getPostCreatedAt(post) {
+            if (!post) return 0;
+            const candidates = [post.timestamp, post.createdAt, post.created_at, post.time, post.postedAt, post.ts];
+            for (let i = 0; i < candidates.length; i++) {
+                const n = Number(candidates[i]);
+                if (n && isFinite(n) && n > 0) {
+                    // Normalize second-precision epochs to milliseconds.
+                    return n < 1e12 ? n * 1000 : n;
+                }
+            }
+            return 0;
+        }
+
+        const NewBadgeTurnoverML = {
+            MIN_DURATION_MS: 2 * 60 * 1000,    // high turnover → 2 minutes
+            MAX_DURATION_MS: 60 * 60 * 1000,   // low turnover  → 1 hour
+            WINDOW_MS: 10 * 60 * 1000,         // rolling observation window
+            HIGH_RATE: 3,                      // fresh LOCAL posts/min that counts as "busy"
+            arrivals: [],                      // timestamps when a fresh LOCAL post first appeared
+            seen: new Set(),                   // post ids already counted (avoid double counting)
+            areaKey: null,                     // normalized current local area
+            _cacheMs: null,
+            _cacheAt: 0,
+
+            _norm(a) { return String(a == null ? '' : a).trim().toLowerCase(); },
+
+            setArea(area) {
+                const key = this._norm(area);
+                // Reset turnover tracking when the user genuinely changes area so
+                // another area's churn never shortens NEW here (and vice-versa).
+                if (key && key !== this.areaKey) {
+                    this.areaKey = key;
+                    this.arrivals = [];
+                    this.seen = new Set();
+                    this._cacheMs = null;
+                }
+            },
+
+            postArea(post) {
+                if (!post) return '';
+                return this._norm(post.zoneTag || post.area || post.county || post.zone || '');
+            },
+
+            // Observe the posts currently in the user's grid and count genuinely
+            // fresh LOCAL arrivals (a post whose creation time is recent the first
+            // time we see it). Backfilled posts from other areas do NOT count.
+            observe(posts) {
+                try {
+                    if (!Array.isArray(posts) || !posts.length) return;
+                    const now = Date.now();
+                    const localKey = this.areaKey;
+                    for (let i = 0; i < posts.length; i++) {
+                        const p = posts[i];
+                        if (!p || !p.id || this.seen.has(p.id)) continue;
+                        this.seen.add(p.id);
+                        // Only LOCAL-area posts contribute to local turnover. If we
+                        // can't resolve areas yet, fall back to counting fresh posts.
+                        const pa = this.postArea(p);
+                        if (localKey && pa && pa !== localKey) continue;
+                        const createdAt = getPostCreatedAt(p);
+                        if (createdAt && (now - createdAt) <= this.WINDOW_MS) {
+                            this.arrivals.push(now);
+                        }
+                    }
+                    const cutoff = now - this.WINDOW_MS;
+                    if (this.arrivals.length) this.arrivals = this.arrivals.filter(t => t >= cutoff);
+                    if (this.seen.size > 8000) {
+                        // Bound memory: keep only currently-visible ids.
+                        this.seen = new Set(posts.map(p => p && p.id).filter(Boolean));
+                    }
+                    this._cacheMs = null;
+                } catch (e) { /* never let tracking break rendering */ }
+            },
+
+            // Fresh LOCAL posts per minute over the observation window.
+            localArrivalRate() {
+                const cutoff = Date.now() - this.WINDOW_MS;
+                let n = 0;
+                for (let i = 0; i < this.arrivals.length; i++) if (this.arrivals[i] >= cutoff) n++;
+                return n / (this.WINDOW_MS / 60000);
+            },
+
+            // Map the measured turnover to an adaptive NEW-badge duration.
+            getDurationMs() {
+                const now = Date.now();
+                // Short cache so every badge in one render pass agrees.
+                if (this._cacheMs != null && (now - this._cacheAt) < 1000) return this._cacheMs;
+                const rate = this.localArrivalRate();
+                const t = Math.max(0, Math.min(1, rate / this.HIGH_RATE));
+                // Exponential interpolation: MAX at rate 0 → MIN at rate ≥ HIGH_RATE.
+                const ms = this.MAX_DURATION_MS * Math.pow(this.MIN_DURATION_MS / this.MAX_DURATION_MS, t);
+                const clamped = Math.max(this.MIN_DURATION_MS, Math.min(this.MAX_DURATION_MS, ms));
+                this._cacheMs = clamped;
+                this._cacheAt = now;
+                return clamped;
+            }
+        };
+        try { window.NewBadgeTurnoverML = NewBadgeTurnoverML; } catch (e) {}
+
+        // Single source of truth for "is this post still NEW?"
+        function isPostNew(post) {
+            try {
+                if (!post) return false;
+                const createdAt = getPostCreatedAt(post);
+                if (!createdAt) return false;
+                const age = Date.now() - createdAt;
+                if (age < 0) return true; // minor clock skew → treat as new
+                return age < NewBadgeTurnoverML.getDurationMs();
+            } catch (e) { return false; }
+        }
+        try { window.isPostNew = isPostNew; } catch (e) {}
+
         function getPostEngagementTier(post) {
             const likes = Number(post.likes) || 0;
             const dislikes = Number(post.dislikes) || 0;
             const likeRatio = likes - dislikes;
             
-            // Check if post is NEW (less than 1 hour old)
-            const postAge = Date.now() - (post.timestamp || 0);
-            const isNew = postAge < (60 * 60 * 1000); // 1 hour
+            // Check if post is NEW using the adaptive turnover system
+            const isNew = isPostNew(post);
             
             // NEW POSTS: Placed AFTER liked posts (priority 4) so fresh posts
             // appear below engaged content instead of jumping to the first slot.
@@ -9596,6 +9718,12 @@
                 const orderedPosts = (window.gridScroller && Array.isArray(window.gridScroller.items) && window.gridScroller.items.length > 0)
                     ? window.gridScroller.items.filter(p => p && p.id)
                     : getActiveViewerFeedPosts().filter(p => p && p.id);
+                // Feed the adaptive NEW-badge turnover tracker with the current feed
+                // so it can learn how quickly the user's local grid is turning over.
+                try {
+                    NewBadgeTurnoverML.setArea((typeof currentZoneTag !== 'undefined' && currentZoneTag) ? currentZoneTag : (window.currentZoneTag || ''));
+                    NewBadgeTurnoverML.observe(orderedPosts);
+                } catch (e) { /* tracking is best-effort */ }
                 const podium = orderedPosts.slice(0, 3).filter(isPostEligibleForPositionBadge).map(p => p.id);
 
                 // Cache last visible top-3 for modal mapping consistency
@@ -9662,8 +9790,9 @@
                             if (hasBoostFlag || hasSellFlag) {
                                 // intentionally do not add HOT/NEW/LIKED/DISLIKED badges
                             } else {
-                                // Brand-new posts with no votes yet get the NEW chip.
-                                if (tier === 'NEW') {
+                                // Fresh posts get the NEW chip for as long as the
+                                // adaptive turnover system considers them new.
+                                if (isPostNew(post)) {
                                     badges.push({ kind: 'new', label: 'New' });
                                 }
 
@@ -30900,8 +31029,7 @@
                 const isBuyTile = !!(post && (post.primaryBadge === 'sell' || post.sellBadge || (Array.isArray(post.badges) && post.badges.includes('sell'))));
                 // Posts that earn the NEW badge get the same content offset so the
                 // top-left NEW pill does not overlap the text.
-                const tierInfoTile = (typeof getPostEngagementTier === 'function') ? (getPostEngagementTier(post) || {}) : {};
-                const isNewTile = !isBoostTile && !isBuyTile && String(tierInfoTile.tier || '').toUpperCase() === 'NEW';
+                const isNewTile = !isBoostTile && !isBuyTile && (typeof isPostNew === 'function') && isPostNew(post);
                 // Posts that earn the LIKED badge (net positive engagement) get the
                 // same offset so the badge does not overlap the text.
                 const netEngagementTile = (typeof getPostNetEngagement === 'function')
@@ -34956,7 +35084,14 @@
 
 
         function getNewBadgeDurationMs() {
-            // Dynamic NEW badge duration based on online user count
+            // Unified with the adaptive turnover system so feed scoring and the
+            // visual NEW badge always agree on how long a post stays "new".
+            try {
+                if (typeof NewBadgeTurnoverML !== 'undefined' && NewBadgeTurnoverML) {
+                    return NewBadgeTurnoverML.getDurationMs();
+                }
+            } catch (e) { /* fall through to legacy heuristic */ }
+            // Legacy fallback based on online user count.
             if (onlineUserCount <= 5) {
                 return 60 * 60 * 1000; // 1 hour
             } else if (onlineUserCount <= 10) {
