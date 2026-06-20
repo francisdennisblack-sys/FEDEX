@@ -9240,10 +9240,236 @@
                 if (!createdAt) return false;
                 const age = Date.now() - createdAt;
                 if (age < 0) return true; // minor clock skew → treat as new
-                return age < NewBadgeTurnoverML.getDurationMs();
+                if (age >= NewBadgeTurnoverML.getDurationMs()) return false;
+                // Coordinate with the replacement ML: a non-local post should only be
+                // surfaced as "new" once local content has gone stale. While fresh local
+                // content is still flowing we don't want far-away posts feeling new.
+                try {
+                    if (typeof GridReplacementML !== 'undefined' && GridReplacementML) {
+                        const d = GridReplacementML.distanceMi(post);
+                        if (isFinite(d) && d > GridReplacementML.BAND_NEAR_MI && !GridReplacementML.localContentIsStale()) {
+                            return false;
+                        }
+                    }
+                } catch (e) { /* coordination is best-effort */ }
+                return true;
             } catch (e) { return false; }
         }
         try { window.isPostNew = isPostNew; } catch (e) {}
+
+        // ============================================================
+        // GRID REPLACEMENT ML
+        // Decides how much and how often the user's grid should turn over,
+        // while PROTECTING the post the user is actively viewing/liking.
+        //
+        // Hard composition rule for every grid: 80 / 10 / 10
+        //   • 80% — content from users as LOCAL as possible
+        //   • 10% — the website's highest net-score posts (global)
+        //   • 10% — boosted posts
+        //
+        // Behaviour:
+        //   • Never replaces a post the user is viewing or has just interacted with.
+        //   • Only reaches for non-local content when local content has gone stale —
+        //     reach expands the longer the local (≤1mi) feed stays dry (1mi → 20mi →
+        //     100mi). When local is fresh, it stays local and replaces quickly.
+        //   • Pool density matters: a large shared pool (e.g. 20M posts) means there is
+        //     plenty of local supply, so it favours local content and replaces it less
+        //     often; a thin pool reaches farther and rotates faster.
+        //   • Coordinates with the NEW-badge ML (see isPostNew above).
+        // ============================================================
+        const GridReplacementML = {
+            // Composition targets (hard rule)
+            TARGET_LOCAL: 0.80,
+            TARGET_TOP: 0.10,
+            TARGET_BOOST: 0.10,
+
+            // Distance bands (miles)
+            BAND_NEAR_MI: 1,
+            BAND_MID_MI: 20,
+            BAND_FAR_MI: 100,
+
+            // Replacement cadence bounds
+            MIN_INTERVAL_MS: 15 * 1000,        // fast churn (fresh, busy local feed)
+            MAX_INTERVAL_MS: 30 * 60 * 1000,   // slow churn (quiet local feed)
+
+            // How long a post stays protected after the user interacts with it
+            PROTECT_INTERACTION_MS: 90 * 1000,
+
+            protectedUntil: {},   // { postId: expiryTs }
+            viewingPostId: null,  // post currently open in the modal
+            _stats: { total: 0, near: 0, mid: 0, far: 0, boost: 0, newestLocalAt: 0 },
+            _lastReplaceAt: 0,
+
+            // ---------- User protection ----------
+            setViewing(postId) { try { this.viewingPostId = postId || null; } catch (e) {} },
+            clearViewing() { try { this.viewingPostId = null; } catch (e) {} },
+            noteInteraction(postId) {
+                try { if (postId) this.protectedUntil[postId] = Date.now() + this.PROTECT_INTERACTION_MS; } catch (e) {}
+            },
+            isProtected(postId) {
+                try {
+                    if (!postId) return false;
+                    if (this.viewingPostId && postId === this.viewingPostId) return true;
+                    const until = this.protectedUntil[postId];
+                    if (until && until > Date.now()) return true;
+                    if (until) delete this.protectedUntil[postId];
+                    return false;
+                } catch (e) { return false; }
+            },
+
+            // ---------- Geo / classification helpers ----------
+            distanceMi(post) {
+                try {
+                    if (!post) return Infinity;
+                    const loc = (typeof userLocation !== 'undefined') ? userLocation : null;
+                    if (!loc || loc.lat == null || loc.lon == null) return Infinity;
+                    const plat = Number(post.lat), plon = Number(post.lon);
+                    if (!isFinite(plat) || !isFinite(plon)) return Infinity;
+                    if (typeof calculateDistance !== 'function') return Infinity;
+                    return calculateDistance(loc.lat, loc.lon, plat, plon) * 0.621371; // km → mi
+                } catch (e) { return Infinity; }
+            },
+            isBoost(post) {
+                try { return (typeof isStrictBoostActive === 'function') && isStrictBoostActive(post); } catch (e) { return false; }
+            },
+            net(post) {
+                try { return (typeof getPostNetEngagement === 'function') ? getPostNetEngagement(post) : ((Number(post.likes || 0)) - (Number(post.dislikes || 0))); } catch (e) { return 0; }
+            },
+
+            // ---------- Observe the available feed/pool ----------
+            observe(feed, totalPoolSize) {
+                try {
+                    let near = 0, mid = 0, far = 0, boost = 0, newestLocalAt = 0;
+                    if (Array.isArray(feed)) {
+                        for (let i = 0; i < feed.length; i++) {
+                            const p = feed[i];
+                            if (!p || !p.id) continue;
+                            if (this.isBoost(p)) boost++;
+                            const d = this.distanceMi(p);
+                            const created = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(p) : (Number(p.timestamp) || 0);
+                            if (d <= this.BAND_NEAR_MI) { near++; if (created > newestLocalAt) newestLocalAt = created; }
+                            else if (d <= this.BAND_MID_MI) { mid++; }
+                            else if (d <= this.BAND_FAR_MI) { far++; }
+                        }
+                    }
+                    this._stats = {
+                        total: Number(totalPoolSize) || (Array.isArray(feed) ? feed.length : 0),
+                        near, mid, far, boost, newestLocalAt
+                    };
+                } catch (e) { /* never break rendering */ }
+            },
+
+            // 0 (sparse pool) .. ~1 (very dense pool e.g. 20M posts)
+            densityFactor() {
+                const total = this._stats.total || 0;
+                return total / (total + 2000);
+            },
+
+            // ms since the most recent ≤1mi post; Infinity if none
+            localFreshnessMs() {
+                const t = this._stats.newestLocalAt || 0;
+                return t ? (Date.now() - t) : Infinity;
+            },
+
+            // Local feed is "stale" when there is no near content or none has arrived recently.
+            localContentIsStale() {
+                return (this._stats.near || 0) === 0 || this.localFreshnessMs() > 5 * 60 * 1000;
+            },
+
+            // How far (miles) we are currently willing to pull replacement content from.
+            currentReachMi() {
+                const fresh = this.localFreshnessMs();
+                const density = this.densityFactor();
+                let reach;
+                if (fresh < 60 * 1000 && (this._stats.near || 0) > 0) reach = this.BAND_NEAR_MI;       // fresh local → stay ≤1mi
+                else if (fresh < 5 * 60 * 1000) reach = this.BAND_MID_MI;                              // slightly stale → ≤20mi
+                else reach = this.BAND_FAR_MI;                                                         // dry → ≤100mi
+                // Denser pool means more local supply, so we don't need to reach as far.
+                reach = reach * (1 - 0.5 * density);
+                return Math.max(this.BAND_NEAR_MI, reach);
+            },
+
+            // Adaptive replacement cadence: fast when local is fresh, slow when dry;
+            // denser pools lean slower (more local content → replace less often).
+            getReplaceIntervalMs() {
+                const fresh = this.localFreshnessMs();
+                const density = this.densityFactor();
+                let t = (fresh === Infinity) ? 1 : Math.max(0, Math.min(1, fresh / (10 * 60 * 1000)));
+                t = Math.max(t, 0.4 * density);
+                const ms = this.MIN_INTERVAL_MS * Math.pow(this.MAX_INTERVAL_MS / this.MIN_INTERVAL_MS, t);
+                return Math.max(this.MIN_INTERVAL_MS, Math.min(this.MAX_INTERVAL_MS, ms));
+            },
+            dueForReplacement() { return (Date.now() - this._lastReplaceAt) >= this.getReplaceIntervalMs(); },
+            markReplaced() { this._lastReplaceAt = Date.now(); },
+
+            // Target slot counts for an 80/10/10 grid of the given size.
+            targetCounts(gridSize) {
+                const n = Math.max(0, Number(gridSize) || 0);
+                const boost = Math.round(n * this.TARGET_BOOST);
+                const top = Math.round(n * this.TARGET_TOP);
+                const local = Math.max(0, n - boost - top);
+                return { local, top, boost };
+            },
+
+            // Build an 80/10/10 grid from a candidate pool, keeping protected posts and
+            // honouring the current locality reach. Never throws; falls back safely.
+            compose(pool, gridSize, currentGrid) {
+                try {
+                    if (!Array.isArray(pool) || !pool.length) {
+                        return Array.isArray(currentGrid) ? currentGrid : [];
+                    }
+                    const size = Math.max(1, Number(gridSize) || pool.length);
+                    const targets = this.targetCounts(size);
+                    const reach = this.currentReachMi();
+                    const used = new Set();
+                    const result = [];
+
+                    // 1) Pin protected posts (currently viewed / recently interacted)
+                    if (Array.isArray(currentGrid)) {
+                        for (const p of currentGrid) {
+                            if (p && p.id && this.isProtected(p.id) && !used.has(p.id)) { result.push(p); used.add(p.id); }
+                        }
+                    }
+
+                    // 2) Categorize the pool
+                    const boosts = [], locals = [], fillers = [];
+                    for (const p of pool) {
+                        if (!p || !p.id || used.has(p.id)) continue;
+                        if (this.isBoost(p)) { boosts.push(p); continue; }
+                        if (this.distanceMi(p) <= reach) locals.push(p); else fillers.push(p);
+                    }
+                    const tops = pool.filter(p => p && p.id && !used.has(p.id) && !this.isBoost(p)).sort((a, b) => this.net(b) - this.net(a));
+                    locals.sort((a, b) => {
+                        const da = this.distanceMi(a), db = this.distanceMi(b);
+                        if (da !== db) return da - db;
+                        const ca = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(a) : 0;
+                        const cb = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(b) : 0;
+                        return cb - ca;
+                    });
+                    boosts.sort((a, b) => this.net(b) - this.net(a));
+
+                    const take = (arr, count) => {
+                        for (const p of arr) {
+                            if (result.length >= size || count <= 0) break;
+                            if (!p || !p.id || used.has(p.id)) continue;
+                            result.push(p); used.add(p.id); count--;
+                        }
+                    };
+                    take(boosts, targets.boost);
+                    take(tops, targets.top);
+                    take(locals, targets.local);
+                    // Backfill remaining slots: nearer first, then farther, then anything.
+                    take(locals, size - result.length);
+                    take(fillers, size - result.length);
+                    take(tops, size - result.length);
+                    take(pool, size - result.length);
+                    return result.slice(0, size);
+                } catch (e) {
+                    return (Array.isArray(currentGrid) && currentGrid.length) ? currentGrid : (Array.isArray(pool) ? pool : []);
+                }
+            }
+        };
+        try { window.GridReplacementML = GridReplacementML; } catch (e) {}
 
         function getPostEngagementTier(post) {
             const likes = Number(post.likes) || 0;
@@ -9723,6 +9949,13 @@
                 try {
                     NewBadgeTurnoverML.setArea((typeof currentZoneTag !== 'undefined' && currentZoneTag) ? currentZoneTag : (window.currentZoneTag || ''));
                     NewBadgeTurnoverML.observe(orderedPosts);
+                } catch (e) { /* tracking is best-effort */ }
+                // Feed the grid-replacement ML with the active feed + total shared-pool
+                // size so it can decide locality reach and replacement cadence.
+                try {
+                    let __totalPool = 0;
+                    for (const __k in gridContent) { if (Array.isArray(gridContent[__k])) __totalPool += gridContent[__k].length; }
+                    GridReplacementML.observe(orderedPosts, __totalPool);
                 } catch (e) { /* tracking is best-effort */ }
                 const podium = orderedPosts.slice(0, 3).filter(isPostEligibleForPositionBadge).map(p => p.id);
 
@@ -12455,6 +12688,9 @@
         }
         
         function voteOnPost(postId, voteType) {
+            // Protect the post the user is actively engaging with from being
+            // replaced/cycled out of the grid while they interact with it.
+            try { if (typeof GridReplacementML !== 'undefined') GridReplacementML.noteInteraction(postId); } catch (e) {}
             console.log(`🗳️ voteOnPost called: postId=${postId.substring(0,8)}, type=${voteType}`);
 
             // Allow voting while signed out by using a stable device-scoped id.
@@ -21453,6 +21689,8 @@
             
             selectedBoxIndex = -1;
             selectedPostId = postId;
+            // Protect the post the user is viewing from being replaced/cycled out.
+            try { if (typeof GridReplacementML !== 'undefined') GridReplacementML.setViewing(postId); } catch (e) {}
             
             // Store the link for the link button
             currentViewedPostLink = targetPost.linkURL || null;
@@ -21655,6 +21893,8 @@
 
         function closeViewModal() {
             document.getElementById('viewModal').classList.remove('active');
+            // Release the viewing protection so the grid can resume normal replacement.
+            try { if (typeof GridReplacementML !== 'undefined') GridReplacementML.clearViewing(); } catch (e) {}
         }
 
         // 📞 Open the contact info view so the viewer can call or text the post's author.
