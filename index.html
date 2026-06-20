@@ -14482,23 +14482,50 @@
                 }
                 
                 console.log(`📊 Evaluating ${allAvailablePosts.length} posts for retention...`);
-                
+
+                // Replacement-only retention: NEVER rotate out a post the user is
+                // currently viewing or has just interacted with (protect the user),
+                // and only physically drop a post when we actually have replacement
+                // content available to fill its slot — otherwise we would leave an
+                // empty hole instead of a swap.
+                const keepPost = (p) => {
+                    try {
+                        if (typeof GridReplacementML !== 'undefined' && p && p.id && GridReplacementML.isProtected(p.id)) return true;
+                    } catch (e) { /* protection is best-effort */ }
+                    return ML_POST_RETENTION.shouldKeepPost(p);
+                };
+
                 // Filter posts: keep high-engagement ones, rotate out low-engagement
-                const retainedPosts = allAvailablePosts.filter(post => ML_POST_RETENTION.shouldKeepPost(post));
-                const rotatedOutCount = allAvailablePosts.length - retainedPosts.length;
+                const retainedPosts = allAvailablePosts.filter(keepPost);
+                const candidatesToDrop = allAvailablePosts.filter(p => !keepPost(p));
+                const rotatedOutCount = candidatesToDrop.length;
+
+                // Only replace as many posts as we can backfill. The replacement pool
+                // is any retained post not currently shown in the visible grid plus
+                // anything we can lazily load — if there is nothing to swap in, keep
+                // the post so the grid never shrinks (replacement, not removal).
+                let visibleIds = new Set();
+                try {
+                    const shown = (window.gridScroller && Array.isArray(gridScroller.items)) ? gridScroller.items : retainedPosts;
+                    shown.forEach(p => { if (p && p.id) visibleIds.add(p.id); });
+                } catch (e) { /* ignore */ }
+                const replacementPool = retainedPosts.filter(p => p && p.id && !visibleIds.has(p.id));
+                const maxReplaceable = Math.max(0, replacementPool.length);
+                // The set we are actually allowed to drop this pass (bounded by supply).
+                const dropSet = new Set(candidatesToDrop.slice(0, maxReplaceable).map(p => p && p.id).filter(Boolean));
                 
-                if (rotatedOutCount > 0) {
-                    console.log(`✅ POST ROTATION: Keeping ${retainedPosts.length}, rotating out ${rotatedOutCount} low-engagement posts`);
+                if (dropSet.size > 0) {
+                    console.log(`✅ POST ROTATION: Keeping ${retainedPosts.length}, replacing ${dropSet.size}/${rotatedOutCount} low-engagement posts (bounded by ${maxReplaceable} replacements)`);
                     
-                    // Remove expired posts from gridContent
+                    // Remove only the bounded, replaceable posts from gridContent
                     for (const key in gridContent) {
                         if (Array.isArray(gridContent[key])) {
-                            gridContent[key] = gridContent[key].filter(p => ML_POST_RETENTION.shouldKeepPost(p));
+                            gridContent[key] = gridContent[key].filter(p => !(p && p.id && dropSet.has(p.id)));
                         }
                     }
                     
-                    // Also remove from Firebase if they're time-expired
-                    const expiredPosts = allAvailablePosts.filter(p => !ML_POST_RETENTION.shouldKeepPost(p));
+                    // Also remove from Firebase if they're time-expired (and not protected)
+                    const expiredPosts = candidatesToDrop.filter(p => p && p.id && dropSet.has(p.id));
                     for (const post of expiredPosts) {
                         if (post.authId && post.id) {
                             try {
@@ -14512,6 +14539,17 @@
                             }
                         }
                     }
+
+                    // Backfill the freed slots immediately so the rotation is a true
+                    // REPLACEMENT — never leave an empty hole where a post used to be.
+                    try { rebuildGridScrollerFromGridContent(); } catch (e) { /* ignore */ }
+                    try { window.lastRenderGridTime = 0; } catch (e) { /* ignore */ }
+                    try { renderGrid(); } catch (e) { /* ignore */ }
+                    try { repairGridSlotGaps('rotate'); } catch (e) { /* ignore */ }
+                    try { fillEmptySlotAfterDelay(250); } catch (e) { /* ignore */ }
+                    try { if (typeof GridReplacementML !== 'undefined') GridReplacementML.markReplaced(); } catch (e) { /* ignore */ }
+                } else if (rotatedOutCount > 0) {
+                    console.log(`⏸️ POST ROTATION: ${rotatedOutCount} posts eligible to retire but no replacements available — keeping them to avoid empty slots.`);
                 }
                 
                 return retainedPosts;
