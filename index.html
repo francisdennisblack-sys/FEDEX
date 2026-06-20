@@ -21733,112 +21733,17 @@
             if (!targetPost.dislikes) targetPost.dislikes = 0;
 
             let viewHTML = '';
-            // Check for Firebase Storage URL or legacy base64
-            const imageSource = targetPost.photoURL || targetPost.imageData;
-            const hasMedia = imageSource !== undefined && imageSource !== null;
-            
+            // Build the ordered media list (supports up to 10 photos/videos for swiping).
+            const postMediaList = (typeof buildPostMediaList === 'function') ? buildPostMediaList(targetPost) : [];
+            const hasMedia = postMediaList.length > 0;
+
             // Render media prominently when present, with written content only in the pop-out description
             const viewMediaEl = document.getElementById('viewMedia');
             const viewTextEl = document.getElementById('viewText');
-                if (hasMedia && viewMediaEl) {
-                const mediaHTML = (function() {
-                    const src = imageSource;
-                    const mt = (targetPost.mediaType || '').toString().toLowerCase();
-                    const ct = (targetPost.contentType || '').toString().toLowerCase();
-                    const looksVideoUrl = typeof src === 'string' && /\.(mp4|webm|mov|m4v|ogv)(\?|$)/i.test(src);
-                    const isVideo = mt === 'video' || ct.startsWith('video/') || looksVideoUrl;
-                    if (isVideo) {
-                        // Guess a sensible source type so the browser knows the codec.
-                        let videoType = '';
-                        if (ct.startsWith('video/')) videoType = ct;
-                        else if (/\.mp4(\?|$)/i.test(src)) videoType = 'video/mp4';
-                        else if (/\.webm(\?|$)/i.test(src)) videoType = 'video/webm';
-                        else if (/\.(mov|m4v)(\?|$)/i.test(src)) videoType = 'video/quicktime';
-                        const typeAttr = videoType ? ` type="${videoType}"` : '';
-                        // Try several common post properties for a preview/poster image
-                        // so the UI can show a visual before the video has decoded.
-                        const posterCandidates = (function(){
-                            const tryKeys = ['poster','previewImage','photoThumb','photoURLThumb','thumbUrl','thumb','photoURL'];
-                            for (let k of tryKeys) {
-                                try { const v = (targetPost[k]); if (v) return v; } catch(e){}
-                            }
-                            // legacy: some posts may include an imageData field that's an image
-                            try { if (targetPost.imageData && typeof targetPost.imageData === 'string' && targetPost.imageData.startsWith('data:image')) return targetPost.imageData; } catch(e){}
-                            return null;
-                        })();
-                        const posterAttr = posterCandidates ? ` poster="${posterCandidates}"` : '';
-                        // NOTE: No `crossorigin` attribute — Firebase Storage on the
-                        // *.firebasestorage.app host often lacks CORS headers, and
-                        // crossorigin="anonymous" turns the request into a CORS
-                        // request which fails and leaves the player black. Plain
-                        // <video> playback does NOT need CORS.
-                        // autoplay + muted + playsinline is required for browsers
-                        // (especially iOS Safari) to allow auto-start without a
-                        // user gesture. User can unmute via controls.
-                        // Render a video WITHOUT native controls or autoplay. We show
-                        // a custom large play overlay; controls are added only when
-                        // the user explicitly activates the video (by pressing the post).
-                        return `
-                            <div class="video-player-wrapper" style="position:relative; display:block; max-width:100%; max-height:80vh; ${posterCandidates ? 'background-image:url(\'" + posterCandidates + "\'); background-size:cover; background-position:center;' : 'background:#000;'}">
-                                <video id="viewMediaVideo" playsinline webkit-playsinline preload="metadata"${posterAttr} style="width:100%; height:auto; max-height:80vh; object-fit:contain; display:block; margin:0 auto; background:transparent;">
-                                    <source src="${src}"${typeAttr}>
-                                    Your browser does not support this video.
-                                </video>
-                                <button class="video-play-overlay" aria-label="Play video" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:72px;height:72px;border-radius:50%;border:none;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;cursor:pointer;box-shadow:0 8px 24px rgba(2,6,23,0.6);">
-                                    ▶
-                                </button>
-                            </div>`;
-                    } else {
-                        return `<img src="${src}" style="max-width:100%; max-height:80vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
-                    }
-                })();
-                viewMediaEl.innerHTML = mediaHTML;
-                // Attach overlay handler and attempt muted autoplay. Only hide
-                // the overlay if playback actually starts; otherwise keep it
-                // visible so the user can explicitly start/unmute the video.
-                try {
-                    const wrapper = viewMediaEl.querySelector('.video-player-wrapper');
-                    if (wrapper) {
-                        const vidEl = wrapper.querySelector('video');
-                        const overlay = wrapper.querySelector('.video-play-overlay');
-                        if (overlay && vidEl) {
-                            // Explicit tap: unmute and play with controls
-                            overlay.addEventListener('click', function(e){
-                                try {
-                                    vidEl.controls = true;
-                                    vidEl.muted = false;
-                                    vidEl.defaultMuted = false;
-                                    const p = vidEl.play();
-                                    if (p && typeof p.then === 'function') p.catch(()=>{});
-                                    overlay.style.display = 'none';
-                                } catch (err) { /* ignore */ }
-                            });
-
-                            // Attempt muted autoplay now and only hide overlay on success
-                            try {
-                                vidEl.muted = true;
-                                vidEl.defaultMuted = true;
-                                vidEl.autoplay = true;
-                                vidEl.loop = true;
-                                vidEl.playsInline = true;
-                                try { vidEl.load(); } catch(e){}
-                                const p = vidEl.play();
-                                if (p && typeof p.then === 'function') {
-                                    p.then(() => {
-                                        try { overlay.style.display = 'none'; } catch(e){}
-                                    }).catch(() => {
-                                        // Autoplay blocked — keep overlay visible
-                                        try { overlay.style.display = ''; } catch(e){}
-                                    });
-                                } else {
-                                    vidEl.addEventListener('playing', () => { try { overlay.style.display = 'none'; } catch(e){} }, { once: true });
-                                }
-                            } catch (e) {
-                                try { overlay.style.display = ''; } catch(e){}
-                            }
-                        }
-                    }
-                } catch (e) { /* ignore setup errors */ }
+            if (hasMedia && viewMediaEl) {
+                // Render the swipeable carousel. A single item renders without nav controls;
+                // 2–10 items get swipe gestures, arrows, dots and a counter.
+                try { renderPostMediaCarousel(viewMediaEl, postMediaList, targetPost); } catch (e) { console.warn('media carousel render failed', e); }
                 // Show written content below media in the description area
                 viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
             } else {
@@ -21957,6 +21862,195 @@
             try { const m = document.getElementById('contactModal'); if (m) m.classList.remove('active'); } catch (e) {}
         }
         try { window.contactPostPhone = contactPostPhone; window.closeContactModal = closeContactModal; } catch (e) {}
+
+        // ───────────────────────────────────────────────────────────────────────
+        // Post media carousel — up to 10 swipeable photos/videos in the pop-out.
+        // buildPostMediaList collects media from any of several possible shapes
+        // (future multi-media arrays or the legacy single photoURL/imageData) and
+        // returns an ordered, de-duped list capped at 10 items.
+        // ───────────────────────────────────────────────────────────────────────
+        function buildPostMediaList(post) {
+            if (!post) return [];
+            const items = [];
+            const seen = new Set();
+            const pushItem = (rawSrc, typeHint) => {
+                const src = (rawSrc === undefined || rawSrc === null) ? '' : String(rawSrc);
+                if (!src || seen.has(src)) return;
+                seen.add(src);
+                const hint = (typeHint || '').toString().toLowerCase();
+                const looksVideoUrl = /\.(mp4|webm|mov|m4v|ogv)(\?|$)/i.test(src);
+                const isVideo = hint === 'video' || hint.startsWith('video/') || looksVideoUrl;
+                items.push({ src, isVideo, type: hint });
+            };
+            // Preferred: explicit arrays for multi-media posts (strings or objects).
+            const arrays = [post.mediaItems, post.media, post.mediaURLs, post.photoURLs, post.images, post.videos];
+            for (const arr of arrays) {
+                if (!Array.isArray(arr)) continue;
+                for (const m of arr) {
+                    if (!m) continue;
+                    if (typeof m === 'string') pushItem(m);
+                    else if (typeof m === 'object') pushItem(m.src || m.url || m.photoURL || m.imageData || m.downloadURL, m.type || m.mediaType || m.contentType);
+                }
+            }
+            // Fallback: single legacy media field.
+            if (items.length === 0) {
+                const single = post.photoURL || post.imageData;
+                if (single) pushItem(single, post.mediaType || post.contentType);
+            }
+            return items.slice(0, 10);
+        }
+
+        // Build the inner <img> / <video> HTML for one carousel slide.
+        function buildSlideMediaHTML(item, post, idx) {
+            const src = item.src;
+            if (item.isVideo) {
+                const ct = (item.type || (post && post.contentType) || '').toString().toLowerCase();
+                let videoType = '';
+                if (ct.startsWith('video/')) videoType = ct;
+                else if (/\.mp4(\?|$)/i.test(src)) videoType = 'video/mp4';
+                else if (/\.webm(\?|$)/i.test(src)) videoType = 'video/webm';
+                else if (/\.(mov|m4v)(\?|$)/i.test(src)) videoType = 'video/quicktime';
+                const typeAttr = videoType ? ` type="${videoType}"` : '';
+                // Pick a poster image only for the first item (legacy single-video posts).
+                let posterCandidates = null;
+                if (idx === 0 && post) {
+                    const tryKeys = ['poster','previewImage','photoThumb','photoURLThumb','thumbUrl','thumb','photoURL'];
+                    for (let k of tryKeys) { try { const v = post[k]; if (v) { posterCandidates = v; break; } } catch (e) {} }
+                    try { if (!posterCandidates && post.imageData && typeof post.imageData === 'string' && post.imageData.startsWith('data:image')) posterCandidates = post.imageData; } catch (e) {}
+                }
+                const posterAttr = posterCandidates ? ` poster="${posterCandidates}"` : '';
+                const bg = posterCandidates ? `background-image:url('${posterCandidates}'); background-size:cover; background-position:center;` : 'background:#000;';
+                // No crossorigin — Firebase Storage host often lacks CORS headers.
+                return `
+                    <div class="video-player-wrapper" style="position:relative; display:block; width:100%; max-height:80vh; ${bg}">
+                        <video playsinline webkit-playsinline preload="metadata"${posterAttr} style="width:100%; height:auto; max-height:80vh; object-fit:contain; display:block; margin:0 auto; background:transparent;">
+                            <source src="${src}"${typeAttr}>
+                            Your browser does not support this video.
+                        </video>
+                        <button class="video-play-overlay" aria-label="Play video" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:72px;height:72px;border-radius:50%;border:none;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px;cursor:pointer;box-shadow:0 8px 24px rgba(2,6,23,0.6);">
+                            ▶
+                        </button>
+                    </div>`;
+            }
+            return `<img src="${src}" style="max-width:100%; max-height:80vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
+        }
+
+        // Wire video overlay handlers for every slide; autoplay only the first slide.
+        function setupCarouselVideos(container) {
+            try {
+                const wrappers = container.querySelectorAll('.video-player-wrapper');
+                wrappers.forEach((wrapper, idx) => {
+                    const vidEl = wrapper.querySelector('video');
+                    const overlay = wrapper.querySelector('.video-play-overlay');
+                    if (!overlay || !vidEl) return;
+                    // Explicit tap: unmute and play with native controls.
+                    overlay.addEventListener('click', function () {
+                        try {
+                            vidEl.controls = true;
+                            vidEl.muted = false;
+                            vidEl.defaultMuted = false;
+                            const p = vidEl.play();
+                            if (p && typeof p.then === 'function') p.catch(() => {});
+                            overlay.style.display = 'none';
+                        } catch (err) { /* ignore */ }
+                    });
+                    if (idx === 0) {
+                        // Attempt muted autoplay for the first slide only.
+                        try {
+                            vidEl.muted = true;
+                            vidEl.defaultMuted = true;
+                            vidEl.autoplay = true;
+                            vidEl.loop = true;
+                            vidEl.playsInline = true;
+                            try { vidEl.load(); } catch (e) {}
+                            const p = vidEl.play();
+                            if (p && typeof p.then === 'function') {
+                                p.then(() => { try { overlay.style.display = 'none'; } catch (e) {} })
+                                 .catch(() => { try { overlay.style.display = ''; } catch (e) {} });
+                            } else {
+                                vidEl.addEventListener('playing', () => { try { overlay.style.display = 'none'; } catch (e) {} }, { once: true });
+                            }
+                        } catch (e) { try { overlay.style.display = ''; } catch (e2) {} }
+                    }
+                });
+            } catch (e) { /* ignore */ }
+        }
+
+        // Render the swipeable media carousel into `container`. One item renders
+        // plainly; 2–10 items get swipe gestures, prev/next arrows, dots + counter.
+        function renderPostMediaCarousel(container, mediaList, post) {
+            if (!container) return;
+            const list = Array.isArray(mediaList) ? mediaList.slice(0, 10) : [];
+            if (list.length === 0) { container.innerHTML = ''; return; }
+            const multi = list.length > 1;
+            const slidesHTML = list.map((item, i) =>
+                `<div class="media-slide" data-index="${i}">${buildSlideMediaHTML(item, post, i)}</div>`
+            ).join('');
+            const navHTML = multi ? `
+                <button class="media-nav media-nav-prev" type="button" aria-label="Previous">‹</button>
+                <button class="media-nav media-nav-next" type="button" aria-label="Next">›</button>
+                <div class="media-counter" id="viewMediaCounter">1 / ${list.length}</div>` : '';
+            const dotsHTML = multi ? `<div class="media-dots" id="viewMediaDots">${list.map((_, i) =>
+                `<button class="media-dot${i === 0 ? ' active' : ''}" type="button" data-index="${i}" aria-label="Go to item ${i + 1}"></button>`
+            ).join('')}</div>` : '';
+            container.innerHTML = `
+                <div class="media-carousel${multi ? ' is-multi' : ''}" id="viewMediaCarousel">
+                    <div class="media-carousel-track" id="viewMediaTrack">${slidesHTML}</div>
+                    ${navHTML}
+                    ${dotsHTML}
+                </div>`;
+
+            // Set up video playback for each slide.
+            setupCarouselVideos(container);
+            if (!multi) return;
+
+            const track = container.querySelector('#viewMediaTrack');
+            if (!track) return;
+            const slides = Array.from(track.querySelectorAll('.media-slide'));
+            const dots = Array.from(container.querySelectorAll('.media-dot'));
+            const counter = container.querySelector('#viewMediaCounter');
+            const prevBtn = container.querySelector('.media-nav-prev');
+            const nextBtn = container.querySelector('.media-nav-next');
+            let current = 0;
+
+            function updateUI() {
+                dots.forEach((d, di) => d.classList.toggle('active', di === current));
+                if (counter) counter.textContent = (current + 1) + ' / ' + list.length;
+                if (prevBtn) prevBtn.disabled = current === 0;
+                if (nextBtn) nextBtn.disabled = current === list.length - 1;
+                // Pause videos that aren't the active slide.
+                slides.forEach((s, si) => { const v = s.querySelector('video'); if (v && si !== current) { try { v.pause(); } catch (e) {} } });
+            }
+            function goTo(i) {
+                current = Math.max(0, Math.min(list.length - 1, i));
+                const slideW = track.clientWidth || 1;
+                try { track.scrollTo({ left: current * slideW, behavior: 'smooth' }); }
+                catch (e) { track.scrollLeft = current * slideW; }
+                updateUI();
+            }
+            if (prevBtn) prevBtn.addEventListener('click', () => goTo(current - 1));
+            if (nextBtn) nextBtn.addEventListener('click', () => goTo(current + 1));
+            dots.forEach(d => d.addEventListener('click', () => goTo(Number(d.dataset.index))));
+
+            // Keep the active index in sync with manual swipe/scroll.
+            let scrollTimer = null;
+            track.addEventListener('scroll', () => {
+                if (scrollTimer) clearTimeout(scrollTimer);
+                scrollTimer = setTimeout(() => {
+                    const slideW = track.clientWidth || 1;
+                    const idx = Math.round(track.scrollLeft / slideW);
+                    if (idx !== current) { current = idx; updateUI(); }
+                }, 90);
+            });
+            // Keyboard arrow navigation while the carousel is in view.
+            container.tabIndex = 0;
+            container.addEventListener('keydown', (e) => {
+                if (e.key === 'ArrowLeft') { e.preventDefault(); goTo(current - 1); }
+                else if (e.key === 'ArrowRight') { e.preventDefault(); goTo(current + 1); }
+            });
+            updateUI();
+        }
+        try { window.buildPostMediaList = buildPostMediaList; window.renderPostMediaCarousel = renderPostMediaCarousel; } catch (e) {}
 
         // Locate the live post object so replica modal buttons reflect current counts.
         function findPostForModalActions(postId) {
