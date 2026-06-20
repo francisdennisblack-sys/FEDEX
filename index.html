@@ -7251,6 +7251,13 @@
 
                 navigator.geolocation.getCurrentPosition(
                     (position) => {
+                        // 🔒 MANUAL OVERRIDE GUARD: never let polled GPS overwrite a
+                        // user-chosen "Change Location" position (kept across refreshes).
+                        try {
+                            const manualActive = localStorage.getItem('manualLocationActive') === '1' || !!localStorage.getItem('lastChosenLocation');
+                            if (manualActive) return;
+                        } catch (e) { /* fall through to normal polling */ }
+
                         const newLat = position.coords.latitude;
                         const newLon = position.coords.longitude;
 
@@ -8036,6 +8043,18 @@
             // High accuracy watchPosition for continuous real-time updates
             locationWatchId = navigator.geolocation.watchPosition(
                 (position) => {
+                    // 🔒 MANUAL OVERRIDE GUARD: if the user explicitly chose a location via
+                    // "Change Location", do NOT let live GPS overwrite it. A hard refresh
+                    // restores the manual location; without this guard watchPosition would
+                    // immediately revert userLocation/zone back to the real GPS position.
+                    // (Pressing "Return Home" clears these flags so tracking resumes.)
+                    try {
+                        const manualActive = localStorage.getItem('manualLocationActive') === '1' || !!localStorage.getItem('lastChosenLocation');
+                        if (manualActive) {
+                            return; // keep the user's chosen location authoritative
+                        }
+                    } catch (e) { /* fall through to normal live tracking */ }
+
                     const newLocation = {
                         lat: position.coords.latitude,
                         lon: position.coords.longitude,
