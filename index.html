@@ -7071,6 +7071,53 @@
         let currentGridId = null; // Zone/grid ID for post tracking (derived from currentZoneTag)
         let geolocationRequested = false; // Flag to prevent multiple geolocation requests
 
+        // ============================================================
+        // CHANGE-LOCATION → GRID SYNC
+        // The Change Location modal runs in a SEPARATE <script> scope and can only
+        // assign window.* — it cannot reach these module-scope lexical bindings
+        // (`userLocation`, `currentZoneTag`, `currentAreaName`, `userSelectedZone`).
+        // The grid proximity sort (renderGridFull) and GridReplacementML read the
+        // LEXICAL bindings, so before this a committed location only updated window.*
+        // and the grid never re-sorted/refilled for the new location.
+        // This window-exposed helper updates the lexical state so the very next
+        // renderGrid() re-ranks every post for the new location in a single pass.
+        // The website's top posts (highest global net-score) stay near the top via
+        // the existing sentiment-first sort, so the 10% top posts are NOT removed.
+        function syncRuntimeLocationFromCommit(opts) {
+            try {
+                opts = opts || {};
+                let coords = (opts.coords && opts.coords.lat != null && opts.coords.lon != null) ? opts.coords : null;
+                if (!coords) {
+                    try {
+                        const raw = localStorage.getItem('lastChosenLocation');
+                        if (raw) { const o = JSON.parse(raw); if (o && o.lat != null && o.lon != null) coords = o; }
+                    } catch (e) {}
+                }
+                if (coords) {
+                    const lat = Number(coords.lat), lon = Number(coords.lon);
+                    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+                        // Update the lexical binding every proximity/distance read uses.
+                        userLocation = { lat, lon, accuracy: Number(coords.accuracy) || 100, manual: opts.userSelected !== false };
+                        try { window.userLocation = { lat, lon, accuracy: userLocation.accuracy }; } catch (e) {}
+                        try { setUserLocationCache(userLocation, { force: true }); } catch (e) {}
+                    }
+                }
+                // Update the lexical area-tag state used by isAreaLocal scoring + the tag UI.
+                if (opts.userSelected === false) {
+                    // Return Home / auto: drop the explicit selection so detection resumes.
+                    userSelectedZone = false;
+                } else {
+                    const label = (opts.label || (coords && (coords.label || coords.name || coords.display)) || '').toString().trim();
+                    if (label) {
+                        currentZoneTag = label;
+                        currentAreaName = label;
+                        userSelectedZone = true;
+                    }
+                }
+            } catch (e) { console.warn('syncRuntimeLocationFromCommit failed', e); }
+        }
+        try { window.syncRuntimeLocationFromCommit = syncRuntimeLocationFromCommit; } catch (e) {}
+
         // Helper: set auto-generated zone tag safely — never overwrite explicit user choice
         function maybeSetAutoZoneTag(newTag) {
             try {
@@ -40541,6 +40588,11 @@
                             try { window.persistZoneTagForUser && window.persistZoneTagForUser(window.currentZoneTag, { manual: true }); } catch(e) {}
                             try { if (sel) localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch(e) {}
                         } catch (e) {}
+                        // 🔁 SYNC IN-MEMORY (lexical) location/area so the grid proximity sort +
+                        // GridReplacementML re-rank for the NEW location on the renderGrid below.
+                        // Without this the modal (separate <script> scope) only set window.* and the
+                        // grid never re-sorted. Top global posts stay via the sentiment-first sort.
+                        try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: sel || null, label: (sel && (sel.label || sel.name || sel.display)) || window.latestUserAreaTag || null }); } catch(e) {}
                         try {
                             if (typeof renderGrid === 'function') {
                                 window.lastRenderGridTime = 0;
@@ -40587,6 +40639,9 @@
                             try { if (cacheObj) localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: cacheObj.lat, lon: cacheObj.lon, label: (cacheObj.label || cacheObj.name || cacheObj.display) })); } catch(e) {}
                         } catch (e) {}
                         try { checkSavedLocationAreaMatch && checkSavedLocationAreaMatch(); } catch (e) {}
+                        // 🔁 Return Home: sync the lexical location to the restored coords so the
+                        // grid re-ranks back to the home location on the renderGrid below.
+                        try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: (cacheObj && cacheObj.lat != null && cacheObj.lon != null) ? cacheObj : null, userSelected: false }); } catch(e) {}
                         try {
                             if (typeof renderGrid === 'function') {
                                 window.lastRenderGridTime = 0;
@@ -41202,6 +41257,11 @@
                                 try { checkSavedLocationAreaMatch(); } catch(e) {}
                                 localStorage.setItem('suppressRetagOnManualLocation', '1');
                                 window.userLocation = { lat: Number(sel.lat), lon: Number(sel.lon) };
+                                // 🔁 Update the in-memory (lexical) location/area so the grid
+                                // proximity sort + GridReplacementML re-rank for the NEW location
+                                // on the immediate refill below (the modal runs in a separate
+                                // <script> scope and otherwise only touches window.*).
+                                try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: sel, label: (sel && (sel.label || sel.name || sel.display)) || window.latestUserAreaTag || null }); } catch(e) {}
                                 try { localStorage.setItem('lastLocationSetStatus', JSON.stringify({ status: 'pending', sel: sel, ts: Date.now() })); } catch(e){}
                             } catch (e) { console.warn('Failed to persist chosen location locally', e); }
 
