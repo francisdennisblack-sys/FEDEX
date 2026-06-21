@@ -21594,7 +21594,20 @@
                             // view that must never be added to gridContent (which the grid
                             // renderer merges via the 'shared-posts' feed).
                             let inRealGrid = false;
-                            try { for (const k in gridContent) { if ((gridContent[k] || []).some(p => p && p.id === postId)) { inRealGrid = true; break; } } } catch (e) {}
+                            try {
+                                for (const k in gridContent) {
+                                    const arr = gridContent[k];
+                                    if (!Array.isArray(arr)) continue;
+                                    const idx = arr.findIndex(p => p && p.id === postId);
+                                    if (idx !== -1) {
+                                        inRealGrid = true;
+                                        // Enrich the existing grid copy with the authoritative
+                                        // record so the modal (which reads gridContent FIRST)
+                                        // shows the media instead of a partial/text-only copy.
+                                        try { arr[idx] = Object.assign({}, arr[idx], data); } catch (e) {}
+                                    }
+                                }
+                            } catch (e) {}
                             const wasCached = !!postCache[postId];
                             try { postCache[postId] = Object.assign({}, postCache[postId] || {}, data); } catch (e) { postCache[postId] = data; }
                             // Keep it ONLY in postCache (which openViewModalByPostId reads as a
@@ -21609,9 +21622,12 @@
                     return false;
                 };
 
-                // Retry while the app finishes booting / posts stream in.
+                // Fetch the AUTHORITATIVE record first: it always carries the media URLs
+                // if the post has any, so the very first open shows photos/videos instead
+                // of needing a second press. Fall back to a locally-cached copy only when
+                // Firebase is unreachable (offline / still booting).
                 for (let i = 0; i < 15; i++) {
-                    if (isLoaded() || await fetchFromFirebase()) {
+                    if (await fetchFromFirebase() || isLoaded()) {
                         if (typeof openViewModalByPostId === 'function') {
                             try { openViewModalByPostId(postId, { sharedLink: true }); } catch (e) { console.warn('openViewModalByPostId failed', e); }
                         }
