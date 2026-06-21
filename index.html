@@ -21639,18 +21639,28 @@
                     }
                 };
 
-                // Photo/video posts must show their media on the FIRST open. The authoritative
-                // posts/${id} record always carries the media URLs, so we prefer it. We open
-                // immediately only when a local copy ALREADY has media (nothing to wait for);
-                // otherwise we keep pulling Firebase across retries (the SDK may not be ready
-                // on the very first tick during boot) instead of opening a media-less partial.
-                for (let i = 0; i < 15; i++) {
+                // 1) If we already have ANY local copy with renderable content, open it
+                //    immediately — don't make the user wait for Firebase. Then fetch in the
+                //    background: if the authoritative record has media the local copy was
+                //    missing (e.g. a text-only cache of a media post), re-open to show it.
+                if (isLoaded()) {
+                    openNow();
+                    fetchFromFirebase().then(fetched => {
+                        if (fetched && localCopyHasMedia()) { try { openNow(); } catch (e) {} }
+                    }).catch(() => {});
+                    return true;
+                }
+
+                // 2) No usable local copy — fetch from Firebase. On cold boot the SDK
+                //    (window.get/ref/database) may not be assigned on the very first tick;
+                //    retry every 100ms (max 20 tries = 2 seconds) instead of 600ms so the
+                //    post appears as fast as possible once the SDK warms up.
+                for (let i = 0; i < 20; i++) {
                     if (localCopyHasMedia()) { openNow(); return true; }
                     if (await fetchFromFirebase()) { openNow(); return true; }
-                    await new Promise(r => setTimeout(r, 600));
+                    await new Promise(r => setTimeout(r, 100));
                 }
-                // Firebase never returned (offline / deleted record). As a last resort open
-                // whatever local copy exists so the link still does something (e.g. text-only).
+                // Still nothing (offline / deleted). Open whatever local copy exists.
                 if (isLoaded()) { openNow(); return true; }
                 console.warn('Shared post could not be loaded:', postId);
                 return false;
