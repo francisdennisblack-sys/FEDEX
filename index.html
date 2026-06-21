@@ -21595,18 +21595,10 @@
 
                 const fetchFromFirebase = async () => {
                     try {
-                        // Consume the early-prefetch promise if it's for this post —
-                        // the network call is already in flight so we just await it.
-                        let data = null;
-                        if (window.__sharedPostEarlyId === postId && window.__sharedPostEarlyDataPromise) {
-                            data = await window.__sharedPostEarlyDataPromise;
-                            window.__sharedPostEarlyDataPromise = null; // consume once
-                        } else {
-                            if (!(window.get && window.ref && window.database)) return false;
-                            const snap = await window.get(window.ref(window.database, `posts/${postId}`));
-                            data = (snap && snap.exists && snap.exists()) ? (snap.val() || {}) : null;
-                        }
-                        if (data) {
+                        if (!(window.get && window.ref && window.database)) return false;
+                        const snap = await window.get(window.ref(window.database, `posts/${postId}`));
+                        if (snap && snap.exists && snap.exists()) {
+                            const data = snap.val() || {};
                             data.id = data.id || postId;
                             let inRealGrid = false;
                             try {
@@ -21630,7 +21622,37 @@
                     } catch (e) { console.warn('Shared post Firebase fetch failed', e); }
                     return false;
                 };
-                    return false;
+
+                // Bypass the SDK entirely: hit the RTDB REST endpoint with a plain fetch().
+                // This fires immediately on page load — no SDK init delay.
+                // RTDB rules are open (read:true) so no auth token needed.
+                const fetchFromREST = async () => {
+                    try {
+                        const url = `https://wificontent-143da-default-rtdb.firebaseio.com/posts/${encodeURIComponent(postId)}.json`;
+                        const res = await fetch(url);
+                        if (!res.ok) return false;
+                        const data = await res.json();
+                        if (!data || typeof data !== 'object') return false;
+                        data.id = data.id || postId;
+                        let inRealGrid = false;
+                        try {
+                            for (const k in gridContent) {
+                                const arr = gridContent[k];
+                                if (!Array.isArray(arr)) continue;
+                                const idx = arr.findIndex(p => p && p.id === postId);
+                                if (idx !== -1) {
+                                    inRealGrid = true;
+                                    try { arr[idx] = Object.assign({}, arr[idx], data); } catch (e) {}
+                                }
+                            }
+                        } catch (e) {}
+                        const wasCached = !!(postCache && postCache[postId]);
+                        try { postCache[postId] = Object.assign({}, (postCache && postCache[postId]) || {}, data); } catch (e) { try { postCache[postId] = data; } catch(e2){} }
+                        if (!inRealGrid) {
+                            __transientSharedPost = { id: postId, removeFromCache: !wasCached };
+                        }
+                        return true;
+                    } catch (e) { return false; }
                 };
 
                 const openNow = () => {
@@ -21640,23 +21662,28 @@
                 };
 
                 // 1) If we already have ANY local copy with renderable content, open it
-                //    immediately — don't make the user wait for Firebase. Then fetch in the
-                //    background: if the authoritative record has media the local copy was
-                //    missing (e.g. a text-only cache of a media post), re-open to show it.
+                //    immediately. Background-fetch to upgrade text→media if needed.
                 if (isLoaded()) {
                     openNow();
-                    fetchFromFirebase().then(fetched => {
+                    fetchFromREST().then(fetched => {
                         if (fetched && localCopyHasMedia()) { try { openNow(); } catch (e) {} }
                     }).catch(() => {});
                     return true;
                 }
 
-                // 2) No usable local copy — fetch from Firebase. On cold boot the SDK
-                //    (window.get/ref/database) may not be assigned on the very first tick;
-                //    retry every 100ms (max 20 tries = 2 seconds) instead of 600ms so the
-                //    post appears as fast as possible once the SDK warms up.
+                // 2) No local copy. Race REST (no SDK dependency, fires immediately) against
+                //    the SDK fetch. Whichever returns the data first wins. Fall back to
+                //    polling in case the network is slow (100ms × 20 = 2 second max wait).
+                const restRace = fetchFromREST();
+                const sdkRace  = fetchFromFirebase();
+                const firstWin = await Promise.race([restRace, sdkRace]);
+                if (firstWin) { openNow(); return true; }
+                // If the faster one lost, wait for the slower one.
+                if (await Promise.race([restRace, sdkRace])) { openNow(); return true; }
+
                 for (let i = 0; i < 20; i++) {
                     if (localCopyHasMedia()) { openNow(); return true; }
+                    if (await fetchFromREST()) { openNow(); return true; }
                     if (await fetchFromFirebase()) { openNow(); return true; }
                     await new Promise(r => setTimeout(r, 100));
                 }
@@ -21768,46 +21795,6 @@
             } catch (e) { console.warn('openSharedPostFromUrl failed', e); }
         }
         try { window.openSharedPostFromUrl = openSharedPostFromUrl; } catch (e) {}
-
-        // ── EARLY PREFETCH ────────────────────────────────────────────────────────
-        // Read ?post= from the URL RIGHT NOW (synchronously) and start the Firebase
-        // get() the instant window.get/ref/database are available — polling every
-        // 10ms so we don't lose a single millisecond. By the time loadAndOpenPostById
-        // runs the network round-trip is already in flight (or done). fetchFromFirebase
-        // inside loadAndOpenPostById awaits this same promise instead of making a
-        // second request, so the post appears as fast as the network allows.
-        (function () {
-            try {
-                let pid = null;
-                try { pid = new URLSearchParams(location.search || '').get('post'); } catch (e) {}
-                if (!pid && location.hash) {
-                    const m = location.hash.match(/[#&]post=([^&]+)/);
-                    if (m) { try { pid = decodeURIComponent(m[1]); } catch (e) { pid = m[1]; } }
-                }
-                if (!pid) return;
-                pid = String(pid).trim();
-                if (!pid) return;
-                window.__sharedPostEarlyId = pid;
-                window.__sharedPostEarlyDataPromise = new Promise(function (resolve) {
-                    var ticks = 0;
-                    var iv = setInterval(function () {
-                        ticks++;
-                        if (window.get && window.ref && window.database) {
-                            clearInterval(iv);
-                            try {
-                                window.get(window.ref(window.database, 'posts/' + pid))
-                                    .then(function (snap) {
-                                        resolve(snap && snap.exists && snap.exists() ? (snap.val() || {}) : null);
-                                    })
-                                    .catch(function () { resolve(null); });
-                            } catch (e) { resolve(null); }
-                        } else if (ticks > 300) { clearInterval(iv); resolve(null); } // 3s max
-                    }, 10);
-                });
-            } catch (e) {}
-        })();
-        // ─────────────────────────────────────────────────────────────────────────
-
         try {
             const __bootSharedPost = () => {
                 try { initSharedPostChannel(); } catch (e) {}
