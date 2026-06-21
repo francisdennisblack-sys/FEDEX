@@ -21448,95 +21448,169 @@
             if (!post) return;
 
             // Share only the post content (trim to sensible length) and omit the site URL
-            const rawContent = (post.content || '').trim();
+            const rawContent = (post.content || post.description || '').trim();
             const maxLen = 280; // keep share text reasonably sized for platforms
-            const contentPreview = rawContent.length > maxLen ? rawContent.substring(0, maxLen - 3) + '...' : rawContent || 'A photo';
-            const shareText = `"${contentPreview}"`;
+            const contentPreview = rawContent.length > maxLen ? rawContent.substring(0, maxLen - 3) + '...' : rawContent;
+            const shareText = contentPreview ? `"${contentPreview}"` : 'Check out this post';
 
-            // If post has media (photoURL/imageData/video), attempt to include it in the share.
+            // Build a DEEP LINK back to THIS post. Opening it reconstructs the exact
+            // post (photo/video + text) inside the app instead of launching the raw
+            // media file as a bare webpage (the old CORS-fetch behaviour). This link
+            // is what gets "sent through" in the message / email / whatever the user picks.
+            const shareUrl = buildPostShareUrl(post.id);
+
+            // 1) BEST RESULT (mobile): attach the ACTUAL media file to the native
+            //    share sheet so the photo/video itself lands inside the message/email.
+            //    Fully guarded so a CORS or unsupported failure silently falls through
+            //    to the link share below — it never opens the media as a webpage.
             try {
-                const mediaUrl = post.photoURL || null;
-                const mediaDataUrl = post.imageData || null; // base64 data URL fallback
-                const mediaType = post.mediaType || null; // 'image' or 'video'
-
-                // Prefer fetch of hosted URL if available
-                if (mediaUrl) {
-                    try {
-                        const resp = await fetch(mediaUrl);
-                        if (resp && resp.ok) {
-                            const blob = await resp.blob();
-                            const filename = (mediaUrl.split('/').pop().split('?')[0]) || (`post-${post.id}.${blob.type.split('/')[1] || 'jpg'}`);
-                            const file = new File([blob], filename, { type: blob.type });
-
-                            // If the browser supports sharing files, use native share with file
-                            if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                                await navigator.share({ files: [file], text: shareText });
-                                return;
-                            }
-
-                            // Try writing image/video to clipboard (best-effort)
-                            if (navigator.clipboard && window.ClipboardItem) {
-                                try {
-                                    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-                                    // Also write text to clipboard separately
-                                    try { await navigator.clipboard.writeText(shareText); } catch(e){}
-                                    alert('Post content and media copied to clipboard. Paste into your app.');
-                                    return;
-                                } catch (cbErr) {
-                                    // ignore clipboard failures and fall back
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        console.warn('Could not fetch media for sharing:', e);
+                const mediaList = (typeof buildPostMediaList === 'function') ? buildPostMediaList(post) : [];
+                const primary = mediaList && mediaList.length ? mediaList[0] : null;
+                const mediaSrc = (primary && primary.src) ||
+                    post.photoURL || post.videoURL || post.mediaURL || post.imageData || null;
+                if (mediaSrc && navigator.canShare) {
+                    const file = await mediaSrcToShareFile(mediaSrc, post.id, (primary && primary.isVideo));
+                    if (file && navigator.canShare({ files: [file] })) {
+                        await navigator.share({ files: [file], text: `${shareText}\n\n${shareUrl}`, title: 'Grid Post' });
+                        return;
                     }
                 }
-
-                // If we have inline base64 image data, try to convert and share
-                if (mediaDataUrl && mediaDataUrl.indexOf('data:') === 0) {
-                    try {
-                        const res = await fetch(mediaDataUrl);
-                        const blob = await res.blob();
-                        const mime = blob.type || 'image/png';
-                        const file = new File([blob], `post-${post.id}.${mime.split('/')[1]||'png'}`, { type: mime });
-                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                            await navigator.share({ files: [file], text: shareText });
-                            return;
-                        }
-                        if (navigator.clipboard && window.ClipboardItem) {
-                            try { await navigator.clipboard.write([new ClipboardItem({ [mime]: blob })]); await navigator.clipboard.writeText(shareText); alert('Post content and media copied to clipboard.'); return; } catch(e){}
-                        }
-                    } catch (e) { console.warn('Could not convert inline image data for sharing', e); }
-                }
-            } catch (err) {
-                console.warn('Media share attempt failed:', err);
+            } catch (e) {
+                if (e && e.name === 'AbortError') return; // user dismissed the share sheet
+                console.warn('File share unavailable, falling back to link share', e);
             }
 
-            // Fallback: share/copy only the quoted text
-            
-            // Final fallback/share: share text only (no site link)
+            // 2) LINK SHARE: send text + the deep link through the user's chosen app.
+            //    The recipient opens the link and the exact content (with media) repopulates.
             try {
                 if (navigator.share) {
-                    await navigator.share({ title: 'Grid Post', text: shareText });
+                    await navigator.share({ title: 'Grid Post', text: shareText, url: shareUrl });
                     return;
                 }
             } catch (e) {
+                if (e && e.name === 'AbortError') return; // user cancelled
                 console.warn('navigator.share failed', e);
             }
 
-            // Clipboard fallback: copy text only
+            // 3) Clipboard fallback: copy text + link together.
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 try {
-                    await navigator.clipboard.writeText(shareText);
-                    alert('Post content copied to clipboard. Paste into your app.');
+                    await navigator.clipboard.writeText(`${shareText}\n${shareUrl}`);
+                    alert('Post link copied. Paste it into your message or email — opening it shows the photo/video.');
                     return;
                 } catch (e) {
                     console.warn('Clipboard write failed', e);
                 }
             }
 
-            alert('Sharing is not supported on this device.');
+            // 4) Last resort: surface the shareable text + link for manual copy.
+            try { window.prompt('Copy this to share the post:', `${shareText} ${shareUrl}`); } catch (e) {}
         }
+
+        // Build an absolute, openable link to a specific post. Opening it triggers
+        // openSharedPostFromUrl() which fetches the post (by id) and repopulates the
+        // exact content in the view modal — so the shared media is reproduced, not
+        // dumped as a raw file URL.
+        function buildPostShareUrl(postId) {
+            try {
+                const origin = (location && location.origin && location.origin !== 'null') ? location.origin : '';
+                const path = (location && location.pathname) ? location.pathname : '/';
+                const base = origin ? (origin + path) : path;
+                return `${base}?post=${encodeURIComponent(postId)}`;
+            } catch (e) {
+                return `?post=${encodeURIComponent(postId)}`;
+            }
+        }
+
+        // Convert a media source (hosted URL or base64 data URL) into a File for the
+        // native share sheet. Returns null on any failure (e.g. cross-origin CORS
+        // block on Firebase Storage) so the caller can fall back to the deep link.
+        async function mediaSrcToShareFile(src, postId, isVideo) {
+            try {
+                if (!src) return null;
+                let blob;
+                if (String(src).indexOf('data:') === 0) {
+                    blob = await (await fetch(src)).blob();
+                } else {
+                    const resp = await fetch(src, { mode: 'cors' });
+                    if (!resp || !resp.ok) return null;
+                    blob = await resp.blob();
+                }
+                if (!blob || !blob.size) return null;
+                let ext = (blob.type && blob.type.split('/')[1]) ||
+                    (String(src).split('?')[0].split('.').pop()) ||
+                    (isVideo ? 'mp4' : 'jpg');
+                ext = String(ext).split(';')[0].slice(0, 5) || (isVideo ? 'mp4' : 'jpg');
+                return new File([blob], `post-${postId}.${ext}`, { type: blob.type || (isVideo ? 'video/mp4' : 'application/octet-stream') });
+            } catch (e) {
+                console.warn('mediaSrcToShareFile failed (likely CORS) — using deep link instead', e);
+                return null;
+            }
+        }
+
+        // On load, if the URL carries ?post=<id> (or #post=<id>) — i.e. a shared link —
+        // ensure that exact post is loaded (fetching it from Firebase by id when the
+        // recipient doesn't already have it) and open it in the view modal so the
+        // photo/video + text repopulate exactly as the sender saw them.
+        async function openSharedPostFromUrl() {
+            try {
+                let postId = null;
+                try { postId = new URLSearchParams(location.search || '').get('post'); } catch (e) {}
+                if (!postId && location.hash) {
+                    const m = location.hash.match(/[#&]post=([^&]+)/);
+                    if (m) { try { postId = decodeURIComponent(m[1]); } catch (e) { postId = m[1]; } }
+                }
+                if (!postId) return;
+                postId = String(postId).trim();
+                if (!postId) return;
+
+                const isLoaded = () => {
+                    try { if (postCache && postCache[postId]) return true; } catch (e) {}
+                    try { for (const k in gridContent) { if ((gridContent[k] || []).some(p => p && p.id === postId)) return true; } } catch (e) {}
+                    return false;
+                };
+
+                const fetchFromFirebase = async () => {
+                    try {
+                        if (!(window.get && window.ref && window.database)) return false;
+                        const snap = await window.get(window.ref(window.database, `posts/${postId}`));
+                        if (snap && snap.exists && snap.exists()) {
+                            const data = snap.val() || {};
+                            data.id = data.id || postId;
+                            try { postCache[postId] = Object.assign({}, postCache[postId] || {}, data); } catch (e) { postCache[postId] = data; }
+                            try {
+                                gridContent['shared-posts'] = gridContent['shared-posts'] || [];
+                                if (!gridContent['shared-posts'].some(p => p && p.id === postId)) {
+                                    gridContent['shared-posts'].unshift(postCache[postId]);
+                                }
+                            } catch (e) {}
+                            return true;
+                        }
+                    } catch (e) { console.warn('Shared post Firebase fetch failed', e); }
+                    return false;
+                };
+
+                // Retry while the app finishes booting / posts stream in.
+                for (let i = 0; i < 15; i++) {
+                    if (isLoaded() || await fetchFromFirebase()) {
+                        if (typeof openViewModalByPostId === 'function') {
+                            try { openViewModalByPostId(postId); } catch (e) { console.warn('openViewModalByPostId failed', e); }
+                        }
+                        return;
+                    }
+                    await new Promise(r => setTimeout(r, 600));
+                }
+                console.warn('Shared post could not be loaded:', postId);
+            } catch (e) { console.warn('openSharedPostFromUrl failed', e); }
+        }
+        try { window.openSharedPostFromUrl = openSharedPostFromUrl; } catch (e) {}
+        try {
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => { try { openSharedPostFromUrl(); } catch (e) {} });
+            } else {
+                try { openSharedPostFromUrl(); } catch (e) {}
+            }
+        } catch (e) {}
 
         function reportPost() {
             console.log(`🚩 reportPost called - selectedPostId: ${selectedPostId}`);
