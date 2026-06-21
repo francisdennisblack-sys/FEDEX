@@ -37508,7 +37508,56 @@
                         }
                     }
                 } catch (e) { /* ignore localStorage read errors */ }
-                
+
+                // ================================================================
+                // 🌍 ROUTE-TO-AREA-TAG: A post must land in the zone around the
+                // LOCATION ITS AREA TAG REPRESENTS — not necessarily where the
+                // author is physically standing — so users near that location see
+                // it on their grid. Resolve the coordinates the final area tag
+                // points at. (The neutral "Local area" tag means "right here", so
+                // it falls back to the author's own location.)
+                // ================================================================
+                let areaTagCoords = null;
+                try {
+                    const tagLabel = String(areaTag || '').trim();
+                    const tagIsLocalArea = !tagLabel || tagLabel.toLowerCase() === 'local area';
+                    if (!tagIsLocalArea) {
+                        // 1) Committed Change Location — use its saved coordinates.
+                        if (areaTagSource === 'manual_saved') {
+                            try {
+                                const raw = localStorage.getItem('lastChosenLocation');
+                                if (raw) {
+                                    const parsed = JSON.parse(raw);
+                                    if (parsed && parsed.lat != null && parsed.lon != null) {
+                                        areaTagCoords = { lat: Number(parsed.lat), lon: Number(parsed.lon) };
+                                    }
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+                        // 2) Explicit dropdown / refine-search selection stored a center.
+                        if (!areaTagCoords) {
+                            const c = window.currentSelectedAreaCenter;
+                            if (c && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lon))) {
+                                areaTagCoords = { lat: Number(c.lat), lon: Number(c.lon) };
+                            }
+                        }
+                        // 3) Last resort: match the tag name against the location database.
+                        if (!areaTagCoords && typeof globalLocationDatabase !== 'undefined' && Array.isArray(globalLocationDatabase) && globalLocationDatabase.length) {
+                            const needle = tagLabel.split(',')[0].trim().toLowerCase();
+                            if (needle) {
+                                const hit = globalLocationDatabase.find(l => l && l.name && String(l.name).toLowerCase() === needle && Number.isFinite(l.lat) && Number.isFinite(l.lon));
+                                if (hit) areaTagCoords = { lat: Number(hit.lat), lon: Number(hit.lon) };
+                            }
+                        }
+                    }
+                } catch (e) { console.warn('Failed to resolve area-tag routing coordinates', e); }
+
+                // Coordinates the post is routed by. Falls back to the author's
+                // physical location when the area tag has no place coords.
+                const postRoutingCoords = areaTagCoords
+                    || (userLocation && userLocation.lat != null && userLocation.lon != null ? { lat: userLocation.lat, lon: userLocation.lon } : null);
+                try { console.log(`🌍 POST ROUTING: tag="${areaTag}" → ${postRoutingCoords ? postRoutingCoords.lat.toFixed(4) + ',' + postRoutingCoords.lon.toFixed(4) : 'null'} (area-tag coords: ${areaTagCoords ? 'yes' : 'no'})`); } catch (e) {}
+
                 // MVP: Disable payment/boost for now
                 const boostChecked = false;
 
@@ -37535,7 +37584,7 @@
                     // Omitted for media posts so photos/videos do not carry area badges.
                     displayAreaTag: (selectedMediaType === 'image' || selectedMediaType === 'video') ? null : displayAreaTagForPost,
                     areaTagSource: (selectedMediaType === 'image' || selectedMediaType === 'video') ? null : areaTagSource,
-                    geolocation: userLocation ? {lat: userLocation.lat, lon: userLocation.lon} : null,
+                    geolocation: postRoutingCoords ? {lat: postRoutingCoords.lat, lon: postRoutingCoords.lon} : null,
                     timestamp: new Date().getTime(),
                     likes: 0,
                     dislikes: 0,
