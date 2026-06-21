@@ -7131,7 +7131,53 @@
         }
         try { window.syncRuntimeLocationFromCommit = syncRuntimeLocationFromCommit; } catch (e) {}
 
-        // Helper: set auto-generated zone tag safely — never overwrite explicit user choice
+        // Exposed helper: fully wipe the grid and re-subscribe to Firebase so the
+        // feed refills from scratch for a new location. Called by the Change Location
+        // modal (a separate IIFE that cannot reach the lexical gridContent /
+        // firebaseUnsubscribe variables directly).
+        function resetGridForLocationChange() {
+            try {
+                // 1. Cancel the live listener (both lexical + window copies so the
+                //    duplicate-listener guard inside subscribeToFirebasePostsWithReconnect
+                //    lets a fresh subscription through).
+                try {
+                    if (typeof firebaseUnsubscribe === 'function') firebaseUnsubscribe();
+                } catch (e) {}
+                try { firebaseUnsubscribe = null; } catch (e) {}
+                try { window.firebaseUnsubscribe = null; } catch (e) {}
+
+                // 2. Clear the lexical gridContent (what renderGrid / the subscription
+                //    callback actually read and write).
+                try { gridContent = {}; } catch (e) {}
+                try { window.gridContent = {}; } catch (e) {}
+
+                // 3. Blank the virtual scroller so the user sees the slate clear instantly.
+                try {
+                    if (window.gridScroller) {
+                        if (typeof window.gridScroller.setItems === 'function') window.gridScroller.setItems([]);
+                        else if (typeof window.gridScroller.clear === 'function') window.gridScroller.clear();
+                    }
+                } catch (e) {}
+
+                // 4. Reset render throttle so the next call goes through immediately.
+                try { window.lastRenderGridTime = 0; } catch (e) {}
+
+                // 5. Re-subscribe — the snapshot callback will call renderGrid() with
+                //    the new location already set in memory, giving a fully fresh feed.
+                try {
+                    if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                        subscribeToFirebasePostsWithReconnect();
+                    }
+                } catch (e) {}
+
+                console.log('📍 resetGridForLocationChange: grid wiped and resubscribed for new location');
+            } catch (e) {
+                console.warn('resetGridForLocationChange failed:', e);
+            }
+        }
+        try { window.resetGridForLocationChange = resetGridForLocationChange; } catch (e) {}
+
+
         function maybeSetAutoZoneTag(newTag) {
             try {
                 const hasSaved = !!localStorage.getItem('lastChosenLocation');
@@ -41060,43 +41106,13 @@
                         try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: sel || null, label: (sel && (sel.label || sel.name || sel.display)) || window.latestUserAreaTag || null }); } catch(e) {}
 
                         // ── FULL GRID RESET FOR NEW LOCATION ─────────────────────────────
-                        // Wipe all cached posts then re-subscribe to Firebase so the feed
-                        // re-populates with posts ranked for the new location from scratch.
-                        // This guarantees the user sees fresh, correctly-sorted content
-                        // rather than the same old posts re-ranked in memory.
+                        // Delegate to the window-exposed helper that lives in the same scope
+                        // as the lexical `gridContent` and `firebaseUnsubscribe` variables.
+                        // (Direct access from this IIFE silently fails due to scope isolation.)
                         try {
-                            // 1. Tear down the live Firebase posts listener so the guard inside
-                            //    subscribeToFirebasePostsWithReconnect lets us create a new one.
-                            try {
-                                if (typeof firebaseUnsubscribe === 'function') { firebaseUnsubscribe(); }
-                                if (typeof window.firebaseUnsubscribe === 'function') { window.firebaseUnsubscribe(); }
-                            } catch (e) {}
-                            try { window.firebaseUnsubscribe = null; } catch (e) {}
-                            try { firebaseUnsubscribe = null; } catch (e) {}
-
-                            // 2. Wipe the in-memory post store so renderGrid starts blank.
-                            try { gridContent = {}; } catch (e) {}
-                            try { window.gridContent = {}; } catch (e) {}
-
-                            // 3. Clear the virtual scroller DOM so the user sees empty slots
-                            //    immediately (not the old location's posts hanging around).
-                            try {
-                                if (window.gridScroller) {
-                                    if (typeof window.gridScroller.setItems === 'function') window.gridScroller.setItems([]);
-                                    else if (typeof window.gridScroller.clear === 'function') window.gridScroller.clear();
-                                }
-                            } catch (e) {}
-
-                            // 4. Reset the render throttle so the next call goes through instantly.
-                            try { window.lastRenderGridTime = 0; } catch (e) {}
-
-                            // 5. Re-subscribe — Firebase will push all posts back; the subscription
-                            //    callback calls renderGrid() which now sorts for the new location.
-                            try {
-                                if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
-                                    subscribeToFirebasePostsWithReconnect();
-                                }
-                            } catch (e) {}
+                            if (typeof window.resetGridForLocationChange === 'function') {
+                                window.resetGridForLocationChange();
+                            }
                         } catch (e) { console.warn('Location change grid reset failed:', e); }
 
                         try { if (typeof window.requestGridUpdate === 'function') window.requestGridUpdate('location'); } catch(e){}
@@ -41791,8 +41807,7 @@
                                 }
                             } catch (e) { console.warn('Failed to persist chosen location to Firebase', e); }
 
-                            // Refresh grid immediately to reflect the chosen location without waiting for network
-                            try { if (typeof renderGrid === 'function') renderGrid(); else if (typeof forceGridRefresh === 'function') forceGridRefresh(); } catch (e) {}
+                            // Grid wipe + resubscribe is handled by applySavedLocationAndRefreshUI below.
 
                             // Immediately apply visual transfer flags and reload the page so the saved location is authoritative.
                                 try {
