@@ -35475,14 +35475,16 @@
                     const tier = String(post.engagementTier || '').toLowerCase();
                     const likes = post.likes || 0;
                     const dislikes = post.dislikes || 0;
+                    // Disliked / net-negative posts (more dislikes than likes) must NEVER
+                    // be promoted to position 1 — they belong at the END of the feed,
+                    // after every other post (boosted, net-positive, new, balanced, neutral).
+                    if (dislikes > likes) return false;
                     return (
                         tier === 'hot' ||
                         tier === 'trending' ||
                         tier === 'rising' ||
                         tier === 'podium' ||
-                        tier === 'disliked' ||
-                        likes >= 5 ||
-                        dislikes > likes
+                        likes >= 5
                     );
                 });
 
@@ -35685,6 +35687,38 @@
                 });
             } catch (e) {
                 console.warn('⚠️ Non-interactive top-window stability pass failed:', e);
+            }
+
+            // ========================================================================
+            // 👎 DISLIKED-LAST GUARANTEE (authoritative final pass)
+            // Net-negative posts (more dislikes than likes) must appear AFTER every
+            // other post — below boosted, net-positive / top / most-liked, new,
+            // balanced and neutral (no-vote) posts. This runs LAST so none of the
+            // rotation / recirculation / stability passes above can leave a disliked
+            // post ranked ahead of a non-negative one. Active boosts are paid
+            // promotion and stay exempt. The stable partition preserves the already
+            // computed order within each group.
+            // ========================================================================
+            try {
+                if (Array.isArray(sortedPosts) && sortedPosts.length > 1) {
+                    const keepPosts = [];
+                    const dislikedPosts = [];
+                    for (const p of sortedPosts) {
+                        if (!p || !p.id) continue;
+                        const isActiveBoost = (typeof isStrictBoostActive === 'function') && isStrictBoostActive(p);
+                        if (!isActiveBoost && getPostNetEngagement(p) < 0) {
+                            dislikedPosts.push(p);
+                        } else {
+                            keepPosts.push(p);
+                        }
+                    }
+                    if (dislikedPosts.length > 0) {
+                        sortedPosts = [...keepPosts, ...dislikedPosts];
+                        console.log(`👎 DISLIKED-LAST: moved ${dislikedPosts.length} net-negative post(s) to the end of the feed`);
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ DISLIKED-LAST guarantee failed:', e);
             }
 
             // Refresh latest snapshot after position-1 rotation
