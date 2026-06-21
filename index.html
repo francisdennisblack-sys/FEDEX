@@ -21613,7 +21613,7 @@
                 for (let i = 0; i < 15; i++) {
                     if (isLoaded() || await fetchFromFirebase()) {
                         if (typeof openViewModalByPostId === 'function') {
-                            try { openViewModalByPostId(postId); } catch (e) { console.warn('openViewModalByPostId failed', e); }
+                            try { openViewModalByPostId(postId, { sharedLink: true }); } catch (e) { console.warn('openViewModalByPostId failed', e); }
                         }
                         return true;
                     }
@@ -22170,7 +22170,12 @@
         window.hidePost = hidePost;
 
         // View modal functions
-        function openViewModalByPostId(postId) {
+        function openViewModalByPostId(postId, opts) {
+            // opts.sharedLink === true means this open came from a ?post= deep link.
+            // For those, a text-only post is shown as a BIGGER pop-out that actually
+            // renders the written content (a shareable "content post"), instead of the
+            // normal compact text pop-out that hides the text.
+            const isSharedLinkOpen = !!(opts && opts.sharedLink);
             console.log('\n' + '='.repeat(60));
             console.log('🔍 MODAL OPEN ATTEMPT');
             console.log('='.repeat(60));
@@ -22304,15 +22309,25 @@
             // Render media prominently when present, with written content only in the pop-out description
             const viewMediaEl = document.getElementById('viewMedia');
             const viewTextEl = document.getElementById('viewText');
+            // A shared-link text-only post becomes a dedicated "content post": a larger
+            // pop-out that shows the written content (like a photo/video share, but text).
+            const isSharedTextPost = isSharedLinkOpen && !hasMedia;
             if (hasMedia && viewMediaEl) {
                 // Render the swipeable carousel. A single item renders without nav controls;
                 // 2–10 items get swipe gestures, arrows, dots and a counter.
                 try { renderPostMediaCarousel(viewMediaEl, postMediaList, targetPost); } catch (e) { console.warn('media carousel render failed', e); }
                 // Show written content below media in the description area
                 viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
+            } else if (isSharedTextPost) {
+                // Shared content-only post: clear the media area and render the text large
+                // and readable so the recipient sees the post itself, not an empty card.
+                if (viewMediaEl) viewMediaEl.innerHTML = '';
+                const sharedText = (targetPost.content || targetPost.description || targetPost.text || '').toString();
+                const esc = sharedText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                viewTextEl.innerHTML = `<div style="color:#fff; white-space:pre-wrap; word-break:break-word; font-size:1.35rem; line-height:1.5; text-align:center; padding:8px 4px;">${esc}</div>`;
             } else {
-                // No media (text-only post): clear media container and do not render
-                // the text content in the pop-out per request.
+                // No media (normal text-only browsing): clear media container and do not
+                // render the text content in the pop-out per request.
                 if (viewMediaEl) viewMediaEl.innerHTML = '';
                 viewTextEl.innerHTML = '';
             }
@@ -22341,7 +22356,10 @@
                 if (modalContent) {
                     modalContent.classList.toggle('media-modal', !!hasMedia);
                     // Text-only posts: enlarge the icon buttons to fill the pop-out.
-                    modalContent.classList.toggle('text-only-modal', !hasMedia);
+                    // A shared content-only post uses the larger 'shared-text-modal'
+                    // layout instead of the compact 'text-only-modal'.
+                    modalContent.classList.toggle('text-only-modal', !hasMedia && !isSharedTextPost);
+                    modalContent.classList.toggle('shared-text-modal', !!isSharedTextPost);
                     // If this media container contains a video element, mark modal
                     // so CSS can make videos larger than photos.
                     try {
