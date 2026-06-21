@@ -21684,12 +21684,20 @@
                 };
 
                 // 1) If we already have ANY local copy with renderable content, open it
-                //    immediately. Background-fetch to upgrade text→media if needed.
+                //    immediately for instant feedback. The local copy may be a text-only
+                //    snapshot loaded by the live posts listener, so ALWAYS fetch the
+                //    authoritative record (REST + SDK) in the background and RE-OPEN as
+                //    soon as media becomes available. This is why a shared media post can
+                //    take a moment longer — it waits for the photos/videos to arrive.
                 if (isLoaded()) {
                     openNow();
-                    fetchFromREST().then(fetched => {
-                        if (fetched && localCopyHasMedia()) { try { openNow(); } catch (e) {} }
-                    }).catch(() => {});
+                    let reopened = false;
+                    const upgradeIfMedia = () => {
+                        if (reopened) return;
+                        if (localCopyHasMedia()) { reopened = true; try { openNow(); } catch (e) {} }
+                    };
+                    try { fetchFromREST().then(upgradeIfMedia).catch(() => {}); } catch (e) {}
+                    try { fetchFromFirebase().then(upgradeIfMedia).catch(() => {}); } catch (e) {}
                     return true;
                 }
 
@@ -22360,7 +22368,31 @@
                     }
                 }
             }
-            
+
+            // FRESHEST-MEDIA WINS: the copy we just found (often from gridContent) can be
+            // a text-only/partial snapshot loaded by the live posts listener, while the
+            // authoritative record fetched for this shared link lives in postCache. If the
+            // resolved targetPost is missing media but postCache has it, merge the media
+            // fields in so a shared media post NEVER renders as text-only.
+            try {
+                const fresh = postCache[postId];
+                if (fresh && fresh !== targetPost) {
+                    const mediaKeys = ['photoURL','imageData','videoURL','mediaURL','mediaType','contentType','mediaItems','media','mediaURLs','photoURLs','images','videos'];
+                    const hasAny = (o) => o && mediaKeys.some(k => {
+                        const v = o[k];
+                        return Array.isArray(v) ? v.length > 0 : (v != null && v !== '');
+                    });
+                    if (hasAny(fresh) && !hasAny(targetPost)) {
+                        const merged = Object.assign({}, targetPost);
+                        mediaKeys.forEach(k => {
+                            const v = fresh[k];
+                            if (Array.isArray(v) ? v.length > 0 : (v != null && v !== '')) merged[k] = v;
+                        });
+                        targetPost = merged;
+                    }
+                }
+            } catch (e) { /* ignore merge errors */ }
+
             console.log(`✅ OPENING MODAL FOR POST`);
             console.log('='.repeat(60));
             console.log('');
