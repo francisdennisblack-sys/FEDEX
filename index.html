@@ -14961,8 +14961,19 @@
                     if (!createdAt) continue;
                     if ((now - createdAt) > POST_MAX_AGE_MS) expiredIds.push(id);
                 }
+                // Also cascade-delete any reposts of the expired posts. Since we
+                // already have all posts in memory, this is free — no extra Firebase call.
+                const expiredSet = new Set(expiredIds);
+                for (const id in all) {
+                    if (!Object.prototype.hasOwnProperty.call(all, id)) continue;
+                    const post = all[id];
+                    if (post && post.repostOf && expiredSet.has(post.repostOf) && !expiredSet.has(id)) {
+                        expiredIds.push(id);
+                        expiredSet.add(id);
+                    }
+                }
                 if (!expiredIds.length) return;
-                console.log(`🗑️ TTL: ${expiredIds.length} post(s) older than 32h — deleting from Firebase.`);
+                console.log(`🗑️ TTL: ${expiredIds.length} post(s) older than 32h (including reposts) — deleting from Firebase.`);
                 for (const id of expiredIds) {
                     try {
                         await deletePostFromFirebase(id);
@@ -18825,6 +18836,33 @@
                 // (posts/${postId}/photo, posts/${postId}/media_0, …). Non-fatal so a
                 // storage failure never blocks the database deletion.
                 try { await deletePostMediaFromStorage(postId); } catch (e) { /* non-fatal */ }
+
+                // 🔁 Cascade-delete reposts of this post. Reposts cannot themselves be
+                // reposted (the UI blocks it), so we only need one level deep.
+                try {
+                    const allSnap = await get(ref(database, 'posts'));
+                    if (allSnap && allSnap.exists()) {
+                        const allPosts = allSnap.val() || {};
+                        for (const rid in allPosts) {
+                            if (!Object.prototype.hasOwnProperty.call(allPosts, rid)) continue;
+                            const rpost = allPosts[rid];
+                            if (!rpost || rpost.repostOf !== postId) continue;
+                            try {
+                                const revRef = ref(database, `post_events/removed/${rid}`);
+                                await set(revRef, { removedBy: null, timestamp: Date.now(), isRepost: true, rootId: postId, repostOf: postId, reason: 'og_deleted' });
+                            } catch (e) { /* ignore tombstone errors */ }
+                            try { await remove(ref(database, `posts/${rid}`)); } catch (e) { /* ignore */ }
+                            try { await deletePostMediaFromStorage(rid); } catch (e) { /* non-fatal */ }
+                            try {
+                                for (const key in gridContent) {
+                                    if (Array.isArray(gridContent[key])) gridContent[key] = gridContent[key].filter(p => !(p && p.id === rid));
+                                }
+                            } catch (e) { /* ignore */ }
+                            try { purgeDeletedPostFromDOM(rid); } catch (e) { /* ignore */ }
+                            console.log(`🗑️ Cascade-deleted repost ${rid.substring(0,8)} of deleted post ${postId.substring(0,8)}`);
+                        }
+                    }
+                } catch (e) { console.warn('Repost cascade delete failed (non-fatal):', e && e.message); }
             } catch (error) {
                 console.error('❌ Error deleting post from Firebase:', error);
                 throw error;
