@@ -21552,17 +21552,13 @@
         // ensure that exact post is loaded (fetching it from Firebase by id when the
         // recipient doesn't already have it) and open it in the view modal so the
         // photo/video + text repopulate exactly as the sender saw them.
-        async function openSharedPostFromUrl() {
+
+        // Reusable: make sure a post is in memory (fetch by id if needed) then open it.
+        async function loadAndOpenPostById(postId) {
             try {
-                let postId = null;
-                try { postId = new URLSearchParams(location.search || '').get('post'); } catch (e) {}
-                if (!postId && location.hash) {
-                    const m = location.hash.match(/[#&]post=([^&]+)/);
-                    if (m) { try { postId = decodeURIComponent(m[1]); } catch (e) { postId = m[1]; } }
-                }
-                if (!postId) return;
+                if (!postId) return false;
                 postId = String(postId).trim();
-                if (!postId) return;
+                if (!postId) return false;
 
                 const isLoaded = () => {
                     try { if (postCache && postCache[postId]) return true; } catch (e) {}
@@ -21596,19 +21592,137 @@
                         if (typeof openViewModalByPostId === 'function') {
                             try { openViewModalByPostId(postId); } catch (e) { console.warn('openViewModalByPostId failed', e); }
                         }
-                        return;
+                        return true;
                     }
                     await new Promise(r => setTimeout(r, 600));
                 }
                 console.warn('Shared post could not be loaded:', postId);
+                return false;
+            } catch (e) { console.warn('loadAndOpenPostById failed', e); return false; }
+        }
+
+        // Same-origin tab handoff channel. Every open tab listens so a freshly opened
+        // shared link can ask the tab the user is ALREADY signed into to open the post,
+        // instead of showing it in a brand-new (often signed-out) instance.
+        let __sharedPostChannel = null;
+        function getSharedPostChannel() {
+            try {
+                if (__sharedPostChannel) return __sharedPostChannel;
+                if (typeof BroadcastChannel === 'undefined') return null;
+                __sharedPostChannel = new BroadcastChannel('fedex-shared-post');
+                return __sharedPostChannel;
+            } catch (e) { return null; }
+        }
+
+        // Register the request listener in EVERY tab (runs on every load, not just shared links).
+        function initSharedPostChannel() {
+            try {
+                const ch = getSharedPostChannel();
+                if (!ch || ch.__listenerAttached) return;
+                ch.__listenerAttached = true;
+                ch.addEventListener('message', (ev) => {
+                    try {
+                        const msg = ev && ev.data;
+                        if (!msg || msg.type !== 'open-shared-post-request' || !msg.postId) return;
+                        // Only a SIGNED-IN tab should claim the post, so it opens in the
+                        // user's real session and never in a signed-out instance.
+                        const signedIn = !!(window.currentUserId || (typeof currentUserId !== 'undefined' && currentUserId));
+                        if (!signedIn) return;
+                        // Acknowledge so the requesting tab can step aside.
+                        try { ch.postMessage({ type: 'open-shared-post-ack', requestId: msg.requestId }); } catch (e) {}
+                        try { window.focus(); } catch (e) {}
+                        loadAndOpenPostById(msg.postId);
+                    } catch (e) {}
+                });
+            } catch (e) {}
+        }
+
+        // Ask other open tabs to claim this post. Resolves true if one acked (it will open it).
+        function tryHandoffSharedPost(postId) {
+            return new Promise((resolve) => {
+                try {
+                    const ch = getSharedPostChannel();
+                    if (!ch) return resolve(false);
+                    const requestId = 'req-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+                    let settled = false;
+                    const onMsg = (ev) => {
+                        try {
+                            const m = ev && ev.data;
+                            if (m && m.type === 'open-shared-post-ack' && m.requestId === requestId) {
+                                if (settled) return;
+                                settled = true;
+                                try { ch.removeEventListener('message', onMsg); } catch (e) {}
+                                resolve(true);
+                            }
+                        } catch (e) {}
+                    };
+                    ch.addEventListener('message', onMsg);
+                    try { ch.postMessage({ type: 'open-shared-post-request', postId, requestId }); }
+                    catch (e) { try { ch.removeEventListener('message', onMsg); } catch (e2) {} return resolve(false); }
+                    setTimeout(() => {
+                        if (!settled) { settled = true; try { ch.removeEventListener('message', onMsg); } catch (e) {} resolve(false); }
+                    }, 900);
+                } catch (e) { resolve(false); }
+            });
+        }
+
+        // Lightweight notice shown in the freshly-opened tab once an existing signed-in
+        // tab has claimed the post, so the user knows to switch to their real session.
+        function showSharedPostHandoffNotice(postId) {
+            try {
+                if (document.getElementById('sharedPostHandoffNotice')) return;
+                const wrap = document.createElement('div');
+                wrap.id = 'sharedPostHandoffNotice';
+                wrap.style.cssText = 'position:fixed;inset:0;z-index:2147483600;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,0.72);backdrop-filter:blur(2px);font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif;';
+                wrap.innerHTML = '<div style="max-width:360px;width:86%;background:#ffffff;border-radius:16px;padding:22px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,0.35);text-align:center;color:#111827;">'
+                    + '<div style="font-size:32px;line-height:1;margin-bottom:10px;">✅</div>'
+                    + '<div style="font-size:17px;font-weight:700;margin-bottom:6px;">Opened in your other tab</div>'
+                    + '<div style="font-size:14px;color:#4b5563;margin-bottom:16px;">This post was opened where you\'re already signed in. You can close this window.</div>'
+                    + '<div style="display:flex;gap:10px;justify-content:center;">'
+                    + '<button id="sharedPostHandoffOpenHere" style="flex:1;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;background:#fff;color:#111827;font-weight:600;cursor:pointer;">Open here</button>'
+                    + '<button id="sharedPostHandoffClose" style="flex:1;padding:10px 12px;border:none;border-radius:10px;background:#111827;color:#fff;font-weight:600;cursor:pointer;">Close</button>'
+                    + '</div></div>';
+                document.body.appendChild(wrap);
+                const closeBtn = document.getElementById('sharedPostHandoffClose');
+                const openHereBtn = document.getElementById('sharedPostHandoffOpenHere');
+                if (closeBtn) closeBtn.onclick = () => { try { window.close(); } catch (e) {} try { wrap.remove(); } catch (e) {} };
+                if (openHereBtn) openHereBtn.onclick = () => { try { wrap.remove(); } catch (e) {} loadAndOpenPostById(postId); };
+                // Best-effort auto-close (works for script-opened windows; harmless otherwise).
+                setTimeout(() => { try { window.close(); } catch (e) {} }, 400);
+            } catch (e) {}
+        }
+
+        async function openSharedPostFromUrl() {
+            try {
+                let postId = null;
+                try { postId = new URLSearchParams(location.search || '').get('post'); } catch (e) {}
+                if (!postId && location.hash) {
+                    const m = location.hash.match(/[#&]post=([^&]+)/);
+                    if (m) { try { postId = decodeURIComponent(m[1]); } catch (e) { postId = m[1]; } }
+                }
+                if (!postId) return;
+                postId = String(postId).trim();
+                if (!postId) return;
+
+                // 1) HANDOFF: if the user already has this site open & signed in on another
+                // tab, let THAT tab open the post so they stay in their real session.
+                const handedOff = await tryHandoffSharedPost(postId);
+                if (handedOff) { showSharedPostHandoffNotice(postId); return; }
+
+                // 2) No existing tab — open the post here (same as before).
+                await loadAndOpenPostById(postId);
             } catch (e) { console.warn('openSharedPostFromUrl failed', e); }
         }
         try { window.openSharedPostFromUrl = openSharedPostFromUrl; } catch (e) {}
         try {
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', () => { try { openSharedPostFromUrl(); } catch (e) {} });
-            } else {
+            const __bootSharedPost = () => {
+                try { initSharedPostChannel(); } catch (e) {}
                 try { openSharedPostFromUrl(); } catch (e) {}
+            };
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', __bootSharedPost);
+            } else {
+                __bootSharedPost();
             }
         } catch (e) {}
 
