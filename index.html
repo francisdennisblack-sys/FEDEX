@@ -21595,15 +21595,19 @@
 
                 const fetchFromFirebase = async () => {
                     try {
-                        if (!(window.get && window.ref && window.database)) return false;
-                        const snap = await window.get(window.ref(window.database, `posts/${postId}`));
-                        if (snap && snap.exists && snap.exists()) {
-                            const data = snap.val() || {};
+                        // Consume the early-prefetch promise if it's for this post —
+                        // the network call is already in flight so we just await it.
+                        let data = null;
+                        if (window.__sharedPostEarlyId === postId && window.__sharedPostEarlyDataPromise) {
+                            data = await window.__sharedPostEarlyDataPromise;
+                            window.__sharedPostEarlyDataPromise = null; // consume once
+                        } else {
+                            if (!(window.get && window.ref && window.database)) return false;
+                            const snap = await window.get(window.ref(window.database, `posts/${postId}`));
+                            data = (snap && snap.exists && snap.exists()) ? (snap.val() || {}) : null;
+                        }
+                        if (data) {
                             data.id = data.id || postId;
-                            // Is this post already part of the viewer's real grid feed?
-                            // If so it's a normal post; if NOT it's a transient shared-link
-                            // view that must never be added to gridContent (which the grid
-                            // renderer merges via the 'shared-posts' feed).
                             let inRealGrid = false;
                             try {
                                 for (const k in gridContent) {
@@ -21612,24 +21616,20 @@
                                     const idx = arr.findIndex(p => p && p.id === postId);
                                     if (idx !== -1) {
                                         inRealGrid = true;
-                                        // Enrich the existing grid copy with the authoritative
-                                        // record so the modal (which reads gridContent FIRST)
-                                        // shows the media instead of a partial/text-only copy.
                                         try { arr[idx] = Object.assign({}, arr[idx], data); } catch (e) {}
                                     }
                                 }
                             } catch (e) {}
                             const wasCached = !!postCache[postId];
                             try { postCache[postId] = Object.assign({}, postCache[postId] || {}, data); } catch (e) { postCache[postId] = data; }
-                            // Keep it ONLY in postCache (which openViewModalByPostId reads as a
-                            // fallback) — do NOT inject into gridContent['shared-posts'], or it
-                            // would be merged into the rendered grid and persist after close.
                             if (!inRealGrid) {
                                 __transientSharedPost = { id: postId, removeFromCache: !wasCached };
                             }
                             return true;
                         }
                     } catch (e) { console.warn('Shared post Firebase fetch failed', e); }
+                    return false;
+                };
                     return false;
                 };
 
@@ -21768,6 +21768,46 @@
             } catch (e) { console.warn('openSharedPostFromUrl failed', e); }
         }
         try { window.openSharedPostFromUrl = openSharedPostFromUrl; } catch (e) {}
+
+        // ── EARLY PREFETCH ────────────────────────────────────────────────────────
+        // Read ?post= from the URL RIGHT NOW (synchronously) and start the Firebase
+        // get() the instant window.get/ref/database are available — polling every
+        // 10ms so we don't lose a single millisecond. By the time loadAndOpenPostById
+        // runs the network round-trip is already in flight (or done). fetchFromFirebase
+        // inside loadAndOpenPostById awaits this same promise instead of making a
+        // second request, so the post appears as fast as the network allows.
+        (function () {
+            try {
+                let pid = null;
+                try { pid = new URLSearchParams(location.search || '').get('post'); } catch (e) {}
+                if (!pid && location.hash) {
+                    const m = location.hash.match(/[#&]post=([^&]+)/);
+                    if (m) { try { pid = decodeURIComponent(m[1]); } catch (e) { pid = m[1]; } }
+                }
+                if (!pid) return;
+                pid = String(pid).trim();
+                if (!pid) return;
+                window.__sharedPostEarlyId = pid;
+                window.__sharedPostEarlyDataPromise = new Promise(function (resolve) {
+                    var ticks = 0;
+                    var iv = setInterval(function () {
+                        ticks++;
+                        if (window.get && window.ref && window.database) {
+                            clearInterval(iv);
+                            try {
+                                window.get(window.ref(window.database, 'posts/' + pid))
+                                    .then(function (snap) {
+                                        resolve(snap && snap.exists && snap.exists() ? (snap.val() || {}) : null);
+                                    })
+                                    .catch(function () { resolve(null); });
+                            } catch (e) { resolve(null); }
+                        } else if (ticks > 300) { clearInterval(iv); resolve(null); } // 3s max
+                    }, 10);
+                });
+            } catch (e) {}
+        })();
+        // ─────────────────────────────────────────────────────────────────────────
+
         try {
             const __bootSharedPost = () => {
                 try { initSharedPostChannel(); } catch (e) {}
