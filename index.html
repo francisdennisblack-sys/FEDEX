@@ -21576,6 +21576,22 @@
                     return false;
                 };
 
+                // A locally-cached copy is only "complete" for opening immediately when it
+                // ALREADY carries media (or there's genuinely no media). A copy that has
+                // ONLY text could be a media post whose media field hasn't streamed in yet,
+                // so we must wait for the authoritative Firebase record before opening.
+                const hasMediaFields = (p) => {
+                    if (!p || typeof p !== 'object') return false;
+                    if (p.photoURL || p.imageData || p.videoURL || p.mediaURL) return true;
+                    const arrs = [p.mediaItems, p.media, p.mediaURLs, p.photoURLs, p.images, p.videos];
+                    return arrs.some(a => Array.isArray(a) && a.length > 0);
+                };
+                const localCopyHasMedia = () => {
+                    try { if (postCache && postCache[postId] && hasMediaFields(postCache[postId])) return true; } catch (e) {}
+                    try { for (const k in gridContent) { if ((gridContent[k] || []).some(p => p && p.id === postId && hasMediaFields(p))) return true; } } catch (e) {}
+                    return false;
+                };
+
                 const fetchFromFirebase = async () => {
                     try {
                         if (!(window.get && window.ref && window.database)) return false;
@@ -21616,19 +21632,25 @@
                     return false;
                 };
 
-                // Fetch the AUTHORITATIVE record first: it always carries the media URLs
-                // if the post has any, so the very first open shows photos/videos instead
-                // of needing a second press. Fall back to a locally-cached copy only when
-                // Firebase is unreachable (offline / still booting).
-                for (let i = 0; i < 15; i++) {
-                    if (await fetchFromFirebase() || isLoaded()) {
-                        if (typeof openViewModalByPostId === 'function') {
-                            try { openViewModalByPostId(postId, { sharedLink: true }); } catch (e) { console.warn('openViewModalByPostId failed', e); }
-                        }
-                        return true;
+                const openNow = () => {
+                    if (typeof openViewModalByPostId === 'function') {
+                        try { openViewModalByPostId(postId, { sharedLink: true }); } catch (e) { console.warn('openViewModalByPostId failed', e); }
                     }
+                };
+
+                // Photo/video posts must show their media on the FIRST open. The authoritative
+                // posts/${id} record always carries the media URLs, so we prefer it. We open
+                // immediately only when a local copy ALREADY has media (nothing to wait for);
+                // otherwise we keep pulling Firebase across retries (the SDK may not be ready
+                // on the very first tick during boot) instead of opening a media-less partial.
+                for (let i = 0; i < 15; i++) {
+                    if (localCopyHasMedia()) { openNow(); return true; }
+                    if (await fetchFromFirebase()) { openNow(); return true; }
                     await new Promise(r => setTimeout(r, 600));
                 }
+                // Firebase never returned (offline / deleted record). As a last resort open
+                // whatever local copy exists so the link still does something (e.g. text-only).
+                if (isLoaded()) { openNow(); return true; }
                 console.warn('Shared post could not be loaded:', postId);
                 return false;
             } catch (e) { console.warn('loadAndOpenPostById failed', e); return false; }
