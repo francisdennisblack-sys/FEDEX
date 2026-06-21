@@ -14828,6 +14828,72 @@
             }
         }, 5 * 60 * 1000);
 
+        // ============================================================================
+        // HARD 32-HOUR POST LIFETIME (TTL) — deletes every post 32h after it was
+        // posted, regardless of engagement or replacement availability. This is the
+        // authoritative expiry that the engagement-based rotation above does NOT
+        // guarantee (that one only retires posts when a backfill is available and
+        // keeps high-engagement posts for days). Scans the SHARED posts collection
+        // directly so expired posts are removed even when their author is offline.
+        // ============================================================================
+        const POST_MAX_AGE_MS = 32 * 60 * 60 * 1000; // 32 hours
+        let __purgeExpiredPostsRunning = false;
+
+        async function purgeExpiredPostsFromFirebase() {
+            if (__purgeExpiredPostsRunning) return;
+            if (typeof database === 'undefined' || !database) return;
+            __purgeExpiredPostsRunning = true;
+            try {
+                const snap = await get(ref(database, 'posts'));
+                if (!snap || !snap.exists()) return;
+                const all = snap.val() || {};
+                const now = Date.now();
+                const expiredIds = [];
+                for (const id in all) {
+                    if (!Object.prototype.hasOwnProperty.call(all, id)) continue;
+                    const post = all[id];
+                    if (!post) continue;
+                    const createdAt = getPostCreatedAt(post);
+                    // No usable timestamp -> cannot age it out (leave it alone).
+                    if (!createdAt) continue;
+                    if ((now - createdAt) > POST_MAX_AGE_MS) expiredIds.push(id);
+                }
+                if (!expiredIds.length) return;
+                console.log(`🗑️ TTL: ${expiredIds.length} post(s) older than 32h — deleting from Firebase.`);
+                for (const id of expiredIds) {
+                    try {
+                        await deletePostFromFirebase(id);
+                    } catch (err) {
+                        console.warn('TTL: failed to delete expired post', id, err && err.message);
+                    }
+                    // Remove from local grid + DOM/cache so it disappears immediately.
+                    try {
+                        for (const key in gridContent) {
+                            if (Array.isArray(gridContent[key])) {
+                                gridContent[key] = gridContent[key].filter(p => !(p && p.id === id));
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+                    try { purgeDeletedPostFromDOM(id); } catch (e) { /* ignore */ }
+                }
+                // Refresh the grid once after the batch so freed slots backfill.
+                try { rebuildGridScrollerFromGridContent(); } catch (e) { /* ignore */ }
+                try { window.lastRenderGridTime = 0; } catch (e) { /* ignore */ }
+                try { renderGrid(); } catch (e) { /* ignore */ }
+            } catch (error) {
+                console.warn('TTL purge failed:', error && error.message);
+            } finally {
+                __purgeExpiredPostsRunning = false;
+            }
+        }
+        try { window.purgeExpiredPostsFromFirebase = purgeExpiredPostsFromFirebase; } catch (e) { /* ignore */ }
+
+        // Run an initial purge shortly after load (lets Firebase warm up) so posts
+        // that were already live > 32h get cleaned up on this update, then re-check
+        // every 5 minutes so posts are deleted as they cross the 32h mark.
+        setTimeout(() => { purgeExpiredPostsFromFirebase(); }, 12000);
+        setInterval(() => { purgeExpiredPostsFromFirebase(); }, 5 * 60 * 1000);
+
         // Purge DOM and internal caches for a deleted/expired post id
         function purgeDeletedPostFromDOM(postId) {
             try {
