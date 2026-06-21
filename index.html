@@ -21632,8 +21632,30 @@
                         const res = await fetch(url);
                         if (!res.ok) return false;
                         const data = await res.json();
-                        if (!data || typeof data !== 'object') return false;
+                        // null = post doesn't exist; error object = permission denied
+                        if (!data || typeof data !== 'object' || data.error) return false;
                         data.id = data.id || postId;
+                        // Firebase RTDB stores JS arrays as sequential integer-keyed objects
+                        // {"0":{...},"1":{...}} when written via SDK. The REST endpoint returns
+                        // them as objects, not arrays. Convert them back so buildPostMediaList
+                        // (which uses Array.isArray) can find the media items.
+                        const restoreArray = (val) => {
+                            if (!val || typeof val !== 'object' || Array.isArray(val)) return val;
+                            const keys = Object.keys(val);
+                            if (keys.length === 0) return val;
+                            if (keys.every(k => /^\d+$/.test(k))) {
+                                const arr = [];
+                                keys.forEach(k => { arr[Number(k)] = val[k]; });
+                                return arr;
+                            }
+                            return val;
+                        };
+                        if (data.mediaItems)  data.mediaItems  = restoreArray(data.mediaItems);
+                        if (data.media)       data.media       = restoreArray(data.media);
+                        if (data.mediaURLs)   data.mediaURLs   = restoreArray(data.mediaURLs);
+                        if (data.photoURLs)   data.photoURLs   = restoreArray(data.photoURLs);
+                        if (data.images)      data.images      = restoreArray(data.images);
+                        if (data.videos)      data.videos      = restoreArray(data.videos);
                         let inRealGrid = false;
                         try {
                             for (const k in gridContent) {
@@ -21671,20 +21693,28 @@
                     return true;
                 }
 
-                // 2) No local copy. Race REST (no SDK dependency, fires immediately) against
-                //    the SDK fetch. Whichever returns the data first wins. Fall back to
-                //    polling in case the network is slow (100ms × 20 = 2 second max wait).
-                const restRace = fetchFromREST();
-                const sdkRace  = fetchFromFirebase();
-                const firstWin = await Promise.race([restRace, sdkRace]);
-                if (firstWin) { openNow(); return true; }
-                // If the faster one lost, wait for the slower one.
-                if (await Promise.race([restRace, sdkRace])) { openNow(); return true; }
+                // 2) No local copy. Race REST (fires immediately, no SDK dependency) against
+                //    the SDK fetch. Resolve as soon as EITHER succeeds, wait for both to
+                //    settle before giving up. Uses a manual race so a fast-false from one
+                //    source doesn't prevent the slower-but-successful other source from winning.
+                const fetchEither = () => new Promise((resolve) => {
+                    let done = false;
+                    const win = (val) => { if (!done && val) { done = true; resolve(true); } };
+                    const restP = fetchFromREST();
+                    const sdkP  = fetchFromFirebase();
+                    restP.then(win).catch(() => {});
+                    sdkP.then(win).catch(() => {});
+                    // If both settle without success, resolve false.
+                    Promise.allSettled([restP, sdkP]).then(() => { if (!done) resolve(false); });
+                });
 
+                if (await fetchEither()) { openNow(); return true; }
+
+                // Both failed (SDK not warm yet, network slow). Retry at 100ms until one
+                // succeeds or 2 seconds elapses.
                 for (let i = 0; i < 20; i++) {
-                    if (localCopyHasMedia()) { openNow(); return true; }
-                    if (await fetchFromREST()) { openNow(); return true; }
-                    if (await fetchFromFirebase()) { openNow(); return true; }
+                    if (isLoaded()) { openNow(); return true; }
+                    if (await fetchEither()) { openNow(); return true; }
                     await new Promise(r => setTimeout(r, 100));
                 }
                 // Still nothing (offline / deleted). Open whatever local copy exists.
@@ -22552,9 +22582,12 @@
                     else if (typeof m === 'object') pushItem(m.src || m.url || m.photoURL || m.imageData || m.downloadURL, m.type || m.mediaType || m.contentType);
                 }
             }
-            // Fallback: single legacy media field.
+            // Fallback: single legacy media fields (cover all field names the app uses).
             if (items.length === 0) {
-                const single = post.photoURL || post.imageData;
+                const isVid = (post.mediaType || post.contentType || '').toString().toLowerCase().startsWith('video');
+                const single = isVid
+                    ? (post.videoURL || post.mediaURL || post.photoURL || post.imageData)
+                    : (post.photoURL || post.imageData || post.videoURL || post.mediaURL);
                 if (single) pushItem(single, post.mediaType || post.contentType);
             }
             return items.slice(0, 10);
