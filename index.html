@@ -21633,18 +21633,6 @@
                 };
 
                 const openNow = () => {
-                    // A shared content-only (text) post re-renders the REAL post
-                    // large & centered (the "hero") instead of jumping straight to
-                    // the pop-out. Media posts keep opening the media pop-out.
-                    try {
-                        const post = (typeof getSharedPostObject === 'function') ? getSharedPostObject(postId) : null;
-                        const mediaList = (post && typeof buildPostMediaList === 'function') ? buildPostMediaList(post) : [];
-                        const isTextOnly = !!post && (!Array.isArray(mediaList) || mediaList.length === 0);
-                        if (isTextOnly && typeof openSharedPostHero === 'function') {
-                            openSharedPostHero(postId);
-                            return;
-                        }
-                    } catch (e) { console.warn('shared hero route failed', e); }
                     if (typeof openViewModalByPostId === 'function') {
                         try { openViewModalByPostId(postId, { sharedLink: true }); } catch (e) { console.warn('openViewModalByPostId failed', e); }
                     }
@@ -22363,13 +22351,25 @@
                 // Show written content below media in the description area
                 viewTextEl.innerHTML = `<div style="color: #fff; white-space: pre-wrap; word-break: break-word; margin-top:8px;">${targetPost.description || targetPost.content || ''}</div>`;
             } else if (isSharedTextPost) {
-                // Shared content-only post: render it to look like a REAL post — the same
-                // left-aligned, system-font text card the grid tile uses — just BIGGER, so
-                // the recipient feels like they're viewing an actual (large) post.
-                if (viewMediaEl) viewMediaEl.innerHTML = '';
-                const sharedText = (targetPost.content || targetPost.description || targetPost.text || '').toString();
-                const esc = sharedText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                viewTextEl.innerHTML = `<div class="post-text-content shared-text-body" style="color:#fff; white-space:pre-wrap; word-break:break-word; text-align:left; line-height:1.5; font-family:system-ui,-apple-system,sans-serif; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; box-sizing:border-box; width:100%;">${esc}</div>`;
+                // Shared content-only post: render the REAL post tile (badges + vote
+                // buttons + glow) ENLARGED inside the modal, so the recipient sees the
+                // actual post zoomed in — not a plain pop-out. Reuses the same modal
+                // show/hide path that media shares already use (which works reliably).
+                if (viewTextEl) viewTextEl.innerHTML = '';
+                if (viewMediaEl) {
+                    viewMediaEl.innerHTML = '<div class="grid-box shared-real-post-tile" id="sharedRealPostTile"></div>';
+                    const tile = document.getElementById('sharedRealPostTile');
+                    if (tile) {
+                        try { renderGridItemFull(tile, targetPost); } catch (e) { console.warn('shared tile render failed', e); }
+                        try {
+                            const tileBadges = calculateBadges(targetPost, Object.values(gridContent).flat());
+                            applyGlowAndBorder(tile, targetPost, { podium: window.lastVisibleTop3 || [], badges: tileBadges, hasBoostFlag: isStrictBoostActive(targetPost) });
+                        } catch (e) {}
+                        // It's already the focused post — tapping the tile body does
+                        // nothing (the vote buttons keep their own stopPropagation handlers).
+                        tile.onclick = null;
+                    }
+                }
             } else {
                 // No media (normal text-only browsing): clear media container and do not
                 // render the text content in the pop-out per request.
@@ -22401,10 +22401,10 @@
                 if (modalContent) {
                     modalContent.classList.toggle('media-modal', !!hasMedia);
                     // Text-only posts: enlarge the icon buttons to fill the pop-out.
-                    // A shared content-only post uses the larger 'shared-text-modal'
-                    // layout instead of the compact 'text-only-modal'.
+                    // A shared content-only post shows the REAL post tile enlarged via
+                    // the 'shared-real-post-modal' layout instead of 'text-only-modal'.
                     modalContent.classList.toggle('text-only-modal', !hasMedia && !isSharedTextPost);
-                    modalContent.classList.toggle('shared-text-modal', !!isSharedTextPost);
+                    modalContent.classList.toggle('shared-real-post-modal', !!isSharedTextPost);
                     // If this media container contains a video element, mark modal
                     // so CSS can make videos larger than photos.
                     try {
@@ -22466,44 +22466,6 @@
             // Signed-out viewers fall back to the normal signed-out grid; signed-in
             // viewers return to their unchanged grid with the post NOT added.
             try {
-                if (!__sharedPostHeroOpen && __transientSharedPost && __transientSharedPost.id) {
-                    const tid = __transientSharedPost.id;
-                    try { if (gridContent['shared-posts']) gridContent['shared-posts'] = gridContent['shared-posts'].filter(p => !p || p.id !== tid); } catch (e) {}
-                    try { if (window.gridContent && window.gridContent['shared-posts']) window.gridContent['shared-posts'] = window.gridContent['shared-posts'].filter(p => !p || p.id !== tid); } catch (e) {}
-                    if (__transientSharedPost.removeFromCache) { try { delete postCache[tid]; } catch (e) {} }
-                    __transientSharedPost = null;
-                }
-            } catch (e) {}
-        }
-
-        // === SHARED CONTENT POST HERO ====================================
-        // A shared content-only ("text") post link does NOT jump straight into
-        // the pop-out. Instead it re-renders the REAL post — the exact same tile
-        // the grid uses (badges, vote buttons, glow) — but LARGE and centered on
-        // screen, so the recipient feels like they're viewing an actual post.
-        // Pressing the post opens the normal pop-out page.
-        function getSharedPostObject(postId) {
-            try {
-                for (const k in gridContent) {
-                    const arr = gridContent[k];
-                    if (!Array.isArray(arr)) continue;
-                    const p = arr.find(x => x && x.id === postId);
-                    if (p) return p;
-                }
-            } catch (e) {}
-            try { if (postCache && postCache[postId]) return postCache[postId]; } catch (e) {}
-            return null;
-        }
-
-        let __sharedPostHeroOpen = false;
-
-        function closeSharedPostHero() {
-            try {
-                const overlay = document.getElementById('sharedPostHero');
-                if (overlay) overlay.classList.remove('active');
-                __sharedPostHeroOpen = false;
-                // Purge the transient shared post now that the hero is dismissed,
-                // so it never leaks into the grid or lingers in caches.
                 if (__transientSharedPost && __transientSharedPost.id) {
                     const tid = __transientSharedPost.id;
                     try { if (gridContent['shared-posts']) gridContent['shared-posts'] = gridContent['shared-posts'].filter(p => !p || p.id !== tid); } catch (e) {}
@@ -22513,50 +22475,6 @@
                 }
             } catch (e) {}
         }
-        window.closeSharedPostHero = closeSharedPostHero;
-
-        function openSharedPostHero(postId) {
-            const post = getSharedPostObject(postId);
-            if (!post) {
-                // We somehow lack the object — fall back to the pop-out.
-                try { openViewModalByPostId(postId, { sharedLink: true }); } catch (e) {}
-                return;
-            }
-            // Build the overlay lazily and reuse it on subsequent opens.
-            let overlay = document.getElementById('sharedPostHero');
-            if (!overlay) {
-                overlay = document.createElement('div');
-                overlay.id = 'sharedPostHero';
-                overlay.className = 'shared-post-hero';
-                const inner = document.createElement('div');
-                inner.className = 'shared-post-hero-inner';
-                const heroBox = document.createElement('div');
-                heroBox.className = 'grid-box shared-post-hero-box';
-                heroBox.id = 'sharedPostHeroBox';
-                inner.appendChild(heroBox);
-                overlay.appendChild(inner);
-                document.body.appendChild(overlay);
-                // Tapping the backdrop (outside the post) dismisses the hero.
-                overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSharedPostHero(); });
-            }
-            const box = document.getElementById('sharedPostHeroBox');
-            // Render the REAL post tile into the large box (badges + vote buttons).
-            try { renderGridItemFull(box, post); } catch (e) { console.warn('hero render failed', e); }
-            // Apply the same glow/border the grid uses so it matches a real tile.
-            try {
-                const allPostsForBadges = Object.values(gridContent).flat();
-                const badges = calculateBadges(post, allPostsForBadges);
-                applyGlowAndBorder(box, post, { podium: window.lastVisibleTop3 || [], badges, hasBoostFlag: isStrictBoostActive(post) });
-            } catch (e) {}
-            // Pressing the post (not a vote button) opens the pop-out page.
-            box.onclick = (e) => {
-                if (e.target && (e.target.tagName === 'BUTTON' || (e.target.closest && e.target.closest('button')))) return;
-                try { openViewModalByPostId(postId, { sharedLink: true }); } catch (err) {}
-            };
-            __sharedPostHeroOpen = true;
-            overlay.classList.add('active');
-        }
-        window.openSharedPostHero = openSharedPostHero;
 
         function contactPostPhone() {
             try {
