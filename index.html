@@ -18288,7 +18288,31 @@
                                     incoming.boostStatus = incoming.boostStatus || 'active';
                                 }
                             } catch (e) { /* ignore normalization errors */ }
-                            const cached = (postCache && postCache[postId]) || cachedPostsMap[postId] || null;
+                            // Merge BOTH cache sources for rehydration. A partial/badge-only
+                            // postCache entry (created by badge/payments hydration) must NEVER
+                            // shadow the richer localStorage-cached post — otherwise an incoming
+                            // snapshot with empty content/media fails to rehydrate, the blanked
+                            // post overwrites gridContent AND gets saved back to cachedAllPosts,
+                            // permanently blanking the post's grid front for everyone.
+                            const cachedPrimary = (postCache && postCache[postId]) || null;
+                            const cachedBackup = cachedPostsMap[postId] || null;
+                            let cached = null;
+                            if (cachedPrimary || cachedBackup) {
+                                const pickStr = (a, b) => {
+                                    const av = (typeof a === 'string') ? a.trim() : a;
+                                    if (av) return a;
+                                    return (b != null ? b : a);
+                                };
+                                cached = Object.assign({}, cachedBackup || {}, cachedPrimary || {});
+                                cached.content = pickStr(cachedPrimary && cachedPrimary.content, cachedBackup && cachedBackup.content);
+                                cached.description = pickStr(cachedPrimary && cachedPrimary.description, cachedBackup && cachedBackup.description);
+                                cached.text = pickStr(cachedPrimary && cachedPrimary.text, cachedBackup && cachedBackup.text);
+                                cached.photoURL = (cachedPrimary && cachedPrimary.photoURL) || (cachedBackup && cachedBackup.photoURL) || null;
+                                cached.imageData = (cachedPrimary && cachedPrimary.imageData) || (cachedBackup && cachedBackup.imageData) || null;
+                                cached.videoURL = (cachedPrimary && cachedPrimary.videoURL) || (cachedBackup && cachedBackup.videoURL) || null;
+                                cached.mediaURL = (cachedPrimary && cachedPrimary.mediaURL) || (cachedBackup && cachedBackup.mediaURL) || null;
+                                cached.mediaType = (cachedPrimary && cachedPrimary.mediaType) || (cachedBackup && cachedBackup.mediaType) || null;
+                            }
                             if ((incoming.content === undefined || incoming.content === null || (typeof incoming.content === 'string' && incoming.content.trim() === '')) && cached && cached.content) {
                                 incoming.content = cached.content;
                             }
@@ -40007,6 +40031,19 @@
                         postCache[p.id] = postCache[p.id] || {};
                         const pc = postCache[p.id];
                         pc.id = p.id;
+                        // Seed full content/media from the source post so this badge cache
+                        // entry is never a content-less shell that could shadow the real
+                        // post during snapshot rehydrate (which blanks the grid front).
+                        try {
+                            if (!pc.content && p.content != null && String(p.content).trim()) pc.content = p.content;
+                            if (!pc.description && p.description != null && String(p.description).trim()) pc.description = p.description;
+                            if (!pc.text && p.text != null && String(p.text).trim()) pc.text = p.text;
+                            pc.photoURL = pc.photoURL || p.photoURL || null;
+                            pc.imageData = pc.imageData || p.imageData || null;
+                            pc.videoURL = pc.videoURL || p.videoURL || null;
+                            pc.mediaURL = pc.mediaURL || p.mediaURL || null;
+                            pc.mediaType = pc.mediaType || p.mediaType || null;
+                        } catch (e) { /* ignore seed errors */ }
                         pc.badges = pc.badges || [];
                         for (const k of keys) {
                             try {
