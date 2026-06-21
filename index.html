@@ -19071,58 +19071,57 @@
 
                 onChildAdded(evRoot, handleRemovedEvent);
                 onChildChanged(evRoot, handleRemovedEvent);
+
+                // ── Direct posts/ removal listener ───────────────────────────────────
+                // onChildRemoved fires the instant any post node disappears from
+                // Firebase — no tombstone write required. This is the primary
+                // cross-device propagation path; the tombstone above is a belt-and-
+                // suspenders fallback for offline-then-online clients.
+                if (!window._postsChildRemovedListenerAttached) {
+                    window._postsChildRemovedListenerAttached = true;
+                    const postsRootRef = ref(database, 'posts');
+                    onChildRemoved(postsRootRef, (snap) => {
+                        try {
+                            const postId = snap.key;
+                            if (!postId) return;
+                            console.log('🗑️ posts/ onChildRemoved fired for', postId, '→ purging all clients');
+                            // Mark globally deleted so onValue can never resurrect it
+                            window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
+                            window.globallyDeletedPostIds.add(postId);
+                            window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
+                            window.pendingRemovedPosts.add(postId);
+                            // Drop from in-memory caches
+                            try { if (postCache) delete postCache[postId]; } catch(e){}
+                            try {
+                                if (typeof gridContent === 'object' && gridContent) {
+                                    Object.keys(gridContent).forEach(k => {
+                                        if (Array.isArray(gridContent[k])) gridContent[k] = gridContent[k].filter(p => !(p && p.id === postId));
+                                    });
+                                }
+                            } catch(e){}
+                            // Remove DOM node instantly
+                            try { clearGridBoxByPostId(postId); } catch(e){}
+                            // Drop from virtual scroller
+                            try {
+                                if (gridScroller && Array.isArray(gridScroller.items)) {
+                                    gridScroller.items = gridScroller.items.filter(i => !(i && i.id === postId));
+                                    if (typeof gridScroller.setItems === 'function') gridScroller.setItems(gridScroller.items);
+                                    else if (typeof gridScroller.refresh === 'function') gridScroller.refresh();
+                                }
+                            } catch(e){}
+                            // Reflow grid
+                            try { window.lastRenderGridTime = 0; } catch(e){}
+                            try { if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
+                        } catch (e) { console.warn('posts/onChildRemoved handler failed', e); }
+                    });
+                }
             } catch (e) {
                 console.warn('subscribeToPostRemovedEvents failed', e);
             }
         }
 
-        /**
-         * Attach a native Firebase onChildRemoved listener on the posts/ collection.
-         * This fires on ALL connected clients (including other tabs and devices) the
-         * instant a post node is deleted from Firebase — no tombstone write needed.
-         * Combined with the post_events/removed tombstone path this gives two
-         * independent propagation channels so deletion is always instant.
-         */
-        function subscribeToDirectPostDeletion() {
-            try {
-                if (!database) return;
-                if (window._postDirectDeletionListenerAttached) return;
-                window._postDirectDeletionListenerAttached = true;
-
-                const postsRootRef = ref(database, 'posts');
-                console.log('🌎 Subscribing to posts onChildRemoved for instant cross-client deletion');
-
-                onChildRemoved(postsRootRef, (snap) => {
-                    try {
-                        const postId = snap.key;
-                        if (!postId) return;
-                        console.log('🗑️ onChildRemoved:', postId, '→ purging from all clients instantly');
-
-                        // Guard so the onValue snapshot handler never resurrects this post
-                        window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
-                        window.globallyDeletedPostIds.add(postId);
-
-                        // Drop from all in-memory stores
-                        try { if (postCache) delete postCache[postId]; } catch(e) {}
-                        try {
-                            Object.keys(gridContent || {}).forEach(k => {
-                                if (Array.isArray(gridContent[k]))
-                                    gridContent[k] = gridContent[k].filter(p => !(p && p.id === postId));
-                            });
-                        } catch(e) {}
-
-                        // Remove from virtual scroller and DOM
-                        try { purgeDeletedPostFromDOM(postId); } catch(e) {}
-
-                        // Re-render so the vacated slot collapses
-                        try { window.lastRenderGridTime = 0; } catch(e) {}
-                        try { if (typeof renderGrid === 'function') renderGrid(); } catch(e) {}
-                    } catch(e) { console.warn('onChildRemoved handler failed', e); }
-                });
-            } catch(e) {
-                console.warn('subscribeToDirectPostDeletion failed', e);
-            }
-        }
+        // Subscribe to per-post update events (likes/dislikes changes)
+        function subscribeToPostUpdatedEvents() {
             try {
                 if (!database) return;
                 if (window._postUpdatedListenerAttached) return;
@@ -27008,7 +27007,6 @@
                     // Ensure we are subscribed to removal events so we can surface a soft-refresh
                     try {
                         if (typeof subscribeToPostRemovedEvents === 'function') subscribeToPostRemovedEvents();
-                        if (typeof subscribeToDirectPostDeletion === 'function') subscribeToDirectPostDeletion();
                         if (typeof subscribeToPostAddedEvents === 'function') subscribeToPostAddedEvents();
                         if (typeof subscribeToPostUpdatedEvents === 'function') subscribeToPostUpdatedEvents();
                     } catch (e) { console.warn('subscribeToPostRemovedEvents wiring failed', e); }
