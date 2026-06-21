@@ -18499,6 +18499,17 @@
                             if (window.globallyDeletedPostIds && window.globallyDeletedPostIds.has(postId)) {
                                 return;
                             }
+
+                            // ── Client-side 32h TTL ──────────────────────────────────────────
+                            // Filter expired posts before they reach any render path. This
+                            // ensures signed-out users (who may connect before the scheduled
+                            // purgeExpiredPostsFromFirebase timer fires) never see stale posts.
+                            const _postTs = (postsObj[postId] || {}).timestamp || (postsObj[postId] || {}).createdAt || 0;
+                            if (_postTs && (Date.now() - Number(_postTs)) > 32 * 60 * 60 * 1000) {
+                                // Mark globally deleted so it can't re-enter via any other path
+                                try { window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set(); window.globallyDeletedPostIds.add(postId); } catch(e){}
+                                return; // expired — skip
+                            }
                             
                             seenPostIds.add(postId);
                             // Defensive merge: if incoming post has missing/empty content, preserve cached content
@@ -18746,8 +18757,16 @@
                     try {
                         const cachedPosts = JSON.parse(localStorage.getItem('cachedAllPosts') || '[]');
                         if (cachedPosts.length > 0) {
-                            console.log(`⚠️ Firebase error - using cached ${cachedPosts.length} posts from localStorage`);
-                            callback(cachedPosts);
+                            // Strip expired posts from the localStorage fallback too so offline/error
+                            // mode doesn't serve stale content to signed-out users.
+                            const _nowFb = Date.now();
+                            const _ttlFb = 32 * 60 * 60 * 1000;
+                            const freshCached = cachedPosts.filter(p => {
+                                const ts = Number(p && (p.timestamp || p.createdAt) || 0);
+                                return !ts || (_nowFb - ts) <= _ttlFb;
+                            });
+                            console.log(`⚠️ Firebase error - using cached ${freshCached.length}/${cachedPosts.length} posts from localStorage (${cachedPosts.length - freshCached.length} expired stripped)`);
+                            callback(freshCached);
                         }
                     } catch (e) {
                         console.warn('⚠️ Could not restore cached posts:', e.message);
@@ -27036,6 +27055,8 @@
                         const inWarmup = listenerAgeMs < 45000 || callCount <= 3;
                         const droppedTooFast = previousVisible.length >= 20 && incomingVisible.length < Math.floor(previousVisible.length * 0.7);
                         if (inWarmup && droppedTooFast) {
+                            const _now = Date.now();
+                            const _ttlMs = 32 * 60 * 60 * 1000;
                             const byId = new Map();
                             incomingVisible.forEach(p => { if (p && p.id) byId.set(String(p.id), p); });
                             previousVisible.forEach(prev => {
@@ -27044,6 +27065,9 @@
                                 if (byId.has(id)) return;
                                 if (window.globallyDeletedPostIds && window.globallyDeletedPostIds.has(id)) return;
                                 if (isPostHiddenForViewer(prev, currentUserId)) return;
+                                // Never resurrect expired posts from stale gridContent
+                                const prevTs = Number(prev.timestamp || prev.createdAt || 0);
+                                if (prevTs && (_now - prevTs) > _ttlMs) return;
                                 byId.set(id, prev);
                             });
                             mergedVisible = Array.from(byId.values());
