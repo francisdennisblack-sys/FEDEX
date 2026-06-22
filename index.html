@@ -13437,7 +13437,12 @@
                 } catch(e) { /* ignore duplicate-check failures */ }
 
                 // Add new repost to local caches for immediate feedback
-                try { postCache = postCache || {}; postCache[newId] = newPost; } catch(e){}
+                try {
+                    postCache = postCache || {};
+                    newPost._optimistic = true;
+                    newPost._optimisticExpiry = Date.now() + 30000; // keep optimistic for 30s
+                    postCache[newId] = newPost;
+                } catch(e){}
                 try {
                     const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
                     gridContent[key] = gridContent[key] || [];
@@ -18690,7 +18695,15 @@
                         try {
                             const serverIds = new Set(Object.keys(postsObj));
                             const cachedIds = Object.keys(postCache || {});
-                            const removedIds = cachedIds.filter(id => !serverIds.has(id));
+                            const removedIds = cachedIds.filter(id => {
+                                if (serverIds.has(id)) return false;
+                                try {
+                                    const pc = postCache && postCache[id];
+                                    // Preserve optimistic local posts for a short window
+                                    if (pc && pc._optimistic && Number(pc._optimisticExpiry || 0) > Date.now()) return false;
+                                } catch (e) {}
+                                return true;
+                            });
                             if (removedIds.length > 0) {
                                 console.log(`🧽 Snapshot prune: removing ${removedIds.length} posts no longer on server`);
                                 window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
@@ -38837,6 +38850,8 @@
                     postData.newExpiresAt = postData.newExpiresAt || (Date.now() + windowMs);
                     postData.newDurationMs = postData.newDurationMs || windowMs;
                     postData.badge = postData.badge || 'NEW';
+                    // Mark optimistic local post so server snapshot prune won't immediately remove it
+                    try { postData._optimistic = true; postData._optimisticExpiry = Date.now() + 30000; } catch(e) {}
                 } catch (e) { /* ignore badge init failures */ }
                 try { postCache[postId] = postData; } catch(_) {}
                 try {
