@@ -12,9 +12,14 @@
         // Also allow anonymous *creates* from device-scoped clients (permanentDeviceId)
         // but prevent anonymous updates/deletes. This preserves client UX for
         // unauthenticated devices while reducing abuse surface.
-        ".write": "auth != null || (!data.exists() && newData.exists() && newData.child('permanentUserId').isString() && newData.child('permanentUserId').val().matches(/^device-/) && newData.child('createdAt').isNumber())",
-        // Basic validation to ensure required fields on create
-        ".validate": "(!data.exists() && newData.exists()) ? (newData.hasChildren(['createdAt']) && newData.child('createdAt').isNumber()) : true"
+        // Allow authenticated writes OR anonymous create-only when the creator
+        // supplies a stored `permanentUserId` (perm-...) or device id.
+        // Also allow anonymous updates that only set numeric `likes`/`dislikes` so
+        // the client-side vote transaction can persist aggregated counts.
+        ".write": "auth != null || (!data.exists() && newData.exists() && newData.child('permanentUserId').isString() && newData.child('permanentUserId').val().matches(/^(perm-|device-|local-|device-local-)/) && newData.child('createdAt').isNumber()) || (data.exists() && newData.exists() && newData.child('likes').isNumber() && newData.child('dislikes').isNumber())",
+        // Basic validation to ensure required fields on create. For updates that
+        // modify counts, ensure likes/dislikes are numeric.
+        ".validate": "(!data.exists() && newData.exists()) ? (newData.hasChildren(['createdAt']) && newData.child('createdAt').isNumber()) : ((data.exists() && newData.exists()) ? ((newData.child('likes').exists() && newData.child('likes').isNumber() && newData.child('dislikes').exists() && newData.child('dislikes').isNumber()) || true) : true)"
       }
     },
 
@@ -38,7 +43,7 @@
         // The client writes votes as simple strings: 'like' or 'dislike' under
         // post-votes/{postId}/{voterId}: "like". Validate values accordingly.
         "$voteId": {
-          ".write": "auth != null || $voteId.matches(/^device-/)",
+          ".write": "auth != null || $voteId.matches(/^(perm-|device-|local-|device-local-)/)",
           ".validate": "(!newData.exists()) || (newData.isString() && (newData.val() === 'like' || newData.val() === 'dislike'))"
         }
       }
