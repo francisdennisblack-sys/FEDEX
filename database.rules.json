@@ -1,31 +1,51 @@
 {
   "rules": {
 
+    // Default: deny by default, allow specific nodes below
+    ".read": false,
+    ".write": false,
+
     "posts": {
       ".read": true,
       "$postId": {
-        ".write": "auth != null"
+        // Allow writes from authenticated users.
+        // Also allow anonymous *creates* from device-scoped clients (permanentDeviceId)
+        // but prevent anonymous updates/deletes. This preserves client UX for
+        // unauthenticated devices while reducing abuse surface.
+        ".write": "auth != null || (!data.exists() && newData.exists() && newData.child('permanentUserId').isString() && newData.child('permanentUserId').val().matches('^device-') && newData.child('createdAt').isNumber())",
+        // Basic validation to ensure required fields on create
+        ".validate": "(!data.exists() && newData.exists()) ? (newData.hasChildren(['createdAt']) && newData.child('createdAt').isNumber()) : true"
       }
     },
 
     "posts_by_zone": {
       ".read": true,
+      // writes should come from server-side or authenticated clients
       ".write": "auth != null"
     },
 
     "post_events": {
       ".read": true,
+      // events are sensitive; require auth to write (or server-side functions)
       ".write": "auth != null"
     },
 
     "post-votes": {
       ".read": true,
-      ".write": "auth != null"
+      "$postId": {
+        // Allow authenticated voting. Allow anonymous vote *creates* from
+        // device-scoped clients (stored under a device key) but disallow
+        // anonymous edits/deletes.
+        "$voteId": {
+          ".write": "auth != null || (!data.exists() && newData.exists() && newData.child('deviceId').isString() && newData.child('deviceId').val().matches('^device-'))"
+        }
+      }
     },
 
     "user-votes": {
       ".read": true,
       "$userId": {
+        // Only the authenticated user may write to their own vote-tracking node.
         ".write": "auth != null && auth.uid === $userId"
       }
     },
@@ -50,7 +70,7 @@
     },
 
     "onlineUsers": {
-      ".read":  true,
+      ".read": true,
       ".write": "auth != null"
     },
 
@@ -60,7 +80,7 @@
     },
 
     "reports": {
-      ".read":  false,
+      ".read": false,
       ".write": "auth != null"
     },
 
@@ -70,16 +90,13 @@
     },
 
     "payments": {
-      ".read":  true,
+      ".read": true,
       ".write": "auth != null"
     },
 
     "_test_write": {
-      ".read":  true,
+      ".read": true,
       ".write": "auth != null"
-    },
-
-    ".read":  false,
-    ".write": false
+    }
   }
 }
