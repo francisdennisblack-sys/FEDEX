@@ -5879,8 +5879,17 @@
                     const savedMetadata = localStorage.getItem('fedex-cache-metadata');
                     
                     if (savedCache) {
-                        this.cache = JSON.parse(savedCache);
-                        console.log(`📦 Loaded ${Object.keys(this.cache).length} posts from cache`);
+                        const parsed = JSON.parse(savedCache);
+                        // Strip expired posts (>32h) so stale cache never flashes on refresh
+                        const _now = Date.now(), _maxAge = 32 * 60 * 60 * 1000;
+                        const fresh = {};
+                        Object.keys(parsed || {}).forEach(id => {
+                            const p = parsed[id] || {};
+                            const ts = p.timestamp || p.createdAt || p.created_at || p.time || p.postedAt || p.ts || 0;
+                            if (!ts || (_now - Number(ts)) <= _maxAge) fresh[id] = p;
+                        });
+                        this.cache = fresh;
+                        console.log(`📦 Loaded ${Object.keys(this.cache).length} posts from cache (expired stripped)`);
                     }
                     
                     if (savedMetadata) {
@@ -18430,10 +18439,16 @@
                 
                 if (snapshot.exists()) {
                     const postsObj = snapshot.val();
-                    return Object.keys(postsObj).map(key => ({
-                        id: key,
-                        ...postsObj[key]
-                    }));
+                    const now = Date.now();
+                    const MAX_AGE = 32 * 60 * 60 * 1000;
+                    return Object.keys(postsObj)
+                        .filter(key => {
+                            const p = postsObj[key] || {};
+                            const ts = p.timestamp || p.createdAt || p.created_at || p.time || p.postedAt || p.ts || 0;
+                            if (!ts) return true; // no timestamp — let TTL purge handle it
+                            return (now - Number(ts)) <= MAX_AGE;
+                        })
+                        .map(key => ({ id: key, ...postsObj[key] }));
                 }
                 return [];
             } catch (error) {
@@ -27369,7 +27384,14 @@
                         const snap = await get(ref(database, 'posts'));
                         if (snap && snap.exists && snap.exists()) {
                             const obj = snap.val();
-                            posts = Object.keys(obj || {}).map(k => ({ id: k, ...(obj[k] || {}) }));
+                            const _now = Date.now(), _maxAge = 32 * 60 * 60 * 1000;
+                            posts = Object.keys(obj || {})
+                                .filter(k => {
+                                    const p = obj[k] || {};
+                                    const ts = p.timestamp || p.createdAt || p.created_at || p.time || p.postedAt || p.ts || 0;
+                                    return !ts || (_now - Number(ts)) <= _maxAge;
+                                })
+                                .map(k => ({ id: k, ...(obj[k] || {}) }));
                         }
                     } catch (e) { console.warn('Direct DB GET for posts failed', e); }
                 }
