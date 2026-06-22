@@ -16,7 +16,10 @@
         // supplies a stored `permanentUserId` (perm-...) or device id.
         // Also allow anonymous updates that only set numeric `likes`/`dislikes` so
         // the client-side vote transaction can persist aggregated counts.
-        ".write": "auth != null || (!data.exists() && newData.exists() && newData.child('permanentUserId').isString() && newData.child('permanentUserId').val().matches(/^(perm-|device-|local-|device-local-)/) && newData.child('createdAt').isNumber()) || (data.exists() && newData.exists() && newData.child('likes').isNumber() && newData.child('dislikes').isNumber())",
+        // Finally, allow DELETES of an existing post (data exists, newData does
+        // not) so an owner — including anonymous device clients — can remove their
+        // post from the shared collection for ALL viewers, not just hide locally.
+        ".write": "auth != null || (!data.exists() && newData.exists() && newData.child('permanentUserId').isString() && newData.child('permanentUserId').val().matches(/^(perm-|device-|local-|device-local-)/) && newData.child('createdAt').isNumber()) || (data.exists() && newData.exists() && newData.child('likes').isNumber() && newData.child('dislikes').isNumber()) || (data.exists() && !newData.exists())",
         // Basic validation to ensure required fields on create. For updates that
         // modify counts, ensure likes/dislikes are numeric.
         ".validate": "(!data.exists() && newData.exists()) ? (newData.hasChildren(['createdAt']) && newData.child('createdAt').isNumber()) : ((data.exists() && newData.exists()) ? ((newData.child('likes').exists() && newData.child('likes').isNumber() && newData.child('dislikes').exists() && newData.child('dislikes').isNumber()) || true) : true)"
@@ -25,14 +28,30 @@
 
     "posts_by_zone": {
       ".read": true,
-      // writes should come from server-side or authenticated clients
-      ".write": "auth != null"
+      // writes should come from server-side or authenticated clients.
+      // Allow deletes (removing a post's zone-index entry) by any client so the
+      // index is cleaned up when an anonymous owner deletes their post.
+      ".write": "auth != null || (data.exists() && !newData.exists())",
+      "$zoneKey": {
+        "$postId": {
+          ".write": "auth != null || (data.exists() && !newData.exists())"
+        }
+      }
     },
 
     "post_events": {
       ".read": true,
-      // events are sensitive; require auth to write (or server-side functions)
-      ".write": "auth != null"
+      // events are sensitive; require auth to write (or server-side functions).
+      ".write": "auth != null",
+      // Exception: allow ANY client to write a lightweight removal tombstone so a
+      // deletion broadcasts instantly to all viewers even when the deleter is an
+      // anonymous device client. The payload is validated to be a small record.
+      "removed": {
+        "$postId": {
+          ".write": true,
+          ".validate": "newData.hasChildren(['timestamp']) && newData.child('timestamp').isNumber()"
+        }
+      }
     },
 
     "post-votes": {
