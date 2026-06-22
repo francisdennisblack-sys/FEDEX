@@ -6105,6 +6105,30 @@
         // Expose cache system globally
         window.postCacheSystem = postCacheSystem;
 
+        // Prune any expired entries from the legacy `cachedAllPosts` localStorage
+        // to avoid briefly flashing stale posts on startup. Uses same 32h TTL.
+        (function pruneCachedAllPostsOnStartup(){
+            try {
+                const raw = localStorage.getItem('cachedAllPosts');
+                if (!raw) return;
+                const arr = JSON.parse(raw || '[]');
+                if (!Array.isArray(arr) || arr.length === 0) return;
+                const now = Date.now();
+                const TTL = 32 * 60 * 60 * 1000;
+                const fresh = arr.filter(p => {
+                    try {
+                        const ts = Number(p && (p.timestamp || p.createdAt || p.postedAt) || 0);
+                        if (!ts) return true;
+                        return (now - ts) <= TTL;
+                    } catch (e) { return false; }
+                });
+                if (fresh.length !== arr.length) {
+                    try { localStorage.setItem('cachedAllPosts', JSON.stringify(fresh)); } catch(e){}
+                    console.log(`🧹 startup: pruned ${arr.length - fresh.length} expired posts from cachedAllPosts`);
+                }
+            } catch (e) { /* ignore */ }
+        })();
+
         // ============================================
         // 🧠 ML TAG REWRITING SYSTEM
         // Dynamic tag transformation based on post performance & geography
