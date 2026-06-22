@@ -7229,6 +7229,35 @@
                     try { subscribeToFirebasePostsWithReconnect(); } catch (e2) {}
                 }
 
+                // 6. CRITICAL: startAutoRefresh() only resubscribes when
+                //    (isConnected && currentUserId) is truthy AND it tears the old
+                //    listener down first. Guests / early-boot states can have a falsy
+                //    currentUserId, which leaves the grid wiped but never refilled.
+                //    Force an idempotent resubscribe (the guard inside
+                //    subscribeToFirebasePostsWithReconnect skips it if a listener is
+                //    already active, so signed-in users never get a duplicate).
+                try {
+                    if (!firebaseUnsubscribe && !(window.firebaseUnsubscribe)) {
+                        subscribeToFirebasePostsWithReconnect();
+                    }
+                } catch (e) {}
+
+                // 7. Render safety net: if no snapshot has refilled the grid shortly
+                //    after the wipe, repopulate the device feed and force a render so
+                //    the feed always comes back for the new location.
+                try {
+                    setTimeout(() => {
+                        try {
+                            const hasPosts = Object.values(gridContent || {}).some(a => Array.isArray(a) && a.length > 0);
+                            if (!hasPosts) {
+                                if (typeof window.ensureDeviceFeed === 'function') { try { window.ensureDeviceFeed(); } catch (e) {} }
+                                try { window.lastRenderGridTime = 0; } catch (e) {}
+                                try { renderGrid(); } catch (e) {}
+                            }
+                        } catch (e) {}
+                    }, 700);
+                } catch (e) {}
+
                 console.log('📍 resetGridForLocationChange: grid wiped and resubscribed for new location');
             } catch (e) {
                 console.warn('resetGridForLocationChange failed:', e);
