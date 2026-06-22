@@ -14997,6 +14997,23 @@
                 try { rebuildGridScrollerFromGridContent(); } catch (e) { /* ignore */ }
                 try { window.lastRenderGridTime = 0; } catch (e) { /* ignore */ }
                 try { renderGrid(); } catch (e) { /* ignore */ }
+
+                // 🪦 Clean up post_events/removed tombstones older than 48 h so they
+                // don't accumulate indefinitely.  Runs after the post purge batch.
+                try {
+                    const tombCutoff = now - (48 * 60 * 60 * 1000);
+                    const tombSnap = await get(ref(database, 'post_events/removed'));
+                    if (tombSnap && tombSnap.exists()) {
+                        const tombs = tombSnap.val() || {};
+                        for (const tid in tombs) {
+                            if (!Object.prototype.hasOwnProperty.call(tombs, tid)) continue;
+                            const t = tombs[tid];
+                            if (t && typeof t.timestamp === 'number' && t.timestamp < tombCutoff) {
+                                try { await remove(ref(database, `post_events/removed/${tid}`)); } catch (e) { /* ignore */ }
+                            }
+                        }
+                    }
+                } catch (e) { console.warn('Tombstone cleanup failed:', e && e.message); }
             } catch (error) {
                 console.warn('TTL purge failed:', error && error.message);
             } finally {
@@ -18853,6 +18870,15 @@
                     await remove(postRef);
                     console.log('✅ Post removed (fallback) from shared collection:', postId);
                 }
+
+                // 🗺️ Remove zone index entry so posts_by_zone doesn't accumulate orphans.
+                try {
+                    const zoneKey = (postData && (postData.zoneTag || postData.county)) || 'unknown_zone';
+                    await remove(ref(database, `posts_by_zone/${zoneKey}/${postId}`));
+                } catch (e) { /* non-fatal */ }
+
+                // 🗳️ Remove vote data for this post so post-votes doesn't accumulate orphans.
+                try { await remove(ref(database, `post-votes/${postId}`)); } catch (e) { /* non-fatal */ }
 
                 // 🧹 Free Storage space: delete all media objects uploaded for this post
                 // (posts/${postId}/photo, posts/${postId}/media_0, …). Non-fatal so a
