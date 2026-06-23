@@ -23753,23 +23753,50 @@
                         img.addEventListener('load', hide, { once: true });
                         img.addEventListener('error', hide, { once: true });
                     } else if (video) {
-                        const update = () => {
+                        // Predict how far along loading is and ease the bar toward ~92%
+                        // while the clip buffers, then snap to 100% and close the moment
+                        // the video actually starts playing. We blend two signals:
+                        //   (a) a time-based estimate that always creeps forward so the
+                        //       bar never looks frozen, and
+                        //   (b) real buffered/duration progress when available.
+                        // Whichever is larger drives the bar (capped at 92% until play).
+                        const CAP = 92;
+                        let sim = 0;
+                        const bufferedPct = () => {
                             try {
                                 const d = video.duration;
-                                if (d && isFinite(d) && video.buffered && video.buffered.length) {
+                                if (d && isFinite(d) && d > 0 && video.buffered && video.buffered.length) {
                                     const end = video.buffered.end(video.buffered.length - 1);
-                                    setPct((end / d) * 100);
+                                    // A video usually starts after buffering only a small
+                                    // slice, so scale the early buffer up so it reads as
+                                    // meaningful progress toward "ready to play".
+                                    return Math.min(CAP, (end / d) * 100 * 4);
                                 }
                             } catch (e) { /* ignore */ }
+                            return 0;
                         };
-                        video.addEventListener('progress', update);
-                        video.addEventListener('loadedmetadata', update);
-                        video.addEventListener('canplay', hide, { once: true });
-                        video.addEventListener('canplaythrough', hide, { once: true });
+                        simTimer = setInterval(() => {
+                            // Ease the time-based estimate forward; slows as it nears CAP.
+                            sim += Math.max(0.6, (CAP - sim) * 0.06);
+                            if (sim > CAP) sim = CAP;
+                            setPct(Math.min(CAP, Math.max(sim, bufferedPct())));
+                        }, 150);
+
+                        // Only finish + close once the video has truly started playing.
                         video.addEventListener('playing', hide, { once: true });
                         video.addEventListener('error', hide, { once: true });
-                        // Cached/ready clip — dismiss immediately.
-                        if (video.readyState >= 3) hide();
+                        // Fallback: if the clip becomes ready but autoplay was blocked
+                        // (it stays paused), the user now taps to play — close the bar
+                        // shortly after so it doesn't linger over the paused poster.
+                        const readyFallback = () => {
+                            setTimeout(() => {
+                                if (hidden) return;
+                                if (video.paused) hide();
+                            }, 1500);
+                        };
+                        video.addEventListener('canplay', readyFallback, { once: true });
+                        // Already playing (e.g. cached clip resumed) — close right away.
+                        if (!video.paused && video.currentTime > 0 && video.readyState >= 3) hide();
                     }
                 } catch (e) { /* ignore */ }
             });
