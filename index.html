@@ -27275,6 +27275,34 @@
                                 try { renderGrid(); } catch(e) {}
                                 console.log(`⚡ Fast initial load: populated ${displayKey} with ${top.length} top posts`);
                             } catch(e) { console.warn('Fast initial load failed', e); }
+                            // If the quick preview is sparse, ask the server for the
+                            // authoritative best post for the current zone and inject it.
+                            try {
+                                setTimeout(async () => {
+                                    try {
+                                        const MIN_SEED = 8;
+                                        if (Array.isArray(gridContent[displayKey]) && gridContent[displayKey].length >= MIN_SEED) return;
+                                        const zid = currentZoneTag || window.currentZoneTag || null;
+                                        if (!zid || typeof window.fetchBestPostForZone !== 'function') return;
+                                        const best = await window.fetchBestPostForZone(zid);
+                                        if (!best || !best.id) return;
+                                        try {
+                                            // ensureUniqueAndInsert exists elsewhere; use it if available
+                                            if (typeof ensureUniqueAndInsert === 'function') {
+                                                ensureUniqueAndInsert(displayKey, best);
+                                            } else {
+                                                gridContent[displayKey] = gridContent[displayKey] || [];
+                                                gridContent[displayKey] = gridContent[displayKey].filter(p => !(p && p.id === best.id));
+                                                gridContent[displayKey].unshift(best);
+                                            }
+                                            if (gridContent[displayKey].length > TOP_N) gridContent[displayKey].length = TOP_N;
+                                            try { window.lastRenderGridTime = 0; } catch(e) {}
+                                            try { renderGrid(); } catch(e) {}
+                                            console.log('⚡ Server seed: injected best post for zone', zid, best.id);
+                                        } catch (e) { console.warn('Server seed injection failed', e); }
+                                    } catch (e) { /* ignore server seed errors */ }
+                                }, 50);
+                            } catch(e) { console.warn('Server seed scheduling failed', e); }
                         }
                     } catch(e) { console.warn('Fast-path initial populate failed', e); }
 
