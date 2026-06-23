@@ -13395,6 +13395,46 @@
                     }
                 } catch (e) { /* fallback: keep rootId = orig.id */ }
 
+                // If we couldn't fully resolve the root locally, attempt a best-effort
+                // server lookup to follow the repost chain so counts/duplicates target
+                // the true root. This prevents creating reposts that point to an
+                // intermediate repost and causes duplicate counters to update wrong
+                // objects when postCache is sparse.
+                async function fetchRootFromServer(candidateId, depth = 8) {
+                    try {
+                        if (!candidateId) return candidateId;
+                        const db = (typeof getDatabase === 'function') ? getDatabase() : null;
+                        if (!db) return candidateId;
+                        let curId = candidateId;
+                        for (let i = 0; i < depth; i++) {
+                            try {
+                                const snap = await get(ref(db, `posts/${curId}`));
+                                if (!snap || !snap.exists()) break;
+                                const data = snap.val();
+                                if (!data) break;
+                                if (!data.repostOf) return curId; // reached root
+                                // move up chain
+                                curId = data.repostOf;
+                                continue;
+                            } catch (e) { break; }
+                        }
+                        return curId || candidateId;
+                    } catch (e) { return candidateId; }
+                }
+
+                try {
+                    // If the candidate rootId isn't present in postCache, try server
+                    if (rootId && (!postCache || !postCache[rootId])) {
+                        try {
+                            const resolved = await fetchRootFromServer(rootId);
+                            if (resolved && String(resolved) !== String(rootId)) {
+                                console.log(`🔍 Resolved repost root via server: ${rootId} → ${resolved}`);
+                                rootId = resolved;
+                            }
+                        } catch (e) { /* ignore server lookup failures */ }
+                    }
+                } catch (e) { /* ignore */ }
+
                 // Always anchor the new repost to the OG so reposting a repost
                 // still increments the single counter on the root post.
                 newPost.repostOf = rootId;
@@ -13527,8 +13567,25 @@
                     // Increment repost count on the root original post locally and persist update
                     try {
                         // compute current root count (from cache if present)
-                        const currentRoot = (postCache && postCache[rootId]) || null;
-                        const prev = (currentRoot && (currentRoot.repostCount || currentRoot.reposts)) || 0;
+                        // compute current root count (from cache if present), or fetch from server
+                        let currentRoot = (postCache && postCache[rootId]) || null;
+                        let prev = (currentRoot && (currentRoot.repostCount || currentRoot.reposts)) || 0;
+                        if ((!currentRoot || typeof prev !== 'number' || prev === 0) && typeof getDatabase === 'function') {
+                            try {
+                                const db = getDatabase();
+                                const snap = await get(ref(db, `posts/${rootId}`));
+                                if (snap && snap.exists()) {
+                                    const srv = snap.val();
+                                    if (srv) {
+                                        prev = Number(srv.repostCount || srv.reposts || prev || 0);
+                                        // seed postCache if missing
+                                        postCache = postCache || {};
+                                        postCache[rootId] = Object.assign({}, postCache[rootId] || {}, srv, { id: rootId });
+                                        currentRoot = postCache[rootId];
+                                    }
+                                }
+                            } catch (e) { console.warn('Failed to fetch root repostCount from server', e); }
+                        }
                         const newRootCount = prev + 1;
 
                         // Update postCache/root placeholder
