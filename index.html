@@ -23429,6 +23429,91 @@
             return `<img src="${src}" style="max-width:100%; max-height:80vh; object-fit:contain; display:block; margin:0 auto;" loading="lazy">`;
         }
 
+        // Capture the first NON-BLACK frame of a video and hand it back as a JPEG
+        // data URL to use as a "playcard" poster. Long videos (>20s) frequently can
+        // NOT muted-autoplay, so instead of leaving a black box we show the first real
+        // scene as a still image behind the play button. Fails silently (e.g. if the
+        // storage host lacks CORS headers, the canvas read throws and we just skip).
+        function captureFirstNonBlackPoster(srcUrl, onPoster) {
+            if (!srcUrl || typeof onPoster !== 'function') return;
+            let probe = null;
+            let done = false;
+            const cleanup = () => {
+                try { if (probe) { probe.removeAttribute('src'); probe.load && probe.load(); } } catch (e) {}
+                probe = null;
+            };
+            const finish = (dataUrl) => {
+                if (done) return;
+                done = true;
+                try { if (dataUrl) onPoster(dataUrl); } catch (e) {}
+                cleanup();
+            };
+            try {
+                probe = document.createElement('video');
+                probe.crossOrigin = 'anonymous';   // required to read pixels back out
+                probe.muted = true;
+                probe.playsInline = true;
+                probe.preload = 'auto';
+                probe.src = srcUrl;
+
+                const canvas = document.createElement('canvas');
+                let maxT = 8;          // only inspect the opening scene
+                const step = 0.25;     // seek granularity (seconds)
+                let t = 0.05;
+
+                const measureAndMaybeCapture = () => {
+                    if (done || !probe) return;
+                    try {
+                        const vw = probe.videoWidth || 0;
+                        const vh = probe.videoHeight || 0;
+                        if (!vw || !vh) { seekNext(); return; }
+                        // Downscale for a fast brightness check.
+                        const sw = 64, sh = Math.max(1, Math.round((vh / vw) * 64));
+                        canvas.width = sw; canvas.height = sh;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(probe, 0, 0, sw, sh);
+                        const data = ctx.getImageData(0, 0, sw, sh).data; // throws if tainted
+                        let sum = 0;
+                        for (let i = 0; i < data.length; i += 4) {
+                            // Rec. 601 luma approximation.
+                            sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                        }
+                        const avg = sum / (data.length / 4);
+                        if (avg > 22) {
+                            // Found a non-black frame — capture at full resolution.
+                            const full = document.createElement('canvas');
+                            full.width = vw; full.height = vh;
+                            full.getContext('2d').drawImage(probe, 0, 0, vw, vh);
+                            finish(full.toDataURL('image/jpeg', 0.82));
+                            return;
+                        }
+                        seekNext();
+                    } catch (e) {
+                        // Tainted canvas / read failure: cannot build a poster. Bail out.
+                        finish(null);
+                    }
+                };
+                const seekNext = () => {
+                    if (done || !probe) return;
+                    t += step;
+                    if (t > maxT) { finish(null); return; }
+                    try { probe.currentTime = Math.min(t, (probe.duration || maxT) - 0.05); } catch (e) { finish(null); }
+                };
+
+                probe.addEventListener('loadeddata', () => {
+                    try {
+                        maxT = Math.min(8, (probe.duration || 8));
+                        probe.currentTime = t;
+                    } catch (e) { finish(null); }
+                });
+                probe.addEventListener('seeked', measureAndMaybeCapture);
+                probe.addEventListener('error', () => finish(null));
+                // Safety timeout so a stalled probe never leaks.
+                setTimeout(() => finish(null), 8000);
+                try { probe.load(); } catch (e) {}
+            } catch (e) { finish(null); }
+        }
+
         // Wire video overlay handlers for every slide; autoplay only the first slide.
         function setupCarouselVideos(container) {
             try {
@@ -23461,17 +23546,38 @@
                             vidEl.loop = true;
                             vidEl.playsInline = true;
                             let started = false;
+                            let posterRequested = false;
+                            // For longer videos (>20s) that typically can't autoplay,
+                            // grab the first non-black scene and show it as a playcard
+                            // poster behind the play button.
+                            const maybeBuildPlaycard = () => {
+                                if (posterRequested) return;
+                                const dur = Number(vidEl.duration) || 0;
+                                if (!isFinite(dur) || dur <= 20) return;
+                                posterRequested = true;
+                                const srcEl = vidEl.querySelector('source');
+                                const srcUrl = (srcEl && srcEl.getAttribute('src')) || vidEl.currentSrc || '';
+                                captureFirstNonBlackPoster(srcUrl, (dataUrl) => {
+                                    try {
+                                        if (!dataUrl) return;
+                                        // Only apply while the video isn't actively playing,
+                                        // so the playcard never covers a running video.
+                                        vidEl.setAttribute('poster', dataUrl);
+                                        if (vidEl.paused) { try { overlay.style.display = ''; } catch (e) {} }
+                                    } catch (e) {}
+                                });
+                            };
                             const tryPlay = () => {
                                 if (started) return;
                                 try {
                                     const pr = vidEl.play();
                                     if (pr && typeof pr.then === 'function') {
                                         pr.then(() => { started = true; try { overlay.style.display = 'none'; } catch (e) {} })
-                                          .catch(() => { /* will retry on next readiness event */ });
+                                          .catch(() => { maybeBuildPlaycard(); });
                                     }
-                                } catch (e) { /* will retry on next readiness event */ }
+                                } catch (e) { maybeBuildPlaycard(); }
                             };
-                            vidEl.addEventListener('loadedmetadata', tryPlay);
+                            vidEl.addEventListener('loadedmetadata', () => { tryPlay(); maybeBuildPlaycard(); });
                             vidEl.addEventListener('loadeddata', tryPlay);
                             vidEl.addEventListener('canplay', tryPlay);
                             vidEl.addEventListener('canplaythrough', tryPlay);
