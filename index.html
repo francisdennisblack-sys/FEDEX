@@ -23646,6 +23646,8 @@
 
             // Set up video playback for each slide.
             setupCarouselVideos(container);
+            // Show a centered loading bar over each photo/video until it loads/starts.
+            attachMediaLoadingBars(container);
             if (!multi) return;
 
             const track = container.querySelector('#viewMediaTrack');
@@ -23704,6 +23706,80 @@
         }
         try { window.buildPostMediaList = buildPostMediaList; window.renderPostMediaCarousel = renderPostMediaCarousel; } catch (e) {}
 
+        // Attach a centered loading bar over each media slide so the viewer can
+        // track how long until a photo finishes loading or a video can start.
+        // Images expose no real byte-progress, so we ease a simulated bar toward
+        // ~90% and snap to 100% on load; videos report real buffered progress and
+        // the bar is dismissed as soon as the clip is ready to play.
+        function attachMediaLoadingBars(container) {
+            if (!container) return;
+            const slides = Array.from(container.querySelectorAll('.media-slide, .fs-slide'));
+            slides.forEach(slide => {
+                try {
+                    if (slide.querySelector('.media-loading-overlay')) return; // already attached
+                    const img = slide.querySelector('img');
+                    const video = slide.querySelector('video');
+                    if (!img && !video) return;
+                    if (!slide.style.position) slide.style.position = 'relative';
+
+                    const overlay = document.createElement('div');
+                    overlay.className = 'media-loading-overlay';
+                    overlay.innerHTML = '<div class="media-loading-track"><div class="media-loading-fill"></div></div><div class="media-loading-label">0%</div>';
+                    slide.appendChild(overlay);
+                    const fill = overlay.querySelector('.media-loading-fill');
+                    const label = overlay.querySelector('.media-loading-label');
+
+                    let hidden = false;
+                    let simTimer = null;
+                    const setPct = (p) => {
+                        p = Math.max(0, Math.min(100, Math.round(p)));
+                        if (fill) fill.style.width = p + '%';
+                        if (label) label.textContent = p + '%';
+                    };
+                    const hide = () => {
+                        if (hidden) return;
+                        hidden = true;
+                        setPct(100);
+                        if (simTimer) { clearInterval(simTimer); simTimer = null; }
+                        overlay.classList.add('is-hidden');
+                        setTimeout(() => { try { overlay.remove(); } catch (e) {} }, 400);
+                    };
+
+                    if (img) {
+                        // Already cached/decoded — nothing to wait for.
+                        if (img.complete && img.naturalWidth > 0) { hide(); return; }
+                        let sim = 0;
+                        simTimer = setInterval(() => {
+                            sim += Math.max(1, (90 - sim) * 0.12);
+                            if (sim > 90) sim = 90;
+                            setPct(sim);
+                        }, 180);
+                        img.addEventListener('load', hide, { once: true });
+                        img.addEventListener('error', hide, { once: true });
+                    } else if (video) {
+                        const update = () => {
+                            try {
+                                const d = video.duration;
+                                if (d && isFinite(d) && video.buffered && video.buffered.length) {
+                                    const end = video.buffered.end(video.buffered.length - 1);
+                                    setPct((end / d) * 100);
+                                }
+                            } catch (e) { /* ignore */ }
+                        };
+                        video.addEventListener('progress', update);
+                        video.addEventListener('loadedmetadata', update);
+                        video.addEventListener('canplay', hide, { once: true });
+                        video.addEventListener('canplaythrough', hide, { once: true });
+                        video.addEventListener('playing', hide, { once: true });
+                        video.addEventListener('error', hide, { once: true });
+                        // Cached/ready clip — dismiss immediately.
+                        if (video.readyState >= 3) hide();
+                    }
+                } catch (e) { /* ignore */ }
+            });
+        }
+        try { window.attachMediaLoadingBars = attachMediaLoadingBars; } catch (e) {}
+
         // Fullscreen media overlay: render and navigation helpers
         (function(){
             // Create overlay element lazily
@@ -23742,6 +23818,8 @@
                     ` : '');
                 // Initialize videos inside overlay
                 setupCarouselVideos(mount);
+                // Centered loading bar over each fullscreen photo/video while it loads.
+                attachMediaLoadingBars(mount);
 
                 const slides = Array.from(mount.querySelectorAll('.fs-slide'));
                 function updateFSUI() {
