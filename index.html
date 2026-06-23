@@ -36671,35 +36671,52 @@
             }
 
             // ========================================================================
-            // 👎 DISLIKED-LAST GUARANTEE (authoritative final pass)
-            // Net-negative posts (more dislikes than likes) must appear AFTER every
-            // other post — below boosted, net-positive / top / most-liked, new,
-            // balanced and neutral (no-vote) posts. This runs LAST so none of the
-            // rotation / recirculation / stability passes above can leave a disliked
-            // post ranked ahead of a non-negative one. Active boosts are paid
-            // promotion and stay exempt. The stable partition preserves the already
-            // computed order within each group.
+            // � SENTIMENT-ORDER GUARANTEE (authoritative final pass)
+            // Using the REAL like/dislike counts (likes - dislikes), enforce a strict,
+            // stable 3-way order so engagement always wins out over the cosmetic
+            // rotation / freshness / vote-stability / top-window-lock passes above:
+            //   1) net-positive posts (more likes than dislikes)        → TOP
+            //   2) balanced / neutral posts (equal votes, or no votes)  → MIDDLE
+            //   3) net-negative posts (more dislikes than likes)        → BOTTOM
+            // This runs LAST so none of the passes above can leave a balanced (or
+            // no-vote) post ranked ahead of a net-positive one — the exact requirement:
+            // net-positive must sit higher than balanced. Order WITHIN each bucket is
+            // preserved (stable partition) so this only fixes cross-bucket violations
+            // and introduces no extra churn. Active boosts are paid promotion and ride
+            // in the positive bucket so they stay pinned at the top.
             // ========================================================================
             try {
                 if (Array.isArray(sortedPosts) && sortedPosts.length > 1) {
-                    const keepPosts = [];
-                    const dislikedPosts = [];
+                    const positivePosts = [];
+                    const neutralPosts = [];
+                    const negativePosts = [];
                     for (const p of sortedPosts) {
                         if (!p || !p.id) continue;
                         const isActiveBoost = (typeof isStrictBoostActive === 'function') && isStrictBoostActive(p);
-                        if (!isActiveBoost && getPostNetEngagement(p) < 0) {
-                            dislikedPosts.push(p);
+                        const net = getPostNetEngagement(p); // real count: likes - dislikes
+                        if (isActiveBoost || net > 0) {
+                            positivePosts.push(p);
+                        } else if (net === 0) {
+                            neutralPosts.push(p);
                         } else {
-                            keepPosts.push(p);
+                            negativePosts.push(p);
                         }
                     }
-                    if (dislikedPosts.length > 0) {
-                        sortedPosts = [...keepPosts, ...dislikedPosts];
-                        console.log(`👎 DISLIKED-LAST: moved ${dislikedPosts.length} net-negative post(s) to the end of the feed`);
+                    const reordered = [...positivePosts, ...neutralPosts, ...negativePosts];
+                    // Only reassign when the order actually changed (avoid needless work).
+                    let changed = reordered.length !== sortedPosts.length;
+                    if (!changed) {
+                        for (let i = 0; i < reordered.length; i++) {
+                            if (reordered[i] !== sortedPosts[i]) { changed = true; break; }
+                        }
+                    }
+                    if (changed) {
+                        sortedPosts = reordered;
+                        console.log(`👍 SENTIMENT-ORDER: ${positivePosts.length} positive → ${neutralPosts.length} balanced/neutral → ${negativePosts.length} negative`);
                     }
                 }
             } catch (e) {
-                console.warn('⚠️ DISLIKED-LAST guarantee failed:', e);
+                console.warn('⚠️ SENTIMENT-ORDER guarantee failed:', e);
             }
 
             // Refresh latest snapshot after position-1 rotation
