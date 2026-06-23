@@ -13779,17 +13779,49 @@
             try {
                 try { console.log('ensureUniqueAndInsert:', { contentKey: contentKey, postId: post && post.id, currentUserId: currentUserId }); } catch(e) {}
                 if (!post || !post.id) return;
-                // (repost insertion guard removed — reposts should create their own slot)
-                // Remove existing occurrences across all keys
+                // Treat reposts that reference the same root as duplicates: remove
+                // any existing slot whose resolved root matches the incoming post's
+                // root so reposts don't stack as separate tiles for the same content.
+                function resolveRootIdCandidate(obj) {
+                    try {
+                        if (!obj) return null;
+                        // Walk repostOf chain using postCache when available
+                        let cur = obj;
+                        let last = cur.id || null;
+                        while (cur && cur.repostOf) {
+                            last = cur.repostOf;
+                            cur = (postCache && postCache[cur.repostOf]) || null;
+                            // if postCache doesn't have the parent, stop but keep last id
+                            if (!cur) break;
+                        }
+                        return last || (obj && obj.id) || null;
+                    } catch (e) { return (obj && obj.id) || null; }
+                }
+
+                const incomingRoot = resolveRootIdCandidate(post);
                 try {
                     Object.keys(gridContent || {}).forEach(k => {
                         if (!Array.isArray(gridContent[k])) return;
-                        gridContent[k] = gridContent[k].filter(p => !(p && p.id === post.id));
+                        gridContent[k] = gridContent[k].filter(p => {
+                            if (!p || !p.id) return false;
+                            // Remove exact id matches
+                            if (p.id === post.id) return false;
+                            try {
+                                const existingRoot = resolveRootIdCandidate(p);
+                                // If the existing slot resolves to the same root as the incoming
+                                // post, drop it so we maintain a single slot per root.
+                                if (incomingRoot && existingRoot && String(incomingRoot) === String(existingRoot)) {
+                                    console.log(`🧹 ensureUniqueAndInsert: removed root-equivalent slot ${p.id} (root=${existingRoot}) from key=${k}`);
+                                    return false;
+                                }
+                            } catch (e) { /* continue fallback: keep p */ }
+                            return true;
+                        });
                     });
                 } catch (e) { /* ignore */ }
                 // Ensure target key exists
                 gridContent[contentKey] = gridContent[contentKey] || [];
-                // Insert at front
+                // Insert at front (new repost becomes visible)
                 gridContent[contentKey].unshift(post);
                 // Update cache
                 try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
