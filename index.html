@@ -33404,6 +33404,8 @@
                 } catch (e) { console.warn('applySmartVoteMove failed', e); return false; }
             }
 
+            const VOTE_RECONCILE_STABILIZE_MS = 420; // wait this long after a vote before reconciling
+
             gridReconcileInterval = setInterval(() => {
                 try {
                     if (!gridScroller || !pendingSortedPosts || !Array.isArray(pendingSortedPosts)) return;
@@ -33450,13 +33452,23 @@
                     try {
                         const voteActive = !!(window.voteTriggeredRerank && isVoteReorderStabilizationActive());
                         if (voteActive) {
+                            const now = Date.now();
+                            const sinceVote = now - (window.lastVoteRerankAt || 0);
+                            if (sinceVote < VOTE_RECONCILE_STABILIZE_MS) {
+                                console.log(`⏳ Skipping reconcile tick: ${sinceVote}ms since vote (waiting ${VOTE_RECONCILE_STABILIZE_MS}ms)`);
+                                return; // allow ranking to stabilize before attempting smart move
+                            }
+
                             // If this is a vote-triggered rerank, attempt a minimal smart
                             // move for the voted post instead of doing broad reconcile
                             // operations that can remove many items.
                             try {
                                 const votedPostId = String(window.lastVoteRerankPostId || '');
-                                if (votedPostId && applySmartVoteMove(current, target, votedPostId)) {
-                                    return; // smart move applied, skip further reconcile work
+                                if (votedPostId) {
+                                    console.log(`🔎 Vote-stabilized reconcile for ${votedPostId} (sinceVote=${sinceVote}ms)`);
+                                    if (applySmartVoteMove(current, target, votedPostId)) {
+                                        return; // smart move applied, skip further reconcile work
+                                    }
                                 }
                             } catch (e) { /* ignore smart-move failures and fall back */ }
                         }
