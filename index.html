@@ -27229,6 +27229,57 @@
                         console.warn('Snapshot churn guard failed:', e);
                     }
 
+                    // FAST-PATH: Render top posts immediately for a snappy initial load.
+                    // This picks the best posts by simple net-like score + locality and
+                    // shows them right away while the full merged list finishes processing
+                    // so the user sees high-quality content instantly instead of a noisy
+                    // unfiltered dump that is slowly pruned.
+                    try {
+                        const displayKey = (typeof getActiveViewerFeedKey === 'function') ? (getActiveViewerFeedKey() || (currentUserId || 'shared-posts')) : (currentUserId || 'shared-posts');
+                        window.__fastInitialLoadDoneFor = window.__fastInitialLoadDoneFor || {};
+                        if (!window.__fastInitialLoadDoneFor[displayKey]) {
+                            // Lightweight scoring: netLikes weighted, prefer same-area posts,
+                            // then recentness as a minor tiebreaker.
+                            const quickScore = (p) => {
+                                try {
+                                    const likes = Number(p.likes || 0);
+                                    const dislikes = Number(p.dislikes || 0);
+                                    const net = likes - dislikes;
+                                    let score = net * 100;
+                                    // area/locality boost
+                                    try {
+                                        const tag = (String((p.displayAreaTag || p.zoneTag || '') || '').toLowerCase());
+                                        const cz = String((currentZoneTag || window.currentZoneTag || '') || '').toLowerCase();
+                                        if (cz && tag && tag === cz) score += 1000;
+                                    } catch(e) {}
+                                    // recency bonus (newer slightly preferred)
+                                    try {
+                                        const ageMs = Date.now() - (Number(p.timestamp || p.createdAt || 0) || 0);
+                                        if (ageMs >= 0 && ageMs < 7 * 24 * 60 * 60 * 1000) {
+                                            score += Math.max(0, 50 - (ageMs / (1000 * 60 * 60 * 24))); // small bonus
+                                        }
+                                    } catch(e) {}
+                                    return score;
+                                } catch (e) { return 0; }
+                            };
+
+                            try {
+                                const candidates = Array.isArray(mergedVisible) ? mergedVisible.slice() : [];
+                                candidates.sort((a,b) => quickScore(b) - quickScore(a));
+                                const TOP_N = 200;
+                                const top = candidates.slice(0, TOP_N);
+                                // Inject into the appropriate viewer bucket so renderGrid picks it
+                                gridContent[displayKey] = top;
+                                window.__fastInitialLoadDoneFor[displayKey] = Date.now();
+                                try { window.lastRenderGridTime = 0; } catch(e) {}
+                                try { renderGrid(); } catch(e) {}
+                                console.log(`⚡ Fast initial load: populated ${displayKey} with ${top.length} top posts`);
+                            } catch(e) { console.warn('Fast initial load failed', e); }
+                        }
+                    } catch(e) { console.warn('Fast-path initial populate failed', e); }
+
+                    // Now assign the authoritative mergedVisible list (may replace the
+                    // quick preview above once heavy processing completes).
                     gridContent[contentKey] = mergedVisible;
                     console.log(`  ✅ gridContent['${contentKey}'] updated with ${gridContent[contentKey].length} posts (${uniquePosts.length - gridContent[contentKey].length} hidden filtered)`);
 
