@@ -4380,10 +4380,17 @@
 
             <!-- Media loading popout - appears only while processing/uploading media -->
             <div id="mediaLoadingOverlay" style="display:none; position:fixed; inset:0; background: rgba(0,0,0,0.6); z-index:10050; align-items:center; justify-content:center;">
-                <div style="background: linear-gradient(135deg,#0b1220,#071018); padding:18px 22px; border-radius:12px; display:flex; flex-direction:column; align-items:center; gap:8px; color:#e6fff9; box-shadow:0 12px 40px rgba(2,6,23,0.6);">
+                <div style="background: linear-gradient(135deg,#0b1220,#071018); padding:18px 22px; border-radius:12px; display:flex; flex-direction:column; align-items:center; gap:8px; color:#e6fff9; box-shadow:0 12px 40px rgba(2,6,23,0.6); min-width:240px;">
                     <div id="mediaLoadingSpinner" style="font-size:34px;"></div>
                     <div id="mediaLoadingMessage" style="font-size:14px; font-weight:700;">Processing media...</div>
                     <div id="mediaLoadingSub" style="font-size:12px; color:#9adbd8;">This window will close when processing completes.</div>
+                    <!-- Determinate upload progress bar - only shown while actually uploading media on Post -->
+                    <div id="mediaUploadProgressWrap" style="display:none; width:100%; flex-direction:column; align-items:center; gap:6px; margin-top:4px;">
+                        <div style="width:100%; height:8px; background:rgba(255,255,255,0.12); border-radius:999px; overflow:hidden;">
+                            <div id="mediaUploadBar" style="width:0%; height:100%; background:linear-gradient(90deg,#22d3ee,#06b6d4); border-radius:999px; transition:width 0.2s ease;"></div>
+                        </div>
+                        <div id="mediaUploadPercent" style="font-size:12px; font-weight:700; color:#e6fff9;">0%</div>
+                    </div>
                 </div>
             </div>
 
@@ -18363,7 +18370,7 @@
             }
         };
 
-        async function uploadPhotoToFirebase(postId, file, slotKey) {
+        async function uploadPhotoToFirebase(postId, file, slotKey, onProgress) {
             try {
                 const slot = (slotKey && typeof slotKey === 'string') ? slotKey : 'photo';
                 const photoPath = `posts/${postId}/${slot}`;
@@ -18483,6 +18490,9 @@
                                     const progress = snap.totalBytes ? (snap.bytesTransferred / snap.totalBytes) * 100 : 0;
                                     console.log(`  Upload progress: ${progress.toFixed(1)}%`);
                                     window.lastUploadProgress = progress;
+                                    if (typeof onProgress === 'function') {
+                                        try { onProgress(snap.bytesTransferred || 0, snap.totalBytes || 0); } catch (e) { /* ignore progress callback errors */ }
+                                    }
                                 } catch (e) { /* ignore progress log errors */ }
                             }, (err) => {
                                 reject(err);
@@ -23930,6 +23940,32 @@
             if (overlay) overlay.style.display = 'flex';
         }
 
+        // Determinate upload-progress overlay (real byte-based progress).
+        // Used ONLY when posting media so the user sees genuine upload completion.
+        function showUploadProgressOverlay(message, sub) {
+            const overlay = document.getElementById('mediaLoadingOverlay');
+            const msg = document.getElementById('mediaLoadingMessage');
+            const subEl = document.getElementById('mediaLoadingSub');
+            const spinner = document.getElementById('mediaLoadingSpinner');
+            const wrap = document.getElementById('mediaUploadProgressWrap');
+            if (msg) msg.textContent = message || 'Uploading…';
+            if (subEl) subEl.textContent = sub || 'Please keep this window open.';
+            if (spinner) spinner.textContent = '⬆️';
+            if (wrap) wrap.style.display = 'flex';
+            setUploadProgressPercent(0);
+            if (overlay) overlay.style.display = 'flex';
+        }
+
+        function setUploadProgressPercent(pct, message) {
+            const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+            const bar = document.getElementById('mediaUploadBar');
+            const label = document.getElementById('mediaUploadPercent');
+            const msg = document.getElementById('mediaLoadingMessage');
+            if (bar) bar.style.width = clamped.toFixed(1) + '%';
+            if (label) label.textContent = Math.round(clamped) + '%';
+            if (message && msg) msg.textContent = message;
+        }
+
         function hideMediaLoadingOverlay() {
             const overlay = document.getElementById('mediaLoadingOverlay');
             if (overlay) overlay.style.display = 'none';
@@ -23937,6 +23973,11 @@
             if (spinner) spinner.textContent = '⏳';
             const msg = document.getElementById('mediaLoadingMessage');
             if (msg) msg.textContent = 'Processing media...';
+            const wrap = document.getElementById('mediaUploadProgressWrap');
+            if (wrap) wrap.style.display = 'none';
+            const subEl = document.getElementById('mediaLoadingSub');
+            if (subEl) subEl.textContent = 'This window will close when processing completes.';
+            setUploadProgressPercent(0);
         }
 
         function showDeleteMediaButton() {
@@ -39151,6 +39192,21 @@
                     ? selectedMediaItems.slice(0, 10)
                     : (imageFile ? [{ file: imageFile, type: (selectedMediaType === 'video' ? 'video' : 'image'), name: imageFile.name }] : []);
 
+                // ── Real upload progress (media posts only) ──────────────────────
+                // Content/text-only posts have no files, so the progress overlay
+                // is never shown for them. For media posts the bar is driven by
+                // actual bytes transferred so it genuinely tracks upload time.
+                const hasMediaToUpload = itemsToUpload.length > 0;
+                const uploadTotalBytes = itemsToUpload.reduce((sum, it) => sum + ((it.file && it.file.size) ? it.file.size : 0), 0);
+                const uploadTransferred = new Array(itemsToUpload.length).fill(0);
+                const UPLOAD_PHASE_PCT = 85; // bytes uploaded fill 0–85%; moderation + publish fill the rest
+                if (hasMediaToUpload) {
+                    showUploadProgressOverlay(
+                        'Uploading media…',
+                        itemsToUpload.length > 1 ? `0 of ${itemsToUpload.length} files` : 'Preparing upload…'
+                    );
+                }
+
                 // Upload + moderate EVERY media item. A single rejection fails the whole post.
                 for (let i = 0; i < itemsToUpload.length; i++) {
                     const item = itemsToUpload[i];
@@ -39158,7 +39214,21 @@
                     const slotKey = itemsToUpload.length > 1 ? `media_${i}` : 'photo';
                     let url = null;
                     try {
-                        url = await uploadPhotoToFirebase(postId, item.file, slotKey);
+                        url = await uploadPhotoToFirebase(postId, item.file, slotKey, (bytesTransferred /*, fileTotal */) => {
+                            try {
+                                uploadTransferred[i] = bytesTransferred;
+                                const sum = uploadTransferred.reduce((a, b) => a + b, 0);
+                                const pct = uploadTotalBytes ? (sum / uploadTotalBytes) * UPLOAD_PHASE_PCT : 0;
+                                setUploadProgressPercent(pct, 'Uploading media…');
+                                const subEl = document.getElementById('mediaLoadingSub');
+                                if (subEl) subEl.textContent = itemsToUpload.length > 1
+                                    ? `Uploading file ${i + 1} of ${itemsToUpload.length}`
+                                    : 'Uploading…';
+                            } catch (e) { /* ignore progress UI errors */ }
+                        });
+                        // Lock this file's bytes as fully transferred so the bar doesn't
+                        // slip backward while the next stages (moderation) run.
+                        uploadTransferred[i] = (item.file && item.file.size) ? item.file.size : uploadTransferred[i];
                     } catch (photoError) {
                         // If the failure appears auth-related, prompt user to re-authenticate
                         try {
@@ -39176,6 +39246,16 @@
                     }
 
                     // Server-side moderation for each uploaded item.
+                    if (hasMediaToUpload) {
+                        setUploadProgressPercent(
+                            UPLOAD_PHASE_PCT + (i / itemsToUpload.length) * 10,
+                            'Checking content…'
+                        );
+                        const subEl = document.getElementById('mediaLoadingSub');
+                        if (subEl) subEl.textContent = itemsToUpload.length > 1
+                            ? `Reviewing file ${i + 1} of ${itemsToUpload.length}`
+                            : 'Reviewing media…';
+                    }
                     if (itemType === 'video') {
                         const approved = await moderateVideo(url, postId, currentUserId);
                         if (!approved) {
@@ -39189,6 +39269,9 @@
                     }
 
                     mediaItemsForPost.push({ url, type: itemType });
+                    if (hasMediaToUpload) {
+                        setUploadProgressPercent(UPLOAD_PHASE_PCT + ((i + 1) / itemsToUpload.length) * 10);
+                    }
                 }
 
                 // First item is the post's primary media (back-compat with single-media rendering).
@@ -39841,6 +39924,11 @@
                 // Save to SHARED posts collection (not per-user)
                 // Use a single retry on transient failure, keeping the same clientId so server dedupes.
                 console.log(`\n💾 SAVING TO FIREBASE...`);
+                if (hasMediaToUpload) {
+                    setUploadProgressPercent(96, 'Publishing post…');
+                    const subEl = document.getElementById('mediaLoadingSub');
+                    if (subEl) subEl.textContent = 'Almost done…';
+                }
                 try {
                     await savePostToFirebaseShared(postId, postData);
                     console.log(`✅ Post saved to shared collection - all users will see it`);
@@ -39853,6 +39941,9 @@
                         console.error('❌ savePostToFirebaseShared retry failed:', secondErr);
                         throw secondErr;
                     }
+                }
+                if (hasMediaToUpload) {
+                    setUploadProgressPercent(100, 'Posted!');
                 }
 
                 // 🚀 POST IS NOW IN SHARED COLLECTION - ALL USERS SEE IT
@@ -39967,6 +40058,8 @@
                 // Always reset the posting flag and media type
                 isPostingInProgress = false;
                 selectedMediaType = null;
+                // Always close the upload-progress overlay (media posts only ever showed it).
+                try { hideMediaLoadingOverlay(); } catch (e) {}
                 
                 // Re-enable the submit button
                 const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
