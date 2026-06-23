@@ -33538,7 +33538,11 @@
             const hasRenderedPostsOnce = !!window.__hasRenderedFeedPosts;
 
             let RENDER_THROTTLE = 8000; // steady-state: 8s
-            if (!hasAnyPosts || !hasRenderedPostsOnce) {
+            if (isFastBulkLoadAllowed()) {
+                // During fast bulk load (hard refresh or location commit), bypass
+                // the usual render throttle so the UI can fill immediately.
+                RENDER_THROTTLE = 10;
+            } else if (!hasAnyPosts || !hasRenderedPostsOnce) {
                 RENDER_THROTTLE = 250; // first-time / empty-to-filled transitions
             } else if (appAgeMs < 20000) {
                 RENDER_THROTTLE = 1000; // fast warm-up while initial snapshots stream in
@@ -33784,6 +33788,16 @@
                     // Update offset by how many we actually added
                     postBatchOffset += Math.min(nextBatch.length, addedCount);
                     console.log(`   Next offset: ${postBatchOffset}`);
+                    // If we're in a fast-bulk-load window, continue fetching
+                    // remaining batches quickly so the UI fills without waiting
+                    // for further scroll triggers.
+                    try {
+                        if (isFastBulkLoadAllowed() && postBatchOffset < allFirebasePosts.length) {
+                            setTimeout(() => {
+                                try { loadMorePostsFromDatabase(); } catch(e) { console.warn('fast-bulk load next batch failed', e); }
+                            }, 10);
+                        }
+                    } catch (e) {}
                 } else {
                     console.error(`   ❌ gridScroller not available!`);
                 }
