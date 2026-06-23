@@ -27087,6 +27087,41 @@
                 // gridId and authId determine filtering/routing in renderGrid
                 console.log('  ✅ Subscribing to shared posts collection');
                 console.log('  🔍 FIREBASE PATH: posts (SHARED COLLECTION)');
+                // PREFETCH: If we know the user's zone, do a targeted prefetch of
+                // posts listed under `posts_by_zone/{zone}` so the client can
+                // display high-quality local posts immediately without waiting
+                // for the full `posts` collection snapshot to arrive.
+                try {
+                    const zid = currentZoneTag || window.currentZoneTag || null;
+                    if (zid && !window.__zonePrefetchDoneFor) window.__zonePrefetchDoneFor = {};
+                    if (zid && window.__zonePrefetchDoneFor && !window.__zonePrefetchDoneFor[zid]) {
+                        (async () => {
+                            try {
+                                const zoneRef = ref(database, `posts_by_zone/${zid}`);
+                                const snap = await get(zoneRef);
+                                if (!snap || !snap.exists()) { window.__zonePrefetchDoneFor[zid] = Date.now(); return; }
+                                const obj = snap.val() || {};
+                                const ids = Object.keys(obj).slice().sort((a,b) => {
+                                    const ta = Number((obj[a] && obj[a].timestamp) || 0);
+                                    const tb = Number((obj[b] && obj[b].timestamp) || 0);
+                                    return tb - ta;
+                                }).slice(0, 200);
+                                if (ids.length === 0) { window.__zonePrefetchDoneFor[zid] = Date.now(); return; }
+                                // Fetch posts by id in parallel (batch-get)
+                                const posts = await Promise.all(ids.map(id => get(ref(database, `posts/${id}`)).then(s => s && s.exists() ? ({ id, ...(s.val()||{}) }) : null).catch(_=>null)));
+                                const visible = (posts || []).filter(p=>p && p.id);
+                                if (visible.length > 0) {
+                                    const displayKey = (typeof getActiveViewerFeedKey === 'function') ? (getActiveViewerFeedKey() || (currentUserId || 'shared-posts')) : (currentUserId || 'shared-posts');
+                                    gridContent[displayKey] = visible;
+                                    try { window.lastRenderGridTime = 0; } catch(e) {}
+                                    try { renderGrid(); } catch(e) {}
+                                    console.log(`🟦 Zone prefetch: populated ${displayKey} with ${visible.length} posts from posts_by_zone/${zid}`);
+                                }
+                                window.__zonePrefetchDoneFor[zid] = Date.now();
+                            } catch (e) { console.warn('Zone prefetch failed', e); }
+                        })();
+                    }
+                } catch(e) { console.warn('Zone prefetch scheduling failed', e); }
                 
                 firebaseUnsubscribe = subscribeToFirebasePosts((posts) => {
                     console.log('\n📬 Firebase snapshot received for shared posts');
