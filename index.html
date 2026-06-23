@@ -33544,7 +33544,33 @@
         }
 
         function scheduleGridReconcile() {
+            // If we have a fresh snapshot but the scroller hasn't been initialized
+            // yet (e.g. app started in background), proactively initialize the
+            // scroller so pending updates are not held until user interaction.
+            try {
+                if (!gridScroller && Array.isArray(window.pendingSortedPosts) && window.pendingSortedPosts.length) {
+                    console.log('⚡ scheduleGridReconcile: initializing grid via renderGrid() due to pending snapshot');
+                    try { renderGrid(); } catch (e) { console.warn('Failed to renderGrid during reconcile init', e); }
+                }
+            } catch (e) { /* ignore */ }
+
             if (gridReconcileInterval) return;
+
+            // Helper to immediately flush pending snapshot to scroller when safe
+            function flushPendingNow() {
+                try {
+                    if (!Array.isArray(window.pendingSortedPosts) || !window.pendingSortedPosts.length) return false;
+                    if (!gridScroller || typeof gridScroller.setItems !== 'function') return false;
+                    // Avoid stomping while the user is actively scrolling
+                    if (window.__suspendBatchPruneDuringScroll) return false;
+                    // Apply compacted pending snapshot immediately
+                    const items = compactPostListForSlots(window.pendingSortedPosts.slice());
+                    gridScroller.setItems(items);
+                    try { recomputeAndApplyBadges(); } catch(e){}
+                    console.log(`⚡ flushPendingNow: applied ${items.length} pending posts to scroller`);
+                    return true;
+                } catch (e) { console.warn('flushPendingNow failed', e); return false; }
+            }
             // Helper: attempt a minimal, safe move for a single voted post
             function applySmartVoteMove(current, target, votedPostId) {
                 try {
@@ -33586,6 +33612,8 @@
             gridReconcileInterval = setInterval(() => {
                 try {
                     if (!gridScroller || !pendingSortedPosts || !Array.isArray(pendingSortedPosts)) return;
+                    // If there are pending updates and it's safe, flush them immediately
+                    try { if (typeof flushPendingNow === 'function') { if (flushPendingNow()) return; } } catch(e) {}
 
                     let target = Array.isArray(pendingSortedPosts) ? pendingSortedPosts.slice() : [];
                     const current = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
@@ -35324,9 +35352,6 @@
             const suspendFn = () => {
                 try {
                     window.__suspendBatchPruneDuringScroll = true;
-                    // Track the last scroll/interaction time so the idle-convergence
-                    // loop knows when it is safe to apply fresh data without jitter.
-                    window.__lastScrollAt = Date.now();
                     if (__scrollSuspendTimer) clearTimeout(__scrollSuspendTimer);
                     __scrollSuspendTimer = setTimeout(() => { window.__suspendBatchPruneDuringScroll = false; __scrollSuspendTimer = null; }, 700);
                 } catch (e) {}
@@ -35337,78 +35362,6 @@
                 gridEl.addEventListener('touchmove', suspendFn, { passive: true });
             }
         } catch (e) { /* ignore scroll wiring errors */ }
-
-        // ============================================================
-        // 🔄 IDLE LIVE-CONVERGENCE LOOP
-        // Keeps the grid continuously current with the latest ranked data
-        // (new posts, vote-driven reorders, freshness injections) WITHOUT
-        // waiting for a local like/dislike or a hard refresh. The 1/sec
-        // reconciler intentionally throttles non-interactive moves to prevent
-        // jitter while the user reads/scrolls; this loop completes the picture
-        // by fully applying `pendingSortedPosts` during genuine idle moments.
-        // Safety: it never runs while the user is actively scrolling, just
-        // scrolled, or while a vote rerank is settling — so it cannot cause the
-        // "post jumps while reading" problem.
-        // ============================================================
-        (function startIdleLiveConvergenceLoop() {
-            try {
-                if (window.__idleConvergenceInterval) return;
-                const IDLE_CHECK_MS = 1200;        // how often to evaluate convergence
-                const IDLE_QUIET_MS = 1500;        // require this much quiet since last scroll
-                const VOTE_QUIET_MS = 600;         // stay out of the way right after a vote
-
-                // Compare two post lists purely by id ordering.
-                function sameIdOrder(a, b) {
-                    if (!Array.isArray(a) || !Array.isArray(b)) return false;
-                    if (a.length !== b.length) return false;
-                    for (let i = 0; i < a.length; i++) {
-                        const ai = a[i] && a[i].id;
-                        const bi = b[i] && b[i].id;
-                        if (ai !== bi) return false;
-                    }
-                    return true;
-                }
-
-                window.__idleConvergenceInterval = setInterval(() => {
-                    try {
-                        if (!window.gridScroller || typeof gridScroller.setItems !== 'function') return;
-                        const pending = (Array.isArray(window.pendingSortedPosts) && window.pendingSortedPosts.length)
-                            ? window.pendingSortedPosts
-                            : (Array.isArray(pendingSortedPosts) ? pendingSortedPosts : null);
-                        if (!pending || pending.length === 0) return;
-
-                        const now = Date.now();
-
-                        // Respect active scrolling / very recent scroll.
-                        if (window.__suspendBatchPruneDuringScroll) return;
-                        if ((now - Number(window.__lastScrollAt || 0)) < IDLE_QUIET_MS) return;
-
-                        // Let the vote smart-move/reconciler settle first.
-                        if (window.voteTriggeredRerank && (now - Number(window.lastVoteRerankAt || 0)) < VOTE_QUIET_MS) return;
-
-                        const current = Array.isArray(gridScroller.items) ? gridScroller.items : [];
-                        // Never blank a populated grid with an empty/sparse snapshot.
-                        if (current.length > 0 && pending.length === 0) return;
-
-                        const target = (typeof compactPostListForSlots === 'function')
-                            ? compactPostListForSlots(pending)
-                            : pending.slice();
-
-                        // Already current — nothing to do.
-                        if (sameIdOrder(current, target)) return;
-
-                        // Apply the fresh snapshot fully so content stays correct and
-                        // current. setItems preserves scroll position; during idle this
-                        // is a single clean update (not the repeated churn the reconciler
-                        // throttle was protecting against).
-                        gridScroller.setItems(target);
-                        try { applyGridTextFontSizeToVisiblePosts(); } catch (e) {}
-                        try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch (e) {}
-                        console.log(`🔄 Idle live-convergence applied: grid synced to ${target.length} posts`);
-                    } catch (e) { /* defensive: never throw from the loop */ }
-                }, IDLE_CHECK_MS);
-            } catch (e) { console.warn('startIdleLiveConvergenceLoop failed', e); }
-        })();
 
         function observeBoxForImpression(box, postId) {
             try {
