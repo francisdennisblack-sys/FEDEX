@@ -33368,6 +33368,41 @@
 
         function scheduleGridReconcile() {
             if (gridReconcileInterval) return;
+            // Helper: attempt a minimal, safe move for a single voted post
+            function applySmartVoteMove(current, target, votedPostId) {
+                try {
+                    if (!votedPostId) return false;
+                    const vid = String(votedPostId);
+                    const curIdx = current.findIndex(p => p && String(p.id) === vid);
+                    const tgtIdx = target.findIndex(p => p && String(p.id) === vid);
+                    if (tgtIdx === -1) return false; // not present in new target
+                    if (curIdx === -1) {
+                        // Post not currently in scroller - insert at target index
+                        current.splice(tgtIdx, 0, hydratePostForRender(target[tgtIdx]));
+                    } else if (curIdx !== tgtIdx) {
+                        // Move in-place with minimal splice operations
+                        const [moved] = current.splice(curIdx, 1);
+                        // Clamp target index to current length after removal
+                        const insertAt = Math.min(Math.max(0, tgtIdx), current.length);
+                        current.splice(insertAt, 0, hydratePostForRender(moved || target[tgtIdx]));
+                    } else {
+                        // Already at desired position - nothing to do
+                        return true;
+                    }
+
+                    // Apply compacting and set items, but avoid clearing unrelated slots
+                    gridScroller.items = compactPostListForSlots(current);
+                    try { if (typeof gridScroller.renderItemsInRange === 'function') {
+                        const start = Math.max(0, Math.min(curIdx, tgtIdx) - 2);
+                        const end = Math.min(gridScroller.items.length, Math.max(curIdx, tgtIdx) + 3);
+                        gridScroller.renderItemsInRange(start, end);
+                    } }
+                    catch(e) { try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(_) {} }
+                    try { recomputeAndApplyBadges(); } catch(e) {}
+                    console.log(`🧠 Smart vote move applied for ${vid}: ${curIdx}→${tgtIdx}`);
+                    return true;
+                } catch (e) { console.warn('applySmartVoteMove failed', e); return false; }
+            }
 
             gridReconcileInterval = setInterval(() => {
                 try {
@@ -33414,6 +33449,18 @@
                     // strongly limit automatic ML reshuffles so posts don't drift while reading.
                     try {
                         const voteActive = !!(window.voteTriggeredRerank && isVoteReorderStabilizationActive());
+                        if (voteActive) {
+                            // If this is a vote-triggered rerank, attempt a minimal smart
+                            // move for the voted post instead of doing broad reconcile
+                            // operations that can remove many items.
+                            try {
+                                const votedPostId = String(window.lastVoteRerankPostId || '');
+                                if (votedPostId && applySmartVoteMove(current, target, votedPostId)) {
+                                    return; // smart move applied, skip further reconcile work
+                                }
+                            } catch (e) { /* ignore smart-move failures and fall back */ }
+                        }
+
                         if (!voteActive) {
                             const allowMove = shouldAllowNonInteractiveMove(diffIdx, current, target);
                             if (!allowMove) {
