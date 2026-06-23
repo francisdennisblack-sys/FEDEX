@@ -29366,6 +29366,47 @@
                 netLikes: (post.likes || 0) - (post.dislikes || 0)
             }));
 
+            // 🛰️ VIEWER-RELATIVE PROXIMITY RATING (continuous, 0..1)
+            // -----------------------------------------------------------------
+            // "Local" is defined by how close a post's content origin / sent-to
+            // location is to THIS viewer — NOT a binary area-label match. Because
+            // the rating is a smooth function of physical distance, two users
+            // standing near each other compute near-identical ratings for every
+            // post, so they share the same local set (the core 80%). Content
+            // created at, or sent to, the viewer's location scores highest (1.0)
+            // and the rating decays smoothly with distance. This is what makes
+            // the feed stop flipping when a user moves a few feet.
+            // -----------------------------------------------------------------
+            const _viewerCoords = (function () {
+                try {
+                    return getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 })
+                        || (userLocation && Number.isFinite(Number(userLocation.lat)) ? userLocation : null);
+                } catch (e) {
+                    return (userLocation && Number.isFinite(Number(userLocation.lat))) ? userLocation : null;
+                }
+            })();
+            const PROX_FULL_KM = 0.15;   // <=150m from the viewer → rating 1.0 ("on top of you")
+            const PROX_DECAY_KM = 8;     // exponential falloff scale; ~0 by a few decay lengths
+            function _postOriginCoords(p) {
+                const lat = Number(p && (p.lat != null ? p.lat : p.latitude));
+                const lon = Number(p && (p.lon != null ? p.lon : p.longitude));
+                if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+                return null;
+            }
+            function _computeProximityRating(p) {
+                if (!_viewerCoords) return null;            // viewer location unknown → cannot rate by distance
+                const oc = _postOriginCoords(p);
+                if (!oc) return null;                       // post has no coordinates → not proximity-local
+                let dKm;
+                try { dKm = calculateDistance(_viewerCoords.lat, _viewerCoords.lon, oc.lat, oc.lon); }
+                catch (e) { return null; }
+                if (!Number.isFinite(dKm)) return null;
+                p._viewerDistanceKm = dKm;
+                if (dKm <= PROX_FULL_KM) return 1;
+                return Math.max(0, Math.min(1, Math.exp(-(dKm - PROX_FULL_KM) / PROX_DECAY_KM)));
+            }
+            rankedPosts.forEach(p => { p._proximityRating = _computeProximityRating(p); });
+
             // 1️⃣ USER'S OWN POSTS (always show first)
             const userPosts = rankedPosts.filter(p =>
                 p.authId === currentUserId ||
@@ -29433,15 +29474,43 @@
             });
             const boostIds = new Set(boostPosts.map(p => p.id));
 
-            // 2️⃣ HYPER-LOCAL POSTS: Match user's exact area tag
-            const hyperLocal = rankedPosts.filter(p =>
-                !userPostIds.has(p.id) && !boostIds.has(p.id) &&
-                p.county === userArea
-            );
+            // 📏 DENSITY-ADAPTIVE LOCAL RADIUS
+            // Dense areas → tighter radius so "local" stays hyper-local; sparse
+            // areas → wider radius so the feed still fills. Derived purely from
+            // how many rated posts fall within each candidate ring, so everyone
+            // at the same location with the same posts computes the same radius.
+            function _computeAdaptiveLocalRadiusKm() {
+                if (!_viewerCoords) return null;
+                const rated = rankedPosts.filter(p =>
+                    p._viewerDistanceKm != null && !userPostIds.has(p.id) && !boostIds.has(p.id)
+                );
+                if (!rated.length) return null;
+                const TARGET_LOCAL = 40;                 // aim for ~this many local posts
+                const FLOOR_KM = 0.4, CEIL_KM = 25;
+                const rings = [0.4, 0.8, 1.5, 3, 5, 8, 12, 18, 25];
+                for (const r of rings) {
+                    const c = rated.reduce((n, p) => n + (p._viewerDistanceKm <= r ? 1 : 0), 0);
+                    if (c >= TARGET_LOCAL) return Math.max(FLOOR_KM, Math.min(CEIL_KM, r));
+                }
+                return CEIL_KM;                          // sparse everywhere → widen fully
+            }
+            const adaptiveLocalRadiusKm = _computeAdaptiveLocalRadiusKm();
+
+            // 2️⃣ HYPER-LOCAL POSTS: defined by viewer-relative proximity, not by
+            // an exact area-label match. Falls back to the area-label match only
+            // when the viewer's (or the post's) coordinates are unavailable.
+            const hyperLocal = rankedPosts.filter(p => {
+                if (userPostIds.has(p.id) || boostIds.has(p.id)) return false;
+                if (adaptiveLocalRadiusKm != null && p._viewerDistanceKm != null) {
+                    return p._viewerDistanceKm <= adaptiveLocalRadiusKm;
+                }
+                return p.county === userArea;            // fallback when coords are missing
+            });
+            const hyperLocalIds = new Set(hyperLocal.map(p => p.id));
 
             // 3️⃣ NEAR-LOCAL WELL-REVIEWED POSTS
             const nearLocalWellReviewed = rankedPosts.filter(p =>
-                !userPostIds.has(p.id) && !boostIds.has(p.id) &&
+                !userPostIds.has(p.id) && !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
                 p.county !== userArea &&
                 p.netLikes >= 3 &&
                 (p.proximityClass === 'nearby' || p.proximityClass === 'community')
@@ -29450,7 +29519,7 @@
             // 4️⃣ WEBSITE TOP POSTS
             const websiteTopPosts = rankedPosts
                 .filter(p =>
-                    !userPostIds.has(p.id) && !boostIds.has(p.id) &&
+                    !userPostIds.has(p.id) && !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
                     p.county !== userArea &&
                     !nearLocalWellReviewed.find(n => n.id === p.id) &&
                     p.netLikes >= 5
@@ -29492,7 +29561,20 @@
 
             // Sort each category by unified rank
             userPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
-            hyperLocal.sort((a, b) => b.unifiedRank - a.unifiedRank);
+            // Deterministic LOCAL ordering shared by everyone in the area:
+            // closest first (grouped into proximity bands so tiny GPS jitter
+            // doesn't reshuffle), then engagement, then a stable id tiebreak.
+            // No per-user randomness → two nearby viewers see the same sequence.
+            hyperLocal.sort((a, b) => {
+                const ra = (a._proximityRating != null ? a._proximityRating : 0);
+                const rb = (b._proximityRating != null ? b._proximityRating : 0);
+                if (Math.abs(rb - ra) > 0.02) return rb - ra;
+                const la = (a.netLikes || 0), lb = (b.netLikes || 0);
+                if (lb !== la) return lb - la;
+                const ua = (a.unifiedRank || 0), ub = (b.unifiedRank || 0);
+                if (ub !== ua) return ub - ua;
+                return String(a.id).localeCompare(String(b.id));
+            });
             nearLocalWellReviewed.sort((a, b) => b.netLikes - a.netLikes);
             fallbackPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
 
