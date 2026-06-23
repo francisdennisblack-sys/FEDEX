@@ -4462,11 +4462,6 @@
             <div id="viewMedia" style="display:block; position:relative; width:100%; max-height:92vh; margin-bottom:12px; text-align:center;"></div>
             <div class="view-content-text" id="viewText"></div>
 
-            <!-- Vote row for content-only posts: like / dislike / repost laid out
-                 horizontally, directly above the area tag. Populated by the modal
-                 opener and hidden for photo/video posts. -->
-            <div id="viewVoteRow" style="display:none; align-items:center; gap:10px; margin-top:12px;"></div>
-
             <!-- Area tag section: shows the area tag the user posted with (text, photo & video posts) -->
             <div id="viewAreaTag" style="display:none; align-items:center; gap:6px; margin-top:10px; padding:6px 10px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.18); border-radius:8px; width:fit-content; max-width:100%;">
                 <span aria-hidden="true" style="font-size:14px; line-height:1;">🌍</span>
@@ -23227,32 +23222,6 @@
                     }
                 }
             } catch (e) {}
-
-            // Content-only (text) posts: render like / dislike / repost buttons
-            // horizontally, directly above the area tag. Photo/video posts keep no
-            // vote controls in the pop-out.
-            try {
-                const viewVoteRowEl = document.getElementById('viewVoteRow');
-                if (viewVoteRowEl) {
-                    if (!hasMedia) {
-                        const likes = Number(targetPost.likes || 0);
-                        const dislikes = Number(targetPost.dislikes || 0);
-                        const repostCount = Number(targetPost.repostCount || targetPost.reposts || (targetPost.repostOf && postCache && postCache[targetPost.repostOf] && postCache[targetPost.repostOf].repostCount) || 0);
-                        const likeText = (typeof window.formatLikeCount === 'function') ? window.formatLikeCount(likes) : likes;
-                        const btnStyle = 'min-width:40px;height:40px;padding:0 12px;display:inline-flex;align-items:center;justify-content:center;gap:6px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.18);border-radius:999px;cursor:pointer;font-size:15px;font-weight:600;';
-                        viewVoteRowEl.innerHTML = `
-                            <button id="likeBtn" class="vote-button" onclick="event.stopPropagation(); voteOnPost('${targetPost.id}', 'like')" title="Like" style="${btnStyle}">↑ <span id="likeCount" class="vote-count like-count">${likeText}</span></button>
-                            <button id="dislikeBtn" class="vote-button" onclick="event.stopPropagation(); voteOnPost('${targetPost.id}', 'dislike')" title="Dislike" style="${btnStyle}">↓ <span id="dislikeCount" class="vote-count">${dislikes > 0 ? dislikes : ''}</span></button>
-                            <button id="repostBtn" onclick="event.stopPropagation(); auxActionOnPost('${targetPost.id}')" title="Repost" style="${btnStyle}">🔁 <span class="repost-count-circle">${repostCount > 0 ? repostCount : ''}</span></button>
-                        `;
-                        viewVoteRowEl.style.display = 'flex';
-                        try { updateVoteDisplay(); } catch (e) {}
-                    } else {
-                        viewVoteRowEl.innerHTML = '';
-                        viewVoteRowEl.style.display = 'none';
-                    }
-                }
-            } catch (e) {}
             
             // Show appropriate button based on post ownership
             const deleteSection = document.getElementById('deleteSection');
@@ -23275,6 +23244,10 @@
             // photo & video pop-outs. They reuse the exact grid button classes so they
             // look identical, and call the same voteOnPost/auxActionOnPost handlers.
             try { renderViewModalMediaActions(targetPost, !!hasMedia); } catch (e) { /* defensive */ }
+
+            // Content-only (text) pop-outs render the same like / repost / dislike
+            // buttons horizontally, directly above the area tag.
+            try { renderViewModalTextActions(targetPost, !!hasMedia); } catch (e) { /* defensive */ }
 
             // 📞 Phone contact button — visible only when the post was created with the
             // phone option enabled on the composer.
@@ -23590,14 +23563,57 @@
             }
         }
 
+        // Content-only (text) pop-out: render the like / repost / dislike buttons
+        // horizontally, directly above the area tag. Reuses the exact same button
+        // classes/styles as the media overlay so the buttons look identical.
+        function renderViewModalTextActions(post, hasMedia) {
+            const areaTagEl = document.getElementById('viewAreaTag');
+            // Remove any previous row so counts/state never go stale.
+            const old = document.getElementById('viewTextActions');
+            if (old) old.remove();
+            // Text-only posts only — media posts use the right-side media overlay.
+            if (hasMedia || !post) return;
+            if (!areaTagEl || !areaTagEl.parentNode) return;
+
+            const likes = Number(post.likes || 0);
+            const dislikes = Number(post.dislikes || 0);
+            const displayRepostCount = Number(post.repostCount || post.reposts || (post.repostOf && postCache && postCache[post.repostOf] && postCache[post.repostOf].repostCount) || 0);
+
+            const container = document.createElement('div');
+            container.id = 'viewTextActions';
+            // Horizontal row directly above the area tag.
+            container.style.cssText = 'display:flex; flex-direction:row; gap:10px; align-items:center; justify-content:flex-start; margin-top:12px;';
+
+            if (!currentUserId) {
+                container.innerHTML = `
+                    <div style="width:36px;height:36px;background:#222;color:#888;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;">↑ ${likes > 0 ? likes : ''}</div>
+                    <div style="width:36px;height:36px;background:#222;color:#888;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;">↓ ${dislikes > 0 ? dislikes : ''}</div>`;
+            } else {
+                container.innerHTML = `
+                    <button class="like-btn" onclick="event.stopPropagation(); modalMediaVote('${post.id}', 'like')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;"><span class="vote-count like-count ${"" + (typeof window.getLikeFontClass === 'function' ? window.getLikeFontClass(likes) : '')}">${typeof window.formatLikeCount === 'function' ? window.formatLikeCount(likes) : likes}</span></button>
+                    <button class="left-square-btn" onclick="event.stopPropagation(); modalMediaRepost('${post.id}')" title="Reposts" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#555;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:13px;"><span class="repost-count-circle">${displayRepostCount > 0 ? displayRepostCount : ''}</span></button>
+                    <button class="dislike-btn" onclick="event.stopPropagation(); modalMediaVote('${post.id}', 'dislike')" style="width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#fff;border:none;border-radius:50%;cursor:pointer;font-size:14px;">↓</button>`;
+            }
+
+            // Insert directly above the area tag.
+            areaTagEl.parentNode.insertBefore(container, areaTagEl);
+        }
+        try { window.renderViewModalTextActions = renderViewModalTextActions; } catch (e) {}
+
+        // True when the modal treats this post as a media post (same logic as open flow).
+        function postHasModalMedia(p) {
+            try { if (typeof buildPostMediaList === 'function') return buildPostMediaList(p).length > 0; } catch (e) {}
+            return !!(p && (p.photoURL || p.imageData || p.videoURL || p.mediaURL || p.mediaType === 'video'));
+        }
+
         // Wrappers: vote/repost via the same core handlers, then refresh the overlay counts.
         function modalMediaVote(postId, type) {
             try { if (typeof voteOnPost === 'function') voteOnPost(postId, type); } catch (e) { console.warn('modalMediaVote failed', e); }
-            try { const p = findPostForModalActions(postId); if (p) renderViewModalMediaActions(p, true); } catch (e) { /* ignore */ }
+            try { const p = findPostForModalActions(postId); if (p) { const hm = postHasModalMedia(p); renderViewModalMediaActions(p, hm); renderViewModalTextActions(p, hm); } } catch (e) { /* ignore */ }
         }
         function modalMediaRepost(postId) {
             try { if (typeof auxActionOnPost === 'function') auxActionOnPost(postId); } catch (e) { console.warn('modalMediaRepost failed', e); }
-            try { const p = findPostForModalActions(postId); if (p) renderViewModalMediaActions(p, true); } catch (e) { /* ignore */ }
+            try { const p = findPostForModalActions(postId); if (p) { const hm = postHasModalMedia(p); renderViewModalMediaActions(p, hm); renderViewModalTextActions(p, hm); } } catch (e) { /* ignore */ }
         }
         try { window.modalMediaVote = modalMediaVote; window.modalMediaRepost = modalMediaRepost; } catch (e) {}
         
@@ -33296,10 +33312,11 @@
                                        post.poiName || post.state || post.region ||
                                        post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
                                        'Nearby Area';
-                    // Text-only grid tiles intentionally omit the like/dislike/repost
-                    // buttons on the tile itself — those controls now live only inside
-                    // the post pop-out modal, laid out horizontally directly above the
-                    // area tag (matches the photo/video tile behavior).
+                    // Like/dislike/repost buttons are intentionally NOT rendered on
+                    // content-only grid tiles. They live only inside the post pop-out,
+                    // rendered horizontally directly above the area tag by
+                    // renderViewModalTextActions(). Keep the variable defined so the
+                    // innerHTML template below stays valid.
                     let voteBadge = '';
                     // Area tag pinned to the very bottom, BELOW the like/dislike buttons.
                     // When `post.displayAreaTag` is set we use it verbatim (one read, zero formatter cost).
