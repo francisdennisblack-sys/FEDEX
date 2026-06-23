@@ -13518,123 +13518,51 @@
                     } catch (e) { /* ignore */ }
                 } catch(e) { /* ignore duplicate-check failures */ }
 
-                // Add new repost to local caches for immediate feedback. Prefer
-                // updating an existing visible root slot rather than inserting a
-                // separate repost tile — this prevents a transient separate slot
-                // appearing then being collapsed into a stack.
-                let skipInsert = false;
+                // Add new repost to local caches for immediate feedback
                 try {
                     postCache = postCache || {};
                     newPost._optimistic = true;
                     newPost._optimisticExpiry = Date.now() + 30000; // keep optimistic for 30s
                     postCache[newId] = newPost;
                 } catch(e){}
-
                 try {
                     const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
                     gridContent[key] = gridContent[key] || [];
-
-                    // Try to find an existing visible slot for the root post
-                    let existingSlot = null;
+                    // Prefer the helper insertion which respects reserved slots and
+                    // updates the virtual scroller efficiently when available.
                     try {
-                        for (const k of Object.keys(gridContent || {})) {
-                            const arr = gridContent[k];
-                            if (!Array.isArray(arr)) continue;
-                            for (const p of arr) {
-                                if (!p || !p.id) continue;
-                                if (String(p.id) === String(rootId) || isRepostOfRoot(p, rootId)) {
-                                    existingSlot = p; break;
-                                }
-                            }
-                            if (existingSlot) break;
+                        console.log(`🔁 Inserting new repost ${newId} (root=${rootId}) into key=${key}`);
+                        if (typeof insertNewPostIntoGrid === 'function') {
+                            // insertNewPostIntoGrid already guards duplicates, use it
+                            insertNewPostIntoGrid(key, newPost);
+                        } else {
+                            // Use ensureUniqueAndInsert to prevent transient duplicates
+                            ensureUniqueAndInsert(key, newPost);
                         }
-                    } catch (e) { existingSlot = null; }
 
-                    // compute current root count (from cache if present), or fetch from server
-                    let currentRoot = (postCache && postCache[rootId]) || existingSlot || null;
-                    let prev = (currentRoot && (currentRoot.repostCount || currentRoot.reposts)) || 0;
-                    if ((!currentRoot || typeof prev !== 'number' || prev === 0) && typeof getDatabase === 'function') {
+                        // Also ensure the repost surfaces in the shared feed so other
+                        // viewers see it immediately (fixes cases where personal feed
+                        // insertions didn't publish to shared/zone feeds).
                         try {
-                            const db = getDatabase();
-                            const snap = await get(ref(db, `posts/${rootId}`));
-                            if (snap && snap.exists()) {
-                                const srv = snap.val();
-                                if (srv) {
-                                    prev = Number(srv.repostCount || srv.reposts || prev || 0);
-                                    postCache = postCache || {};
-                                    postCache[rootId] = Object.assign({}, postCache[rootId] || {}, srv, { id: rootId });
-                                    currentRoot = postCache[rootId];
-                                }
+                            const sharedKey = 'shared-posts';
+                            if (key !== sharedKey) {
+                                console.log(`🔁 Also inserting repost ${newId} into ${sharedKey}`);
+                                try {
+                                    if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(sharedKey, newPost);
+                                    else ensureUniqueAndInsert(sharedKey, newPost);
+                                } catch(e) { console.warn('Failed to insert repost into shared-posts', e); }
                             }
-                        } catch (e) { console.warn('Failed to fetch root repostCount from server', e); }
+                        } catch(e) { /* ignore */ }
+
+                        // Ensure the new repost is visible to the user immediately.
+                        try { ensureNewPostVisible(newPost); } catch (e) { /* ignore visibility failures */ }
+                    } catch(e) {
+                        console.warn('Repost insert helper failed, falling back', e);
+                        // If insertion helper fails, fallback to naive dedupe + render
+                        try { ensureUniqueAndInsert(key, newPost); } catch (ee) { gridContent[key].unshift(newPost); }
+                        window.lastRenderGridTime = 0;
+                        renderGrid();
                     }
-                    const newRootCount = prev + 1;
-
-                    if (existingSlot) {
-                        // Update existing visible slot in-place rather than inserting new
-                        try {
-                            existingSlot.repostCount = newRootCount;
-                            existingSlot.repostedByCurrentUser = true;
-                            try { if (postCache && postCache[existingSlot.id]) postCache[existingSlot.id].repostCount = newRootCount; } catch(e){}
-                            // Update visible DOM node's repost count and mark UI
-                            try {
-                                const node = document.querySelector(`.grid-box[data-post-id="${existingSlot.id}"]`);
-                                if (node) {
-                                    let span = node.querySelector('.left-square-btn .repost-count-circle');
-                                    if (!span) {
-                                        const leftBtn = node.querySelector('.left-square-btn');
-                                        if (leftBtn) {
-                                            span = document.createElement('span');
-                                            span.className = 'repost-count-circle';
-                                            leftBtn.appendChild(span);
-                                        }
-                                    }
-                                    if (span) span.textContent = String(newRootCount);
-                                    node.classList.add('reposted-by-me');
-                                }
-                            } catch(e) { /* ignore DOM update failures */ }
-                            console.log(`🔧 Updated existing root slot ${existingSlot.id} for repost (newCount=${newRootCount})`);
-                            skipInsert = true;
-                        } catch (e) { console.warn('Failed to update existing root slot', e); }
-                    }
-
-                    if (!skipInsert) {
-                        // Prefer the helper insertion which respects reserved slots and
-                        // updates the virtual scroller efficiently when available.
-                        try {
-                            console.log(`🔁 Inserting new repost ${newId} (root=${rootId}) into key=${key}`);
-                            if (typeof insertNewPostIntoGrid === 'function') {
-                                // insertNewPostIntoGrid already guards duplicates, use it
-                                insertNewPostIntoGrid(key, newPost);
-                            } else {
-                                // Use ensureUniqueAndInsert to prevent transient duplicates
-                                ensureUniqueAndInsert(key, newPost);
-                            }
-
-                            // Also ensure the repost surfaces in the shared feed so other
-                            // viewers see it immediately.
-                            try {
-                                const sharedKey = 'shared-posts';
-                                if (key !== sharedKey) {
-                                    console.log(`🔁 Also inserting repost ${newId} into ${sharedKey}`);
-                                    try {
-                                        if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(sharedKey, newPost);
-                                        else ensureUniqueAndInsert(sharedKey, newPost);
-                                    } catch(e) { console.warn('Failed to insert repost into shared-posts', e); }
-                                }
-                            } catch(e) { /* ignore */ }
-
-                            // Ensure the new repost is visible to the user immediately.
-                            try { ensureNewPostVisible(newPost); } catch (e) { /* ignore visibility failures */ }
-                        } catch(e) {
-                            console.warn('Repost insert helper failed, falling back', e);
-                            // If insertion helper fails, fallback to naive dedupe + render
-                            try { ensureUniqueAndInsert(key, newPost); } catch (ee) { gridContent[key].unshift(newPost); }
-                            window.lastRenderGridTime = 0;
-                            renderGrid();
-                        }
-                    }
-                } catch (e) { console.warn('Failed during repost local insert/update', e); }
 
                     // Increment repost count on the root original post locally and persist update
                     try {
