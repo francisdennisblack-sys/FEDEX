@@ -23410,10 +23410,14 @@
                 // frame a SECOND time, cropped, behind the letterboxed video,
                 // making the media appear twice.
                 const bg = 'background:#000;';
+                // First slide preloads eagerly so videos of ANY length can begin
+                // playing the moment the pop-out opens (metadata-only preload can
+                // stall longer clips and prevent autoplay from ever starting).
+                const preloadVal = idx === 0 ? 'auto' : 'metadata';
                 // No crossorigin — Firebase Storage host often lacks CORS headers.
                 return `
                     <div class="video-player-wrapper" style="position:relative; display:block; width:100%; max-height:80vh; ${bg}">
-                        <video playsinline webkit-playsinline preload="metadata"${posterAttr} style="width:100%; height:auto; max-height:80vh; object-fit:contain; display:block; margin:0 auto; background:transparent;">
+                        <video playsinline webkit-playsinline preload="${preloadVal}"${posterAttr} style="width:100%; height:auto; max-height:80vh; object-fit:contain; display:block; margin:0 auto; background:transparent;">
                             <source src="${src}"${typeAttr}>
                             Your browser does not support this video.
                         </video>
@@ -23445,21 +23449,36 @@
                         } catch (err) { /* ignore */ }
                     });
                     if (idx === 0) {
-                        // Attempt muted autoplay for the first slide only.
+                        // Attempt muted autoplay for the first slide only. Videos of
+                        // ANY length must start the moment the pop-out opens, so we
+                        // retry play() on the readiness events too — a single early
+                        // play() call often rejects for longer clips that haven't
+                        // buffered yet, which would otherwise leave the video paused.
                         try {
                             vidEl.muted = true;
                             vidEl.defaultMuted = true;
                             vidEl.autoplay = true;
                             vidEl.loop = true;
                             vidEl.playsInline = true;
+                            let started = false;
+                            const tryPlay = () => {
+                                if (started) return;
+                                try {
+                                    const pr = vidEl.play();
+                                    if (pr && typeof pr.then === 'function') {
+                                        pr.then(() => { started = true; try { overlay.style.display = 'none'; } catch (e) {} })
+                                          .catch(() => { /* will retry on next readiness event */ });
+                                    }
+                                } catch (e) { /* will retry on next readiness event */ }
+                            };
+                            vidEl.addEventListener('loadedmetadata', tryPlay);
+                            vidEl.addEventListener('loadeddata', tryPlay);
+                            vidEl.addEventListener('canplay', tryPlay);
+                            vidEl.addEventListener('canplaythrough', tryPlay);
+                            vidEl.addEventListener('playing', () => { started = true; try { overlay.style.display = 'none'; } catch (e) {} });
                             try { vidEl.load(); } catch (e) {}
-                            const p = vidEl.play();
-                            if (p && typeof p.then === 'function') {
-                                p.then(() => { try { overlay.style.display = 'none'; } catch (e) {} })
-                                 .catch(() => { try { overlay.style.display = ''; } catch (e) {} });
-                            } else {
-                                vidEl.addEventListener('playing', () => { try { overlay.style.display = 'none'; } catch (e) {} }, { once: true });
-                            }
+                            // Immediate attempt (works for already-cached/short clips).
+                            tryPlay();
                         } catch (e) { try { overlay.style.display = ''; } catch (e2) {} }
                     }
                 });
