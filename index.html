@@ -7172,6 +7172,7 @@
                     }
                 }
             } catch (e) { console.warn('syncRuntimeLocationFromCommit failed', e); }
+            try { window.__lastLocationCommitAt = Date.now(); } catch(e) {}
         }
         try { window.syncRuntimeLocationFromCommit = syncRuntimeLocationFromCommit; } catch (e) {}
 
@@ -18747,25 +18748,54 @@
                             });
                             if (removedIds.length > 0) {
                                 console.log(`🧽 Snapshot prune: removing ${removedIds.length} posts no longer on server`);
-                                window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
-                                removedIds.forEach(id => {
-                                    window.globallyDeletedPostIds.add(id);
-                                    try { delete postCache[id]; } catch(e){}
-                                    try {
-                                        Object.keys(gridContent || {}).forEach(k => {
-                                            if (Array.isArray(gridContent[k])) {
-                                                gridContent[k] = gridContent[k].filter(p => !(p && p.id === id));
-                                            }
-                                        });
-                                    } catch(e){}
-                                    try { clearGridBoxByPostId(id); } catch(e){}
-                                });
-                                try {
-                                    if (gridScroller && Array.isArray(gridScroller.items)) {
-                                        gridScroller.items = gridScroller.items.filter(i => !(i && removedIds.includes(i.id)));
-                                        if (typeof gridScroller.refresh === 'function') gridScroller.refresh();
+                                // If the user is actively scrolling and did not just commit a location,
+                                // defer destructive removals to avoid jarring batch deletions while
+                                // the user inspects the feed.
+                                const suspend = Boolean(window.__suspendBatchPruneDuringScroll);
+                                const lastLoc = Number(window.__lastLocationCommitAt || 0);
+                                if (suspend && (Date.now() - lastLoc) > 3000) {
+                                    window.__pendingGloballyDeletedIds = window.__pendingGloballyDeletedIds || new Set();
+                                    removedIds.forEach(id => window.__pendingGloballyDeletedIds.add(id));
+                                    // Schedule processing after a brief idle window
+                                    if (!window.__pendingGlobalRemovalTimer) {
+                                        window.__pendingGlobalRemovalTimer = setTimeout(() => {
+                                            try {
+                                                const toProcess = Array.from(window.__pendingGloballyDeletedIds || []);
+                                                window.__pendingGloballyDeletedIds = new Set();
+                                                window.__pendingGlobalRemovalTimer = null;
+                                                if (toProcess.length === 0) return;
+                                                console.log('🕒 Processing deferred snapshot-prune removals:', toProcess.length);
+                                                toProcess.forEach(id => {
+                                                    try { window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set(); window.globallyDeletedPostIds.add(id); } catch(e){}
+                                                    try { delete postCache[id]; } catch(e){}
+                                                    try { Object.keys(gridContent || {}).forEach(k => { if (Array.isArray(gridContent[k])) { gridContent[k] = gridContent[k].filter(p => !(p && p.id === id)); } }); } catch(e){}
+                                                    try { clearGridBoxByPostId(id); } catch(e){}
+                                                });
+                                                try { if (gridScroller && Array.isArray(gridScroller.items)) { gridScroller.items = gridScroller.items.filter(i => !(i && toProcess.includes(i.id))); if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } } catch(e){}
+                                            } catch (e) { console.warn('Deferred snapshot-prune processing failed', e); }
+                                        }, 1200);
                                     }
-                                } catch(e){}
+                                } else {
+                                    window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
+                                    removedIds.forEach(id => {
+                                        window.globallyDeletedPostIds.add(id);
+                                        try { delete postCache[id]; } catch(e){}
+                                        try {
+                                            Object.keys(gridContent || {}).forEach(k => {
+                                                if (Array.isArray(gridContent[k])) {
+                                                    gridContent[k] = gridContent[k].filter(p => !(p && p.id === id));
+                                                }
+                                            });
+                                        } catch(e){}
+                                        try { clearGridBoxByPostId(id); } catch(e){}
+                                    });
+                                    try {
+                                        if (gridScroller && Array.isArray(gridScroller.items)) {
+                                            gridScroller.items = gridScroller.items.filter(i => !(i && removedIds.includes(i.id)));
+                                            if (typeof gridScroller.refresh === 'function') gridScroller.refresh();
+                                        }
+                                    } catch(e){}
+                                }
                             }
                         } catch (e) { console.warn('Snapshot prune failed', e); }
                         
@@ -33024,6 +33054,17 @@
         function repairGridSlotGaps(reason = '') {
             try {
                 if (!window.gridScroller || !Array.isArray(window.gridScroller.items)) return false;
+                // If the user is actively scrolling, avoid aggressive compaction
+                // that would remove many items from view. Allow compaction if the
+                // user just committed a location change (recent location commit).
+                try {
+                    const suspend = Boolean(window.__suspendBatchPruneDuringScroll);
+                    const lastLoc = Number(window.__lastLocationCommitAt || 0);
+                    if (suspend && (Date.now() - lastLoc) > 3000) {
+                        // Skip repairs that would shrink the items while scrolling.
+                        return false;
+                    }
+                } catch (e) {}
 
                 const beforeItems = window.gridScroller.items || [];
                 const compacted = compactPostListForSlots(beforeItems).filter(post => {
@@ -34964,6 +35005,27 @@
                 }, { threshold: [0.5] });
             } catch (e) { window._postImpressionObserver = null; }
         }
+
+        // User scroll detector: while user is actively scrolling, suspend batch
+        // pruning/compaction so posts are not removed in large batches during
+        // exploration. Debounced to resume 700ms after last scroll event.
+        try {
+            window.__suspendBatchPruneDuringScroll = false;
+            let __scrollSuspendTimer = null;
+            const gridEl = document.getElementById('grid');
+            const suspendFn = () => {
+                try {
+                    window.__suspendBatchPruneDuringScroll = true;
+                    if (__scrollSuspendTimer) clearTimeout(__scrollSuspendTimer);
+                    __scrollSuspendTimer = setTimeout(() => { window.__suspendBatchPruneDuringScroll = false; __scrollSuspendTimer = null; }, 700);
+                } catch (e) {}
+            };
+            if (gridEl) {
+                gridEl.addEventListener('scroll', suspendFn, { passive: true });
+                gridEl.addEventListener('wheel', suspendFn, { passive: true });
+                gridEl.addEventListener('touchmove', suspendFn, { passive: true });
+            }
+        } catch (e) { /* ignore scroll wiring errors */ }
 
         function observeBoxForImpression(box, postId) {
             try {
