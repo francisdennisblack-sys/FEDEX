@@ -26130,10 +26130,11 @@
             }, val.length <= 2 ? 120 : 260); // faster on short queries, still throttled for stability
         }
 
+        // Defer diagnostics init — it's non-critical and shouldn't compete with first paint
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initRefineSearchDiagnostics, { once: true });
+            document.addEventListener('DOMContentLoaded', () => setTimeout(initRefineSearchDiagnostics, 1000), { once: true });
         } else {
-            initRefineSearchDiagnostics();
+            setTimeout(initRefineSearchDiagnostics, 1000);
         }
 
         /**
@@ -39867,26 +39868,36 @@
             // ⚡ CRITICAL: Do NOT request geolocation on load to avoid browser prompts.
             // Geolocation will be requested only when the user explicitly posts.
             console.log('📍 Auto geolocation disabled on load; will request on first post');
-            
-            // ⚡ CRITICAL: Preload databases IMMEDIATELY so refine locations dropdown works on first try
-            console.log('📥 Preloading databases (POI index, locations, OSM places)...');
-            
-            // Store preload promises so refine search/default handlers can reuse them (avoiding duplicate loads)
-            if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
-                window._poiIndexPreloadPromise = window.ensureGlobalPoiSearchIndex().catch(e => console.warn('POI index preload failed:', e));
+
+            // 📥 Defer heavy database preloads so the first paint and grid render
+            // are not delayed. Databases are only needed when the user opens the
+            // posting / search UI, so loading them 800ms after DOM ready is fine.
+            const _doDbPreload = function() {
+                console.log('📥 Preloading databases (POI index, locations, OSM places)...');
+                // Store preload promises so refine search/default handlers can reuse them (avoiding duplicate loads)
+                if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                    window._poiIndexPreloadPromise = window.ensureGlobalPoiSearchIndex().catch(e => console.warn('POI index preload failed:', e));
+                }
+                if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
+                    window._enhancedLocationsPreloadPromise = window.lazyLoadEnhancedLocationDatabase().catch(e => console.warn('Location DB preload failed:', e));
+                }
+                // Preload OSM places - store promise so it can be reused
+                window._osmPlacesPreloadPromise = poisFetch('/pois/places.json')
+                    .then(r => r.json())
+                    .then(d => {
+                        window.osmPlaces = d.places || [];
+                        console.log(`✅ OSM places preloaded: ${window.osmPlaces.length} places`);
+                        return d;
+                    })
+                    .catch(e => console.warn('OSM places preload failed:', e));
+            };
+            // Use requestIdleCallback when available (fires during browser idle time),
+            // fallback to a plain 800ms delay.
+            if (typeof requestIdleCallback === 'function') {
+                requestIdleCallback(_doDbPreload, { timeout: 2000 });
+            } else {
+                setTimeout(_doDbPreload, 800);
             }
-            if (typeof window.lazyLoadEnhancedLocationDatabase === 'function') {
-                window._enhancedLocationsPreloadPromise = window.lazyLoadEnhancedLocationDatabase().catch(e => console.warn('Location DB preload failed:', e));
-            }
-            // Preload OSM places - store promise so it can be reused
-            window._osmPlacesPreloadPromise = poisFetch('/pois/places.json')
-                .then(r => r.json())
-                .then(d => {
-                    window.osmPlaces = d.places || [];
-                    console.log(`✅ OSM places preloaded: ${window.osmPlaces.length} places`);
-                    return d;
-                })
-                .catch(e => console.warn('OSM places preload failed:', e));
 
             // QUICK COLD START: Use a small cached POI subset from previous sessions for instant dropdowns
             try {
@@ -39927,12 +39938,20 @@
             };
 
             // When page/tab becomes visible again, ensure POIs and location are refreshed
-                document.addEventListener('visibilitychange', () => {
+            // and kick a grid refresh so the page doesn't feel frozen after being in background.
+            document.addEventListener('visibilitychange', () => {
                 try {
                     if (document.visibilityState === 'visible') {
-                        console.log('👀 Page visible again — ensuring POI data (no auto geolocation)');
-                        // Do not re-request geolocation on visibility change to avoid prompts.
+                        console.log('👀 Page visible again — refreshing POI data and grid');
                         try { window.ensurePOIDataReady(); } catch(e){}
+                        // Refresh the grid content so users see fresh posts after returning.
+                        // Use a small delay so the browser completes its own resume work first.
+                        setTimeout(() => {
+                            try {
+                                if (typeof forceGridRefresh === 'function') forceGridRefresh();
+                                else if (typeof renderGrid === 'function') renderGrid();
+                            } catch(e){}
+                        }, 300);
                     }
                 } catch(e){}
             });
@@ -40196,11 +40215,11 @@
             
             console.log('=== 🎉 DOMContentLoaded COMPLETE (UI ready, loading in background) ===');
         });
-        // Also try to connect immediately in case DOMContentLoaded already fired
+        // Defer POI-on-load check — runs well after first paint to avoid startup congestion
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', checkPOIOnLoad);
+            document.addEventListener('DOMContentLoaded', () => setTimeout(checkPOIOnLoad, 1500));
         } else {
-            setTimeout(checkPOIOnLoad, 300);
+            setTimeout(checkPOIOnLoad, 1500);
         }
         
         // =================== DEBUG: ZOOM & RESIZE MONITORING ===================
