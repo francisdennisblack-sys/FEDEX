@@ -34617,13 +34617,37 @@
                 if (!haveSamePostMembershipById(next, prev)) return next;
 
                 const lockSlots = Math.max(0, Number(options.lockSlots) || 12);
+                // If the user is not looking at the top of the grid (scrolled away),
+                // allow more frequent rotation of the top slots by reducing the
+                // number of preserved locked slots. This makes it safe to update
+                // the top-positioned posts while the user isn't observing them.
+                let effectiveLockSlots = lockSlots;
+                try {
+                    const topBox = document.getElementById('box-1');
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        try {
+                            const r = el.getBoundingClientRect();
+                            const vh = (window.innerHeight || document.documentElement.clientHeight);
+                            const vw = (window.innerWidth || document.documentElement.clientWidth);
+                            return !(r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw);
+                        } catch (e) { return false; }
+                    };
+                    const topVisible = isVisible(topBox);
+                    if (!topVisible) {
+                        // Reduce lock window to 25% of configured size (min 1)
+                        effectiveLockSlots = Math.max(1, Math.floor(lockSlots * 0.25));
+                        console.log(`🔁 Top slot not visible — reducing ML lockSlots ${lockSlots}→${effectiveLockSlots} to allow rotation`);
+                    }
+                } catch (e) { /* ignore visibility checks */ }
+                if (effectiveLockSlots <= 0) return next;
                 if (lockSlots <= 0) return next;
 
                 const nextById = new Map(next.map(p => [String(p.id), p]));
                 const lockedIds = [];
                 const lockedSet = new Set();
 
-                for (let i = 0; i < Math.min(lockSlots, prev.length); i++) {
+                for (let i = 0; i < Math.min(effectiveLockSlots, prev.length); i++) {
                     const id = prev[i] && prev[i].id ? String(prev[i].id) : null;
                     if (!id || !nextById.has(id) || lockedSet.has(id)) continue;
                     lockedIds.push(id);
