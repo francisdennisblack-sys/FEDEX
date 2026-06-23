@@ -9622,8 +9622,10 @@
         // Decides how much and how often the user's grid should turn over,
         // while PROTECTING the post the user is actively viewing/liking.
         //
-        // Hard composition rule for every grid: 80 / 10 / 10
-        //   • 80% — content from users as LOCAL as possible
+        // Hard composition rule for every grid: 60 / 20 / 10 / 10
+        //   • 60% — content from users as LOCAL as possible
+        //   • 20% — the SURROUNDING area's most-liked content (best net-score posts
+        //           just beyond the local reach, out to ~100mi)
         //   • 10% — the website's highest net-score posts (global)
         //   • 10% — boosted posts
         //
@@ -9639,7 +9641,8 @@
         // ============================================================
         const GridReplacementML = {
             // Composition targets (hard rule)
-            TARGET_LOCAL: 0.80,
+            TARGET_LOCAL: 0.60,
+            TARGET_SURROUNDING: 0.20,
             TARGET_TOP: 0.10,
             TARGET_BOOST: 0.10,
 
@@ -9762,16 +9765,17 @@
             dueForReplacement() { return (Date.now() - this._lastReplaceAt) >= this.getReplaceIntervalMs(); },
             markReplaced() { this._lastReplaceAt = Date.now(); },
 
-            // Target slot counts for an 80/10/10 grid of the given size.
+            // Target slot counts for a 60/20/10/10 grid of the given size.
             targetCounts(gridSize) {
                 const n = Math.max(0, Number(gridSize) || 0);
                 const boost = Math.round(n * this.TARGET_BOOST);
                 const top = Math.round(n * this.TARGET_TOP);
-                const local = Math.max(0, n - boost - top);
-                return { local, top, boost };
+                const surrounding = Math.round(n * this.TARGET_SURROUNDING);
+                const local = Math.max(0, n - boost - top - surrounding);
+                return { local, surrounding, top, boost };
             },
 
-            // Build an 80/10/10 grid from a candidate pool, keeping protected posts and
+            // Build a 60/20/10/10 grid from a candidate pool, keeping protected posts and
             // honouring the current locality reach. Never throws; falls back safely.
             compose(pool, gridSize, currentGrid) {
                 try {
@@ -9792,11 +9796,17 @@
                     }
 
                     // 2) Categorize the pool
-                    const boosts = [], locals = [], fillers = [];
+                    //   • locals       — within the current local reach
+                    //   • surrounding  — just beyond local reach, out to BAND_FAR_MI (~100mi)
+                    //   • fillers      — everything farther away
+                    const boosts = [], locals = [], surrounding = [], fillers = [];
                     for (const p of pool) {
                         if (!p || !p.id || used.has(p.id)) continue;
                         if (this.isBoost(p)) { boosts.push(p); continue; }
-                        if (this.distanceMi(p) <= reach) locals.push(p); else fillers.push(p);
+                        const d = this.distanceMi(p);
+                        if (d <= reach) locals.push(p);
+                        else if (d <= this.BAND_FAR_MI) surrounding.push(p);
+                        else fillers.push(p);
                     }
                     const tops = pool.filter(p => p && p.id && !used.has(p.id) && !this.isBoost(p)).sort((a, b) => this.net(b) - this.net(a));
                     locals.sort((a, b) => {
@@ -9806,6 +9816,9 @@
                         const cb = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(b) : 0;
                         return cb - ca;
                     });
+                    // Surrounding bucket is the surrounding area's MOST-LIKED content:
+                    // rank purely by net engagement (likes − dislikes), highest first.
+                    surrounding.sort((a, b) => this.net(b) - this.net(a));
                     boosts.sort((a, b) => this.net(b) - this.net(a));
 
                     const take = (arr, count) => {
@@ -9817,9 +9830,12 @@
                     };
                     take(boosts, targets.boost);
                     take(tops, targets.top);
+                    take(surrounding, targets.surrounding);
                     take(locals, targets.local);
-                    // Backfill remaining slots: nearer first, then farther, then anything.
+                    // Backfill remaining slots: nearer first, then the surrounding
+                    // area's most-liked content, then farther, then anything.
                     take(locals, size - result.length);
+                    take(surrounding, size - result.length);
                     take(fillers, size - result.length);
                     take(tops, size - result.length);
                     take(pool, size - result.length);
