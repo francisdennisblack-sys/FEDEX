@@ -23493,6 +23493,14 @@
             if (nextBtn) nextBtn.addEventListener('click', () => goTo(current + 1));
             dots.forEach(d => d.addEventListener('click', () => goTo(Number(d.dataset.index))));
 
+            // Allow tapping any slide to open full-screen gallery starting at that index
+            slides.forEach((s, si) => {
+                s.style.touchAction = 'manipulation';
+                s.addEventListener('click', (ev) => {
+                    try { ev.stopPropagation(); openFullScreenMedia(post && post.id ? post.id : (post && post._tempId) || '', si); } catch (e) {}
+                });
+            });
+
             // Keep the active index in sync with manual swipe/scroll.
             let scrollTimer = null;
             track.addEventListener('scroll', () => {
@@ -23512,6 +23520,103 @@
             updateUI();
         }
         try { window.buildPostMediaList = buildPostMediaList; window.renderPostMediaCarousel = renderPostMediaCarousel; } catch (e) {}
+
+        // Fullscreen media overlay: render and navigation helpers
+        (function(){
+            // Create overlay element lazily
+            function ensureOverlay() {
+                let ov = document.getElementById('fullScreenMediaOverlay');
+                if (ov) return ov;
+                ov = document.createElement('div');
+                ov.id = 'fullScreenMediaOverlay';
+                ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,0.95);display:none;align-items:center;justify-content:center;overflow:hidden;';
+                ov.innerHTML = `
+                    <div id="fullScreenMediaInner" style="position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+                        <button id="fullScreenCloseBtn" aria-label="Close media" style="position:absolute;right:18px;top:18px;z-index:100002;background:rgba(0,0,0,0.45);border:none;color:#fff;font-size:22px;width:46px;height:46px;border-radius:999px;display:flex;align-items:center;justify-content:center;">×</button>
+                        <div id="fullScreenMediaMount" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;"></div>
+                    </div>`;
+                document.body.appendChild(ov);
+                // Close handlers
+                const closeBtn = ov.querySelector('#fullScreenCloseBtn');
+                closeBtn.addEventListener('click', closeFullScreenMedia);
+                ov.addEventListener('click', (e) => { if (e.target === ov) closeFullScreenMedia(); });
+                return ov;
+            }
+
+            let fsState = { list: [], current: 0, postId: null };
+
+            function renderFullScreenGallery(list, startIndex) {
+                const ov = ensureOverlay();
+                const mount = ov.querySelector('#fullScreenMediaMount');
+                if (!mount) return;
+                fsState.list = Array.isArray(list) ? list.slice(0, 50) : [];
+                fsState.current = Math.max(0, Math.min((startIndex||0), fsState.list.length - 1));
+                mount.innerHTML = fsState.list.map((item, i) => `<div class="fs-slide" data-index="${i}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:auto;">${buildSlideMediaHTML(item, null, i)}</div>`).join('') +
+                    (fsState.list.length > 1 ? `
+                        <button id="fsPrev" aria-label="Previous" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);z-index:100003;background:rgba(0,0,0,0.35);border:none;color:#fff;font-size:36px;padding:8px 12px;border-radius:8px;">‹</button>
+                        <button id="fsNext" aria-label="Next" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:100003;background:rgba(0,0,0,0.35);border:none;color:#fff;font-size:36px;padding:8px 12px;border-radius:8px;">›</button>
+                        <div id="fsCounter" style="position:absolute;left:50%;transform:translateX(-50%);bottom:18px;z-index:100003;color:#fff;font-size:14px;padding:6px 10px;background:rgba(0,0,0,0.3);border-radius:999px;">${fsState.current+1} / ${fsState.list.length}</div>
+                    ` : '');
+                // Initialize videos inside overlay
+                setupCarouselVideos(mount);
+
+                const slides = Array.from(mount.querySelectorAll('.fs-slide'));
+                function updateFSUI() {
+                    slides.forEach((s, si) => { s.style.display = si === fsState.current ? 'flex' : 'none'; const v = s.querySelector('video'); if (v && si !== fsState.current) try{ v.pause(); }catch(e){} });
+                    const counter = document.getElementById('fsCounter'); if (counter) counter.textContent = (fsState.current+1) + ' / ' + fsState.list.length;
+                }
+                function go(i) { fsState.current = Math.max(0, Math.min(fsState.list.length-1, i)); updateFSUI(); }
+                updateFSUI();
+
+                // Prev/Next handlers
+                const prev = mount.querySelector('#fsPrev'); const next = mount.querySelector('#fsNext');
+                if (prev) prev.onclick = () => go(fsState.current - 1);
+                if (next) next.onclick = () => go(fsState.current + 1);
+
+                // Touch swipe handlers
+                let tx = 0; let dragging = false; let lastTx = 0;
+                mount.addEventListener('touchstart', e => { if (!e.touches || !e.touches[0]) return; tx = e.touches[0].clientX; dragging = true; lastTx = tx; });
+                mount.addEventListener('touchmove', e => { if (!dragging || !e.touches || !e.touches[0]) return; lastTx = e.touches[0].clientX; });
+                mount.addEventListener('touchend', e => { if (!dragging) return; dragging = false; const delta = (lastTx || tx) - tx; if (Math.abs(delta) > 40) { if (delta < 0) go(fsState.current + 1); else go(fsState.current - 1); } });
+
+                // Keyboard nav
+                function onKey(e) {
+                    if (e.key === 'Escape') { closeFullScreenMedia(); }
+                    else if (e.key === 'ArrowLeft') { go(fsState.current - 1); }
+                    else if (e.key === 'ArrowRight') { go(fsState.current + 1); }
+                }
+                document.addEventListener('keydown', onKey);
+                // store cleanup handler reference
+                mount._onKey = onKey;
+            }
+
+            window.openFullScreenMedia = function(postId, index){
+                try {
+                    const p = findPostForModalActions(postId) || (postId && postCache && postCache[postId]) || null;
+                    const list = (typeof buildPostMediaList === 'function' && p) ? buildPostMediaList(p) : (p && p.media ? p.media : []);
+                    if (!list || !list.length) return;
+                    const ov = ensureOverlay();
+                    ov.style.display = 'flex';
+                    renderFullScreenGallery(list, index || 0);
+                    // prevent background scroll
+                    document.documentElement.style.overflow = 'hidden';
+                    document.body.style.overflow = 'hidden';
+                } catch (e) { console.warn('openFullScreenMedia failed', e); }
+            };
+
+            window.closeFullScreenMedia = function(){
+                try {
+                    const ov = document.getElementById('fullScreenMediaOverlay');
+                    if (!ov) return;
+                    const mount = ov.querySelector('#fullScreenMediaMount');
+                    if (mount && mount._onKey) document.removeEventListener('keydown', mount._onKey);
+                    ov.style.display = 'none';
+                    if (mount) mount.innerHTML = '';
+                    document.documentElement.style.overflow = '';
+                    document.body.style.overflow = '';
+                } catch (e) { console.warn('closeFullScreenMedia failed', e); }
+            };
+        })();
 
         // Locate the live post object so replica modal buttons reflect current counts.
         function findPostForModalActions(postId) {
