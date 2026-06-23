@@ -29181,6 +29181,25 @@
         const CROSS_AREA_MAX_MS     = 3 * 60 * 1000;
         const CROSS_AREA_RATE_MS    = 1000;          // 1 post/sec throttle
 
+        // Recent hard-refresh marker: set at startup so initial page loads
+        // are treated as a 'hard refresh' and allowed faster bulk loading
+        // for a short window.
+        try { window.__recentHardRefreshAt = Date.now(); } catch (e) {}
+
+        // Helper: allow very fast bulk loads (10ms per item) when the user
+        // just performed a location commit or the page just loaded.
+        function isFastBulkLoadAllowed() {
+            try {
+                const now = Date.now();
+                const lastLoc = Number(window.__lastLocationCommitAt || 0);
+                const recentHard = Number(window.__recentHardRefreshAt || 0);
+                // 5s grace window after a location commit or hard refresh
+                if (lastLoc && (now - lastLoc) < 5000) return true;
+                if (recentHard && (now - recentHard) < 5000) return true;
+            } catch (e) {}
+            return false;
+        }
+
         window.refreshSession = window.refreshSession || {
             count: 0,
             crossAreaStartedAt: 0,
@@ -29462,7 +29481,8 @@
             let crossAreaRateBudget = 0;
             if (crossAreaOn) {
                 const elapsed = Date.now() - rs.crossAreaStartedAt;
-                const allowed = Math.min(CROSS_AREA_MAX_POSTS, Math.floor(elapsed / CROSS_AREA_RATE_MS));
+                const rateMs = isFastBulkLoadAllowed() ? 10 : CROSS_AREA_RATE_MS;
+                const allowed = Math.min(CROSS_AREA_MAX_POSTS, Math.floor(elapsed / rateMs));
                 crossAreaRateBudget = Math.max(0, allowed - rs.crossAreaServed);
             }
 
@@ -33968,7 +33988,7 @@
         window.requestGridUpdate = function(reason) {
             try {
                 const now = Date.now();
-                const MIN_MS = 1000; // max 1 update per second for incremental
+                const MIN_MS = isFastBulkLoadAllowed() ? 10 : 1000; // allow fast updates after refresh/loc commit
                 if (now - (window._lastIncrementalRender || 0) < MIN_MS) {
                     // schedule a deferred incremental render at MIN_MS boundary
                     if (window._gridUpdateTimeout) clearTimeout(window._gridUpdateTimeout);
@@ -33986,8 +34006,10 @@
         function renderGridIncremental(reason) {
             try {
                 const now = Date.now();
-                // enforce 1s throttle as a safety net
-                if (now - (window._lastIncrementalRender || 0) < 900) return;
+                // enforce throttle as a safety net (normally 900ms). Reduce to
+                // ~10ms when fast bulk loading is allowed (hard refresh / location commit).
+                const safetyThreshold = isFastBulkLoadAllowed() ? 9 : 900;
+                if (now - (window._lastIncrementalRender || 0) < safetyThreshold) return;
                 window._lastIncrementalRender = now;
                 console.log(`⚡ incremental render triggered (${reason || 'unspecified'})`);
 
