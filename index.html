@@ -5443,39 +5443,112 @@
         window.fsGetDoc = getDoc;
         window.fsOnSnapshot = fsOnSnapshot;
 
+        // ── FIRESTORE LOCATION TRACKING SYSTEM ──────────────────────────────────────
+        // Document structure: users/{uid}
+        //   location          — active location the app uses for feed/proximity
+        //   realLocation      — most recent real GPS location (updated as user moves)
+        //   committedLocation — manual override set via "Change Location" (null if none)
+        //   locationMode      — 'real' | 'committed'
+        // ─────────────────────────────────────────────────────────────────────────────
+
+        // Internal GPS watch handle and throttle
+        let _fsGpsWatchId = null;
+        let _fsLastGpsWriteAt = 0;
+        const FS_GPS_THROTTLE_MS = 30000; // write real location at most every 30s
+
         /**
-         * Save the user's precise location to Firestore under users/{uid}/location.
-         * Called automatically on every location commit.
+         * Commit a manual location override.
+         * Writes committedLocation + sets location = committedLocation + locationMode = 'committed'.
          */
         window.saveUserLocationToFirestore = async function(uid, lat, lon, label, extra) {
             if (!uid || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
             try {
+                const now = Date.now();
                 const locData = {
                     lat,
                     lon,
                     label: label || null,
                     accuracy: (extra && extra.accuracy) || null,
                     source: (extra && extra.source) || 'manual',
-                    updatedAt: Date.now()
+                    updatedAt: now
                 };
-                await setDoc(doc(firestore, 'users', uid), { location: locData }, { merge: true });
-                console.log('✅ Firestore: saved location for', uid, lat, lon);
+                await setDoc(doc(firestore, 'users', uid), {
+                    location: locData,
+                    committedLocation: locData,
+                    locationMode: 'committed'
+                }, { merge: true });
+                console.log('✅ Firestore: committed location for', uid, lat, lon);
             } catch (e) {
                 console.warn('saveUserLocationToFirestore failed:', e);
             }
         };
 
         /**
-         * Read the user's saved location from Firestore.
-         * Returns { lat, lon, label, accuracy, source, updatedAt } or null.
+         * Update the user's real (GPS) location in Firestore.
+         * Also updates location + locationMode='real' if no committed override is active.
+         * Throttled to FS_GPS_THROTTLE_MS.
+         */
+        window.updateRealLocationInFirestore = async function(uid, lat, lon, accuracy) {
+            if (!uid || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+            const now = Date.now();
+            if (now - _fsLastGpsWriteAt < FS_GPS_THROTTLE_MS) return; // throttle
+            _fsLastGpsWriteAt = now;
+            try {
+                const realLoc = { lat, lon, accuracy: accuracy || null, updatedAt: now, source: 'gps' };
+                // Read current mode first (use cache to avoid extra read if possible)
+                const snap = await getDoc(doc(firestore, 'users', uid));
+                const currentMode = snap.exists() ? (snap.data().locationMode || 'real') : 'real';
+                const update = { realLocation: realLoc };
+                if (currentMode !== 'committed') {
+                    // No manual override active — keep active location in sync with GPS
+                    update.location = realLoc;
+                    update.locationMode = 'real';
+                }
+                await setDoc(doc(firestore, 'users', uid), update, { merge: true });
+                console.log('📍 Firestore: updated realLocation for', uid, lat, lon);
+            } catch (e) {
+                console.warn('updateRealLocationInFirestore failed:', e);
+            }
+        };
+
+        /**
+         * Return Home: restore the user's real GPS location as the active location.
+         * Clears committedLocation and sets locationMode = 'real'.
+         */
+        window.restoreRealLocationInFirestore = async function(uid) {
+            if (!uid) return null;
+            try {
+                const snap = await getDoc(doc(firestore, 'users', uid));
+                if (!snap.exists()) return null;
+                const data = snap.data();
+                const real = data && data.realLocation;
+                if (!real || !Number.isFinite(real.lat) || !Number.isFinite(real.lon)) {
+                    console.log('ℹ️ Firestore: no realLocation to restore for', uid);
+                    return null;
+                }
+                await setDoc(doc(firestore, 'users', uid), {
+                    location: real,
+                    committedLocation: null,
+                    locationMode: 'real'
+                }, { merge: true });
+                console.log('🏠 Firestore: restored real location for', uid, real.lat, real.lon);
+                return real;
+            } catch (e) {
+                console.warn('restoreRealLocationInFirestore failed:', e);
+                return null;
+            }
+        };
+
+        /**
+         * Read the user's full location document from Firestore.
+         * Returns the full document data or null.
          */
         window.getUserLocationFromFirestore = async function(uid) {
             if (!uid) return null;
             try {
                 const snap = await getDoc(doc(firestore, 'users', uid));
                 if (!snap.exists()) return null;
-                const data = snap.data();
-                return (data && data.location) ? data.location : null;
+                return snap.data() || null;
             } catch (e) {
                 console.warn('getUserLocationFromFirestore failed:', e);
                 return null;
@@ -5483,7 +5556,8 @@
         };
 
         /**
-         * Subscribe to real-time location updates for a user from Firestore.
+         * Subscribe to real-time location document updates for a user from Firestore.
+         * callback receives the full document { location, realLocation, committedLocation, locationMode }.
          * Returns an unsubscribe function.
          */
         window.subscribeUserLocationFromFirestore = function(uid, callback) {
@@ -5492,7 +5566,7 @@
                 return fsOnSnapshot(doc(firestore, 'users', uid), (snap) => {
                     try {
                         const data = snap && snap.exists() ? snap.data() : null;
-                        callback((data && data.location) ? data.location : null);
+                        callback(data);
                     } catch (e) { console.warn('Firestore location snapshot error', e); }
                 });
             } catch (e) {
@@ -5500,7 +5574,93 @@
                 return () => {};
             }
         };
-        console.log('✅ Firestore initialized and location helpers exposed');
+
+        /**
+         * Start continuous GPS tracking for a signed-in user.
+         * Uses watchPosition — fires whenever the device detects movement.
+         * Writes are throttled (FS_GPS_THROTTLE_MS) to avoid excessive Firestore costs.
+         * Call stopRealtimeLocationTracking() to cancel.
+         */
+        window.startRealtimeLocationTracking = function(uid) {
+            if (!uid) return;
+            if (_fsGpsWatchId !== null) return; // already watching
+            if (!navigator.geolocation) {
+                console.log('ℹ️ Geolocation not available — real-time tracking skipped');
+                return;
+            }
+            _fsGpsWatchId = navigator.geolocation.watchPosition(
+                (pos) => {
+                    const { latitude, longitude, accuracy } = pos.coords;
+                    // Also update the in-memory userLocation cache (lexical binding via syncRuntimeLocationFromCommit
+                    // handles the committed path; here we only update when in real mode)
+                    try {
+                        const mode = window.__fsLocationMode || 'real';
+                        if (mode === 'real') {
+                            try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: { lat: latitude, lon: longitude, accuracy }, userSelected: false }); } catch(e) {}
+                        }
+                    } catch(e) {}
+                    // Write to Firestore (throttled)
+                    window.updateRealLocationInFirestore(uid, latitude, longitude, accuracy);
+                },
+                (err) => { console.warn('GPS watchPosition error:', err.message); },
+                { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 }
+            );
+            console.log('✅ Firestore: real-time GPS tracking started for', uid, '(watchId:', _fsGpsWatchId, ')');
+        };
+
+        window.stopRealtimeLocationTracking = function() {
+            if (_fsGpsWatchId !== null) {
+                try { navigator.geolocation.clearWatch(_fsGpsWatchId); } catch(e) {}
+                _fsGpsWatchId = null;
+                console.log('⏹ Firestore: GPS tracking stopped');
+            }
+        };
+
+        // Mirror locationMode into window.__fsLocationMode so watchPosition callback can read it
+        // without an async Firestore read on every GPS ping.
+        window.__fsLocationMode = 'real';
+
+        // Subscribe to the signed-in user's location doc so window.__fsLocationMode stays current.
+        // Also restores active location into memory on page load if a committed location is stored.
+        function _startFsLocationSync(uid) {
+            if (!uid) return;
+            window.subscribeUserLocationFromFirestore(uid, (data) => {
+                try {
+                    if (!data) return;
+                    window.__fsLocationMode = data.locationMode || 'real';
+                    // On first load, if there is a committed location, apply it into memory
+                    if (data.locationMode === 'committed' && data.committedLocation && data.committedLocation.lat) {
+                        try {
+                            if (typeof window.syncRuntimeLocationFromCommit === 'function') {
+                                window.syncRuntimeLocationFromCommit({
+                                    coords: data.committedLocation,
+                                    label: data.committedLocation.label || null
+                                });
+                            }
+                        } catch(e) {}
+                    }
+                } catch(e) {}
+            });
+        }
+
+        // Hook into onAuthStateChanged to auto-start tracking when user signs in.
+        // This runs AFTER the main onAuthStateChanged handler so currentUserId is already set.
+        setTimeout(() => {
+            try {
+                onAuthStateChanged(auth, (user) => {
+                    if (user && user.uid) {
+                        window.__fsLocationMode = 'real';
+                        _startFsLocationSync(user.uid);
+                        window.startRealtimeLocationTracking(user.uid);
+                    } else {
+                        window.stopRealtimeLocationTracking();
+                        window.__fsLocationMode = 'real';
+                    }
+                });
+            } catch(e) { console.warn('Firestore location tracking auth hook failed', e); }
+        }, 500); // slight delay so main auth handler runs first
+
+        console.log('✅ Firestore location tracking system ready');
         // ────────────────────────────────────────────────────────────────────────────
         // Persist and restore the user's selected area tag so selections survive navigation
         window.persistZoneTagForUser = function(tag, options = {}) {
@@ -44945,8 +45105,8 @@
                                     changedAt: Date.now(),
                                     updatedAt: Date.now()
                                 }).then(() => console.log('✅ Restored real location synced to users/' + uid + '/location')).catch((err) => console.warn('Could not sync restored location to Firebase', err));
-                                // Also sync restored location to Firestore
-                                try { if (typeof window.saveUserLocationToFirestore === 'function') window.saveUserLocationToFirestore(uid, rlat, rlon, (cacheObj.label || cacheObj.name || null), { accuracy: Number(cacheObj.accuracy) || 100, source: 'auto' }); } catch (e) { console.warn('Firestore restore location save failed', e); }
+                                // Also sync restored location to Firestore — restores realLocation as active and clears committedLocation
+                                try { if (typeof window.restoreRealLocationInFirestore === 'function') window.restoreRealLocationInFirestore(uid).then(real => { if (real) try { window.__fsLocationMode = 'real'; } catch(e){} }).catch(()=>{}); } catch (e) { console.warn('Firestore restore location failed', e); }
                                 try { if (typeof window.trackUserLocation === 'function') window.trackUserLocation(uid, rlat, rlon); } catch (e) {}
                             }
                         } catch (e) { console.warn('Failed to sync restored location to Firebase', e); }
