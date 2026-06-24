@@ -6,8 +6,14 @@
         /* Center action buttons in the post view modal */
         #viewActionRow { justify-content: center !important; width: 100%; }
     </style>
-            <title>Local Grid - POI Proximity</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+                <title>Local social media</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+            <meta name="description" content="Local social media" />
+            <meta property="og:title" content="Local social media" />
+            <meta property="og:description" content="Local social media" />
+            <meta name="twitter:card" content="summary" />
+            <meta name="twitter:title" content="Local social media" />
+            <meta name="twitter:description" content="Local social media" />
     <script>
     </script>
     <script>
@@ -402,6 +408,68 @@
             } catch (error) {
                 console.error('❌ Failed to update post zone on server for', postId, error);
             }
+        }
+
+        // When a user selects/uses the `Local area` tag during post creation,
+        // attempt to re-request geolocation permission so we can get an accurate
+        // GPS fix. If the Permissions API reports 'denied', show a small UI
+        // offering a retry and brief instructions — browsers will not re-prompt
+        // automatically while the permission is permanently denied.
+        async function maybePromptLocationOnLocalAreaUse() {
+            try {
+                if (!navigator.geolocation) return null;
+                let permState = 'prompt';
+                try {
+                    if (navigator.permissions && navigator.permissions.query) {
+                        const p = await navigator.permissions.query({ name: 'geolocation' });
+                        permState = p && p.state ? p.state : 'prompt';
+                    }
+                } catch (e) { /* assume prompt */ }
+
+                if (permState === 'granted' || permState === 'prompt') {
+                    // This will trigger the browser prompt when state is 'prompt'.
+                    const loc = await getFreshGeolocation(8000);
+                    return loc;
+                }
+
+                // permState === 'denied' -> show lightweight UI to allow user to retry
+                return await new Promise((resolve) => {
+                    try {
+                        const existing = document.getElementById('locationRetryBanner');
+                        if (existing) existing.parentNode.removeChild(existing);
+                        const banner = document.createElement('div');
+                        banner.id = 'locationRetryBanner';
+                        banner.style.cssText = 'position:fixed;left:12px;right:12px;bottom:20px;z-index:12000;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;background:rgba(17,24,39,0.96);color:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(2,6,23,0.6);font-size:13px;';
+                        banner.innerHTML = `
+                            <div style="flex:1;">We noticed you selected <strong>Local area</strong>. To improve accuracy, please enable Location in your browser settings or retry the request.</div>
+                            <div style="display:flex;gap:8px;align-items:center;margin-left:12px;">
+                                <button id="retryLocationBtn" style="background:#10b981;border:none;color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer">Retry</button>
+                                <button id="openSettingsBtn" style="background:transparent;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer">How to enable</button>
+                                <button id="dismissLocationBanner" style="background:transparent;border:none;color:#9ca3af;padding:8px 10px;border-radius:8px;cursor:pointer">Dismiss</button>
+                            </div>
+                        `;
+                        document.body.appendChild(banner);
+
+                        document.getElementById('retryLocationBtn').addEventListener('click', async () => {
+                            try { banner.remove(); } catch(_){}
+                            const loc = await getFreshGeolocation(8000);
+                            resolve(loc);
+                        });
+
+                        document.getElementById('openSettingsBtn').addEventListener('click', () => {
+                            try {
+                                // Provide brief instructions in a modal-like alert for now.
+                                alert('To enable location: open your browser settings → Site Settings → Location → allow for this site. Then retry.');
+                            } catch (e) {}
+                        });
+
+                        document.getElementById('dismissLocationBanner').addEventListener('click', () => {
+                            try { banner.remove(); } catch(_){}
+                            resolve(null);
+                        });
+                    } catch (e) { console.warn('maybePromptLocationOnLocalAreaUse UI failed', e); resolve(null); }
+                });
+            } catch (e) { console.warn('maybePromptLocationOnLocalAreaUse failed', e); return null; }
         }
 
         // Ensure a newly created/inserted post is visible immediately to the user.
@@ -4045,70 +4113,6 @@
                     } catch (e) { console.warn('Failed to expose profile helpers', e); }
                 })();
         </script>
-
-    <!-- One-off geolocation consent banner: shown only when Permissions API reports 'prompt' or when user hasn't acted yet -->
-    <div id="geoConsentBanner" style="display:none; position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:linear-gradient(180deg,#0b1220,#071018); color:#ffffff; padding:12px 14px; border-radius:12px; z-index:2147483647; box-shadow:0 12px 40px rgba(2,6,23,0.6); align-items:center; gap:10px; font-size:14px;">
-        <div style="display:flex; align-items:center; gap:12px;">
-            <span style="font-weight:700;">Allow location to improve area tagging</span>
-            <span id="geoConsentHelp" style="font-weight:500; opacity:0.9; font-size:13px;">Only asked once — used to suggest better areas.</span>
-        </div>
-        <div style="display:flex; gap:8px; margin-left:12px;">
-            <button id="geoConsentBtn" style="background:#10b981; border:none; color:#071018; padding:8px 12px; border-radius:8px; font-weight:700; cursor:pointer;">Enable Location</button>
-            <button id="geoConsentDismiss" style="background:transparent; border:1px solid rgba(255,255,255,0.12); color:#fff; padding:8px 12px; border-radius:8px; cursor:pointer;">Dismiss</button>
-        </div>
-    </div>
-
-    <script>
-    (function setupGeoConsentUI(){
-        const STORAGE_KEY = 'geoConsent_v1'; // values: 'accepted'|'dismissed'
-        function showBanner() { const b = document.getElementById('geoConsentBanner'); if (b) b.style.display = 'flex'; }
-        function hideBanner() { const b = document.getElementById('geoConsentBanner'); if (b) b.style.display = 'none'; }
-        async function requestLocationOnce() {
-            if (!('geolocation' in navigator)) return;
-            try {
-                navigator.geolocation.getCurrentPosition(pos => {
-                    try { window.diagnosticState = window.diagnosticState || {}; window.diagnosticState.lastLocation = pos.coords; window.diagnosticState.lastLocationUpdate = Date.now(); } catch(e){}
-                }, err => { console.warn('Geolocation error', err); }, { maximumAge: 1000 * 60 * 5, timeout: 10000 });
-            } catch (e) { console.warn('requestLocationOnce failed', e); }
-        }
-
-        async function init() {
-            try {
-                const stored = (function(){ try { return localStorage.getItem(STORAGE_KEY); } catch(e){ return null; }})();
-                if (stored === 'accepted') { requestLocationOnce(); return; }
-                if (stored === 'dismissed') { return; }
-
-                if (!('permissions' in navigator)) {
-                    // Fallback: show banner so user can opt-in manually
-                    showBanner();
-                    return;
-                }
-
-                const p = await navigator.permissions.query({ name: 'geolocation' });
-                if (p && p.state === 'granted') { try { localStorage.setItem(STORAGE_KEY, 'accepted'); } catch(e){}; requestLocationOnce(); return; }
-                if (p && p.state === 'denied') { try { localStorage.setItem(STORAGE_KEY, 'dismissed'); } catch(e){}; return; }
-
-                // If prompt, show the banner and wait for explicit user tap
-                showBanner();
-
-                // Listen for external state changes (user granting via browser UI)
-                try { p.onchange = function() { if (p.state === 'granted') { try { localStorage.setItem(STORAGE_KEY, 'accepted'); } catch(e){}; requestLocationOnce(); hideBanner(); } }; } catch(e){}
-            } catch (e) { console.warn('init geo consent failed', e); showBanner(); }
-        }
-
-        document.addEventListener('DOMContentLoaded', function(){
-            const btn = document.getElementById('geoConsentBtn');
-            const dismiss = document.getElementById('geoConsentDismiss');
-            if (btn) btn.addEventListener('click', function(){
-                try { localStorage.setItem(STORAGE_KEY, 'accepted'); } catch(e){}
-                requestLocationOnce(); hideBanner();
-            });
-            if (dismiss) dismiss.addEventListener('click', function(){ try { localStorage.setItem(STORAGE_KEY, 'dismissed'); } catch(e){}; hideBanner(); });
-            // Kick off permission check after DOM ready
-            init();
-        });
-    })();
-    </script>
 
     <div class="container">
         <div class="grid-wrapper">
@@ -8184,6 +8188,61 @@
             return null;
         }
 
+        // Fallback grid: generate a deterministic set of 100 lat/lon points
+        // to use when the user explicitly denies browser geolocation.
+        (function installFallbackGrid(){
+            function mulberry32(a) {
+                return function() {
+                    var t = a += 0x6D2B79F5;
+                    t = Math.imul(t ^ t >>> 15, t | 1);
+                    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+                    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+                }
+            }
+
+            function generateFallbackPoints(seed = 20260624, count = 100) {
+                const rnd = mulberry32(seed >>> 0);
+                const pts = [];
+                for (let i = 0; i < count; i++) {
+                    // Spread points worldwide but avoid extreme polar latitudes
+                    const lat = -60 + rnd() * 120;   // -60 .. +60
+                    const lon = -180 + rnd() * 360;  // -180 .. +180
+                    pts.push({ lat: Number(lat.toFixed(5)), lon: Number(lon.toFixed(5)) });
+                }
+                return pts;
+            }
+
+            window.FALLBACK_GRID_POINTS = generateFallbackPoints(20260624, 100);
+
+            window.getFallbackPointIndex = function() {
+                try {
+                    // Prefer a session-sticky index so the user sees consistent behavior
+                    let idx = sessionStorage.getItem('fallbackPointIndex');
+                    if (idx != null) return Number(idx);
+
+                    // Round-robin counter persisted across sessions to rotate assignment
+                    const key = 'fallbackPointCounter';
+                    let ctr = Number(localStorage.getItem(key) || '0');
+                    ctr = (ctr + 1) % window.FALLBACK_GRID_POINTS.length;
+                    localStorage.setItem(key, String(ctr));
+                    sessionStorage.setItem('fallbackPointIndex', String(ctr));
+                    return ctr;
+                } catch (e) {
+                    const r = Math.floor(Math.random() * window.FALLBACK_GRID_POINTS.length);
+                    try { sessionStorage.setItem('fallbackPointIndex', String(r)); } catch(_){}
+                    return r;
+                }
+            };
+
+            window.getFallbackLocation = function() {
+                const i = window.getFallbackPointIndex();
+                const p = window.FALLBACK_GRID_POINTS[i];
+                const loc = { lat: p.lat, lon: p.lon, accuracy: 5000, source: 'fallback-grid', fallbackIndex: i };
+                console.log('📍 Using fallback-grid location index', i, loc.lat, loc.lon);
+                return loc;
+            };
+        })();
+
         // Request geolocation without triggering the browser permission dialog unless explicitly enabled
         function requestGeolocation() {
             return new Promise(async (resolve) => {
@@ -8237,6 +8296,18 @@
                                 permState = p && p.state ? p.state : 'prompt';
                             }
                         } catch (e) { /* permissions API unavailable — assume prompt */ }
+
+                        // If the user has explicitly denied geolocation, use the
+                        // privacy-preserving fallback grid (rotating assignment).
+                        if (permState === 'denied') {
+                            try {
+                                userLocation = (typeof getFallbackLocation === 'function') ? getFallbackLocation() : { lat: 40.7150, lon: -74.0070, accuracy: 10000 };
+                                setUserLocationCache && typeof setUserLocationCache === 'function' && setUserLocationCache(userLocation);
+                                updateLocationStatus('⚠️ Denied → Grid', `${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}`);
+                                startContinuousLocationTracking();
+                                return resolve(userLocation);
+                            } catch (e) { console.warn('Fallback-grid selection failed', e); }
+                        }
 
                         // Request REAL GPS when permission is granted OR not-yet-decided (prompt).
                         // For `prompt`, getCurrentPosition() will trigger the browser's
@@ -39693,6 +39764,31 @@
                     console.warn('⚠️ Step 3 PRECHECK: Area tag still stale after refresh attempt');
                 }
             }
+
+            // If user is explicitly using the neutral 'Local area' tag, attempt
+            // to re-request geolocation so we can acquire a precise location for
+            // routing. This will trigger a browser prompt when possible; if the
+            // permission is denied we'll show a retry UI.
+            try {
+                const normalized = String(currentZoneTag || '').trim().toLowerCase();
+                if (normalized === 'local area' || normalized === 'local') {
+                    const loc = await maybePromptLocationOnLocalAreaUse();
+                    if (loc && loc.lat != null && loc.lon != null) {
+                        userLocation = loc;
+                        try { setUserLocationCache && typeof setUserLocationCache === 'function' && setUserLocationCache(userLocation); } catch(_){}
+                        // Try to compute a fresher area tag from the obtained coords
+                        try {
+                            const fresh = await __resolveFreshAreaTagFromLocation();
+                            if (fresh) {
+                                currentZoneTag = fresh;
+                                try { if (!userSelectedZone && window.persistZoneTagForUser) window.persistZoneTagForUser(currentZoneTag); } catch (e) {}
+                                try { updateZonePredictor(); } catch (e) {}
+                                console.log('✅ Updated area tag after retrying location:', currentZoneTag);
+                            }
+                        } catch (e) { console.warn('Failed to resolve fresh area tag after location retry', e); }
+                    }
+                }
+            } catch (e) { console.warn('Local-area permission retry check failed', e); }
             
             if (__isStaleAreaTag(currentZoneTag)) {
                 // Check if user has set a custom area
