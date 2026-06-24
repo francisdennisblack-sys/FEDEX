@@ -11563,89 +11563,184 @@
             return post.customTag;
         }
 
-        // ─────────────────────────────────────────────────────────────────
-        // SCALED AREA TAG: Returns the right-sized geographic label for
-        // this viewer. Close viewers see the exact author tag; distant
-        // viewers see progressively broader labels (county → state →
-        // country → Worldwide). Highly-liked posts are promoted to a
-        // broader scope even for nearby viewers.
-        // ─────────────────────────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════════
+        // DENSITY-AWARE LOCAL ZONE SYSTEM
+        //
+        // "Local" = the exact same ~15 acres (139 m radius) as the post origin.
+        // When that zone has >10,000 active users the radius shrinks to ~8,000
+        // sq ft (15.4 m) so hyper-dense areas (concerts, NYC blocks) stay
+        // intimate. Intermediate densities shrink linearly.
+        //
+        // Post visibility tiers (distance from post origin):
+        //   0  inside density-adjusted local zone  → exact author tag
+        //   1  outside local zone, <5 km           → county / district
+        //   2  5–100 km                            → state / region
+        //   3  100–1,000 km                        → country
+        //   4  >1,000 km OR ≥500 net likes         → Worldwide
+        // ═══════════════════════════════════════════════════════════════════════
+
+        // 15 acres circle: area=60,703 m², r=sqrt(60703/π)≈139 m
+        const LOCAL_ZONE_BASE_RADIUS_M  = 139;
+        // 8,000 sq ft circle: area=743 m², r=sqrt(743/π)≈15.4 m
+        const LOCAL_ZONE_DENSE_RADIUS_M = 15.4;
+        // Users-in-base-zone threshold that triggers shrinkage
+        const LOCAL_ZONE_DENSITY_CAP    = 10000;
+
+        // Radius cache: avoid recomputing on every render (5-min TTL)
+        const _lzRadiusCache = new Map();
+        const _LZ_CACHE_TTL  = 300_000;
+
+        /**
+         * Count active users within `radiusM` metres of (lat, lon).
+         * Uses the in-memory onlineUsers Map from the proximity system.
+         */
+        function countNearbyActiveUsers(lat, lon, radiusM) {
+            if (!lat || !lon) return 0;
+            try {
+                if (typeof getNearbyUsers === 'function')
+                    return getNearbyUsers(lat, lon, radiusM / 1000).length;
+            } catch (e) { /* fall through */ }
+            try {
+                let c = 0;
+                if (typeof onlineUsers !== 'undefined' && onlineUsers instanceof Map) {
+                    for (const [, d] of onlineUsers.entries()) {
+                        if (!d || d.lat == null || d.lon == null) continue;
+                        if (typeof haversineMeters === 'function' &&
+                            haversineMeters(lat, lon, d.lat, d.lon) <= radiusM) c++;
+                    }
+                }
+                return c;
+            } catch (e) { return 0; }
+        }
+        window.countNearbyActiveUsers = countNearbyActiveUsers;
+
+        /**
+         * Returns the density-adjusted "local zone" radius in metres.
+         *
+         * Density  →  Radius
+         *   0–2,500  →  139 m  (15 acres, full zone)
+         *   2,500–10,000  →  linear shrink toward 15.4 m
+         *   >10,000  →  15.4 m  (8,000 sq ft, dense mode)
+         *
+         * Cached per ~11 m cell for 5 minutes.
+         */
+        function getLocalZoneRadiusM(postLat, postLon) {
+            try {
+                if (!postLat || !postLon) return LOCAL_ZONE_BASE_RADIUS_M;
+                const key = `${Number(postLat).toFixed(4)},${Number(postLon).toFixed(4)}`;
+                const cached = _lzRadiusCache.get(key);
+                if (cached && Date.now() - cached.ts < _LZ_CACHE_TTL) return cached.radiusM;
+
+                const users = countNearbyActiveUsers(postLat, postLon, LOCAL_ZONE_BASE_RADIUS_M);
+                const LOW = LOCAL_ZONE_DENSITY_CAP * 0.25; // 2,500
+                let radiusM;
+                if (users <= LOW) {
+                    radiusM = LOCAL_ZONE_BASE_RADIUS_M;
+                } else if (users >= LOCAL_ZONE_DENSITY_CAP) {
+                    radiusM = LOCAL_ZONE_DENSE_RADIUS_M;
+                } else {
+                    const t = (users - LOW) / (LOCAL_ZONE_DENSITY_CAP - LOW);
+                    radiusM = LOCAL_ZONE_BASE_RADIUS_M -
+                              t * (LOCAL_ZONE_BASE_RADIUS_M - LOCAL_ZONE_DENSE_RADIUS_M);
+                }
+
+                _lzRadiusCache.set(key, { radiusM, ts: Date.now() });
+                return radiusM;
+            } catch (e) { return LOCAL_ZONE_BASE_RADIUS_M; }
+        }
+        window.getLocalZoneRadiusM = getLocalZoneRadiusM;
+
+        // ─────────────────────────────────────────────────────────────────────
+        // SCALED AREA TAG: Returns the right-sized geographic label for this
+        // viewer, using a density-adjusted local zone instead of fixed miles.
+        // ─────────────────────────────────────────────────────────────────────
         function getScaledAreaTagForViewer(post, viewerLat, viewerLon) {
             try {
                 if (!post) return null;
 
-                const likes = Number(post.likes || 0);
+                const likes    = Number(post.likes    || 0);
                 const dislikes = Number(post.dislikes || 0);
                 const netLikes = likes - dislikes;
 
-                // Original author-chosen tag (most specific)
-                const originalTag = (typeof getStablePostAreaTag === 'function') ? getStablePostAreaTag(post) : null;
+                const originalTag = (typeof getStablePostAreaTag === 'function')
+                    ? getStablePostAreaTag(post) : null;
                 if (!originalTag || /^local area$/i.test(originalTag.trim())) return null;
 
-                // Post origin coords (routing coords — area-tag location set by author)
+                // Post origin coords (routing location set by author at post time)
                 const postLat = Number(
                     (post.geolocation && post.geolocation.lat) ||
-                    (post.postOrigin && post.postOrigin.lat) ||
+                    (post.postOrigin  && post.postOrigin.lat)  ||
                     post.lat || 0
                 );
                 const postLon = Number(
                     (post.geolocation && post.geolocation.lon) ||
-                    (post.postOrigin && post.postOrigin.lon) ||
+                    (post.postOrigin  && post.postOrigin.lon)  ||
                     post.lon || 0
                 );
 
-                // Viewer-to-post distance in miles
-                let distanceMi = Infinity;
-                if (postLat && postLon && viewerLat && viewerLon && typeof haversineMeters === 'function') {
-                    distanceMi = haversineMeters(Number(viewerLat), Number(viewerLon), postLat, postLon) / 1609.34;
+                // Viewer-to-post distance in metres
+                let distanceM = Infinity;
+                if (postLat && postLon && viewerLat && viewerLon &&
+                    typeof haversineMeters === 'function') {
+                    distanceM = haversineMeters(
+                        Number(viewerLat), Number(viewerLon), postLat, postLon
+                    );
                 }
 
-                // Build geographic label hierarchy: most-specific → broadest.
-                // Each tier is only added when its label differs from the level below.
+                // Density-adjusted local zone for this post's origin
+                const localRadiusM = getLocalZoneRadiusM(postLat, postLon);
+
+                // Geographic label hierarchy: most-specific → broadest
                 const hier = [{ label: originalTag, tier: 0 }];
 
                 const county = post.county && String(post.county).trim();
-                if (county && county !== originalTag) hier.push({ label: county, tier: 1 });
+                if (county && county !== originalTag)
+                    hier.push({ label: county, tier: 1 });
 
                 const stateRaw = post.state || post.region;
-                const state = stateRaw && String(stateRaw).trim();
-                if (state && state !== county && state !== originalTag) hier.push({ label: state, tier: 2 });
+                const state    = stateRaw && String(stateRaw).trim();
+                if (state && state !== county && state !== originalTag)
+                    hier.push({ label: state, tier: 2 });
 
-                const countryRaw = post.country;
-                const country = countryRaw && String(countryRaw).trim();
-                if (country && country !== state && country !== county) hier.push({ label: country, tier: 3 });
+                const country = post.country && String(post.country).trim();
+                if (country && country !== state && country !== county)
+                    hier.push({ label: country, tier: 3 });
 
                 hier.push({ label: 'Worldwide', tier: 4 });
 
-                // Distance-based escalation level
-                let distLevel = 0;
-                if (distanceMi < 10) distLevel = 0;       // <10mi  → exact original
-                else if (distanceMi < 50) distLevel = 1;  // 10-50mi → county
-                else if (distanceMi < 300) distLevel = 2; // 50-300mi → state
-                else if (distanceMi < 1000) distLevel = 3;// 300-1000mi → country
-                else distLevel = 4;                        // >1000mi → worldwide
+                // Distance-based escalation (metres)
+                //   Tier 0: inside density-adjusted local zone (≤15 acres)
+                //   Tier 1: outside local zone but <5 km
+                //   Tier 2: 5–100 km (state/region scale)
+                //   Tier 3: 100–1,000 km (national scale)
+                //   Tier 4: >1,000 km (Worldwide)
+                let distLevel;
+                if      (distanceM <= localRadiusM) distLevel = 0;
+                else if (distanceM < 5_000)         distLevel = 1;
+                else if (distanceM < 100_000)       distLevel = 2;
+                else if (distanceM < 1_000_000)     distLevel = 3;
+                else                                distLevel = 4;
 
-                // Engagement-based minimum escalation
-                // (top-liked posts show a broader reach label regardless of distance)
+                // Engagement-based minimum (platform viral reach)
                 let engLevel = 0;
-                if (netLikes >= 500) engLevel = 4;        // ≥500 → Worldwide
-                else if (netLikes >= 100) engLevel = 3;   // ≥100 → country
-                else if (netLikes >= 30) engLevel = 2;    // ≥30  → state
-                else if (netLikes >= 10) engLevel = 1;    // ≥10  → county
+                if      (netLikes >= 500) engLevel = 4;
+                else if (netLikes >= 100) engLevel = 3;
+                else if (netLikes >= 30)  engLevel = 2;
+                else if (netLikes >= 10)  engLevel = 1;
 
                 const finalLevel = Math.max(distLevel, engLevel);
 
-                // Pick the highest available label at or below the final level
                 let chosen = hier[0];
                 for (const h of hier) {
                     if (h.tier <= finalLevel) chosen = h;
                     else break;
                 }
 
-                return { label: chosen.label, tier: chosen.tier, distanceMi, netLikes, original: originalTag };
-            } catch (e) {
-                return null;
-            }
+                return {
+                    label: chosen.label, tier: chosen.tier,
+                    distanceM, localRadiusM, netLikes, original: originalTag
+                };
+            } catch (e) { return null; }
         }
         window.getScaledAreaTagForViewer = getScaledAreaTagForViewer;
 
