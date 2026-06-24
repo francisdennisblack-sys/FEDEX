@@ -4046,6 +4046,70 @@
                 })();
         </script>
 
+    <!-- One-off geolocation consent banner: shown only when Permissions API reports 'prompt' or when user hasn't acted yet -->
+    <div id="geoConsentBanner" style="display:none; position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:linear-gradient(180deg,#0b1220,#071018); color:#ffffff; padding:12px 14px; border-radius:12px; z-index:2147483647; box-shadow:0 12px 40px rgba(2,6,23,0.6); align-items:center; gap:10px; font-size:14px;">
+        <div style="display:flex; align-items:center; gap:12px;">
+            <span style="font-weight:700;">Allow location to improve area tagging</span>
+            <span id="geoConsentHelp" style="font-weight:500; opacity:0.9; font-size:13px;">Only asked once — used to suggest better areas.</span>
+        </div>
+        <div style="display:flex; gap:8px; margin-left:12px;">
+            <button id="geoConsentBtn" style="background:#10b981; border:none; color:#071018; padding:8px 12px; border-radius:8px; font-weight:700; cursor:pointer;">Enable Location</button>
+            <button id="geoConsentDismiss" style="background:transparent; border:1px solid rgba(255,255,255,0.12); color:#fff; padding:8px 12px; border-radius:8px; cursor:pointer;">Dismiss</button>
+        </div>
+    </div>
+
+    <script>
+    (function setupGeoConsentUI(){
+        const STORAGE_KEY = 'geoConsent_v1'; // values: 'accepted'|'dismissed'
+        function showBanner() { const b = document.getElementById('geoConsentBanner'); if (b) b.style.display = 'flex'; }
+        function hideBanner() { const b = document.getElementById('geoConsentBanner'); if (b) b.style.display = 'none'; }
+        async function requestLocationOnce() {
+            if (!('geolocation' in navigator)) return;
+            try {
+                navigator.geolocation.getCurrentPosition(pos => {
+                    try { window.diagnosticState = window.diagnosticState || {}; window.diagnosticState.lastLocation = pos.coords; window.diagnosticState.lastLocationUpdate = Date.now(); } catch(e){}
+                }, err => { console.warn('Geolocation error', err); }, { maximumAge: 1000 * 60 * 5, timeout: 10000 });
+            } catch (e) { console.warn('requestLocationOnce failed', e); }
+        }
+
+        async function init() {
+            try {
+                const stored = (function(){ try { return localStorage.getItem(STORAGE_KEY); } catch(e){ return null; }})();
+                if (stored === 'accepted') { requestLocationOnce(); return; }
+                if (stored === 'dismissed') { return; }
+
+                if (!('permissions' in navigator)) {
+                    // Fallback: show banner so user can opt-in manually
+                    showBanner();
+                    return;
+                }
+
+                const p = await navigator.permissions.query({ name: 'geolocation' });
+                if (p && p.state === 'granted') { try { localStorage.setItem(STORAGE_KEY, 'accepted'); } catch(e){}; requestLocationOnce(); return; }
+                if (p && p.state === 'denied') { try { localStorage.setItem(STORAGE_KEY, 'dismissed'); } catch(e){}; return; }
+
+                // If prompt, show the banner and wait for explicit user tap
+                showBanner();
+
+                // Listen for external state changes (user granting via browser UI)
+                try { p.onchange = function() { if (p.state === 'granted') { try { localStorage.setItem(STORAGE_KEY, 'accepted'); } catch(e){}; requestLocationOnce(); hideBanner(); } }; } catch(e){}
+            } catch (e) { console.warn('init geo consent failed', e); showBanner(); }
+        }
+
+        document.addEventListener('DOMContentLoaded', function(){
+            const btn = document.getElementById('geoConsentBtn');
+            const dismiss = document.getElementById('geoConsentDismiss');
+            if (btn) btn.addEventListener('click', function(){
+                try { localStorage.setItem(STORAGE_KEY, 'accepted'); } catch(e){}
+                requestLocationOnce(); hideBanner();
+            });
+            if (dismiss) dismiss.addEventListener('click', function(){ try { localStorage.setItem(STORAGE_KEY, 'dismissed'); } catch(e){}; hideBanner(); });
+            // Kick off permission check after DOM ready
+            init();
+        });
+    })();
+    </script>
+
     <div class="container">
         <div class="grid-wrapper">
             <div id="pull-to-refresh-indicator" style="display: none; text-align: center; padding: 10px; font-size: 16px; color: #888; transition: opacity 0.3s ease;">
