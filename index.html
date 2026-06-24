@@ -7757,6 +7757,37 @@
                     }
                 } catch (e) {}
 
+                // 3.5. Show a full-screen "finding posts" overlay so the user feels the
+                //      website searching for content in their new location.
+                //      renderGrid() fades it out once real posts arrive (min 1.8s shown).
+                try {
+                    const existingOverlay = document.getElementById('locationChangeLoading');
+                    if (existingOverlay) existingOverlay.remove();
+                    const locationLabel = (window.currentAreaName || window.currentZoneTag || window.latestUserAreaTag || '').trim();
+                    const labelText = locationLabel ? 'near ' + locationLabel : 'for you';
+                    const overlay = document.createElement('div');
+                    overlay.id = 'locationChangeLoading';
+                    overlay.style.cssText = 'position:fixed;inset:0;z-index:9990;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#ffffff;gap:20px;pointer-events:none;';
+                    overlay.innerHTML =
+                        '<style id="lcl-style">' +
+                        '@keyframes lcl-bounce{0%,100%{transform:translateY(0);opacity:.45}50%{transform:translateY(-9px);opacity:1}}' +
+                        '.lcl-dot{width:11px;height:11px;border-radius:50%;background:#111827;animation:lcl-bounce 1.15s ease-in-out infinite}' +
+                        '.lcl-dot:nth-child(2){animation-delay:.2s}.lcl-dot:nth-child(3){animation-delay:.4s}' +
+                        '@keyframes lcl-fade-out{to{opacity:0}}' +
+                        '#locationChangeLoading.lcl-hiding{animation:lcl-fade-out .4s ease forwards;pointer-events:none}' +
+                        '</style>' +
+                        '<div style="font-size:40px;line-height:1;">&#127757;</div>' +
+                        '<div style="font-size:17px;font-weight:700;color:#111827;text-align:center;padding:0 28px;line-height:1.4;">Finding posts ' + labelText + '</div>' +
+                        '<div style="display:flex;gap:12px;align-items:center;">' +
+                        '<div class="lcl-dot"></div>' +
+                        '<div class="lcl-dot"></div>' +
+                        '<div class="lcl-dot"></div>' +
+                        '</div>';
+                    document.body.appendChild(overlay);
+                    window.__locationChangeLoadingActive = true;
+                    window.__locationChangeLoadingStart = Date.now();
+                } catch (e) {}
+
                 // 4. Reset the render throttle so the next renderGrid call goes through now.
                 try { window.lastRenderGridTime = 0; } catch (e) {}
 
@@ -35173,6 +35204,28 @@
             }
             console.log(`  Total posts: ${totalPosts}`);
             if (totalPosts > 0) window.__hasRenderedFeedPosts = true;
+
+            // Fade out the location-change loading overlay once real posts have arrived.
+            // A minimum display of 1 800 ms keeps the "finding posts" feeling intact
+            // even when Firebase responds very quickly.
+            try {
+                if (window.__locationChangeLoadingActive && totalPosts > 0) {
+                    const elapsed = Date.now() - (window.__locationChangeLoadingStart || 0);
+                    const MIN_SEARCH_MS = 1800;
+                    const remaining = Math.max(0, MIN_SEARCH_MS - elapsed);
+                    const doRemove = () => {
+                        try {
+                            const el = document.getElementById('locationChangeLoading');
+                            if (el) {
+                                el.classList.add('lcl-hiding');
+                                setTimeout(() => { try { el.remove(); } catch(e){} }, 430);
+                            }
+                            window.__locationChangeLoadingActive = false;
+                        } catch(e) {}
+                    };
+                    if (remaining > 0) { setTimeout(doRemove, remaining); } else { doRemove(); }
+                }
+            } catch (e) {}
 
             // Allow rendering regardless of `isConnected` so signed-in users see posts
             // even when connectivity/proximity flags are not set.
