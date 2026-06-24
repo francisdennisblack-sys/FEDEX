@@ -38121,9 +38121,22 @@
 
                         const _allPosts = Array.from(_globalMap.values());
 
-                        // ── Sort the full global pool by net likes, highest first ──
-                        const _netLikesOf = (_p) => (Number(_p.likes) || 0) - (Number(_p.dislikes) || 0);
-                        _allPosts.sort((a, b) => _netLikesOf(b) - _netLikesOf(a));
+                        // ── Helper: extract lat/lon from a post object ──
+                        const _postCoords = (_p) => ({
+                            lat: Number(_p.lat || _p.latitude || (_p.geolocation && (_p.geolocation.lat || _p.geolocation.latitude)) || NaN),
+                            lon: Number(_p.lon || _p.longitude || (_p.geolocation && (_p.geolocation.lon || _p.geolocation.longitude)) || NaN)
+                        });
+                        const _distToUser = (_p) => {
+                            const c = _postCoords(_p);
+                            if (!Number.isFinite(c.lat) || !Number.isFinite(c.lon)) return Infinity;
+                            return (calculateDistance(_uLat, _uLon, c.lat, c.lon) || Infinity) * 0.621371; // miles
+                        };
+
+                        // ── Sort the full global pool by proximity to user's committed
+                        //    location — closest posts first.  This ensures the fallback
+                        //    feed feels geographically relevant (nearest content, not just
+                        //    most-liked content from the other side of the world). ──
+                        _allPosts.sort((_a, _b) => _distToUser(_a) - _distToUser(_b));
 
                         // ── Always keep own posts and boosted posts ──
                         const _ownAndBoosted = displayPosts.filter(_p => {
@@ -38132,19 +38145,21 @@
                             return (typeof isStrictBoostActive === 'function') && isStrictBoostActive(_p);
                         });
 
-                        // ── Take the top 50 most-liked posts platform-wide ──
+                        // ── Take the 50 geographically closest posts to the user ──
                         const WORLDWIDE_TOP_N = 50;
                         const _ownAndBoostedIds = new Set(_ownAndBoosted.map(_p => _p.id));
-                        const _topLiked = [];
+                        const _closest = [];
                         for (const _p of _allPosts) {
-                            if (_topLiked.length >= WORLDWIDE_TOP_N) break;
+                            if (_closest.length >= WORLDWIDE_TOP_N) break;
                             if (!_p || !_p.id) continue;
                             if (_ownAndBoostedIds.has(_p.id)) continue; // already included
-                            _topLiked.push(_p);
+                            _closest.push(_p);
                         }
 
-                        displayPosts = [..._ownAndBoosted, ..._topLiked];
-                        console.log(`🌍 WORLDWIDE FALLBACK: no posts within ${WORLDWIDE_FALLBACK_MILES}mi — sourced top ${_topLiked.length} most-liked posts platform-wide (pool size: ${_allPosts.length})`);
+                        displayPosts = [..._ownAndBoosted, ..._closest];
+                        const _nearestMi = _closest.length > 0 ? Math.round(_distToUser(_closest[0])) : '?';
+                        console.log(`🌍 WORLDWIDE FALLBACK: no posts within ${WORLDWIDE_FALLBACK_MILES}mi — showing ${_closest.length} closest posts (nearest: ~${_nearestMi}mi away, pool: ${_allPosts.length})`);
+
                         window._worldwideFallbackActive = true;
                     } else {
                         window._worldwideFallbackActive = false;
