@@ -7746,6 +7746,13 @@
                 gridContent = {};
                 try { window.gridContent = {}; } catch (e) {}
 
+                // 1b. Clear stale pendingSortedPosts so the 1-per-second reconciler
+                //     cannot re-inject the previous location's posts into the now-empty
+                //     scroller before the new Firebase snapshot arrives.
+                try { pendingSortedPosts = []; window.pendingSortedPosts = null; } catch (e) {}
+                // Clear worldwide-fallback flag from any previous render.
+                try { window._worldwideFallbackActive = false; } catch (e) {}
+
                 // 2. Blank the virtual scroller using the LEXICAL gridScroller reference
                 //    (window.gridScroller is never assigned, only the lexical one is real).
                 try {
@@ -38275,10 +38282,14 @@
             // 🎯 APPLY UNIFIED RANKING SYSTEM
             // ========================================================================
             // Blend: Area Hierarchy, Badge System, POI Detection, ML, Zone Tags
-            // This replaces old sorting and applies consistent ranking across all systems
-            console.log(`⚡ Applying unified ranking system to ${displayPosts.length} posts...`);
-            displayPosts = applyUnifiedRanking(displayPosts);
-            console.log(`✅ Unified ranking applied - posts reordered by relevance`);
+            // Skip when worldwide fallback is active — proximity sort must be preserved.
+            if (!window._worldwideFallbackActive) {
+                console.log(`⚡ Applying unified ranking system to ${displayPosts.length} posts...`);
+                displayPosts = applyUnifiedRanking(displayPosts);
+                console.log(`✅ Unified ranking applied - posts reordered by relevance`);
+            } else {
+                console.log(`🌍 Worldwide fallback active — skipping unified re-rank, keeping proximity order for ${displayPosts.length} posts`);
+            }
             
             // Filter hidden/deleted posts from display list
             let sortedPosts = displayPosts.filter(post => !isPostHiddenForViewer(post, currentUserId));
@@ -39024,8 +39035,8 @@
 
                 const gridAlreadyLoaded = Array.isArray(gridScroller.items) && gridScroller.items.length > 0;
 
-                if (!gridAlreadyLoaded) {
-                    // First paint: load immediately so user sees content quickly.
+                if (!gridAlreadyLoaded || window._worldwideFallbackActive) {
+                    // First paint OR new-location worldwide fallback: load immediately.
                     gridScroller.setItems(pendingSortedPosts);
                     applyGridTextFontSizeToVisiblePosts();
                 } else if (window.postPublishImmediateRefresh && pendingSortedPosts.length > 0) {
