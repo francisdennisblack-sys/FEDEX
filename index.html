@@ -38532,106 +38532,9 @@
             // Reset badge-upgrade map at the start of each render cycle
             window.ownPostBadgeUpgrades = {};
 
-            if (currentUserId && sortedPosts.length > 0) {
-                const userPosts = sortedPosts.filter(post => post.authId === currentUserId || post.userId === currentUserId || post.createdBy === currentUserId);
-                const initialVisibleCount = Math.min(sortedPosts.length, 12); // First 12 boxes visible on mobile
+            // Own-post recirculation / ML promotion disabled: own posts rank the same as everyone else's.
 
-                if (userPosts.length > 0) {
-                    // ── WELL-PERFORMING OWN POSTS ──────────────────────────────────
-                    // Score = net likes; secondary = any positive engagement.
-                    const scoredOwnPosts = userPosts
-                        .map(p => ({ post: p, score: (p.likes || 0) - (p.dislikes || 0) }))
-                        .sort((a, b) => b.score - a.score);
-
-                    const wellPerforming = scoredOwnPosts.filter(x => x.score > 0).map(x => x.post);
-                    const recircPool = wellPerforming.length > 0 ? wellPerforming : userPosts; // fallback to all own posts
-
-                    // ── ROTATION: cycle through own posts every 60s ─────────────────
-                    const recircBucket = Math.floor(Date.now() / 60000); // new post every 60s
-                    const recircTarget = recircPool[recircBucket % recircPool.length];
-
-                    // ── BADGE UPGRADE CHECK (before renderGrid writes to DOM) ────────
-                    // generateZoneTagHTML hasn't run yet; pre-enrich to see if any own post
-                    // is about to earn a new badge tier so we can surface it prominently.
-                    let badgeUpgradePost = null;
-                    for (const p of userPosts) {
-                        const enriched = enrichPostWithLocationData(p);
-                        const zoneCtx  = getContextualZoneTag(enriched, userLocation);
-                        const newLevel = getAreaScopeLevel(zoneCtx.scale);
-                        const stored   = getStoredOwnPostBadge(p.id);
-                        if (!stored || newLevel > stored.level) {
-                            badgeUpgradePost = p;
-                            console.log(`🏅 BADGE UPGRADE DETECTED: Post ${p.id.substring(0,8)}... advancing to "${zoneCtx.scale}"`);
-                            break; // surface the first upgrade found
-                        }
-                    }
-
-                    // ── INJECT: Badge-upgrade post gets position 2, recirculation post gets position 3+ ─
-                    // (Position 1 is the gold-medal / position-1 rotator slot — don't clobber it)
-                    const insertionBase = sortedPosts.length > 1 ? 1 : 0; // insert after slot 0
-
-                    if (badgeUpgradePost) {
-                        sortedPosts = sortedPosts.filter(p => p.id !== badgeUpgradePost.id);
-                        sortedPosts.splice(insertionBase, 0, badgeUpgradePost);
-                        console.log(`🏅 BADGE UPGRADE: Surfaced post ${badgeUpgradePost.id.substring(0,8)}... to grid position ${insertionBase + 1}`);
-                    }
-
-                    if (recircTarget && (!badgeUpgradePost || recircTarget.id !== badgeUpgradePost.id)) {
-                        const insertAt = badgeUpgradePost ? insertionBase + 1 : insertionBase;
-                        sortedPosts = sortedPosts.filter(p => p.id !== recircTarget.id);
-                        sortedPosts.splice(Math.min(insertAt, sortedPosts.length), 0, recircTarget);
-                        console.log(`🔄 OWN POST RECIRC: Surfaced post ${recircTarget.id.substring(0,8)}... to grid position ${insertAt + 1} (bucket ${recircBucket})`);
-                    }
-
-                    // ── FALLBACK: if STILL no own post in first 12, promote one ────
-                    const hasUserPostVisible = sortedPosts.slice(0, initialVisibleCount).some(p => p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId);
-                    if (!hasUserPostVisible) {
-                        const topUserPost = recircPool[0];
-                        sortedPosts = sortedPosts.filter(p => p.id !== topUserPost.id);
-                        sortedPosts.unshift(topUserPost);
-                        console.log(`🎯 ML PROMOTION (fallback): Moved user post ${topUserPost.id.substring(0,8)}... to top`);
-                    }
-                }
-
-                console.log(`✅ ML CHECK: User has ${userPosts.length} posts, ${sortedPosts.slice(0, initialVisibleCount).filter(p => p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId).length} visible in first 12 boxes`);
-            }
-
-            // ========================================================================
-            // OWNER PRIORITY: Ensure current user's own posts appear first.
-            // Slots 1..N are reserved for posts owned by the current viewer.
-            // ========================================================================
-            try {
-                if (currentUserId && Array.isArray(sortedPosts) && sortedPosts.length > 0) {
-                    const ownSet = new Set();
-                    const ownPosts = [];
-                    for (const p of sortedPosts) {
-                        if (!p || !p.id) continue;
-                        if (p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId) {
-                            ownPosts.push(p);
-                            ownSet.add(p.id);
-                        }
-                    }
-
-                    if (ownPosts.length > 0) {
-                        // Sort own posts by likes (desc), then by timestamp (desc)
-                        ownPosts.sort((a, b) => {
-                            const la = Number(a.likes || 0);
-                            const lb = Number(b.likes || 0);
-                            if (lb !== la) return lb - la;
-                            return (b.timestamp || 0) - (a.timestamp || 0);
-                        });
-
-                        // Remove own posts from the main list while preserving order for others
-                        const remaining = sortedPosts.filter(p => !ownSet.has(p.id));
-
-                        // Prepend ALL own posts to the sorted list (unlimited owner slots)
-                        sortedPosts = [...ownPosts, ...remaining];
-                        console.log(`🔰 OWN-FIRST: Placed ${ownPosts.length} user posts at top (unlimited owner slots)`);
-                    }
-                }
-            } catch (e) {
-                console.warn('⚠️ OWNER PRIORITY reordering failed:', e);
-            }
+            // OWNER PRIORITY disabled: own posts rank by engagement like all other posts.
 
             // ========================================================================
             // POSITION-1 ROTATION: Promote badge-rich posts every 15 seconds
@@ -38749,33 +38652,7 @@
             // Local -> Nearby -> Regional -> Global top-liked with stale-time fallback injection.
             sortedPosts = applyContentFreshnessWaterfall(sortedPosts, 'full-render');
 
-            // FINAL OWNER-FIRST ENFORCEMENT (hard guarantee):
-            // after all ranking/rotation/freshness passes, keep viewer-owned posts in slots 1..N.
-            try {
-                if (currentUserId && Array.isArray(sortedPosts) && sortedPosts.length > 0) {
-                    const ownPostsFinal = [];
-                    const ownNegativePostsFinal = [];
-                    const otherPostsFinal = [];
-                    for (const p of sortedPosts) {
-                        if (!p || !p.id) continue;
-                        if (p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId) {
-                            if (getPostNetEngagement(p) < 0) {
-                                ownNegativePostsFinal.push(p);
-                            } else {
-                                ownPostsFinal.push(p);
-                            }
-                        } else {
-                            otherPostsFinal.push(p);
-                        }
-                    }
-                    if (ownPostsFinal.length > 0 || ownNegativePostsFinal.length > 0) {
-                        sortedPosts = [...ownPostsFinal, ...otherPostsFinal, ...ownNegativePostsFinal];
-                        console.log(`🔒 OWNER-FIRST GUARANTEE: ${ownPostsFinal.length} non-negative viewer post(s) prioritized, ${ownNegativePostsFinal.length} net-negative viewer post(s) kept visible but not pinned`);
-                    }
-                }
-            } catch (e) {
-                console.warn('⚠️ FINAL OWNER-FIRST enforcement failed:', e);
-            }
+            // FINAL OWNER-FIRST ENFORCEMENT disabled: own posts rank by engagement like all other posts.
 
             // ========================================================================
             // 🥇 POSITION-1 = BEST LOCAL POST (authoritative final pass)
