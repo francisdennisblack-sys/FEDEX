@@ -1538,6 +1538,131 @@
             } catch (e) { console.warn('unloadMediaForNode error', e); }
         }
 
+        // ===========================================================================
+        // POI TYPE VALIDATION
+        // Only real physical locations count as POIs.
+        // City names, town names, neighbourhood / suburb / county / region / place
+        // boundary names must never be treated as POIs – otherwise isNearPOI() fires
+        // for users simply living in or near a named area, which wrongly reduces their
+        // feed window size.
+        // ===========================================================================
+
+        // Types that are definitely real physical POIs (partial-match allowlist).
+        // Any poi.type or poi.category that contains one of these substrings is valid.
+        const POI_VALID_TYPE_FRAGMENTS = new Set([
+            // Transportation
+            'airport','aerodrome','helipad','heliport',
+            'train_station','railway','rail_station','bus_station','bus_stop',
+            'subway','metro_station','tram','light_rail',
+            'ferry_terminal','ferry',
+            'truck_stop','rest_area',
+            'parking','parking_garage','parking_lot',
+            'ev_charging','charging_station','fuel','gas_station','petrol',
+            // Food & Dining
+            'restaurant','fast_food','cafe','coffee_shop','bakery',
+            'bar','pub','brewery','winery','food_truck','ice_cream',
+            'food_court','diner','bistro','pizzeria','eatery',
+            // Retail & Shopping
+            'shopping_mall','supermarket','grocery','convenience','department_store',
+            'hardware','electronics_store','clothing','apparel','furniture',
+            'pharmacy','drugstore','bookstore','retail','shop',
+            // Lodging
+            'hotel','motel','resort','hostel','inn','lodge','campground',
+            'rv_park','camping','accommodation','guesthouse',
+            // Government & Civic
+            'town_hall','city_hall','courthouse','police','fire_station',
+            'post_office','dmv','government','military','embassy','consulate',
+            // Healthcare
+            'hospital','emergency','urgent_care','clinic','medical',
+            'dental','veterinary','health_center','health_centre',
+            // Education
+            'school','college','university','library','research_center',
+            'kindergarten','nursery','education','academic',
+            // Recreation & Entertainment
+            'park','playground','beach','zoo','aquarium','museum',
+            'cinema','movie_theater','theatre','concert_venue','casino',
+            'theme_park','amusement','entertainment',
+            // Sports
+            'stadium','arena','golf','tennis','gym','fitness',
+            'swimming_pool','sports','sports_centre','sports_complex',
+            // Nature & Outdoors
+            'national_park','state_park','forest','nature_reserve',
+            'hiking','viewpoint','scenic','waterfall','campsite',
+            // Religious
+            'church','temple','mosque','synagogue','cathedral',
+            'chapel','religious','place_of_worship',
+            // Financial
+            'bank','credit_union','atm','finance','investment',
+            // Business & Professional
+            'office','coworking','warehouse','industrial',
+            // Emergency & Safety
+            'shelter','emergency_management',
+            // Tourism & Landmarks
+            'historic','monument','memorial','observation_tower',
+            'visitor_center','attraction','tourist','landmark','tourism',
+            // Community
+            'community_center','senior_center','social_facility',
+            // Utilities / Infrastructure (large physical structures only)
+            'power_plant','dam','bridge','telecommunications'
+        ]);
+
+        // Types that are geographic/administrative boundaries – NOT physical POIs.
+        // If a poi's type or category contains any of these substrings it is excluded
+        // even if it would otherwise match an allowlist fragment.
+        const POI_INVALID_TYPE_FRAGMENTS = new Set([
+            'city','town','village','suburb','neighbourhood','neighborhood',
+            'county','state','district','borough','locality','hamlet',
+            'municipality','region','province','area','boundary',
+            'administrative','place','populated_place','settlement',
+            'metro_area','metropolitan','urban','rural','zip','postal'
+        ]);
+
+        /**
+         * Returns true only when a POI entry represents a real, physical point of
+         * interest (restaurant, airport, park, etc.) and is NOT a city/town/area
+         * boundary or other geographic label.
+         *
+         * The check works on two fields:
+         *   1. poi.type    – often an OSM-derived single-word type code
+         *   2. poi.category – may carry a human-readable category string
+         *
+         * Algorithm:
+         *   a. Build a lower-case "type string" from both fields.
+         *   b. Reject immediately if the type string contains any fragment from
+         *      POI_INVALID_TYPE_FRAGMENTS (geo-boundary blocklist).
+         *   c. Accept if the type string contains any fragment from
+         *      POI_VALID_TYPE_FRAGMENTS (physical POI allowlist).
+         *   d. If neither list matches, default to REJECT (unknown = not a POI).
+         */
+        function isValidPhysicalPOI(poi) {
+            if (!poi) return false;
+            // Build a combined lower-case key from both type fields
+            const typeStr = (
+                (poi.type || '') + ' ' +
+                (poi.category || '') + ' ' +
+                (poi.amenity || '') + ' ' +
+                (poi.osm_type || '')
+            ).toLowerCase().trim();
+
+            if (!typeStr) return false; // no type info at all → exclude
+
+            // Step 1: blocklist check – geo names are never physical POIs
+            for (const bad of POI_INVALID_TYPE_FRAGMENTS) {
+                if (typeStr.includes(bad)) return false;
+            }
+
+            // Step 2: allowlist check – must match at least one known physical type
+            for (const good of POI_VALID_TYPE_FRAGMENTS) {
+                if (typeStr.includes(good)) return true;
+            }
+
+            // Step 3: unknown type → exclude by default (safer than allowing)
+            return false;
+        }
+
+        // Expose globally so other helpers can call it
+        window.isValidPhysicalPOI = isValidPhysicalPOI;
+
         // POI proximity helpers - treat 'WiFi' as distance to nearest POI
         function haversineMeters(lat1, lon1, lat2, lon2) {
             if (!lat1 || !lon1 || !lat2 || !lon2) return Infinity;
@@ -1562,6 +1687,8 @@
                 let bestDist = Infinity;
                 for (const p of window.globalPOIDatabase) {
                     if (!p || p.lat === undefined || p.lon === undefined) continue;
+                    // Skip city/town/area names – only count real physical POIs
+                    if (!isValidPhysicalPOI(p)) continue;
                     const d = (typeof calculateDistance === 'function') ? (calculateDistance(coords.lat, coords.lon, p.lat, p.lon) * 1000) : haversineMeters(coords.lat, coords.lon, p.lat, p.lon);
                     if (d < bestDist) { bestDist = d; best = p; }
                 }
@@ -8799,7 +8926,12 @@
                                     state: (typeof r[3] === 'number' && stateCodes[r[3]] ? stateCodes[r[3]] : null),
                                     source: 'search-index'
                                 }));
-                                window.globalPOIDatabase = converted;
+                                // Strip geographic/admin boundary entries — only keep real physical POIs
+                                const convertedFiltered = (typeof isValidPhysicalPOI === 'function')
+                                    ? converted.filter(isValidPhysicalPOI)
+                                    : converted;
+                                console.log(`🗂️ POI filter: ${converted.length} raw → ${convertedFiltered.length} physical POIs (removed ${converted.length - convertedFiltered.length} area/city labels)`);
+                                window.globalPOIDatabase = convertedFiltered;
                                 console.log(`✅ Loaded POIs from pois/search-index.json (${converted.length} rows)`);
                                 try {
                                     // Persist a small subset for instant startup (limit to 500 items)
@@ -8839,8 +8971,13 @@
                                 emoji: poi.emoji || null
                             }));
                             
-                            globalPOIDatabase = statePOIs;
-                            console.log(`✅ Loaded ${statePOIs.length} POIs for ${userState}`);
+                            // Strip geographic/admin boundary entries — only keep real physical POIs
+                            const statePOIsFiltered = (typeof isValidPhysicalPOI === 'function')
+                                ? statePOIs.filter(isValidPhysicalPOI)
+                                : statePOIs;
+                            console.log(`🗂️ POI filter (${userState}): ${statePOIs.length} raw → ${statePOIsFiltered.length} physical POIs`);
+                            globalPOIDatabase = statePOIsFiltered;
+                            console.log(`✅ Loaded ${statePOIsFiltered.length} POIs for ${userState}`);
                         try {
                             const small = statePOIs.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.category || null, state: p.state || null }));
                             localStorage.setItem('lastPOIs', JSON.stringify(small));
@@ -8862,8 +8999,13 @@
                                 const masterData = await masterResp.json();
                                 const masterPois = masterData && masterData.pois ? masterData.pois : (Array.isArray(masterData) ? masterData : []);
                                 if (Array.isArray(masterPois) && masterPois.length > 0) {
-                                    globalPOIDatabase = masterPois;
-                                    console.log(`✅ Loaded ${masterPois.length} POIs from master_pois_database.json fallback`);
+                                    // Strip geographic/admin boundary entries — only keep real physical POIs
+                                    const masterPoisFiltered = (typeof isValidPhysicalPOI === 'function')
+                                        ? masterPois.filter(isValidPhysicalPOI)
+                                        : masterPois;
+                                    console.log(`🗂️ POI filter (master): ${masterPois.length} raw → ${masterPoisFiltered.length} physical POIs`);
+                                    globalPOIDatabase = masterPoisFiltered;
+                                    console.log(`✅ Loaded ${masterPoisFiltered.length} POIs from master_pois_database.json fallback`);
                                     try {
                                         const small = masterPois.slice(0, 500).map(p => ({ name: p.name, lat: p.lat, lon: p.lon, emoji: p.emoji || null, category: p.category || null, state: p.state || null }));
                                         localStorage.setItem('lastPOIs', JSON.stringify(small));
