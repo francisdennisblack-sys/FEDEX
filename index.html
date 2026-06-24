@@ -38067,11 +38067,12 @@
 
             // ====================================================================
             // 🌍 WORLDWIDE FALLBACK — no content within 1000 miles
-            // When a user commits to a location that is more than 1000 miles away
-            // from every available post, we show only Worldwide-tier content
-            // (≥500 net likes) instead of filling the feed with completely
-            // irrelevant distant posts.  Own posts always remain visible.
-            // This activates only when the user has a real committed location.
+            // When the user's committed location has no posts within 1000 miles,
+            // show the most-liked posts from EVERY location on the platform.
+            // Sourced dynamically from all loaded gridContent buckets and
+            // postCache so the set always reflects the actual platform leaders —
+            // even if the current top post only has 3 likes.
+            // Own posts and active boosts are always included.
             // ====================================================================
             try {
                 const _uLat = Number(userLocation && (userLocation.lat || userLocation.latitude));
@@ -38080,33 +38081,70 @@
 
                 if (_hasCommittedLoc) {
                     const WORLDWIDE_FALLBACK_MILES = 1000;
-                    // Count non-own posts that have coordinates AND are within 1000 mi.
+                    // Check whether any non-own post with coordinates sits within 1000 mi.
                     let _nearbyCount = 0;
                     for (const _p of displayPosts) {
                         if (!_p) continue;
-                        // Own posts don't count toward "nearby content"
                         if (_p.authId === currentUserId || _p.userId === currentUserId || _p.createdBy === currentUserId) continue;
                         const _pLat = Number(_p.lat || _p.latitude || (_p.geolocation && (_p.geolocation.lat || _p.geolocation.latitude)));
                         const _pLon = Number(_p.lon || _p.longitude || (_p.geolocation && (_p.geolocation.lon || _p.geolocation.longitude)));
-                        if (!Number.isFinite(_pLat) || !Number.isFinite(_pLon)) continue; // no coords → skip
+                        if (!Number.isFinite(_pLat) || !Number.isFinite(_pLon)) continue;
                         const _distMi = (calculateDistance(_uLat, _uLon, _pLat, _pLon) || Infinity) * 0.621371;
-                        if (_distMi <= WORLDWIDE_FALLBACK_MILES) { _nearbyCount++; break; } // found at least one — done
+                        if (_distMi <= WORLDWIDE_FALLBACK_MILES) { _nearbyCount++; break; }
                     }
 
                     if (_nearbyCount === 0) {
-                        // No post with known coordinates within 1000 miles → worldwide-only mode.
-                        const _WORLDWIDE_NET_LIKES = 500; // matches getScaledAreaTagForViewer tier 4
-                        displayPosts = displayPosts.filter(_p => {
+                        // ── Build a global candidate pool from ALL loaded sources ──
+                        // 1. Every bucket in gridContent (shared-posts, per-user, etc.)
+                        // 2. Every entry in postCache
+                        // Using a Map keyed by post id deduplicates across sources.
+                        const _globalMap = new Map();
+                        try {
+                            if (typeof gridContent !== 'undefined') {
+                                for (const _k of Object.keys(gridContent)) {
+                                    const _arr = gridContent[_k];
+                                    if (!Array.isArray(_arr)) continue;
+                                    for (const _p of _arr) {
+                                        if (_p && _p.id && !_globalMap.has(_p.id)) _globalMap.set(_p.id, _p);
+                                    }
+                                }
+                            }
+                        } catch (_ge) { /* ignore */ }
+                        try {
+                            if (typeof postCache !== 'undefined') {
+                                for (const _id of Object.keys(postCache)) {
+                                    const _p = postCache[_id];
+                                    if (_p && _p.id && !_globalMap.has(_p.id)) _globalMap.set(_p.id, _p);
+                                }
+                            }
+                        } catch (_ce) { /* ignore */ }
+
+                        const _allPosts = Array.from(_globalMap.values());
+
+                        // ── Sort the full global pool by net likes, highest first ──
+                        const _netLikesOf = (_p) => (Number(_p.likes) || 0) - (Number(_p.dislikes) || 0);
+                        _allPosts.sort((a, b) => _netLikesOf(b) - _netLikesOf(a));
+
+                        // ── Always keep own posts and boosted posts ──
+                        const _ownAndBoosted = displayPosts.filter(_p => {
                             if (!_p) return false;
-                            // Always keep the user's own posts
                             if (_p.authId === currentUserId || _p.userId === currentUserId || _p.createdBy === currentUserId) return true;
-                            // Keep active boost posts regardless (creator paid for reach)
-                            if ((typeof isStrictBoostActive === 'function') && isStrictBoostActive(_p)) return true;
-                            // Keep only posts with ≥500 net likes (Worldwide tier)
-                            const _netLikes = (Number(_p.likes) || 0) - (Number(_p.dislikes) || 0);
-                            return _netLikes >= _WORLDWIDE_NET_LIKES;
+                            return (typeof isStrictBoostActive === 'function') && isStrictBoostActive(_p);
                         });
-                        console.log(`🌍 WORLDWIDE FALLBACK: no posts within ${WORLDWIDE_FALLBACK_MILES}mi — showing ${displayPosts.length} worldwide-tier posts`);
+
+                        // ── Take the top 50 most-liked posts platform-wide ──
+                        const WORLDWIDE_TOP_N = 50;
+                        const _ownAndBoostedIds = new Set(_ownAndBoosted.map(_p => _p.id));
+                        const _topLiked = [];
+                        for (const _p of _allPosts) {
+                            if (_topLiked.length >= WORLDWIDE_TOP_N) break;
+                            if (!_p || !_p.id) continue;
+                            if (_ownAndBoostedIds.has(_p.id)) continue; // already included
+                            _topLiked.push(_p);
+                        }
+
+                        displayPosts = [..._ownAndBoosted, ..._topLiked];
+                        console.log(`🌍 WORLDWIDE FALLBACK: no posts within ${WORLDWIDE_FALLBACK_MILES}mi — sourced top ${_topLiked.length} most-liked posts platform-wide (pool size: ${_allPosts.length})`);
                         window._worldwideFallbackActive = true;
                     } else {
                         window._worldwideFallbackActive = false;
