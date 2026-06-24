@@ -38065,6 +38065,55 @@
                 return miles;
             };
 
+            // ====================================================================
+            // 🌍 WORLDWIDE FALLBACK — no content within 1000 miles
+            // When a user commits to a location that is more than 1000 miles away
+            // from every available post, we show only Worldwide-tier content
+            // (≥500 net likes) instead of filling the feed with completely
+            // irrelevant distant posts.  Own posts always remain visible.
+            // This activates only when the user has a real committed location.
+            // ====================================================================
+            try {
+                const _uLat = Number(userLocation && (userLocation.lat || userLocation.latitude));
+                const _uLon = Number(userLocation && (userLocation.lon || userLocation.longitude));
+                const _hasCommittedLoc = Number.isFinite(_uLat) && Number.isFinite(_uLon);
+
+                if (_hasCommittedLoc) {
+                    const WORLDWIDE_FALLBACK_MILES = 1000;
+                    // Count non-own posts that have coordinates AND are within 1000 mi.
+                    let _nearbyCount = 0;
+                    for (const _p of displayPosts) {
+                        if (!_p) continue;
+                        // Own posts don't count toward "nearby content"
+                        if (_p.authId === currentUserId || _p.userId === currentUserId || _p.createdBy === currentUserId) continue;
+                        const _pLat = Number(_p.lat || _p.latitude || (_p.geolocation && (_p.geolocation.lat || _p.geolocation.latitude)));
+                        const _pLon = Number(_p.lon || _p.longitude || (_p.geolocation && (_p.geolocation.lon || _p.geolocation.longitude)));
+                        if (!Number.isFinite(_pLat) || !Number.isFinite(_pLon)) continue; // no coords → skip
+                        const _distMi = (calculateDistance(_uLat, _uLon, _pLat, _pLon) || Infinity) * 0.621371;
+                        if (_distMi <= WORLDWIDE_FALLBACK_MILES) { _nearbyCount++; break; } // found at least one — done
+                    }
+
+                    if (_nearbyCount === 0) {
+                        // No post with known coordinates within 1000 miles → worldwide-only mode.
+                        const _WORLDWIDE_NET_LIKES = 500; // matches getScaledAreaTagForViewer tier 4
+                        displayPosts = displayPosts.filter(_p => {
+                            if (!_p) return false;
+                            // Always keep the user's own posts
+                            if (_p.authId === currentUserId || _p.userId === currentUserId || _p.createdBy === currentUserId) return true;
+                            // Keep active boost posts regardless (creator paid for reach)
+                            if ((typeof isStrictBoostActive === 'function') && isStrictBoostActive(_p)) return true;
+                            // Keep only posts with ≥500 net likes (Worldwide tier)
+                            const _netLikes = (Number(_p.likes) || 0) - (Number(_p.dislikes) || 0);
+                            return _netLikes >= _WORLDWIDE_NET_LIKES;
+                        });
+                        console.log(`🌍 WORLDWIDE FALLBACK: no posts within ${WORLDWIDE_FALLBACK_MILES}mi — showing ${displayPosts.length} worldwide-tier posts`);
+                        window._worldwideFallbackActive = true;
+                    } else {
+                        window._worldwideFallbackActive = false;
+                    }
+                }
+            } catch (_wfe) { console.warn('Worldwide fallback check failed', _wfe); }
+
             displayPosts = displayPosts.filter(post => {
                 if (!post) return false;
                 // Always show user's own posts
