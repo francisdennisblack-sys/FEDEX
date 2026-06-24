@@ -4529,15 +4529,25 @@
                         }catch(e){ return false; }
                     }
 
+                    let _uploadBtnEnforceLogged = 0;
                     function enforce(el){
                         if(!el) return;
                         try{
                             const cs = getComputedStyle(el);
                             const bg = cs && (cs.backgroundColor || cs.background) || '';
                             const img = cs && cs.backgroundImage || '';
-                            if(isGreenish(bg) || (bg && bg.indexOf('green') !== -1) || /linear-gradient\(|url\(/i.test(img)){
+                            const detected = isGreenish(bg) || (bg && bg.indexOf('green') !== -1) || /linear-gradient\(|url\(/i.test(img);
+                            if(detected){
                                 applyStyles(el);
+                                if(_uploadBtnEnforceLogged < 5){
+                                    _uploadBtnEnforceLogged++;
+                                    try{
+                                        console.warn('uploadBtn visual guard triggered — detected background:', bg, ' backgroundImage:', img);
+                                        console.warn(new Error('uploadBtn guard stack').stack);
+                                    }catch(e){}
+                                }
                             } else {
+                                // always keep safe base style to avoid transient flashes
                                 applyStyles(el);
                             }
                         }catch(e){ applyStyles(el); }
@@ -4545,7 +4555,17 @@
 
                     function setupObserver(b){
                         if(!b) return;
-                        const obs = new MutationObserver(() => enforce(b));
+                        const obs = new MutationObserver((mutations)=>{
+                            enforce(b);
+                            for(const m of mutations){
+                                if(m.type === 'attributes'){
+                                    // if an ancestor applied a green class, log once
+                                    if(_uploadBtnEnforceLogged < 5){
+                                        try{ console.log('uploadBtn observed mutation', m); }catch(e){}
+                                    }
+                                }
+                            }
+                        });
                         obs.observe(b, { attributes: true, attributeFilter: ['style','class'] });
                         let p = b.parentElement;
                         while(p && p !== document.documentElement){
