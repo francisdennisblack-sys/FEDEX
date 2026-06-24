@@ -36451,7 +36451,20 @@
                 takeFrom(localPool, targetLocal);
                 takeFrom(nearbyPool, targetNearby);
                 takeFrom(regionalPool, targetRegional);
-                takeFrom(topGlobalPool, targetGlobal);
+                // Mark global top posts as they're pulled from the platform-wide pool
+                // so the positivity-threshold pass downstream can identify them reliably.
+                const takeFromGlobal = (pool, count) => {
+                    let taken = 0;
+                    for (const p of pool) {
+                        if (taken >= count) break;
+                        if (!p || !p.id || selectedIds.has(p.id)) continue;
+                        p._isGlobalTopPost = true;
+                        selected.push(p);
+                        selectedIds.add(p.id);
+                        taken++;
+                    }
+                };
+                takeFromGlobal(topGlobalPool, targetGlobal);
                 takeFrom(base, windowSize - selected.length);
 
                 let merged = mergeUniquePosts(selected, base);
@@ -36490,7 +36503,7 @@
                     }
 
                     if (inject.length > 0) {
-                        inject.forEach(p => { state.recentInjected[p.id] = now; });
+                        inject.forEach(p => { state.recentInjected[p.id] = now; p._isGlobalTopPost = true; });
                         // Keep recentInjected bounded
                         const keys = Object.keys(state.recentInjected);
                         if (keys.length > cfg.maxRecentInjectedTrack) {
@@ -38575,6 +38588,79 @@
                 }
             } catch (e) {
                 console.warn('⚠️ SENTIMENT-ORDER guarantee failed:', e);
+            }
+
+            // ========================================================================
+            // 🌍 POSITIVITY THRESHOLD INSERTION
+            // Local posts (true local + close local ≈ 80%) are sorted purely by net
+            // likes. Website-best posts (global top ≈ 10%) are NOT allowed to outrank
+            // a good local post just because they have higher global engagement.
+            // Instead they are inserted at the exact zero-crossing point — the boundary
+            // between the last net-positive local post and the first net-neutral /
+            // net-negative local post.
+            //
+            // Final order:
+            //   [net-positive local posts  — sorted by net likes desc]
+            //   ── positivity threshold ──────────────────────────────
+            //   [global/non-local top posts — sorted by engagement]
+            //   [neutral local posts]
+            //   [negative local posts]
+            //
+            // Exemptions (never reclassified as global): own posts, active boosts,
+            // and nearby/community proximity posts.
+            // ========================================================================
+            try {
+                if (Array.isArray(sortedPosts) && sortedPosts.length > 1) {
+                    const _localKey = String(userAreaTag || window.latestUserAreaTag || '').trim();
+
+                    const _isGlobalTopPost = (p) => {
+                        if (!p || !p.id) return false;
+                        // Own posts stay in local section
+                        if (p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId) return false;
+                        // Active boosts have dedicated placement — leave them alone
+                        if ((typeof isStrictBoostActive === 'function') && isStrictBoostActive(p)) return false;
+                        // Nearby / community posts are "close local" — stay in local section
+                        const prox = String(p.proximityClass || '');
+                        if (prox === 'local' || prox === 'community' || prox === 'nearby' || prox === 'featured') return false;
+                        // Explicitly tagged as a global top post by the freshness waterfall
+                        if (p._isGlobalTopPost) return true;
+                        // If area tag matches user's local key it's local
+                        if (_localKey) {
+                            const pArea = String(p.county || p.zoneTag || p.area || '');
+                            if (pArea === _localKey) return false;
+                        }
+                        // Anything else is treated as a global top post
+                        return true;
+                    };
+
+                    const _localGroup = [];
+                    const _globalGroup = [];
+                    for (const p of sortedPosts) {
+                        if (_isGlobalTopPost(p)) _globalGroup.push(p);
+                        else _localGroup.push(p);
+                    }
+
+                    if (_globalGroup.length > 0 && _localGroup.length > 0) {
+                        // Find the zero crossing: first index in the local group where
+                        // net engagement drops to ≤ 0. Global posts insert there.
+                        let _threshIdx = _localGroup.length; // default: all local are positive
+                        for (let _i = 0; _i < _localGroup.length; _i++) {
+                            if (getPostNetEngagement(_localGroup[_i]) <= 0) {
+                                _threshIdx = _i;
+                                break;
+                            }
+                        }
+
+                        sortedPosts = [
+                            ..._localGroup.slice(0, _threshIdx),
+                            ..._globalGroup,
+                            ..._localGroup.slice(_threshIdx)
+                        ];
+                        console.log(`🌍 POSITIVITY THRESHOLD: ${_threshIdx} positive local → ${_globalGroup.length} global top → ${_localGroup.length - _threshIdx} neutral/negative local`);
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ Positivity threshold insertion failed:', e);
             }
 
             // Refresh latest snapshot after position-1 rotation
