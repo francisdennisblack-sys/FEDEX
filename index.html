@@ -34695,13 +34695,31 @@
                     box.innerHTML = `${repostBadgeHTMLText}<div class="post-text-content" style="padding: 0 8px 8px 4px; ${boostContentOffset} overflow-y: auto; height: 100%; display:flex; align-items:flex-start; justify-content:flex-start; text-align:left; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}${areaTagHTML}`;
                 }
 
-                // Re-attach the preserved boost-badge-prominent so its CSS animation does
-                // not restart (avoids the flash/pop every 15 s from position-1 rotation).
+                // Ensure boost-badge-prominent pill is always present for boost posts.
+                // If the post moved to a new slot the saved element is null — we create
+                // the pill inline so the 🚀 BOOST label is never missing on first paint.
+                // If a saved element from the previous render exists we reuse it so the
+                // CSS animation does not restart (avoids the flash/pop on position-1 rotation).
                 try {
-                    if (_isBoostPost && _savedBoostProm) {
+                    if (_isBoostPost) {
                         let _lb = box.querySelector('.left-badges');
                         if (!_lb) { _lb = document.createElement('div'); _lb.className = 'left-badges'; box.appendChild(_lb); }
-                        _lb.insertBefore(_savedBoostProm, _lb.firstChild);
+                        const _existingProm = _lb.querySelector('.boost-badge-prominent');
+                        if (!_existingProm) {
+                            if (_savedBoostProm) {
+                                // Reuse saved element to preserve animation state
+                                _lb.insertBefore(_savedBoostProm, _lb.firstChild);
+                            } else {
+                                // First render for this slot — build the pill from scratch
+                                const _bp = document.createElement('div');
+                                _bp.className = 'boost-badge-prominent glow-boost';
+                                const _bpInner = document.createElement('div'); _bpInner.className = 'boost-inner';
+                                const _bpIcon  = document.createElement('span'); _bpIcon.className  = 'boost-icon';  _bpIcon.textContent  = '🚀';
+                                const _bpLabel = document.createElement('span'); _bpLabel.className = 'boost-label'; _bpLabel.textContent = 'BOOST';
+                                _bpInner.appendChild(_bpIcon); _bpInner.appendChild(_bpLabel); _bp.appendChild(_bpInner);
+                                _lb.insertBefore(_bp, _lb.firstChild);
+                            }
+                        }
                     }
                 } catch(_e) {}
                 
@@ -41376,18 +41394,15 @@
                     window.postPublishImmediateRefresh = false;
                 }
                 console.log('  ✅ Grid re-rendered - new post should be visible');
-                // Boost badge pill fix: recomputeAndApplyBadges() creates the
-                // .boost-badge-prominent DOM element, but it is only triggered by
-                // Firebase listeners and vote updates — never by the initial render
-                // path. Without this call the 🚀 BOOST pill is missing on first
-                // render and only appears after a hard refresh. Scheduling after the
-                // current call-stack unwinds gives renderGrid/setItems time to settle
-                // the DOM, then the badge pill is created to match post-refresh look.
-                if (postData.boostBadge || (Array.isArray(postData.badges) && postData.badges.includes('boost'))) {
-                    try {
-                        setTimeout(function() { try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(e){} }, 0);
-                    } catch(_) {}
-                }
+                // After every publish: run recomputeAndApplyBadges() once the DOM settles.
+                // This handles two cases:
+                //   1. The new post itself has a boost/sell badge — pill must be created.
+                //   2. Existing boost posts shifted to new slots — renderGridItemFull now
+                //      creates their pill inline, but this call cleans up any edge cases
+                //      (e.g. a slot that was empty before gets a boost post for the first time).
+                try {
+                    setTimeout(function() { try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(e){} }, 0);
+                } catch(_) {}
 
                 // DO NOT update local grid manually after render - Firebase listener will handle updates
                 if (!userPostBoxes.includes(boxIndex)) {
