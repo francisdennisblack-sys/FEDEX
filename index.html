@@ -15833,8 +15833,9 @@
                     const post = all[id];
                     if (!post) continue;
                     const createdAt = getPostCreatedAt(post);
-                    // No usable timestamp -> cannot age it out (leave it alone).
-                    if (!createdAt) continue;
+                    // No usable timestamp → treat as very old and expire immediately so
+                    // timestamp-less posts never accumulate indefinitely in the database.
+                    if (!createdAt) { expiredIds.push(id); continue; }
                     if ((now - createdAt) > POST_MAX_AGE_MS) expiredIds.push(id);
                 }
                 // Also queue reposts whose original post is expired — reposts of a
@@ -19727,6 +19728,8 @@
         }
 
         async function deletePostFromFirebase(postId) {
+            // Declare at function scope so zone/cascade/user cleanup blocks can access it
+            let postData = null;
             try {
                 // Delete from SHARED posts collection (authId ownership check happens in UI)
                 console.log('🗑️ DELETING FROM SHARED COLLECTION:');
@@ -19736,7 +19739,7 @@
                 try {
                     const postRef = ref(database, `posts/${postId}`);
                     const snap = await get(postRef);
-                    const postData = snap && snap.exists() ? snap.val() : null;
+                    postData = snap && snap.exists() ? snap.val() : null;
 
                     // Attempt to resolve rootId for reposts (best-effort, limited depth)
                     async function findRootIdFrom(postObj, maxDepth = 6) {
@@ -19802,6 +19805,14 @@
 
                 // 🗳️ Remove vote data for this post so post-votes doesn't accumulate orphans.
                 try { await remove(ref(database, `post-votes/${postId}`)); } catch (e) { /* non-fatal */ }
+
+                // 👤 Remove user-posts index entry written on upload so users/ node doesn't accumulate orphans.
+                try {
+                    const ownerUid = postData && (postData.authId || postData.userId || postData.createdBy);
+                    if (ownerUid) {
+                        await remove(ref(database, `users/${ownerUid}/posts/${postId}`));
+                    }
+                } catch (e) { /* non-fatal: requires owner auth — best-effort */ }
 
                 // 🧹 Free Storage space: delete all media objects uploaded for this post
                 // (posts/${postId}/photo, posts/${postId}/media_0, …). Non-fatal so a
