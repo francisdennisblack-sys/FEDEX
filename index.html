@@ -11563,6 +11563,92 @@
             return post.customTag;
         }
 
+        // ─────────────────────────────────────────────────────────────────
+        // SCALED AREA TAG: Returns the right-sized geographic label for
+        // this viewer. Close viewers see the exact author tag; distant
+        // viewers see progressively broader labels (county → state →
+        // country → Worldwide). Highly-liked posts are promoted to a
+        // broader scope even for nearby viewers.
+        // ─────────────────────────────────────────────────────────────────
+        function getScaledAreaTagForViewer(post, viewerLat, viewerLon) {
+            try {
+                if (!post) return null;
+
+                const likes = Number(post.likes || 0);
+                const dislikes = Number(post.dislikes || 0);
+                const netLikes = likes - dislikes;
+
+                // Original author-chosen tag (most specific)
+                const originalTag = (typeof getStablePostAreaTag === 'function') ? getStablePostAreaTag(post) : null;
+                if (!originalTag || /^local area$/i.test(originalTag.trim())) return null;
+
+                // Post origin coords (routing coords — area-tag location set by author)
+                const postLat = Number(
+                    (post.geolocation && post.geolocation.lat) ||
+                    (post.postOrigin && post.postOrigin.lat) ||
+                    post.lat || 0
+                );
+                const postLon = Number(
+                    (post.geolocation && post.geolocation.lon) ||
+                    (post.postOrigin && post.postOrigin.lon) ||
+                    post.lon || 0
+                );
+
+                // Viewer-to-post distance in miles
+                let distanceMi = Infinity;
+                if (postLat && postLon && viewerLat && viewerLon && typeof haversineMeters === 'function') {
+                    distanceMi = haversineMeters(Number(viewerLat), Number(viewerLon), postLat, postLon) / 1609.34;
+                }
+
+                // Build geographic label hierarchy: most-specific → broadest.
+                // Each tier is only added when its label differs from the level below.
+                const hier = [{ label: originalTag, tier: 0 }];
+
+                const county = post.county && String(post.county).trim();
+                if (county && county !== originalTag) hier.push({ label: county, tier: 1 });
+
+                const stateRaw = post.state || post.region;
+                const state = stateRaw && String(stateRaw).trim();
+                if (state && state !== county && state !== originalTag) hier.push({ label: state, tier: 2 });
+
+                const countryRaw = post.country;
+                const country = countryRaw && String(countryRaw).trim();
+                if (country && country !== state && country !== county) hier.push({ label: country, tier: 3 });
+
+                hier.push({ label: 'Worldwide', tier: 4 });
+
+                // Distance-based escalation level
+                let distLevel = 0;
+                if (distanceMi < 10) distLevel = 0;       // <10mi  → exact original
+                else if (distanceMi < 50) distLevel = 1;  // 10-50mi → county
+                else if (distanceMi < 300) distLevel = 2; // 50-300mi → state
+                else if (distanceMi < 1000) distLevel = 3;// 300-1000mi → country
+                else distLevel = 4;                        // >1000mi → worldwide
+
+                // Engagement-based minimum escalation
+                // (top-liked posts show a broader reach label regardless of distance)
+                let engLevel = 0;
+                if (netLikes >= 500) engLevel = 4;        // ≥500 → Worldwide
+                else if (netLikes >= 100) engLevel = 3;   // ≥100 → country
+                else if (netLikes >= 30) engLevel = 2;    // ≥30  → state
+                else if (netLikes >= 10) engLevel = 1;    // ≥10  → county
+
+                const finalLevel = Math.max(distLevel, engLevel);
+
+                // Pick the highest available label at or below the final level
+                let chosen = hier[0];
+                for (const h of hier) {
+                    if (h.tier <= finalLevel) chosen = h;
+                    else break;
+                }
+
+                return { label: chosen.label, tier: chosen.tier, distanceMi, netLikes, original: originalTag };
+            } catch (e) {
+                return null;
+            }
+        }
+        window.getScaledAreaTagForViewer = getScaledAreaTagForViewer;
+
         // Get location data needed for zone conversion
         function enrichPostWithLocationData(post) {
             if (!post) return post;
@@ -23850,7 +23936,18 @@
                 const viewAreaTagEl = document.getElementById('viewAreaTag');
                 const viewAreaTagTextEl = document.getElementById('viewAreaTagText');
                 let areaTagLabel = '';
-                try { areaTagLabel = (typeof getStablePostAreaTag === 'function') ? (getStablePostAreaTag(targetPost) || '') : ''; } catch (e) { areaTagLabel = ''; }
+                try {
+                    // Use the viewer-scaled label so remote posts show a meaningful
+                    // geographic scope (e.g. county/state/Worldwide) instead of the
+                    // raw hyper-local author tag which means nothing to a distant viewer.
+                    const _vLat3 = userLocation && Number(userLocation.lat || userLocation.latitude || 0);
+                    const _vLon3 = userLocation && Number(userLocation.lon || userLocation.longitude || 0);
+                    const _scaledModal = (typeof getScaledAreaTagForViewer === 'function')
+                        ? getScaledAreaTagForViewer(targetPost, _vLat3, _vLon3)
+                        : null;
+                    areaTagLabel = (_scaledModal && _scaledModal.label)
+                        || ((typeof getStablePostAreaTag === 'function') ? (getStablePostAreaTag(targetPost) || '') : '');
+                } catch (e) { areaTagLabel = ''; }
                 // If the author used the generic "Local area" tag but this post was made
                 // far (>1km) from the viewing user, swap the vague label for the nearest
                 // real place name to the POST's own coordinates so viewers see a
@@ -34421,8 +34518,17 @@
                                             post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
                                             'Nearby Area';
                     let zoneTagHTML = '';
-                    // Intentionally hide area/zone tag on photo/video grid tiles —
-                    // rendered only inside the post modal (matches text-post behavior).
+                    // Show scaled area tag for remote / well-liked posts
+                    try {
+                        const _vLat = userLocation && Number(userLocation.lat || userLocation.latitude || 0);
+                        const _vLon = userLocation && Number(userLocation.lon || userLocation.longitude || 0);
+                        const _scaled = getScaledAreaTagForViewer(post, _vLat, _vLon);
+                        // Show the tag when the post is from another area (tier ≥ 1)
+                        // OR the post has notable engagement (county-level reach)
+                        if (_scaled && _scaled.label && (_scaled.tier >= 1 || _scaled.netLikes >= 10)) {
+                            zoneTagHTML = generateZoneTagHTML(post, { display: _scaled.label, scale: 'SCALED_GEO', forceMilestoneLabel: true });
+                        }
+                    } catch (_e) {}
                     
                     // Generate badges (self-post text badge intentionally disabled)
                     let badgeClasses = '';
@@ -34467,8 +34573,16 @@
                     const renderedAreaTag = post.displayAreaTag
                         ? post.displayAreaTag
                         : (typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(areaTagText) : areaTagText);
-                    // Do not render area tag on grid tiles (keep details in modal only)
-                    const areaTagHTML = ``;
+                    // Show scaled area tag for remote / well-liked posts
+                    let areaTagHTML = '';
+                    try {
+                        const _vLat2 = userLocation && Number(userLocation.lat || userLocation.latitude || 0);
+                        const _vLon2 = userLocation && Number(userLocation.lon || userLocation.longitude || 0);
+                        const _scaled2 = getScaledAreaTagForViewer(post, _vLat2, _vLon2);
+                        if (_scaled2 && _scaled2.label && (_scaled2.tier >= 1 || _scaled2.netLikes >= 10)) {
+                            areaTagHTML = `<div style="position:absolute;bottom:0;left:0;right:0;height:28px;background-color:#1a1a1a;display:flex;align-items:center;justify-content:flex-start;font-size:10px;font-weight:900;color:#fff;padding:0 8px 6px 8px;box-sizing:border-box;font-family:'Segoe UI','Helvetica Neue',sans-serif;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">${_scaled2.label}</div>`;
+                        }
+                    } catch (_e2) {}
                     const repostCountText = post.repostCount || post.reposts || 0;
                     // Repost badge removed for text tiles — keep repostCount in data but do not render badge
                     const repostBadgeHTMLText = ``;
