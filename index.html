@@ -29368,6 +29368,49 @@
                         }
                         gridContent[contentKey] = finalVisible;
                         console.log(`  ✅ gridContent['${contentKey}'] updated with ${gridContent[contentKey].length} posts (${uniquePosts.length - gridContent[contentKey].length} hidden filtered)`);
+
+                        // If there are zero posts from the user's current area/zone,
+                        // inject a small set of high-quality global posts so the
+                        // viewer isn't shown an empty feed. Policy: show 10% of
+                        // a 60-post base (ceil) => default 6 posts.
+                        try {
+                            const zid = (currentZoneTag || window.currentZoneTag || '') || '';
+                            const zoneKeyLower = String(zid).toLowerCase();
+                            const localCount = Array.isArray(finalVisible) ? finalVisible.filter(p => {
+                                try {
+                                    const tag = String((p.displayAreaTag || p.zoneTag || '') || '').toLowerCase();
+                                    return zoneKeyLower && tag && tag === zoneKeyLower;
+                                } catch (e) { return false; }
+                            }).length : 0;
+
+                            if (localCount === 0) {
+                                const TOP_BASE = Number(window.TOP_POST_FALLBACK_BASE || 60);
+                                const fallbackCount = Math.max(1, Math.ceil(0.10 * TOP_BASE));
+                                let globalTop = [];
+                                try {
+                                    if (window.postCacheSystem && typeof window.postCacheSystem.getCachedPostsForUser === 'function') {
+                                        globalTop = window.postCacheSystem.getCachedPostsForUser('shared').slice(0, TOP_BASE);
+                                    } else if (window.postCacheSystem && window.postCacheSystem.cache) {
+                                        globalTop = Object.values(window.postCacheSystem.cache).sort((a,b) => compareFeedPriority(a,b)).slice(0, TOP_BASE);
+                                    }
+                                } catch (e) { globalTop = []; }
+
+                                const toInject = [];
+                                for (const p of (globalTop || [])) {
+                                    if (!p || !p.id) continue;
+                                    if ((finalVisible || []).some(fp => fp && fp.id === p.id)) continue;
+                                    toInject.push(p);
+                                    if (toInject.length >= fallbackCount) break;
+                                }
+
+                                if (toInject.length > 0) {
+                                    gridContent[contentKey] = (Array.isArray(finalVisible) ? finalVisible.slice() : []).concat(toInject);
+                                    console.log(`🔁 Fallback: injected ${toInject.length} global top posts for zone=${zoneKeyLower || 'none'}`);
+                                } else {
+                                    console.log('🔁 Fallback: no global top posts available to inject');
+                                }
+                            }
+                        } catch (e) { console.warn('Fallback injection failed', e); }
                     } catch (e) {
                         // Fallback: assign mergedVisible if filtering fails
                         gridContent[contentKey] = mergedVisible;
