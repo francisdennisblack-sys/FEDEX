@@ -5477,14 +5477,15 @@
                     committedLocation: locData,
                     locationMode: 'committed'
                 }, { merge: true });
-                console.log('✅ Firestore: committed location for', uid, lat, lon);
+                if (window.FS_LOCATION_DEBUG) console.log('✅ Firestore: committed location for', uid, lat, lon, { locData });
                 // Immediately apply committed location into in-memory runtime state
                 try {
                     if (typeof window.syncRuntimeLocationFromCommit === 'function') {
+                        if (window.FS_LOCATION_DEBUG) console.log('FS debug: applying committed location in-memory', locData);
                         window.syncRuntimeLocationFromCommit({ coords: locData, label: locData.label || null, userSelected: true });
                     }
-                } catch (e) {}
-                try { if (typeof window.resetGridForLocationChange === 'function') window.resetGridForLocationChange(); } catch(e) {}
+                } catch (e) { if (window.FS_LOCATION_DEBUG) console.warn('FS debug: syncRuntimeLocationFromCommit error', e); }
+                try { if (typeof window.resetGridForLocationChange === 'function') { if (window.FS_LOCATION_DEBUG) console.log('FS debug: calling resetGridForLocationChange after commit'); window.resetGridForLocationChange(); } } catch(e) { if (window.FS_LOCATION_DEBUG) console.warn('FS debug: resetGridForLocationChange error', e); }
             } catch (e) {
                 console.warn('saveUserLocationToFirestore failed:', e);
             }
@@ -5538,14 +5539,15 @@
                     committedLocation: null,
                     locationMode: 'real'
                 }, { merge: true });
-                console.log('🏠 Firestore: restored real location for', uid, real.lat, real.lon);
+                if (window.FS_LOCATION_DEBUG) console.log('🏠 Firestore: restored real location for', uid, real.lat, real.lon, { real });
                 // Immediately apply restored real location into in-memory runtime state
                 try {
                     if (typeof window.syncRuntimeLocationFromCommit === 'function') {
+                        if (window.FS_LOCATION_DEBUG) console.log('FS debug: applying restored real location in-memory', real);
                         window.syncRuntimeLocationFromCommit({ coords: real, userSelected: false });
                     }
-                } catch (e) {}
-                try { if (typeof window.resetGridForLocationChange === 'function') window.resetGridForLocationChange(); } catch(e) {}
+                } catch (e) { if (window.FS_LOCATION_DEBUG) console.warn('FS debug: syncRuntimeLocationFromCommit error', e); }
+                try { if (typeof window.resetGridForLocationChange === 'function') { if (window.FS_LOCATION_DEBUG) console.log('FS debug: calling resetGridForLocationChange after restore'); window.resetGridForLocationChange(); } } catch(e) { if (window.FS_LOCATION_DEBUG) console.warn('FS debug: resetGridForLocationChange error', e); }
                 return real;
             } catch (e) {
                 console.warn('restoreRealLocationInFirestore failed:', e);
@@ -5580,8 +5582,11 @@
                 return fsOnSnapshot(doc(firestore, 'users', uid), (snap) => {
                     try {
                         const data = snap && snap.exists() ? snap.data() : null;
+                        if (window.FS_LOCATION_DEBUG) console.log('FS snapshot:', uid, data);
                         callback(data);
                     } catch (e) { console.warn('Firestore location snapshot error', e); }
+                }, (err) => {
+                    console.warn('Firestore onSnapshot error for users/' + uid, err);
                 });
             } catch (e) {
                 console.warn('subscribeUserLocationFromFirestore failed:', e);
@@ -5633,6 +5638,11 @@
         // Mirror locationMode into window.__fsLocationMode so watchPosition callback can read it
         // without an async Firestore read on every GPS ping.
         window.__fsLocationMode = 'real';
+
+        // Debugging toggle for Firestore location flows. Set true to enable verbose logs.
+        window.FS_LOCATION_DEBUG = true;
+        window.enableFsLocationDebug = function(){ window.FS_LOCATION_DEBUG = true; console.log('FS debug enabled'); };
+        window.disableFsLocationDebug = function(){ window.FS_LOCATION_DEBUG = false; console.log('FS debug disabled'); };
 
         // Subscribe to the signed-in user's location doc so window.__fsLocationMode stays current.
         // Also restores active location into memory on page load if a committed location is stored.
