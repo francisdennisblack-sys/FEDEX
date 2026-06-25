@@ -20398,8 +20398,23 @@ function setUploadModalHeader(title, subtitle) {
 
                 // 🗺️ Remove zone index entry so posts_by_zone doesn't accumulate orphans.
                 try {
-                    const zoneKey = (postData && (postData.zoneTag || postData.county)) || 'unknown_zone';
-                    await remove(ref(database, `posts_by_zone/${zoneKey}/${postId}`));
+                    // Best-effort: remove the postId from any zone index it may appear in.
+                    const postsByZoneRef = ref(database, `posts_by_zone`);
+                    const pzbSnap = await get(postsByZoneRef);
+                    if (pzbSnap && pzbSnap.exists()) {
+                        const zones = pzbSnap.val() || {};
+                        for (const z in zones) {
+                            try {
+                                if (zones[z] && Object.prototype.hasOwnProperty.call(zones[z], postId)) {
+                                    await remove(ref(database, `posts_by_zone/${z}/${postId}`)).catch(()=>{});
+                                }
+                            } catch (ze) { /* ignore per-zone errors */ }
+                        }
+                    } else {
+                        // Fallback: try to remove from the most likely zoneKey
+                        const zoneKey = (postData && (postData.zoneTag || postData.county)) || 'unknown_zone';
+                        await remove(ref(database, `posts_by_zone/${zoneKey}/${postId}`)).catch(()=>{});
+                    }
                 } catch (e) { /* non-fatal */ }
 
                 // 🗳️ Remove vote data for this post so post-votes doesn't accumulate orphans.
@@ -20407,11 +20422,65 @@ function setUploadModalHeader(title, subtitle) {
 
                 // 👤 Remove user-posts index entry written on upload so users/ node doesn't accumulate orphans.
                 try {
+                    // Remove the owner-specific index if we know the owner
                     const ownerUid = postData && (postData.authId || postData.userId || postData.createdBy);
                     if (ownerUid) {
-                        await remove(ref(database, `users/${ownerUid}/posts/${postId}`));
+                        await remove(ref(database, `users/${ownerUid}/posts/${postId}`)).catch(()=>{});
                     }
-                } catch (e) { /* non-fatal: requires owner auth — best-effort */ }
+
+                    // Best-effort sweep: remove any lingering references under users/*/posts/*
+                    try {
+                        const usersRoot = ref(database, 'users');
+                        const usersSnap = await get(usersRoot);
+                        if (usersSnap && usersSnap.exists()) {
+                            const users = usersSnap.val() || {};
+                            for (const uid in users) {
+                                try {
+                                    const candidateRef = ref(database, `users/${uid}/posts/${postId}`);
+                                    const cSnap = await get(candidateRef);
+                                    if (cSnap && cSnap.exists()) {
+                                        await remove(candidateRef).catch(()=>{});
+                                    }
+                                } catch (ue) { /* ignore per-user errors */ }
+                            }
+                        }
+                    } catch (sweepErr) {
+                        /* non-fatal sweep failure */
+                    }
+                } catch (e) { /* non-fatal: best-effort */ }
+
+                // Also remove legacy/alternate index locations that may reference this post
+                try {
+                    await remove(ref(database, `user-posts/${postId}`)).catch(()=>{});
+                    // Try scanning user-posts per-user (user-posts/{uid}/{nw}/{postId}) if present
+                    try {
+                        const userPostsRoot = ref(database, 'user-posts');
+                        const upSnap = await get(userPostsRoot);
+                        if (upSnap && upSnap.exists()) {
+                            const up = upSnap.val() || {};
+                            for (const key in up) {
+                                try {
+                                    // If nested structure, attempt to remove any child with postId
+                                    const nested = up[key] || {};
+                                    if (nested && typeof nested === 'object') {
+                                        // If nested directly contains postId
+                                        if (Object.prototype.hasOwnProperty.call(nested, postId)) {
+                                            await remove(ref(database, `user-posts/${key}/${postId}`)).catch(()=>{});
+                                        }
+                                        // If deeper nesting (e.g. user-posts/{uid}/{nw}/{postId}), check children
+                                        for (const child in nested) {
+                                            try {
+                                                const childRef = ref(database, `user-posts/${key}/${child}/${postId}`);
+                                                const cs = await get(childRef);
+                                                if (cs && cs.exists()) await remove(childRef).catch(()=>{});
+                                            } catch (cc) { /* ignore */ }
+                                        }
+                                    }
+                                } catch (e2) { /* ignore per-key errors */ }
+                            }
+                        }
+                    } catch (eup) { /* ignore */ }
+                } catch (e) { /* non-fatal */ }
 
                 // 🧹 Free Storage space: delete all media objects uploaded for this post
                 // (posts/${postId}/photo, posts/${postId}/media_0, …). Non-fatal so a
