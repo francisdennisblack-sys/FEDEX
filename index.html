@@ -144,7 +144,7 @@
                                     try {
                                         // Mirror the SW-stored location into localStorage and refresh
                                         try { setUserLocationCache({ lat: p.lat, lon: p.lon, source: 'sw', timestamp: p.ts }, { force: true }); } catch(e) {}
-                                        try { localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: p.lat, lon: p.lon, label: p.label })); } catch(e) {}
+                                        try { localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: p.lat, lon: p.lon, label: p.label })); console.log('SW → lastChosenLocation set', { lat: p.lat, lon: p.lon, label: p.label }); } catch(e) {}
                                         try { window.latestUserAreaTag = (p && (p.label || '') ) ? String(p.label || '').trim() : window.latestUserAreaTag; } catch(e) {}
                                             console.log('ServiceWorker: locationUpdated received, reloading to apply new location');
                                             try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
@@ -3294,10 +3294,11 @@
             try {
                 const raw = localStorage.getItem('lastChosenLocation');
                 if (!raw) return false;
+                console.log('🔁 applySavedLocationAuthoritative: found lastChosenLocation', raw);
                 const saved = JSON.parse(raw);
                 const coords = { lat: Number(saved.lat), lon: Number(saved.lon), accuracy: saved.accuracy || 100, manual: true };
                 // Set runtime userLocation and persist into cache (force)
-                try { userLocation = coords; } catch(e){}
+                try { const prev = Object.assign({}, userLocation || {}); userLocation = coords; console.log('📍 applySavedLocationAuthoritative: userLocation prev->new', { prev, next: userLocation }); } catch(e){}
                 try { setUserLocationCache(coords, { force: true }); } catch(e){}
                 try { localStorage.setItem('manualLocationActive', '1'); } catch(e){}
 
@@ -5599,6 +5600,7 @@
                     try {
                         const data = snap && snap.exists() ? snap.data() : null;
                         if (window.FS_LOCATION_DEBUG) console.log('FS snapshot:', uid, data);
+                        console.log('📡 Firestore location snapshot received for', uid, data);
                         callback(data);
                     } catch (e) { console.warn('Firestore location snapshot error', e); }
                 }, (err) => {
@@ -8024,9 +8026,10 @@
         // The website's top posts (highest global net-score) stay near the top via
         // the existing sentiment-first sort, so the 10% top posts are NOT removed.
         function syncRuntimeLocationFromCommit(opts) {
-            try {
-                opts = opts || {};
-                let coords = (opts.coords && opts.coords.lat != null && opts.coords.lon != null) ? opts.coords : null;
+                    try {
+                        opts = opts || {};
+                        console.log('🔁 syncRuntimeLocationFromCommit called', opts);
+                        let coords = (opts.coords && opts.coords.lat != null && opts.coords.lon != null) ? opts.coords : null;
                 if (!coords) {
                     try {
                         const raw = localStorage.getItem('lastChosenLocation');
@@ -8036,10 +8039,12 @@
                 if (coords) {
                     const lat = Number(coords.lat), lon = Number(coords.lon);
                     if (Number.isFinite(lat) && Number.isFinite(lon)) {
-                        // Update the lexical binding every proximity/distance read uses.
-                        userLocation = { lat, lon, accuracy: Number(coords.accuracy) || 100, manual: opts.userSelected !== false };
-                        try { window.userLocation = { lat, lon, accuracy: userLocation.accuracy }; } catch (e) {}
-                        try { setUserLocationCache(userLocation, { force: true }); } catch (e) {}
+                                // Update the lexical binding every proximity/distance read uses.
+                                const prev = Object.assign({}, userLocation || {});
+                                userLocation = { lat, lon, accuracy: Number(coords.accuracy) || 100, manual: opts.userSelected !== false };
+                                try { window.userLocation = { lat, lon, accuracy: userLocation.accuracy }; } catch (e) {}
+                                try { setUserLocationCache(userLocation, { force: true }); } catch (e) {}
+                                console.log('📍 syncRuntimeLocationFromCommit: applied coords', { prev, next: userLocation, userSelected: opts.userSelected });
                     }
                 }
                 // Update the lexical area-tag state used by isAreaLocal scoring + the tag UI.
@@ -8052,6 +8057,7 @@
                         currentZoneTag = label;
                         currentAreaName = label;
                         userSelectedZone = true;
+                                console.log('🏷️ syncRuntimeLocationFromCommit: set zone tag', label);
                     }
                 }
             } catch (e) { console.warn('syncRuntimeLocationFromCommit failed', e); }
@@ -15320,8 +15326,9 @@
                                 changedAt: loc.changedAt || Date.now()
                             };
                             window.userLocation = { lat: sel.lat, lon: sel.lon, accuracy: sel.accuracy, timestamp: sel.changedAt };
-                            try {
+                                try {
                                 localStorage.setItem('lastChosenLocation', JSON.stringify(sel));
+                                console.log('🔁 lastChosenLocation persisted (restore):', sel);
                                 localStorage.setItem('lastLocationTimestamp', String(sel.changedAt || Date.now()));
                                 try { window.latestUserAreaTag = (sel && (sel.label || '')) ? String(sel.label || '').trim() : window.latestUserAreaTag; } catch(e) {}
                                 // Re-arm the manual-location flag AND clear the fresh-navigate
@@ -44386,7 +44393,7 @@
                         // Persist the chosen zone tag so auto-detection won't overwrite it
                         try {
                             try { window.persistZoneTagForUser && window.persistZoneTagForUser(window.currentZoneTag, { manual: true }); } catch(e) {}
-                            try { if (sel) localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); } catch(e) {}
+                            try { if (sel) localStorage.setItem('lastChosenLocation', JSON.stringify(sel)); console.log('🔁 lastChosenLocation persisted (modal apply):', sel); } catch(e) {}
                         } catch (e) {}
                         // 🔁 SYNC IN-MEMORY (lexical) location/area so the grid proximity sort +
                         // GridReplacementML re-rank for the NEW location on the renderGrid below.
@@ -45080,6 +45087,7 @@
                                     // Include computed delta (if present) so downstream code can use distance info
                                     try { if (!sel.deltaMeters && window.__tempLocationOverride && window.__tempLocationOverride.deltaMeters) sel.deltaMeters = window.__tempLocationOverride.deltaMeters; } catch(e){}
                                     localStorage.setItem('lastChosenLocation', JSON.stringify(sel));
+                                    console.log('🔁 lastChosenLocation persisted (manual override):', sel);
                                     try { window.latestUserAreaTag = (sel && (sel.label || '')) ? String(sel.label || '').trim() : window.latestUserAreaTag; } catch(e) {}
                                 try { localStorage.setItem('manualLocationActive', '1'); } catch(e) {}
                                 // The user has explicitly committed a new location this session,
