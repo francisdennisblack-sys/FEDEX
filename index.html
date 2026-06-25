@@ -5664,22 +5664,36 @@
         // Also restores active location into memory on page load if a committed location is stored.
         function _startFsLocationSync(uid) {
             if (!uid) return;
+            let _fsLocationSyncFirstLoad = true;
             window.subscribeUserLocationFromFirestore(uid, (data) => {
                 try {
                     if (!data) return;
                     window.__fsLocationMode = data.locationMode || 'real';
                     // On first load, if there is a committed location, apply it into memory
+                    // AND reset the grid so the feed shows the committed location's posts.
                     if (data.locationMode === 'committed' && data.committedLocation && data.committedLocation.lat) {
                         try {
                             if (typeof window.syncRuntimeLocationFromCommit === 'function') {
                                 window.syncRuntimeLocationFromCommit({
                                     coords: data.committedLocation,
-                                    label: data.committedLocation.label || null
+                                    label: data.committedLocation.label || null,
+                                    userSelected: true
                                 });
                             }
                         } catch(e) {}
+                        // On the very first snapshot after page load, reset the grid so
+                        // the feed rebuilds for the committed location instead of GPS.
+                        if (_fsLocationSyncFirstLoad) {
+                            try {
+                                if (typeof window.resetGridForLocationChange === 'function') {
+                                    window.resetGridForLocationChange();
+                                    console.log('📍 _startFsLocationSync: reset grid for committed location on page load');
+                                }
+                            } catch(e) { console.warn('_startFsLocationSync resetGrid failed', e); }
+                        }
                     }
                 } catch(e) {}
+                _fsLocationSyncFirstLoad = false;
             });
         }
 
@@ -29609,6 +29623,11 @@
         function hasLocationConsentForViewerFeed() {
             try {
                 if (typeof isContinuousTrackingPermitted === 'boolean' && isContinuousTrackingPermitted) return true;
+            } catch (e) { /* ignore */ }
+            // A manually-committed location means the user explicitly chose where they
+            // are — treat that as location consent so the zone-based feed filter runs.
+            try {
+                if (localStorage.getItem('manualLocationActive') === '1' || !!localStorage.getItem('lastChosenLocation')) return true;
             } catch (e) { /* ignore */ }
             try {
                 return localStorage.getItem('poiContentContinuousLocation') === 'true';
