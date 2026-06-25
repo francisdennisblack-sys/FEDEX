@@ -16241,6 +16241,7 @@
         const POST_CACHE_CLEANUP_THRESHOLD = 600; // Trigger cleanup at higher threshold
         const MAX_POSTS_PER_AREA = 200; // Allow more posts per area to avoid premature trimming
         const MAX_TOTAL_GRIDCONTENT = 2000; // Target grid fullness: allow up to 2000 posts
+        const GRIDCONTENT_TRIM_MAX_REMOVALS_PER_SWEEP = 1; // Never bulk-drop many posts at once
         
         function addToPostCache(post) {
             if (!post || !post.id) return;
@@ -16276,6 +16277,7 @@
             try {
                 let totalPostsStored = 0;
                 const areasOverLimit = [];
+                let removalsBudget = Math.max(0, Number(GRIDCONTENT_TRIM_MAX_REMOVALS_PER_SWEEP || 1));
                 
                 // First pass: count and identify over-limit areas
                 for (const area in gridContent) {
@@ -16291,15 +16293,20 @@
                 
                 // Second pass: trim areas that exceed per-area limit
                 for (const { area, count } of areasOverLimit) {
+                    if (removalsBudget <= 0) break;
                     // Keep newest posts, discard oldest
                     gridContent[area].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-                    const removed = gridContent[area].length - MAX_POSTS_PER_AREA;
-                    gridContent[area] = gridContent[area].slice(0, MAX_POSTS_PER_AREA);
-                    console.log(`🧹 Area "${area}": Trimmed ${removed} posts (${count} → ${MAX_POSTS_PER_AREA})`);
+                    const overflow = Math.max(0, gridContent[area].length - MAX_POSTS_PER_AREA);
+                    const removed = Math.min(overflow, removalsBudget);
+                    if (removed > 0) {
+                        gridContent[area] = gridContent[area].slice(0, gridContent[area].length - removed);
+                        removalsBudget -= removed;
+                        console.log(`🧹 Area "${area}": Gradual trim removed ${removed} post (${count} → ${gridContent[area].length})`);
+                    }
                 }
                 
                 // Third pass: If STILL over total limit, trim oldest posts globally
-                if (totalPostsStored > MAX_TOTAL_GRIDCONTENT) {
+                if (totalPostsStored > MAX_TOTAL_GRIDCONTENT && removalsBudget > 0) {
                     console.log(`⚠️ GridContent ${totalPostsStored} posts exceeds ${MAX_TOTAL_GRIDCONTENT}, aggressive trimming...`);
                     
                     // Flatten all posts, sort by age
@@ -16311,7 +16318,8 @@
                     }
                     
                     allPosts.sort((a, b) => (b.post.timestamp || 0) - (a.post.timestamp || 0));
-                    const keepPosts = allPosts.slice(0, MAX_TOTAL_GRIDCONTENT);
+                    const keepCount = Math.max(0, allPosts.length - removalsBudget);
+                    const keepPosts = allPosts.slice(0, keepCount);
                     const keepPostIds = new Set(keepPosts.map(x => x.post.id));
                     
                     // Rebuild gridContent with only kept posts
@@ -16322,7 +16330,8 @@
                     });
                     gridContent = newGridContent;
                     
-                    console.log(`✅ GridContent trimmed to ${MAX_TOTAL_GRIDCONTENT} posts (removed ${totalPostsStored - MAX_TOTAL_GRIDCONTENT})`);
+                    const removedGlobal = Math.max(0, allPosts.length - keepPosts.length);
+                    console.log(`✅ GridContent gradual total trim removed ${removedGlobal} post(s)`);
                 }
             } catch (error) {
                 console.warn('Error limiting gridContent memory:', error);
@@ -16449,8 +16458,10 @@
                 } catch (e) { /* ignore */ }
                 const replacementPool = retainedPosts.filter(p => p && p.id && !visibleIds.has(p.id));
                 const maxReplaceable = Math.max(0, replacementPool.length);
+                const ROTATION_MAX_REPLACEMENTS_PER_PASS = 1;
                 // The set we are actually allowed to drop this pass (bounded by supply).
-                const dropSet = new Set(candidatesToDrop.slice(0, maxReplaceable).map(p => p && p.id).filter(Boolean));
+                const dropNow = Math.min(maxReplaceable, ROTATION_MAX_REPLACEMENTS_PER_PASS);
+                const dropSet = new Set(candidatesToDrop.slice(0, dropNow).map(p => p && p.id).filter(Boolean));
                 
                 if (dropSet.size > 0) {
                     console.log(`✅ POST ROTATION: Keeping ${retainedPosts.length}, replacing ${dropSet.size}/${rotatedOutCount} low-engagement posts (bounded by ${maxReplaceable} replacements)`);
@@ -16513,6 +16524,7 @@
         // directly so expired posts are removed even when their author is offline.
         // ============================================================================
         const POST_MAX_AGE_MS = 32 * 60 * 60 * 1000; // 32 hours
+        const TTL_PURGE_MAX_DELETES_PER_PASS = 1; // Never remove many grid posts at once
         let __purgeExpiredPostsRunning = false;
 
         async function purgeExpiredPostsFromFirebase() {
@@ -16548,8 +16560,9 @@
                     }
                 }
                 if (!expiredIds.length) return;
-                console.log(`🗑️ TTL: ${expiredIds.length} post(s) to delete (expired OGs + their reposts).`);
-                for (const id of expiredIds) {
+                const idsToDelete = expiredIds.slice(0, Math.max(1, Number(TTL_PURGE_MAX_DELETES_PER_PASS || 1)));
+                console.log(`🗑️ TTL: ${expiredIds.length} queued, deleting ${idsToDelete.length} this pass.`);
+                for (const id of idsToDelete) {
                     try {
                         await deletePostFromFirebase(id);
                     } catch (err) {
@@ -16569,6 +16582,11 @@
                 try { rebuildGridScrollerFromGridContent(); } catch (e) { /* ignore */ }
                 try { window.lastRenderGridTime = 0; } catch (e) { /* ignore */ }
                 try { renderGrid(); } catch (e) { /* ignore */ }
+
+                // Keep draining gradually at ~1 post/second if more expired remain.
+                if (expiredIds.length > idsToDelete.length) {
+                    try { setTimeout(() => { purgeExpiredPostsFromFirebase(); }, 1000); } catch (e) { /* ignore */ }
+                }
 
                 // 🪦 Clean up post_events/removed tombstones older than 48 h so they
                 // don't accumulate indefinitely.  Runs after the post purge batch.
