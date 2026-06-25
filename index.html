@@ -29222,6 +29222,31 @@
                     } catch (e) { console.warn('subscribeToPostRemovedEvents wiring failed', e); }
 
                     console.log('  uniquePosts length after dedupe:', uniquePosts.length, 'missingOwnerCount:', missingOwnerCount);
+
+                    // Defensive sync: if the user has a committed manual location saved
+                    // in localStorage, ensure the runtime lexical `userLocation` and
+                    // `currentZoneTag` are updated before any distance-based filtering
+                    // runs. This prevents the app from using the device GPS (`real`) if
+                    // the user explicitly moved themselves somewhere else.
+                    try {
+                        const rawSaved = localStorage.getItem('lastChosenLocation');
+                        if (rawSaved) {
+                            try {
+                                const parsed = JSON.parse(rawSaved || '{}');
+                                if (parsed && parsed.lat != null && parsed.lon != null) {
+                                    if (typeof window.syncRuntimeLocationFromCommit === 'function') {
+                                        window.syncRuntimeLocationFromCommit({ coords: { lat: Number(parsed.lat), lon: Number(parsed.lon), accuracy: parsed.accuracy || 100 }, label: parsed.label || parsed.display || null, userSelected: true });
+                                    } else {
+                                        // fallback: set lexical + window copy
+                                        try { userLocation = { lat: Number(parsed.lat), lon: Number(parsed.lon), accuracy: parsed.accuracy || 100, manual: true }; } catch(e){}
+                                        try { window.userLocation = { lat: Number(parsed.lat), lon: Number(parsed.lon), accuracy: parsed.accuracy || 100 }; } catch(e){}
+                                        try { currentZoneTag = parsed.label || currentZoneTag; } catch(e){}
+                                    }
+                                    console.log('🔁 Applied committed lastChosenLocation into runtime state from localStorage');
+                                }
+                            } catch (e) { /* ignore parse errors */ }
+                        }
+                    } catch (e) { /* ignore storage read errors */ }
                     
                     // Clear the mobile slow-load timeout since data arrived
                     if (window.firebaseLoadTimeoutId) {
