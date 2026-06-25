@@ -44882,6 +44882,11 @@
                 if (closeBtn) {
                     try { closeBtn.focus(); } catch (e) {}
                 }
+                try {
+                    if (typeof window.showChangeGridDefaultSuggestions === 'function') {
+                        window.showChangeGridDefaultSuggestions();
+                    }
+                } catch (e) {}
                 return true;
             }
 
@@ -45193,11 +45198,10 @@
                     } catch (e) {}
                     document.body.style.overflow = 'hidden';
                     if (closeBtn) closeBtn.focus();
-                    // Do NOT show built-in suggestions by default when opening the modal.
-                    // The dropdown should only appear after the user starts typing/searching.
+                    // Show a compact starter list so the dropdown is never blank on open.
                     try {
-                        if (suggestionsEl) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); }
-                        if (refineInput) refineInput.setAttribute('aria-expanded','false');
+                        if (refineInput) refineInput.setAttribute('aria-expanded','true');
+                        renderSuggestions(generateMixedLocationSuggestions(12, 0.5));
                     } catch (e) { /* ignore */ }
                 }
                 function closeModal(){
@@ -45305,6 +45309,64 @@
                 }
                 const suggestionsEl = document.getElementById('changeGridSuggestions');
                 const refineInput = document.getElementById('refinePrimary');
+                function renderSuggestions(list) {
+                    if (!suggestionsEl) return;
+                    suggestionsEl.innerHTML = '';
+                    const items = Array.isArray(list) ? list.slice() : [];
+                    if (!items.length) {
+                        suggestionsEl.style.display = 'none';
+                        suggestionsEl.setAttribute('aria-hidden','true');
+                        return;
+                    }
+
+                    const shuffled = items.slice();
+                    for (let i = shuffled.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        const tmp = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = tmp;
+                    }
+
+                    function cleanSuggestionLabel(lbl) {
+                        if (!lbl) return '';
+                        try {
+                            const emDashParts = String(lbl).split('—');
+                            if (emDashParts.length > 1) return emDashParts[0].trim();
+                            const hyphenParts = String(lbl).split(' - ');
+                            if (hyphenParts.length > 1) return hyphenParts[0].trim();
+                            const enDashParts = String(lbl).split('–');
+                            if (enDashParts.length > 1) return enDashParts[0].trim();
+                            const commaParts = String(lbl).split(',').map(s => s.trim());
+                            if (commaParts.length >= 2) return (commaParts[0] + ', ' + commaParts[1]);
+                            const s = String(lbl).trim();
+                            return s.length > 48 ? s.slice(0, 45).trim() + '…' : s;
+                        } catch (e) {
+                            return String(lbl || '').slice(0, 48);
+                        }
+                    }
+
+                    const visible = shuffled.slice(0, 3);
+                    visible.forEach((it) => {
+                        const div = document.createElement('div');
+                        div.className = 'change-grid-suggestion-item';
+                        div.setAttribute('role','button');
+                        div.setAttribute('tabindex','0');
+                        const cleaned = cleanSuggestionLabel(it.label || it.display || it.name || '');
+                        div.textContent = cleaned;
+                        div.title = (it.label || it.display || it.name || '');
+                        div.dataset.fullLabel = (it.label || it.display || it.name || '');
+                        div.addEventListener('click', function(){ selectSuggestion(it); });
+                        div.addEventListener('keypress', function(e){ if (e.key === 'Enter' || e.key === ' ') selectSuggestion(it); });
+                        suggestionsEl.appendChild(div);
+                    });
+
+                    suggestionsEl.style.display = 'block';
+                    suggestionsEl.setAttribute('aria-hidden','false');
+                }
+                window.renderChangeGridSuggestions = renderSuggestions;
+                window.showChangeGridDefaultSuggestions = function() {
+                    try {
+                        renderSuggestions(generateMixedLocationSuggestions(12, 0.5));
+                    } catch (e) {}
+                };
                 function getCombinedSources() {
                     const out = [];
                     try {
@@ -45623,7 +45685,7 @@
                             ev.preventDefault();
                             ev.stopPropagation();
                             refineInput.value = '';
-                            if (suggestionsEl) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); }
+                            renderSuggestions(generateMixedLocationSuggestions(12, 0.5));
                             updateRefineClearBtn();
                             try { refineInput.focus(); } catch(e){}
                         });
@@ -45656,7 +45718,7 @@
                                     renderSuggestions(merged.slice(0,12));
                                 }, 220);
                             } else {
-                                if (suggestionsEl) { suggestionsEl.style.display = 'none'; suggestionsEl.setAttribute('aria-hidden','true'); }
+                                renderSuggestions(generateMixedLocationSuggestions(12, 0.5));
                             }
                     });
                 }
@@ -46079,6 +46141,95 @@
                     } catch (err) { console.error('getLastLocationSetStatus error', err); return null; }
                 };
             } catch (e) { console.warn('changeGrid modal init failed', e); }
+        })();
+    </script>
+    <script>
+        (function(){
+            function escapeHtml(text) {
+                return String(text || '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
+
+            function cleanLabel(label) {
+                const value = String(label || '').trim();
+                if (!value) return '';
+                const parts = value.split('—');
+                if (parts.length > 1) return parts[0].trim();
+                const hyphenParts = value.split(' - ');
+                if (hyphenParts.length > 1) return hyphenParts[0].trim();
+                const enDashParts = value.split('–');
+                if (enDashParts.length > 1) return enDashParts[0].trim();
+                const commaParts = value.split(',').map((s) => s.trim());
+                if (commaParts.length >= 2) return commaParts[0] + ', ' + commaParts[1];
+                return value.length > 48 ? value.slice(0, 45).trim() + '…' : value;
+            }
+
+            function getFallbackSuggestions() {
+                const fromSources = [];
+                const globals = [
+                    'bestCoffeeShops',
+                    'popularLocalDestinationsCurated',
+                    'compactNearbyCities',
+                    'nearbyPOIsSection',
+                    'regionalCities'
+                ];
+                for (const key of globals) {
+                    const source = window[key];
+                    if (Array.isArray(source)) {
+                        for (const item of source) {
+                            if (!item) continue;
+                            const label = item.display || item.name || item.title || item.label;
+                            if (!label) continue;
+                            fromSources.push({ label, lat: item.lat, lon: item.lon });
+                            if (fromSources.length >= 12) break;
+                        }
+                    }
+                    if (fromSources.length >= 12) break;
+                }
+                if (fromSources.length > 0) return fromSources.slice(0, 12);
+                return [
+                    { label: 'New York, NY', lat: 40.7128, lon: -74.0060 },
+                    { label: 'Los Angeles, CA', lat: 34.0522, lon: -118.2437 },
+                    { label: 'Chicago, IL', lat: 41.8781, lon: -87.6298 },
+                    { label: 'Houston, TX', lat: 29.7604, lon: -95.3698 },
+                    { label: 'Seattle, WA', lat: 47.6062, lon: -122.3321 }
+                ];
+            }
+
+            window.showChangeGridDefaultSuggestions = function() {
+                const suggestionsEl = document.getElementById('changeGridSuggestions');
+                if (!suggestionsEl) return;
+                const items = getFallbackSuggestions();
+                suggestionsEl.innerHTML = '';
+                for (const item of items.slice(0, 3)) {
+                    const row = document.createElement('div');
+                    row.className = 'change-grid-suggestion-item';
+                    row.setAttribute('role', 'button');
+                    row.setAttribute('tabindex', '0');
+                    row.title = item.label || '';
+                    row.dataset.fullLabel = item.label || '';
+                    row.innerHTML = '<span>' + escapeHtml(cleanLabel(item.label)) + '</span>';
+                    row.addEventListener('click', function() {
+                        try {
+                            if (window.__tempLocationOverride == null) {
+                                window.__tempLocationOverride = {};
+                            }
+                            window.__tempLocationOverride.label = item.label;
+                            window.__tempLocationOverride.lat = item.lat;
+                            window.__tempLocationOverride.lon = item.lon;
+                            const refineInput = document.getElementById('refinePrimary');
+                            if (refineInput) refineInput.value = item.label;
+                        } catch (e) {}
+                    });
+                    suggestionsEl.appendChild(row);
+                }
+                suggestionsEl.style.display = 'block';
+                suggestionsEl.setAttribute('aria-hidden', 'false');
+            };
         })();
     </script>
 </html>
