@@ -478,6 +478,22 @@
         function ensureNewPostVisible(post) {
             try {
                 if (!post || !post.id) return;
+                // Respect global max post distance filter for realtime inserts
+                try {
+                    const maxMiles = Number(window.MAX_POST_DISTANCE_MILES || 1000);
+                    if (maxMiles > 0 && userLocation && Number.isFinite(Number(userLocation.lat)) && Number.isFinite(Number(userLocation.lon))) {
+                        const plat = Number((post && (post.geolocation && (post.geolocation.lat || post.geolocation.latitude)) ) || post.lat || post.latitude || NaN);
+                        const plon = Number((post && (post.geolocation && (post.geolocation.lon || post.geolocation.longitude)) ) || post.lon || post.longitude || NaN);
+                        if (Number.isFinite(plat) && Number.isFinite(plon)) {
+                            const distanceKm = (typeof calculateDistance === 'function') ? calculateDistance(Number(userLocation.lat), Number(userLocation.lon), plat, plon) : 0;
+                            const distanceMiles = Number(distanceKm || 0) * 0.621371;
+                            if (Number.isFinite(distanceMiles) && distanceMiles > maxMiles) {
+                                try { console.log(`🔍 Realtime drop: post ${post.id} is ${distanceMiles.toFixed(1)}mi > ${maxMiles}mi`); } catch(e){}
+                                return;
+                            }
+                        }
+                    }
+                } catch (e) { /* ignore filtering failures */ }
                 const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
                 gridContent[key] = gridContent[key] || [];
 
@@ -29326,8 +29342,32 @@
 
                     // Now assign the authoritative mergedVisible list (may replace the
                     // quick preview above once heavy processing completes).
-                    gridContent[contentKey] = mergedVisible;
-                    console.log(`  ✅ gridContent['${contentKey}'] updated with ${gridContent[contentKey].length} posts (${uniquePosts.length - gridContent[contentKey].length} hidden filtered)`);
+                    try {
+                        const maxMiles = Number(window.MAX_POST_DISTANCE_MILES || 1000);
+                        let finalVisible = Array.isArray(mergedVisible) ? mergedVisible.slice() : [];
+                        if (maxMiles > 0 && userLocation && Number.isFinite(Number(userLocation.lat)) && Number.isFinite(Number(userLocation.lon))) {
+                            const userLat = Number(userLocation.lat);
+                            const userLon = Number(userLocation.lon);
+                            const beforeCount = finalVisible.length;
+                            finalVisible = finalVisible.filter(p => {
+                                try {
+                                    const plat = Number((p && (p.geolocation && (p.geolocation.lat || p.geolocation.latitude)) ) || p.lat || p.latitude || p.locationLat || NaN);
+                                    const plon = Number((p && (p.geolocation && (p.geolocation.lon || p.geolocation.longitude)) ) || p.lon || p.longitude || p.locationLon || NaN);
+                                    if (!Number.isFinite(plat) || !Number.isFinite(plon)) return true; // keep posts without coords
+                                    const distanceKm = (typeof calculateDistance === 'function') ? calculateDistance(userLat, userLon, plat, plon) : 0;
+                                    const distanceMiles = Number(distanceKm || 0) * 0.621371;
+                                    return !(Number.isFinite(distanceMiles) && distanceMiles > maxMiles);
+                                } catch (e) { return true; }
+                            });
+                            console.log(`🔍 Distance filter: removed ${beforeCount - finalVisible.length} posts beyond ${maxMiles} miles`);
+                        }
+                        gridContent[contentKey] = finalVisible;
+                        console.log(`  ✅ gridContent['${contentKey}'] updated with ${gridContent[contentKey].length} posts (${uniquePosts.length - gridContent[contentKey].length} hidden filtered)`);
+                    } catch (e) {
+                        // Fallback: assign mergedVisible if filtering fails
+                        gridContent[contentKey] = mergedVisible;
+                        console.warn('Distance filtering failed, assigned mergedVisible fallback', e);
+                    }
 
                     // For unsigned viewers, show a real feed:
                     // - default: full global feed
