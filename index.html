@@ -4546,8 +4546,16 @@
 
     <div class="container">
         <div class="grid-wrapper">
-            <div id="pull-to-refresh-indicator" style="display: none; text-align: center; padding: 10px; font-size: 16px; color: #888; transition: opacity 0.3s ease;">
-                <span>🔄</span> Refreshing...
+            <div id="pull-to-refresh-indicator" style="display: none; text-align: center; padding: 10px; font-size: 16px; color: #888; transition: opacity 0.3s ease; align-items:center; justify-content:center; gap:6px;">
+                <span aria-hidden="true" style="display:inline-flex; width:12px; height:12px; flex:0 0 auto; color:#888;">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"></path>
+                        <polyline points="3 3 3 8 8 8"></polyline>
+                        <path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"></path>
+                        <polyline points="21 21 21 16 16 16"></polyline>
+                    </svg>
+                </span>
+                <span style="font-size:12px; font-weight:600; line-height:1.2; letter-spacing:0.01em;">Refresh</span>
             </div>
             <div class="grid" id="grid" style="transition: transform 0.3s ease;">
                 <!-- Grid boxes will be generated here -->
@@ -6734,6 +6742,21 @@
         const ptrThreshold = 100; // How far the user needs to pull down (in pixels)
         let isRefreshing = false;
 
+        function setPullToRefreshIndicatorLabel(text) {
+            if (!ptrIndicator) return;
+            ptrIndicator.innerHTML = `
+                <span aria-hidden="true" style="display:inline-flex; width:12px; height:12px; flex:0 0 auto; color:#888;">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"></path>
+                        <polyline points="3 3 3 8 8 8"></polyline>
+                        <path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"></path>
+                        <polyline points="21 21 21 16 16 16"></polyline>
+                    </svg>
+                </span>
+                <span style="font-size:12px; font-weight:600; line-height:1.2; letter-spacing:0.01em;">${text}</span>
+            `;
+        }
+
         gridContainer.addEventListener('touchstart', (e) => {
             if (isRefreshing) return;
             // Only track pulls from the top of the grid
@@ -6760,7 +6783,7 @@
             // If scrolled to the top and pulling down
             if (gridContainer.scrollTop === 0 && pullDistance > 0) {
                 e.preventDefault(); // Prevent browser's default pull-to-refresh
-                ptrIndicator.style.display = 'block';
+                ptrIndicator.style.display = 'inline-flex';
                 ptrIndicator.style.opacity = Math.min(1, pullDistance / ptrThreshold);
                 gridContainer.style.transform = `translateY(${pullDistance / 2.5}px)`;
             }
@@ -6788,9 +6811,9 @@
             // Trigger refresh only if threshold is met and we are at the top
             if (pullDistance > ptrThreshold && gridContainer.scrollTop === 0) {
                 isRefreshing = true;
-                ptrIndicator.style.display = 'block';
+                ptrIndicator.style.display = 'inline-flex';
                 ptrIndicator.style.opacity = 1;
-                ptrIndicator.textContent = '🔄 Reloading…';
+                setPullToRefreshIndicatorLabel('Refresh');
                 console.log('🔄 Pull-to-refresh triggered! Performing full page reload.');
 
                 // Full website refresh — bypass HTTP cache so user gets latest code/assets.
@@ -44693,6 +44716,7 @@
                 const closeBtn = modal && modal.querySelector('.modal-close');
                 const changeBtn = document.getElementById('changeLocationBtn');
                 const comeHomeBtn = document.getElementById('comeHomeBtn');
+                let changeGridCloseTimer = null;
                 // Apply saved manual location in-place and refresh UI without reloading
                 function applySavedLocationAndRefreshUI(sel, options) {
                     try {
@@ -44750,7 +44774,15 @@
                         try { if (typeof updateZonePredictor === 'function') updateZonePredictor(); } catch(e){}
                         // Close modal unless caller requested to keep it open. A small
                         // ~0.1s delay lets the press register before the page slides away.
-                        try { if (!(options && options.keepOpen) && typeof closeModal === 'function') setTimeout(closeModal, 100); } catch(e){}
+                        try {
+                            if (!(options && options.keepOpen) && typeof closeModal === 'function') {
+                                if (changeGridCloseTimer) clearTimeout(changeGridCloseTimer);
+                                changeGridCloseTimer = setTimeout(() => {
+                                    changeGridCloseTimer = null;
+                                    closeModal();
+                                }, 100);
+                            }
+                        } catch(e){}
                         // Notification suppressed: UI now highlights Return Home instead of showing a toast
                     } catch (e) { console.warn('applySavedLocationAndRefreshUI failed', e); }
                 }
@@ -44818,9 +44850,21 @@
 
                 function openModal(){
                     if (!backdrop) return;
+                    if (changeGridCloseTimer) {
+                        clearTimeout(changeGridCloseTimer);
+                        changeGridCloseTimer = null;
+                    }
+                    backdrop.hidden = false;
+                    if (modal) modal.hidden = false;
                     backdrop.style.display = 'flex';
+                    backdrop.style.pointerEvents = 'auto';
+                    backdrop.style.opacity = '1';
                     backdrop.setAttribute('aria-hidden','false');
-                    if (modal) modal.classList.add('open');
+                    if (modal) {
+                        modal.classList.remove('open');
+                        void modal.offsetWidth;
+                        modal.classList.add('open');
+                    }
                     try { document.body.classList.add('change-location-open'); } catch (e) {}
                     // Ensure primary action has visible label and can't be easily overwritten
                     try {
@@ -44850,9 +44894,15 @@
                 }
                 function closeModal(){
                     if (!backdrop) return;
+                    if (changeGridCloseTimer) {
+                        clearTimeout(changeGridCloseTimer);
+                        changeGridCloseTimer = null;
+                    }
                     backdrop.style.display = 'none';
                     backdrop.setAttribute('aria-hidden','true');
                     if (modal) modal.classList.remove('open');
+                    if (modal) modal.hidden = true;
+                    backdrop.hidden = true;
                     try { document.body.classList.remove('change-location-open'); } catch (e) {}
                     document.body.style.overflow = '';
                     if (pill) pill.focus();
