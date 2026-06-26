@@ -37508,7 +37508,9 @@ function setUploadModalHeader(title, subtitle) {
                 }
 
                 let injectCount = 0;
-                if (topChanged) {
+                if (window.isFeedWarmupLocked && window.isFeedWarmupLocked()) {
+                    injectCount = 0;
+                } else if (topChanged) {
                     injectCount = Math.max(1, cfg.immediateTopInjectCount);
                 } else if (now >= (state.nextTopFallbackAt || 0) && (now - (state.lastMeaningfulFreshAt || 0)) >= cfg.minStaleMs) {
                     injectCount = freshnessRandomInt(cfg.staleInjectMin, cfg.staleInjectMax);
@@ -37630,7 +37632,7 @@ function setUploadModalHeader(title, subtitle) {
                 }
 
                 try {
-                    rankedSnapshot = stabilizeTargetForScrollActivity(rankedSnapshot, (gridScroller && Array.isArray(gridScroller.items)) ? gridScroller.items : []);
+                    rankedSnapshot = window.stabilizeTargetForScrollActivity ? window.stabilizeTargetForScrollActivity(rankedSnapshot, (gridScroller && Array.isArray(gridScroller.items)) ? gridScroller.items : []) : rankedSnapshot;
                 } catch (e) {
                     console.warn('scroll-aware stabilization failed', e);
                 }
@@ -37651,6 +37653,58 @@ function setUploadModalHeader(title, subtitle) {
         try {
             window.feedScrollStabilityMs = Number(window.feedScrollStabilityMs || 2200);
             window.__feedScrollState = window.__feedScrollState || { lastY: 0, lastDirection: 'down', lastScrollAt: 0, settleUntil: 0 };
+
+            window.isFeedWarmupLocked = window.isFeedWarmupLocked || function isFeedWarmupLocked() {
+                try {
+                    const now = Date.now();
+                    const recentHard = Number(window.__recentHardRefreshAt || 0);
+                    const pageStart = Number(window.startupMetrics && window.startupMetrics.pageLoadStart) || 0;
+                    const warmupMs = Number(window.feedWarmupLockMs || 12000);
+                    return (recentHard && (now - recentHard) < warmupMs) || (pageStart && (now - pageStart) < warmupMs);
+                } catch (e) {
+                    return false;
+                }
+            };
+
+            window.stabilizeTargetForScrollActivity = window.stabilizeTargetForScrollActivity || function stabilizeTargetForScrollActivity(target, current) {
+                try {
+                    const next = Array.isArray(target) ? target.slice() : [];
+                    const live = Array.isArray(current) ? current.slice() : [];
+                    if (next.length === 0 || live.length === 0) return next;
+
+                    const warmupLocked = window.isFeedWarmupLocked ? window.isFeedWarmupLocked() : false;
+                    if (!warmupLocked && !isFeedScrollStabilized()) return next;
+
+                    const merged = [];
+                    const seen = new Set();
+                    const preferredSource = warmupLocked ? live.slice(0, Math.min(live.length, 12)) : next;
+                    const fallbackSource = warmupLocked ? next : live;
+
+                    for (const post of preferredSource) {
+                        if (!post || !post.id) continue;
+                        const id = String(post.id);
+                        if (seen.has(id)) continue;
+                        try { if (typeof isPostHiddenForViewer === 'function' && isPostHiddenForViewer(post, currentUserId)) continue; } catch (e) { /* ignore */ }
+                        seen.add(id);
+                        merged.push(post);
+                        if (!warmupLocked && merged.length >= live.length) break;
+                    }
+
+                    for (const post of fallbackSource) {
+                        if (!post || !post.id) continue;
+                        const id = String(post.id);
+                        if (seen.has(id)) continue;
+                        try { if (typeof isPostHiddenForViewer === 'function' && isPostHiddenForViewer(post, currentUserId)) continue; } catch (e) { /* ignore */ }
+                        seen.add(id);
+                        merged.push(post);
+                        if (merged.length >= live.length) break;
+                    }
+
+                    return merged.length > 0 ? merged : next;
+                } catch (e) {
+                    return Array.isArray(target) ? target : [];
+                }
+            };
 
             const updateFeedScrollState = () => {
                 try {
