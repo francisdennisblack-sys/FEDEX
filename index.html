@@ -14920,8 +14920,24 @@
             try {
                 const timers = window.__pendingVoteShiftTimers || {};
                 const hasTimer = Object.keys(timers).some(k => !!timers[k]);
-                const q = window.__voteMoveQueue;
-                const hasQueue = Array.isArray(q) && q.length > 0;
+                const now = Date.now();
+                const rawQueue = Array.isArray(window.__voteMoveQueue) ? window.__voteMoveQueue : [];
+                // Prune stale planner jobs so reconcile cannot be blocked forever
+                // by an orphaned queue entry.
+                const freshQueue = rawQueue.filter(job => {
+                    if (!job || !job.postId) return false;
+                    const enqueuedAt = Number(job.enqueuedAt || now);
+                    const maxWaitMs = Math.max(250, Number(job.maxWaitMs || 900));
+                    return (now - enqueuedAt) <= (maxWaitMs + 2000);
+                });
+                if (freshQueue.length !== rawQueue.length) {
+                    window.__voteMoveQueue = freshQueue;
+                }
+                // If queue exists but planner RAF is gone, kick it once.
+                if (freshQueue.length > 0 && !window.__voteMovePlannerRafId) {
+                    try { processVoteMoveQueue(); } catch (e) { /* ignore */ }
+                }
+                const hasQueue = freshQueue.length > 0;
                 return hasTimer || hasQueue;
             } catch (e) {
                 return false;
@@ -37688,19 +37704,6 @@ function setUploadModalHeader(title, subtitle) {
                     // Render the full affected range so the old slot gets cleared too.
                     // A moved post changes both its new slot and the slot it left behind.
                     if (typeof gridScroller.renderItemsInRange === 'function') {
-                        // Extra anti-flicker guard: for non-vote visual moves, throttle
-                        // how often we repaint moved ranges.
-                        const isVoteActiveNow = !!(window.voteTriggeredRerank && isVoteReorderStabilizationActive());
-                        if (!isVoteActiveNow && opKind === 'move') {
-                            const nowTs = Date.now();
-                            const lastVisualMoveAt = Number(window.__lastVisualMoveAt || 0);
-                            const minVisualMoveGapMs = 2500;
-                            if ((nowTs - lastVisualMoveAt) < minVisualMoveGapMs) {
-                                return;
-                            }
-                            window.__lastVisualMoveAt = nowTs;
-                        }
-
                         const startIdx = (movedFromIdx !== -1) ? Math.min(diffIdx, movedFromIdx) : diffIdx;
                         const endIdx = (movedFromIdx !== -1) ? Math.max(diffIdx, movedFromIdx) + 1 : diffIdx + 1;
                         gridScroller.renderItemsInRange(startIdx, endIdx, { skipIdentityPass: true });
