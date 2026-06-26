@@ -4516,14 +4516,6 @@
                         transform: translateY(0);
                     }
                 }
-                @keyframes pulse-glow {
-                    0%, 100% {
-                        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
-                    }
-                    50% {
-                        box-shadow: 0 8px 24px rgba(102, 126, 234, 0.25);
-                    }
-                }
                 
                 @keyframes typing-dot {
                     0%, 60%, 100% { opacity: 0.3; }
@@ -35531,6 +35523,10 @@ function setUploadModalHeader(title, subtitle) {
         function repairGridSlotGaps(reason = '') {
             try {
                 if (!window.gridScroller || !Array.isArray(window.gridScroller.items)) return false;
+                try {
+                    const criticalReason = /^(delete|hide|report|vote|location|reset)/i.test(String(reason || ''));
+                    if (isFeedScrollStabilized() && !criticalReason) return false;
+                } catch (e) {}
                 // If the user is actively scrolling, avoid aggressive compaction
                 // that would remove many items from view. Allow compaction if the
                 // user just committed a location change (recent location commit).
@@ -35639,6 +35635,10 @@ function setUploadModalHeader(title, subtitle) {
         function forceCompactNow(reason = '') {
             try {
                 if (!window.gridScroller) return false;
+                try {
+                    const criticalReason = /^(delete|hide|report|vote|location|reset)/i.test(String(reason || ''));
+                    if (isFeedScrollStabilized() && !criticalReason) return false;
+                } catch (e) {}
                 console.log(`⚡ forceCompactNow invoked${reason ? ` (${reason})` : ''}`);
 
                 // Prefer pendingSortedPosts (fresh ML ranking) when available
@@ -37629,6 +37629,12 @@ function setUploadModalHeader(title, subtitle) {
                     console.warn('incremental freshness pass failed:', e);
                 }
 
+                try {
+                    rankedSnapshot = stabilizeTargetForScrollActivity(rankedSnapshot, (gridScroller && Array.isArray(gridScroller.items)) ? gridScroller.items : []);
+                } catch (e) {
+                    console.warn('scroll-aware stabilization failed', e);
+                }
+
                 pendingSortedPosts = compactPostListForSlots(rankedSnapshot);
                 // Kick off the 1/sec reconciler to apply minimal diffs
                 try { scheduleGridReconcile(); } catch (e) { /* ignore */ }
@@ -37639,11 +37645,61 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         // -------------------------
+        // Feed scroll stability: keep ML swaps incremental when the user
+        // reverses direction, especially on mobile where scroll motion is noisy.
+        // -------------------------
+        try {
+            window.feedScrollStabilityMs = Number(window.feedScrollStabilityMs || 2200);
+            window.__feedScrollState = window.__feedScrollState || { lastY: 0, lastDirection: 'down', lastScrollAt: 0, settleUntil: 0 };
+
+            const updateFeedScrollState = () => {
+                try {
+                    const state = window.__feedScrollState || {};
+                    const y = Number((document.scrollingElement && document.scrollingElement.scrollTop) || window.scrollY || window.pageYOffset || 0);
+                    const prevY = Number(state.lastY || 0);
+                    const delta = y - prevY;
+                    if (Math.abs(delta) > 2) {
+                        const direction = delta > 0 ? 'down' : 'up';
+                        state.lastDirection = direction;
+                        state.lastScrollAt = Date.now();
+                        state.settleUntil = Date.now() + (direction === 'up' ? Number(window.feedScrollStabilityMs || 2200) : 1200);
+                        state.lastY = y;
+                        window.__feedScrollState = state;
+                    }
+                } catch (e) {}
+            };
+
+            if (!window.__feedScrollStabilityAttached) {
+                window.__feedScrollStabilityAttached = true;
+                const suspendFn = () => {
+                    try {
+                        window.__suspendBatchPruneDuringScroll = true;
+                        updateFeedScrollState();
+                        if (window.__feedScrollSuspendTimer) clearTimeout(window.__feedScrollSuspendTimer);
+                        window.__feedScrollSuspendTimer = setTimeout(() => {
+                            window.__suspendBatchPruneDuringScroll = false;
+                            window.__feedScrollSuspendTimer = null;
+                        }, 700);
+                    } catch (e) {}
+                };
+
+                const gridEl = document.getElementById('grid');
+                if (gridEl) {
+                    gridEl.addEventListener('scroll', suspendFn, { passive: true });
+                    gridEl.addEventListener('wheel', suspendFn, { passive: true });
+                    gridEl.addEventListener('touchmove', suspendFn, { passive: true });
+                }
+                window.addEventListener('scroll', suspendFn, { passive: true });
+                window.addEventListener('wheel', suspendFn, { passive: true });
+                window.addEventListener('touchmove', suspendFn, { passive: true });
+                updateFeedScrollState();
+            }
+        } catch (e) { console.warn('feed scroll stability init failed', e); }
+
         // Impression / Click metrics
         // -------------------------
         window._impressionTimers = window._impressionTimers || new Map();
         window._impressedPostIds = window._impressedPostIds || new Set();
-
         // IntersectionObserver for impressions (visible >= 1s at 50% threshold)
         if (typeof window._postImpressionObserver === 'undefined') {
             try {
@@ -37672,30 +37728,6 @@ function setUploadModalHeader(title, subtitle) {
                 }, { threshold: [0.5] });
             } catch (e) { window._postImpressionObserver = null; }
         }
-
-        // User scroll detector: while user is actively scrolling, suspend batch
-        // pruning/compaction so posts are not removed in large batches during
-        // exploration. Debounced to resume 700ms after last scroll event.
-        try {
-            window.__suspendBatchPruneDuringScroll = false;
-            let __scrollSuspendTimer = null;
-            const gridEl = document.getElementById('grid');
-            const suspendFn = () => {
-                try {
-                    window.__suspendBatchPruneDuringScroll = true;
-                    if (__scrollSuspendTimer) clearTimeout(__scrollSuspendTimer);
-                    __scrollSuspendTimer = setTimeout(() => { window.__suspendBatchPruneDuringScroll = false; __scrollSuspendTimer = null; }, 700);
-                } catch (e) {}
-            };
-            if (gridEl) {
-                gridEl.addEventListener('scroll', suspendFn, { passive: true });
-                gridEl.addEventListener('wheel', suspendFn, { passive: true });
-                gridEl.addEventListener('touchmove', suspendFn, { passive: true });
-            }
-            window.addEventListener('scroll', suspendFn, { passive: true });
-            window.addEventListener('wheel', suspendFn, { passive: true });
-            window.addEventListener('touchmove', suspendFn, { passive: true });
-        } catch (e) { /* ignore scroll wiring errors */ }
 
         function observeBoxForImpression(box, postId) {
             try {
