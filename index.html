@@ -2506,7 +2506,7 @@
             }
             
             // 🎨 Render items only in specific range (lazy rendering)
-            renderItemsInRange(startIdx, endIdx) {
+            renderItemsInRange(startIdx, endIdx, options = {}) {
                 if (!this.onRenderItem) return;
                 
                 const actualEnd = Math.min(endIdx, this.items.length);
@@ -2551,8 +2551,12 @@
                 }
 
                 // Final identity scrub for this rendered window to eliminate ghost boxes
-                // left by rapid swaps/reorders.
-                this.enforceStrictSlotIdentity(Math.max(actualEnd + 8, endIdx + 4));
+                // left by rapid swaps/reorders. Callers can skip this for minimal
+                // move ticks to prevent visible clear/repaint flicker.
+                const skipIdentityPass = !!(options && options.skipIdentityPass);
+                if (!skipIdentityPass) {
+                    this.enforceStrictSlotIdentity(Math.max(actualEnd + 8, endIdx + 4));
+                }
             }
 
             clearBoxElement(box) {
@@ -36858,11 +36862,23 @@ function setUploadModalHeader(title, subtitle) {
                     // Render the full affected range so the old slot gets cleared too.
                     // A moved post changes both its new slot and the slot it left behind.
                     if (typeof gridScroller.renderItemsInRange === 'function') {
+                        // Extra anti-flicker guard: for non-vote visual moves, throttle
+                        // how often we repaint moved ranges.
+                        const isVoteActiveNow = !!(window.voteTriggeredRerank && isVoteReorderStabilizationActive());
+                        if (!isVoteActiveNow && opKind === 'move') {
+                            const nowTs = Date.now();
+                            const lastVisualMoveAt = Number(window.__lastVisualMoveAt || 0);
+                            const minVisualMoveGapMs = 2500;
+                            if ((nowTs - lastVisualMoveAt) < minVisualMoveGapMs) {
+                                return;
+                            }
+                            window.__lastVisualMoveAt = nowTs;
+                        }
+
                         const startIdx = (movedFromIdx !== -1) ? Math.min(diffIdx, movedFromIdx) : diffIdx;
                         const endIdx = (movedFromIdx !== -1) ? Math.max(diffIdx, movedFromIdx) + 1 : diffIdx + 1;
-                        gridScroller.renderItemsInRange(startIdx, endIdx);
+                        gridScroller.renderItemsInRange(startIdx, endIdx, { skipIdentityPass: true });
                         applyGridTextFontSizeToVisiblePosts();
-                        try { if (typeof gridScroller.enforceStrictSlotIdentity === 'function') gridScroller.enforceStrictSlotIdentity(endIdx + 20); } catch(e) {}
                         try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
                     } else if (typeof gridScroller.setItems === 'function') {
                         // Fallback if API changes
