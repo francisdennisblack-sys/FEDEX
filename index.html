@@ -35633,17 +35633,67 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         function getGridTextFontSizePx() {
-            const w = window.innerWidth || 0;
-            // More aggressive reduction for denser tiles
-            if (w >= 1024) return 40;
-            if (w >= 768) return 32;
-            return 18;
+            // Legacy fallback. Runtime rendering now uses per-tile auto-fit.
+            return 24;
+        }
+
+        function fitPostTextToSlot(el) {
+            if (!el || !(el instanceof HTMLElement)) return;
+            const text = (el.textContent || '').trim();
+            if (!text) return;
+
+            const boxW = el.clientWidth;
+            const boxH = el.clientHeight;
+            if (boxW <= 0 || boxH <= 0) return;
+
+            // Cache by geometry + text length so repeated reconcile passes stay cheap.
+            const cacheKey = `${boxW}x${boxH}:${text.length}`;
+            if (el.dataset.fitKey === cacheKey && el.dataset.fitSize) {
+                el.style.fontSize = `${el.dataset.fitSize}px`;
+                el.style.overflowY = 'hidden';
+                return;
+            }
+
+            const minSize = 14;
+            const maxSize = Math.min(84, Math.floor(boxH * 0.55));
+            const lineHeight = 1.24;
+
+            const fits = (size) => {
+                el.style.fontSize = `${size}px`;
+                el.style.lineHeight = String(lineHeight);
+                el.style.overflowY = 'hidden';
+                return (el.scrollHeight <= el.clientHeight + 1) && (el.scrollWidth <= el.clientWidth + 1);
+            };
+
+            let lo = minSize;
+            let hi = Math.max(minSize, maxSize);
+            let best = minSize;
+
+            // Quick high-bound check avoids unnecessary binary iterations for short text.
+            if (fits(hi)) {
+                best = hi;
+            } else {
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (fits(mid)) {
+                        best = mid;
+                        lo = mid + 1;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+            }
+
+            el.style.fontSize = `${best}px`;
+            el.style.lineHeight = String(lineHeight);
+            el.style.overflowY = 'hidden';
+            el.dataset.fitKey = cacheKey;
+            el.dataset.fitSize = String(best);
         }
 
         function applyGridTextFontSizeToVisiblePosts() {
-            const sizePx = getGridTextFontSizePx();
             document.querySelectorAll('.post-text-content').forEach(el => {
-                el.style.fontSize = `${sizePx}px`;
+                fitPostTextToSlot(el);
             });
         }
 
@@ -35958,7 +36008,7 @@ function setUploadModalHeader(title, subtitle) {
                 } else {
                     // Text-only post
                     const tileText = (post.content || post.text || post.description || '');
-                    const content = String(tileText).substring(0, 200);
+                    const content = String(tileText).substring(0, 137);
                     // 🟢 FAST PATH: author's frozen displayAreaTag (Firebase-backed).
                     const stableAreaTagText = getStablePostAreaTag(post);
                     const areaTagText = stableAreaTagText || post.county || post.zoneTag || post.area || post.customTag ||
@@ -35990,7 +36040,11 @@ function setUploadModalHeader(title, subtitle) {
                     const repostCountText = post.repostCount || post.reposts || 0;
                     // Repost badge removed for text tiles — keep repostCount in data but do not render badge
                     const repostBadgeHTMLText = ``;
-                    box.innerHTML = `${repostBadgeHTMLText}<div class="post-text-content" style="padding: 0 8px 8px 4px; ${boostContentOffset} overflow-y: auto; height: 100%; display:flex; align-items:flex-start; justify-content:flex-start; text-align:left; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}`;
+                    box.innerHTML = `${repostBadgeHTMLText}<div class="post-text-content" style="padding: 0 4px 4px 2px; ${boostContentOffset} overflow-y: hidden; height: 100%; display:flex; align-items:flex-start; justify-content:flex-start; text-align:left; line-height: 1.24; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}`;
+                    try {
+                        const textEl = box.querySelector('.post-text-content');
+                        if (textEl) fitPostTextToSlot(textEl);
+                    } catch (e) {}
                 }
 
                 // Ensure boost-badge-prominent pill is always present for boost posts.
