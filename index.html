@@ -14873,6 +14873,17 @@
                 const insertAt = Math.min(Math.max(0, toIdx), working.length);
                 working.splice(insertAt, 0, moving);
 
+                // Short no-backtrack lock: after a vote move, don't allow this
+                // post to be placed back toward its old index while snapshots settle.
+                try {
+                    window.__voteNoBacktrackLocks = window.__voteNoBacktrackLocks || {};
+                    window.__voteNoBacktrackLocks[String(postId)] = {
+                        direction: dir,
+                        floorIndex: insertAt,
+                        until: Date.now() + 7000
+                    };
+                } catch (e) { /* ignore */ }
+
                 const committed = compactPostListForSlots(working);
                 gridScroller.items = committed;
                 freezeReconcileForVoteMove(2200);
@@ -15083,6 +15094,9 @@
                 post.dislikes = originalDislikes;
                 userVotes[userVoteKey] = originalVote;
                 try { clearPendingVotePositionShift(postId); } catch (e) {}
+                try {
+                    if (window.__voteNoBacktrackLocks) delete window.__voteNoBacktrackLocks[String(postId)];
+                } catch (e) {}
                 try { window.__voteMoveInProgressUntil = 0; } catch (e) {}
                 try {
                     if (window.__voteMovePlannerRafId) cancelAnimationFrame(window.__voteMovePlannerRafId);
@@ -37070,6 +37084,40 @@ function setUploadModalHeader(title, subtitle) {
                     // Foreground resume can briefly produce sparse ML snapshots while
                     // subscriptions/data warm up. Stabilize target before diffing.
                     target = stabilizeReconcileTargetForRecovery(target, current);
+
+                    // Vote no-backtrack guard: while lock is active, prevent target
+                    // snapshots from placing the voted post back toward its old slot.
+                    try {
+                        const locks = window.__voteNoBacktrackLocks || {};
+                        const nowTs = Date.now();
+                        const moveIdInList = (arr, pid, toIndex) => {
+                            if (!Array.isArray(arr) || !pid) return arr;
+                            const idx = arr.findIndex(p => p && String(p.id) === String(pid));
+                            if (idx < 0) return arr;
+                            const [item] = arr.splice(idx, 1);
+                            const at = Math.min(Math.max(0, Number(toIndex) || 0), arr.length);
+                            arr.splice(at, 0, item);
+                            return arr;
+                        };
+
+                        for (const pid of Object.keys(locks)) {
+                            const lock = locks[pid];
+                            if (!lock || nowTs >= Number(lock.until || 0)) {
+                                delete locks[pid];
+                                continue;
+                            }
+                            const floorIdx = Math.max(0, Number(lock.floorIndex || 0));
+                            const dir = String(lock.direction || '').toLowerCase();
+                            const tgtIdx = target.findIndex(p => p && String(p.id) === String(pid));
+                            if (tgtIdx < 0) continue;
+
+                            if (dir === 'like' && tgtIdx > floorIdx) {
+                                moveIdInList(target, pid, floorIdx);
+                            } else if (dir === 'dislike' && tgtIdx < floorIdx) {
+                                moveIdInList(target, pid, floorIdx);
+                            }
+                        }
+                    } catch (e) { /* ignore no-backtrack guard failures */ }
 
                     // Never replace a visible non-empty grid with empty data (prevents black-out).
                     if (target.length === 0 && current.length > 0) return;
