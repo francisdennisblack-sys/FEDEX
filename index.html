@@ -37118,9 +37118,22 @@ function setUploadModalHeader(title, subtitle) {
                     });
                 } catch (e) { /* ignore */ }
 
-                // If already present in this key, update in place
+                // If already present in this key, merge in place and trigger a
+                // fast refresh so optimistic stubs are upgraded immediately.
                 const already = gridContent[contentKey].findIndex(p => p && p.id === postData.id);
-                if (already !== -1) { gridContent[contentKey][already] = postData; return; }
+                if (already !== -1) {
+                    try {
+                        const existing = gridContent[contentKey][already] || {};
+                        gridContent[contentKey][already] = Object.assign({}, existing, postData);
+                    } catch (e) {
+                        gridContent[contentKey][already] = postData;
+                    }
+                    try {
+                        if (typeof requestGridUpdate === 'function') requestGridUpdate('new-post-merge-urgent');
+                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('new-post-merge-urgent');
+                    } catch (e) { /* ignore update-trigger failures */ }
+                    return;
+                }
 
                 // Determine insertion index: after top-3 initial slots and after any
                 // leading posts owned by the current user.
@@ -37346,35 +37359,49 @@ function setUploadModalHeader(title, subtitle) {
             let hash = 0;
             for (let i = 0; i < str.length; i++) {
                 hash = ((hash << 5) - hash) + str.charCodeAt(i);
-                hash |= 0;
-            }
-            return Math.abs(hash) % 100;
-        }
+                            try {
+                                if (isPostHiddenForViewer(postObj, currentUserId)) return;
 
-        function isContentFreshnessEnabled() {
-            if (!window.CLEANUP_FLAGS || window.CLEANUP_FLAGS.ENABLE_CONTENT_FRESHNESS === false) return false;
-            const cfg = getFreshnessConfig();
-            if (!cfg.enabled) return false;
-            if (cfg.rolloutPercent >= 100) return true;
-            const id = currentUserId || permanentUid || firebaseUid || 'anon';
-            return freshnessHashPercent(id) < Math.max(0, Math.min(100, cfg.rolloutPercent));
-        }
+                                // First, merge in place anywhere this post already exists to
+                                // avoid moving it across keys and triggering whole-grid churn.
+                                let mergedExisting = false;
+                                try {
+                                    Object.keys(gridContent || {}).forEach((k) => {
+                                        const arr = gridContent[k];
+                                        if (!Array.isArray(arr)) return;
+                                        const idx = arr.findIndex(p => p && p.id === postId);
+                                        if (idx === -1) return;
+                                        arr[idx] = Object.assign({}, arr[idx] || {}, postObj);
+                                        mergedExisting = true;
+                                    });
+                                } catch (e) { /* ignore merge scan failures */ }
 
-        function getContentFreshnessState() {
-            if (!window._contentFreshnessState) {
-                const cfg = getFreshnessConfig();
-                const now = Date.now();
-                window._contentFreshnessState = {
-                    lastTopSignature: '',
-                    lastMeaningfulFreshAt: now,
-                    nextTopFallbackAt: now + freshnessRandomInt(cfg.minStaleMs, cfg.maxStaleMs),
-                    recentInjected: {}
-                };
-            }
-            return window._contentFreshnessState;
-        }
+                                if (mergedExisting) {
+                                    try {
+                                        if (typeof requestGridUpdate === 'function') requestGridUpdate('post-added-merge-urgent');
+                                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-added-merge-urgent');
+                                    } catch (e) { /* ignore */ }
+                                    return;
+                                }
 
-        function getTop15LockStorageKey(uid) {
+                                // Insert exactly once into a stable key to prevent
+                                // repeated rebuilds/flicker from multi-key inserts.
+                                let targetKey = 'shared-posts';
+                                try {
+                                    const activeKey = (typeof getActiveViewerFeedKey === 'function') ? getActiveViewerFeedKey() : null;
+                                    if (postObj.authId && currentUserId && String(postObj.authId) === String(currentUserId)) {
+                                        targetKey = String(currentUserId);
+                                    } else if (activeKey && typeof activeKey === 'string' && activeKey.trim()) {
+                                        targetKey = activeKey.trim();
+                                    }
+                                } catch (e) { /* keep shared-posts fallback */ }
+
+                                gridContent[targetKey] = gridContent[targetKey] || [];
+                                if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(targetKey, postObj);
+                                else ensureUniqueAndInsert(targetKey, postObj);
+                                try { if (gridContent[targetKey].length > 300) gridContent[targetKey].length = 300; } catch(e){}
+                                console.log('➕ Inserted new post from post_events/added into', targetKey, postId);
+                            } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
             return `top15_engagement_lock_${uid || 'anon'}`;
         }
 
