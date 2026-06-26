@@ -14837,7 +14837,10 @@
                 pendingSortedPosts = committed.slice();
                 window.pendingSortedPosts = committed.slice();
                 window.latestSortedPosts = committed.slice();
-                freezeReconcileForVoteMove(520);
+                freezeReconcileForVoteMove(2200);
+                try {
+                    window.__voteMovePaintHoldUntil = Math.max(Number(window.__voteMovePaintHoldUntil || 0), Date.now() + 2200);
+                } catch (e) { /* ignore */ }
 
                 keepVoteRerankActive(postId);
 
@@ -21931,8 +21934,7 @@ function setUploadModalHeader(title, subtitle) {
                                 }
                                 try {
                                     window._lastIncrementalRender = 0;
-                                    if (typeof rebuildGridScrollerFromGridContent === 'function') rebuildGridScrollerFromGridContent();
-                                    if (typeof renderGridIncremental === 'function') renderGridIncremental('post-added-force');
+                                    if (typeof rebuildGridScrollerFromGridContent === 'function' && gridScroller) rebuildGridScrollerFromGridContent();
                                     else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
                                 } catch (e) { console.warn('forced post-added repaint failed', e); }
                             } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
@@ -36931,6 +36933,14 @@ function setUploadModalHeader(title, subtitle) {
             }
         }
 
+        function isVoteMovePaintHoldActive() {
+            try {
+                return Date.now() < Number(window.__voteMovePaintHoldUntil || 0);
+            } catch (e) {
+                return false;
+            }
+        }
+
         function scheduleGridReconcile() {
             if (gridReconcileInterval) return;
             // Helper: attempt a minimal, safe move for a single voted post
@@ -37843,6 +37853,9 @@ function setUploadModalHeader(title, subtitle) {
                 const now = Date.now();
                 const reasonText = String(reason || '').toLowerCase();
                 const isUrgentPostPublish = /post-publish|publish-queued|new-post|post-create/.test(reasonText);
+                if (isVoteMovePaintHoldActive() && !isUrgentPostPublish) {
+                    return;
+                }
                 // enforce throttle as a safety net (normally 900ms). Reduce to
                 // ~10ms when fast bulk loading is allowed (hard refresh / location commit).
                 const safetyThreshold = isUrgentPostPublish ? 0 : (isFastBulkLoadAllowed() ? 9 : 900);
@@ -41184,9 +41197,9 @@ function setUploadModalHeader(title, subtitle) {
             }
 
             // ========================================================================
-            // ✅ FINAL AUTHORITATIVE FEED ORDER (STRICT NET ORDER)
-            // Hard rule: unlocked posts are sorted by likes minus dislikes.
-            // Locked placements stay where they were inserted.
+            // ✅ FINAL AUTHORITATIVE FEED ORDER (LOCAL 60% ONLY)
+            // Requirement: only the local 60% segment should be sorted by net likes.
+            // Non-local/global content keeps existing order and is NOT re-sorted by likes.
             // ========================================================================
             try {
                 if (Array.isArray(sortedPosts) && sortedPosts.length > 1) {
@@ -41195,26 +41208,40 @@ function setUploadModalHeader(title, subtitle) {
                         if (!p || !p.id) return false;
                         if (p.authId === currentUserId || p.userId === currentUserId || p.createdBy === currentUserId) return true;
                         if ((typeof isStrictBoostActive === 'function') && isStrictBoostActive(p)) return true;
+                        const prox = String(p.proximityClass || '');
+                        if (prox === 'local' || prox === 'community' || prox === 'nearby' || prox === 'featured') return true;
+                        if (_localKey) {
                             const pArea = String(p.county || p.zoneTag || p.area || '');
                             if (pArea === _localKey) return true;
                         }
-                        const likesA = Number(a && a.likes || 0);
-                        const likesB = Number(b && b.likes || 0);
-                        if (likesA !== likesB) return likesB - likesA;
                         return false;
                     };
 
-                    const locked = [];
-                    const unlocked = [];
-                    for (const p of sortedPosts) {
-                        if (!p || !p.id) continue;
-                        if (p._keepGridPlacement || p._lockedGridPlacement) locked.push(p);
-                        else unlocked.push(p);
-                    }
+                    const _netSort = (a, b) => {
+                        const netA = (Number(a && a.likes || 0) - Number(a && a.dislikes || 0));
+                        const netB = (Number(b && b.likes || 0) - Number(b && b.dislikes || 0));
+                        if (netA !== netB) return netB - netA;
+                        const likesA = Number(a && a.likes || 0);
+                        const likesB = Number(b && b.likes || 0);
+                        if (likesA !== likesB) return likesB - likesA;
+                        const dislikesA = Number(a && a.dislikes || 0);
+                        const dislikesB = Number(b && b.dislikes || 0);
+                        if (dislikesA !== dislikesB) return dislikesA - dislikesB;
+                        return Number(b && b.timestamp || 0) - Number(a && a.timestamp || 0);
+                    };
 
-                    unlocked.sort(_netSort);
-                    sortedPosts = [...locked, ...unlocked];
-                    console.log(`✅ FINAL FEED ORDER: strict net sort applied (locked=${locked.length}, unlocked=${unlocked.length})`);
+                    const localPool = sortedPosts.filter(_isLocalFor60);
+                    const localQuota = Math.max(1, Math.round(sortedPosts.length * 0.60));
+
+                    const localPoolInOrder = localPool.slice();
+                    const matureLocalSorted = localPoolInOrder
+                        .filter(p => !(p && (p._keepGridPlacement || p._lockedGridPlacement)) && !isPostNew(p))
+                        .sort(_netSort);
+
+                    const localHead = [];
+                    let matureIdx = 0;
+                    for (const p of localPoolInOrder) {
+                        if (localHead.length >= localQuota) break;
                         const isLockedPlacement = !!(p && (p._keepGridPlacement || p._lockedGridPlacement));
                         if (isLockedPlacement || isPostNew(p)) {
                             localHead.push(p);
@@ -43501,8 +43528,7 @@ function setUploadModalHeader(title, subtitle) {
                 }
                 try {
                     window._lastIncrementalRender = 0;
-                    if (typeof rebuildGridScrollerFromGridContent === 'function') rebuildGridScrollerFromGridContent();
-                    if (typeof renderGridIncremental === 'function') renderGridIncremental('post-publish-force');
+                    if (typeof rebuildGridScrollerFromGridContent === 'function' && gridScroller) rebuildGridScrollerFromGridContent();
                     else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
                 } catch (e) { console.warn('forced publish repaint failed', e); }
                 // Mark publish-settle timestamp so reconciler won't immediately
