@@ -6301,6 +6301,7 @@
 
                 // 2. Prepare the data payload for the backend.
                 // The backend will validate this information.
+                try { savePendingComposerDraft({ postId: postId, amount: amount, kind: type, metadata: metadata || {}, badgeReady: true }); } catch (_) {}
                 const data = {
                     postId: postId,
                     amount: amount, // The backend expects an integer in cents.
@@ -6413,6 +6414,7 @@
                 // Persist prepaid state so the badge survives reloads /
                 // composer-reopens (handled the same way as the redirect flow).
                 try {
+                    savePendingComposerDraft({ kind, paymentIntentId: pi.id, badgeReady: true, amount });
                     window.lastPurchaseType = kind;
                     window.purchasePaidAt = Date.now();
                     // Persist both quick flags and a robust pendingPayments map
@@ -6432,6 +6434,55 @@
             throw new Error('Payment status: ' + (pi ? pi.status : 'unknown'));
         }
         window.payInline = payInline;
+
+        function getPendingComposerDraft() {
+            try {
+                const raw = localStorage.getItem('pendingComposerDraft');
+                if (!raw) return null;
+                const draft = JSON.parse(raw);
+                return draft && typeof draft === 'object' ? draft : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function savePendingComposerDraft(extra = {}) {
+            try {
+                const currentDraft = getPendingComposerDraft() || {};
+                const postTextEl = document.getElementById('postText');
+                const merged = Object.assign({}, currentDraft, extra, {
+                    boxIndex: typeof selectedBoxIndex === 'number' && selectedBoxIndex >= 0 ? selectedBoxIndex : (currentDraft.boxIndex || 0),
+                    postText: postTextEl ? String(postTextEl.value || currentDraft.postText || '') : String(currentDraft.postText || ''),
+                    savedAt: Date.now()
+                });
+                localStorage.setItem('pendingComposerDraft', JSON.stringify(merged));
+                return merged;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function clearPendingComposerDraft() {
+            try { localStorage.removeItem('pendingComposerDraft'); } catch (e) {}
+        }
+
+        function restorePendingComposerDraftIfNeeded() {
+            try {
+                const draft = getPendingComposerDraft();
+                if (!draft) return;
+                const modal = document.getElementById('uploadModal');
+                if (modal && !modal.classList.contains('active')) {
+                    try { openModal(Number.isFinite(Number(draft.boxIndex)) ? Number(draft.boxIndex) : 0); } catch (e) {}
+                }
+                const postTextEl = document.getElementById('postText');
+                if (postTextEl && typeof draft.postText === 'string') {
+                    postTextEl.value = draft.postText;
+                    try { if (typeof updateCharCount === 'function') updateCharCount(); } catch (e) {}
+                }
+            } catch (e) {
+                console.warn('restorePendingComposerDraftIfNeeded failed', e);
+            }
+        }
 
         async function handleCheckoutReturn() {
             try {
@@ -6500,6 +6551,8 @@
                     try { applyPendingPurchaseToNextPost(); } catch (_) {}
                     try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(_) {}
                     try { if (typeof renderGrid === 'function') renderGrid(); } catch(_) {}
+                    try { savePendingComposerDraft({ kind: finalKind, paymentIntentId: sessionId, badgeReady: true }); } catch (_) {}
+                    try { restorePendingComposerDraftIfNeeded(); } catch (_) {}
                     if (window.showNotification) {
                         window.showNotification('Payment Confirmed', `✅ ${finalKind.replace('_', ' + ')} ready`);
                     }
@@ -6543,6 +6596,8 @@
                             try { applyPendingPurchaseToNextPost(); } catch (_) {}
                             try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(_) {}
                             try { if (typeof renderGrid === 'function') renderGrid(); } catch(_) {}
+                            try { savePendingComposerDraft({ kind: finalKind, paymentIntentId: sessionId || ('manual-'+now), badgeReady: true }); } catch (_) {}
+                            try { restorePendingComposerDraftIfNeeded(); } catch (_) {}
                             if (window.showNotification) {
                                 window.showNotification('Payment Accepted', `✅ ${finalKind.replace('_', ' + ')} accepted (manual)`);
                             }
@@ -26618,6 +26673,7 @@ function setUploadModalHeader(title, subtitle) {
             document.getElementById('fileInput').value = '';
             selectedFile = null;
             selectedMediaItems = [];
+            try { restorePendingComposerDraftIfNeeded(); } catch (e) {}
         }
 
         // Update the lower-left media indicator with an icon that clearly shows
@@ -30171,6 +30227,7 @@ function setUploadModalHeader(title, subtitle) {
             selectedBoxIndex = -1;
             selectedFile = null;
             selectedMediaItems = [];
+            try { savePendingComposerDraft(); } catch (e) {}
             document.getElementById('postText').value = ''; // Clear text
             
             // Restore buttons visibility
