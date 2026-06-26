@@ -14847,6 +14847,16 @@
                 if (toIdx < 0) {
                     toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
                 }
+
+                // During the optimistic vote window, never move opposite the
+                // user's explicit direction. Stale ranking snapshots can briefly
+                // point backward and cause flicker-back to the old slot.
+                if (dir === 'like' && toIdx > fromIdx) {
+                    toIdx = fromIdx - 1;
+                } else if (dir === 'dislike' && toIdx < fromIdx) {
+                    toIdx = fromIdx + 1;
+                }
+
                 if (toIdx < 0 || toIdx >= working.length || toIdx === fromIdx) return false;
 
                 const moving = working[fromIdx];
@@ -36985,6 +36995,18 @@ function setUploadModalHeader(title, subtitle) {
                         toIdx = insertAt;
                         moved = true;
                     } else if (curIdx !== tgtIdx) {
+                        // Guard against stale targets that briefly point back to
+                        // the old slot right after a vote. Ignore opposite-direction
+                        // corrections while vote stabilization is active.
+                        try {
+                            if (typeof isVoteReorderStabilizationActive === 'function' && isVoteReorderStabilizationActive()) {
+                                const intent = String(window.lastVoteRerankDirection || '').toLowerCase();
+                                if ((intent === 'up' && tgtIdx > curIdx) || (intent === 'down' && tgtIdx < curIdx)) {
+                                    return true;
+                                }
+                            }
+                        } catch (e) { /* ignore guard failures */ }
+
                         // Move in-place with minimal splice operations
                         const [moved] = current.splice(curIdx, 1);
                         // Clamp target index to current length after removal
