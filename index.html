@@ -16384,36 +16384,372 @@
         };
         
         // ============================================================================
-        // POST ROTATION SYSTEM - Continuously observe engagement patterns.
-        // This must not remove, rebuild, or repopulate the feed.
+        // CONTINUOUS DISCOVERY LAYER (probability-based, non-rhythmic rotation)
+        // - Occupies ~10% of visible feed slots as a dynamic discovery layer.
+        // - Replaces ONE discovery post at a time (never all at once).
+        // - Uses variable timing + replacement probability instead of fixed cadence.
+        // - Applies strict safety: never replace visible, expanded, playing, or
+        //   recently interacted posts.
         // ============================================================================
-        async function rotatePostsBasedOnEngagement() {
-            console.log('🔄 POST ROTATION: observing engagement only (no feed mutation)');
-            
-            try {
-                // Get all available posts across all areas
-                let allAvailablePosts = [];
-                for (const key in gridContent) {
-                    if (Array.isArray(gridContent[key])) {
-                        allAvailablePosts = allAvailablePosts.concat(gridContent[key]);
+        window.CONTINUOUS_DISCOVERY_CONFIG = window.CONTINUOUS_DISCOVERY_CONFIG || {
+            enabled: true,
+            layerPercent: 0.10,
+            minEvalMs: 2500,
+            maxEvalMs: 8500,
+            inactiveRebuildMs: 90 * 1000,
+            activityWindowMs: 20 * 1000,
+            qualityThreshold: 8,
+            ringsMi: [1, 5, 20, 100],
+            maxReachMi: 100,
+            stalenessReplaceFloorMs: 20 * 1000
+        };
+
+        const ContinuousDiscoveryLayer = {
+            running: false,
+            timer: null,
+            discoveryPostIds: new Set(),
+            stalenessById: Object.create(null),
+            lastTickAt: 0,
+            lastReplaceAt: 0,
+            lastRebuildAt: 0,
+            lastActivityAt: Date.now(),
+
+            markActivity() {
+                this.lastActivityAt = Date.now();
+            },
+
+            flattenPool() {
+                try {
+                    const all = [];
+                    for (const key in gridContent) {
+                        if (Array.isArray(gridContent[key])) all.push(...gridContent[key]);
                     }
+                    return all.filter(p => p && p.id);
+                } catch (e) {
+                    return [];
                 }
-                
-                console.log(`📊 Evaluating ${allAvailablePosts.length} posts for telemetry only; no removals will be made.`);
-                try { if (typeof GridReplacementML !== 'undefined') GridReplacementML.observe(allAvailablePosts, allAvailablePosts.length); } catch (e) { /* ignore */ }
-                return allAvailablePosts;
-            } catch (error) {
-                console.error('Error during post rotation:', error);
+            },
+
+            getActiveFeed() {
+                try {
+                    if (window.gridScroller && Array.isArray(window.gridScroller.items) && window.gridScroller.items.length) {
+                        return window.gridScroller.items.filter(p => p && p.id);
+                    }
+                } catch (e) {}
+                try {
+                    if (typeof getActiveViewerFeedPosts === 'function') {
+                        const p = getActiveViewerFeedPosts();
+                        if (Array.isArray(p) && p.length) return p.filter(x => x && x.id);
+                    }
+                } catch (e) {}
                 return [];
+            },
+
+            getVisiblePostIds() {
+                const ids = new Set();
+                try {
+                    if (window.gridScroller && typeof window.gridScroller.getVisibleItems === 'function') {
+                        const vis = window.gridScroller.getVisibleItems() || [];
+                        vis.forEach(v => {
+                            if (v && v.item && v.item.id) ids.add(String(v.item.id));
+                        });
+                    }
+                } catch (e) {}
+                try {
+                    document.querySelectorAll('.grid-box[data-post-id]').forEach(n => {
+                        const id = n.getAttribute('data-post-id');
+                        if (id) ids.add(String(id));
+                    });
+                } catch (e) {}
+                return ids;
+            },
+
+            distanceMi(post) {
+                try {
+                    if (!post) return Infinity;
+                    const loc = (typeof userLocation !== 'undefined') ? userLocation : null;
+                    if (!loc || loc.lat == null || loc.lon == null) return Infinity;
+                    const plat = Number(post.lat), plon = Number(post.lon);
+                    if (!isFinite(plat) || !isFinite(plon)) return Infinity;
+                    if (typeof calculateDistance !== 'function') return Infinity;
+                    return calculateDistance(loc.lat, loc.lon, plat, plon) * 0.621371;
+                } catch (e) { return Infinity; }
+            },
+
+            qualityScore(post) {
+                try {
+                    const likes = Number(post && post.likes || 0);
+                    const dislikes = Number(post && post.dislikes || 0);
+                    const comments = Number(post && (post.comments || post.commentCount) || 0);
+                    const views = Number(post && (post.screenCount || post.views) || 0);
+                    const reports = Number(post && (post.reportCount || post.reports) || 0);
+                    const created = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(post) : Number(post && post.timestamp || 0);
+                    const ageHours = created ? Math.max(0, (Date.now() - created) / (60 * 60 * 1000)) : 24;
+                    const freshnessBoost = Math.max(0, 18 - ageHours) * 0.35;
+                    return (likes * 2.2) - (dislikes * 1.7) + (comments * 2.8) + (views * 0.03) + freshnessBoost - (reports * 8);
+                } catch (e) { return -Infinity; }
+            },
+
+            pickDiscoverySeeds(feed) {
+                const cfg = window.CONTINUOUS_DISCOVERY_CONFIG || {};
+                const n = Math.max(0, Number(feed && feed.length) || 0);
+                if (!n) return [];
+                const k = Math.max(1, Math.round(n * (cfg.layerPercent || 0.10)));
+                // Keep top portion stable; use lower/mid range for dynamic discovery slots.
+                const candidates = feed.map((p, idx) => ({ p, idx }))
+                    .filter(x => x.p && x.p.id)
+                    .filter(x => x.idx >= Math.floor(n * 0.25))
+                    .sort((a, b) => {
+                        const sa = this.qualityScore(a.p), sb = this.qualityScore(b.p);
+                        if (sa !== sb) return sa - sb; // lower quality first for replacement layer
+                        const ca = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(a.p) : 0;
+                        const cb = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(b.p) : 0;
+                        return ca - cb; // older first
+                    });
+                return candidates.slice(0, k).map(x => x.p.id);
+            },
+
+            rebuildLayer(reason) {
+                try {
+                    const feed = this.getActiveFeed();
+                    if (!feed.length) return;
+                    const ids = this.pickDiscoverySeeds(feed);
+                    this.discoveryPostIds = new Set(ids.map(String));
+                    const now = Date.now();
+                    ids.forEach(id => {
+                        const key = String(id);
+                        if (!this.stalenessById[key]) this.stalenessById[key] = { score: 0, shownAt: now, cycles: 0, impressions: 0 };
+                    });
+                    this.lastRebuildAt = now;
+                    if (reason) console.log(`♻️ Discovery layer rebuilt (${ids.length} slots): ${reason}`);
+                } catch (e) {}
+            },
+
+            refreshStaleness(feed, visibleIds, elapsedMs) {
+                const cfg = window.CONTINUOUS_DISCOVERY_CONFIG || {};
+                const now = Date.now();
+                for (const post of feed) {
+                    if (!post || !post.id) continue;
+                    const pid = String(post.id);
+                    if (!this.discoveryPostIds.has(pid)) continue;
+                    if (!this.stalenessById[pid]) this.stalenessById[pid] = { score: 0, shownAt: now, cycles: 0, impressions: 0 };
+                    const state = this.stalenessById[pid];
+                    state.cycles = (state.cycles || 0) + 1;
+                    if (visibleIds.has(pid)) state.impressions = (state.impressions || 0) + 1;
+                    const ageMs = Math.max(0, now - (state.shownAt || now));
+                    const postAgeMs = Math.max(0, now - ((typeof getPostCreatedAt === 'function') ? getPostCreatedAt(post) : Number(post.timestamp || now)));
+                    const quality = this.qualityScore(post);
+                    const newerAvailBoost = 0.8;
+                    state.score =
+                        (ageMs / 1000) * 0.025 +
+                        (state.impressions || 0) * 0.35 +
+                        (state.cycles || 0) * 0.2 +
+                        (postAgeMs / (60 * 60 * 1000)) * 0.05 +
+                        newerAvailBoost -
+                        Math.max(0, quality) * 0.004;
+                    if (ageMs < (cfg.stalenessReplaceFloorMs || 20000)) {
+                        state.score = Math.min(state.score, 0.8);
+                    }
+                    if (!isFinite(state.score)) state.score = 0;
+                }
+                // decay stale map for posts no longer in layer
+                Object.keys(this.stalenessById).forEach(id => {
+                    if (!this.discoveryPostIds.has(String(id))) delete this.stalenessById[id];
+                });
+            },
+
+            isSafeToReplace(postId) {
+                try {
+                    const pid = String(postId || '');
+                    if (!pid) return false;
+                    if (document.getElementById('viewModal') && document.getElementById('viewModal').classList.contains('active')) return false;
+                    const visible = this.getVisiblePostIds();
+                    if (visible.has(pid)) return false;
+                    if (typeof GridReplacementML !== 'undefined' && typeof GridReplacementML.isProtected === 'function' && GridReplacementML.isProtected(pid)) return false;
+                    const node = document.querySelector(`.grid-box[data-post-id="${pid}"]`);
+                    if (node) {
+                        const playing = node.querySelector('video:not([paused])');
+                        if (playing) return false;
+                        if (node.matches(':hover')) return false;
+                    }
+                    return true;
+                } catch (e) { return false; }
+            },
+
+            pickReplacementCandidate(currentFeed, replaceId) {
+                try {
+                    const cfg = window.CONTINUOUS_DISCOVERY_CONFIG || {};
+                    const inFeed = new Set((currentFeed || []).filter(p => p && p.id).map(p => String(p.id)));
+                    const pool = this.flattenPool().filter(p => p && p.id && !inFeed.has(String(p.id)));
+                    if (!pool.length) return null;
+                    const rings = Array.isArray(cfg.ringsMi) ? cfg.ringsMi : [1, 5, 20, 100];
+                    for (const ring of rings) {
+                        const ringCandidates = pool
+                            .map(p => ({ p, d: this.distanceMi(p), q: this.qualityScore(p) }))
+                            .filter(x => isFinite(x.d) && x.d <= Math.min(Number(ring) || 100, cfg.maxReachMi || 100))
+                            .filter(x => x.q >= (cfg.qualityThreshold || 8))
+                            .sort((a, b) => {
+                                if (b.q !== a.q) return b.q - a.q;      // quality first
+                                if (a.d !== b.d) return a.d - b.d;      // then nearest
+                                const an = Number(a.p.likes || 0) - Number(a.p.dislikes || 0);
+                                const bn = Number(b.p.likes || 0) - Number(b.p.dislikes || 0);
+                                return bn - an;
+                            });
+                        if (ringCandidates.length) return ringCandidates[0].p;
+                    }
+                    return null;
+                } catch (e) {
+                    return null;
+                }
+            },
+
+            replaceOneIfNeeded() {
+                try {
+                    const feed = this.getActiveFeed();
+                    if (!feed.length) return false;
+                    const visibleIds = this.getVisiblePostIds();
+                    const now = Date.now();
+                    const elapsed = this.lastTickAt ? (now - this.lastTickAt) : 1000;
+                    this.refreshStaleness(feed, visibleIds, elapsed);
+
+                    const discoveryPosts = feed
+                        .filter(p => p && p.id && this.discoveryPostIds.has(String(p.id)))
+                        .map(p => ({ p, s: (this.stalenessById[String(p.id)] && this.stalenessById[String(p.id)].score) || 0 }))
+                        .sort((a, b) => b.s - a.s);
+                    if (!discoveryPosts.length) return false;
+
+                    const target = discoveryPosts.find(x => this.isSafeToReplace(x.p.id));
+                    if (!target) return false;
+
+                    const candidate = this.pickReplacementCandidate(feed, target.p.id);
+                    if (!candidate) return false;
+
+                    const idx = feed.findIndex(x => x && x.id && String(x.id) === String(target.p.id));
+                    if (idx < 0) return false;
+
+                    const nextFeed = feed.slice();
+                    nextFeed[idx] = candidate;
+
+                    // Swap one slot only, then re-render smoothly.
+                    try {
+                        if (window.gridScroller && Array.isArray(window.gridScroller.items)) {
+                            window.gridScroller.items = nextFeed;
+                        }
+                    } catch (e) {}
+
+                    this.discoveryPostIds.delete(String(target.p.id));
+                    this.discoveryPostIds.add(String(candidate.id));
+                    delete this.stalenessById[String(target.p.id)];
+                    this.stalenessById[String(candidate.id)] = { score: 0, shownAt: now, cycles: 0, impressions: 0 };
+                    this.lastReplaceAt = now;
+
+                    try { if (typeof renderGrid === 'function') renderGrid(); } catch (e) {}
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            },
+
+            evalReplacementProbability() {
+                const cfg = window.CONTINUOUS_DISCOVERY_CONFIG || {};
+                const feed = this.getActiveFeed();
+                if (!feed.length) return false;
+
+                const discoveryStates = feed
+                    .filter(p => p && p.id && this.discoveryPostIds.has(String(p.id)))
+                    .map(p => this.stalenessById[String(p.id)] || { score: 0, shownAt: Date.now(), cycles: 0, impressions: 0 });
+                const staleAvg = discoveryStates.length
+                    ? (discoveryStates.reduce((s, x) => s + (x.score || 0), 0) / discoveryStates.length)
+                    : 0;
+
+                const active = (Date.now() - this.lastActivityAt) <= (cfg.activityWindowMs || 20000);
+                const activityFactor = active ? 1.15 : 0.85;
+
+                // Candidate abundance boosts replacement probability.
+                const pool = this.flattenPool();
+                const available = Math.max(0, pool.length - feed.length);
+                const candidateFactor = Math.max(0.6, Math.min(1.4, available / 250));
+
+                const sinceLastReplaceMs = Date.now() - (this.lastReplaceAt || 0);
+                const elapsedPressure = Math.max(0.6, Math.min(1.6, sinceLastReplaceMs / 30000));
+
+                let p = (0.08 + Math.min(0.55, staleAvg * 0.08)) * activityFactor * candidateFactor * elapsedPressure;
+                p = Math.max(0.03, Math.min(0.85, p));
+                return Math.random() < p;
+            },
+
+            scheduleNext() {
+                if (!this.running) return;
+                const cfg = window.CONTINUOUS_DISCOVERY_CONFIG || {};
+                const active = (Date.now() - this.lastActivityAt) <= (cfg.activityWindowMs || 20000);
+                const jitterMin = Number(cfg.minEvalMs || 2500);
+                const jitterMax = Number(cfg.maxEvalMs || 8500);
+                const base = active
+                    ? (jitterMin + Math.random() * (jitterMax - jitterMin))
+                    : (jitterMax + Math.random() * jitterMax);
+                this.timer = setTimeout(() => this.tick(), Math.max(800, Math.round(base)));
+            },
+
+            tick() {
+                try {
+                    if (!this.running) return;
+                    const now = Date.now();
+                    const cfg = window.CONTINUOUS_DISCOVERY_CONFIG || {};
+
+                    if ((now - this.lastActivityAt) > (cfg.inactiveRebuildMs || 90000) && (now - this.lastRebuildAt) > 15000) {
+                        this.rebuildLayer('inactive-rebuild');
+                    }
+
+                    if (this.evalReplacementProbability()) {
+                        this.replaceOneIfNeeded();
+                    }
+
+                    this.lastTickAt = now;
+                } catch (e) {
+                    console.warn('ContinuousDiscovery tick failed', e && e.message);
+                } finally {
+                    this.scheduleNext();
+                }
+            },
+
+            start() {
+                if (this.running) return;
+                this.running = true;
+                this.lastTickAt = Date.now();
+                this.lastActivityAt = Date.now();
+                this.rebuildLayer('startup');
+                this.scheduleNext();
+            },
+
+            stop() {
+                this.running = false;
+                if (this.timer) { clearTimeout(this.timer); this.timer = null; }
             }
-        }
-        
-        // Run post rotation every 5 minutes
-        setInterval(() => {
-            if (isConnected && currentUserId) {
-                rotatePostsBasedOnEngagement().catch(err => console.error('Post rotation failed:', err));
-            }
-        }, 5 * 60 * 1000);
+        };
+
+        try {
+            window.ContinuousDiscoveryLayer = ContinuousDiscoveryLayer;
+            ['mousemove', 'scroll', 'keydown', 'touchstart', 'pointerdown'].forEach(evt => {
+                window.addEventListener(evt, () => {
+                    try { ContinuousDiscoveryLayer.markActivity(); } catch (e) {}
+                }, { passive: true });
+            });
+            document.addEventListener('visibilitychange', () => {
+                try {
+                    if (document.visibilityState === 'visible') {
+                        ContinuousDiscoveryLayer.markActivity();
+                        ContinuousDiscoveryLayer.rebuildLayer('visibility-return');
+                    }
+                } catch (e) {}
+            });
+            setTimeout(() => {
+                try {
+                    if (window.CONTINUOUS_DISCOVERY_CONFIG && window.CONTINUOUS_DISCOVERY_CONFIG.enabled !== false) {
+                        ContinuousDiscoveryLayer.start();
+                    }
+                } catch (e) {}
+            }, 1200);
+        } catch (e) { console.warn('ContinuousDiscovery init failed', e); }
 
         // ============================================================================
         // HARD 24-HOUR POST LIFETIME (TTL) — deletes every post 24h after it was
