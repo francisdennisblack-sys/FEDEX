@@ -45671,15 +45671,40 @@ function setUploadModalHeader(title, subtitle) {
                 try { console.log('    current pendingPayments BEFORE:', JSON.parse(localStorage.getItem('pendingPayments')||'{}')); } catch(e){}
                 const orders = getPendingOrders();
                 let consumedAny = false;
-                // Find first unconsumed boost and sell (allow both)
-                let boostOrderIdx = -1, sellOrderIdx = -1;
-                for (let i = 0; i < orders.length; i++) {
-                    const o = orders[i];
-                    if (!o || o.consumed) continue;
-                    if (o.kind === 'boost' && boostOrderIdx === -1) boostOrderIdx = i;
-                    if (o.kind === 'sell' && sellOrderIdx === -1) sellOrderIdx = i;
-                    if (boostOrderIdx !== -1 && sellOrderIdx !== -1) break;
+                const targetPostId = String((postData && postData.id) || '');
+
+                // Only consume unbound orders when the composer explicitly has that badge armed.
+                // Bound orders (order.postId) are always restricted to that exact post.
+                const boostBtn = document.getElementById('boostBtn');
+                const sellBtn = document.getElementById('sellBtn');
+                const boostArmedForThisPost = !!(
+                    (window.pendingBoost && window.pendingBoost.armed && __isPaidFlag(window.pendingBoost.paid)) ||
+                    (boostBtn && boostBtn.getAttribute('aria-pressed') === 'true')
+                );
+                const sellArmedForThisPost = !!(
+                    (window.pendingSell && window.pendingSell.armed && __isPaidFlag(window.pendingSell.paid)) ||
+                    (sellBtn && sellBtn.getAttribute('aria-pressed') === 'true') ||
+                    (Array.isArray(window.selectedBadges) && window.selectedBadges.includes('sell'))
+                );
+
+                function findOrderIndex(kind, armedForThisPost) {
+                    // Highest priority: order explicitly bound to this post
+                    const boundIdx = orders.findIndex((o) => {
+                        if (!o || o.consumed || o.kind !== kind) return false;
+                        return String(o.postId || '') === targetPostId;
+                    });
+                    if (boundIdx !== -1) return boundIdx;
+
+                    // Unbound fallback: only when the badge is actively armed right now
+                    if (!armedForThisPost) return -1;
+                    return orders.findIndex((o) => {
+                        if (!o || o.consumed || o.kind !== kind) return false;
+                        return !o.postId;
+                    });
                 }
+
+                const boostOrderIdx = findOrderIndex('boost', boostArmedForThisPost);
+                const sellOrderIdx = findOrderIndex('sell', sellArmedForThisPost);
 
                 if (boostOrderIdx !== -1) {
                     const bo = orders[boostOrderIdx];
@@ -45687,7 +45712,9 @@ function setUploadModalHeader(title, subtitle) {
                     if (!postData.badges.includes('boost')) postData.badges.push('boost');
                     postData.boostBadge = { paymentIntentId: bo.paymentIntentId || null, purchasedAt: bo.paidAt || Date.now(), label: bo.badgeLabel || 'Boost', amountCents: bo.amount || null };
                     postData.primaryBadge = postData.primaryBadge || 'boost';
+                    orders[boostOrderIdx].postId = targetPostId || orders[boostOrderIdx].postId || null;
                     orders[boostOrderIdx].consumed = true;
+                    orders[boostOrderIdx].consumedAt = Date.now();
                     consumedAny = true;
                 }
 
@@ -45697,7 +45724,9 @@ function setUploadModalHeader(title, subtitle) {
                     if (!postData.badges.includes('sell')) postData.badges.push('sell');
                     postData.sellBadge = { paymentIntentId: so.paymentIntentId || null, purchasedAt: so.paidAt || Date.now(), label: so.badgeLabel || 'Buy', amountCents: so.amount || null };
                     postData.primaryBadge = postData.primaryBadge || 'sell';
+                    orders[sellOrderIdx].postId = targetPostId || orders[sellOrderIdx].postId || null;
                     orders[sellOrderIdx].consumed = true;
+                    orders[sellOrderIdx].consumedAt = Date.now();
                     consumedAny = true;
                 }
 
