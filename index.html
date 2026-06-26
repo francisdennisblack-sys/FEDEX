@@ -6414,6 +6414,7 @@
                 // Persist prepaid state so the badge survives reloads /
                 // composer-reopens (handled the same way as the redirect flow).
                 try {
+                    recordPurchasedBadges(kind, { paymentIntentId: pi.id, badgeLabel: finalBadgeLabel || null, amount });
                     savePendingComposerDraft({ kind, paymentIntentId: pi.id, badgeReady: true, amount });
                     window.lastPurchaseType = kind;
                     window.purchasePaidAt = Date.now();
@@ -6466,10 +6467,75 @@
             try { localStorage.removeItem('pendingComposerDraft'); } catch (e) {}
         }
 
+        function getBadgeInventory() {
+            try {
+                const raw = localStorage.getItem('badgeInventory');
+                if (!raw) return { boost: 0, sell: 0, history: [] };
+                const parsed = JSON.parse(raw);
+                if (!parsed || typeof parsed !== 'object') return { boost: 0, sell: 0, history: [] };
+                return {
+                    boost: Math.max(0, Number(parsed.boost || 0)),
+                    sell: Math.max(0, Number(parsed.sell || 0)),
+                    history: Array.isArray(parsed.history) ? parsed.history.slice(0, 100) : []
+                };
+            } catch (e) {
+                return { boost: 0, sell: 0, history: [] };
+            }
+        }
+
+        function saveBadgeInventory(inventory) {
+            try {
+                const nextInventory = {
+                    boost: Math.max(0, Number(inventory && inventory.boost || 0)),
+                    sell: Math.max(0, Number(inventory && inventory.sell || 0)),
+                    history: Array.isArray(inventory && inventory.history) ? inventory.history.slice(0, 100) : []
+                };
+                localStorage.setItem('badgeInventory', JSON.stringify(nextInventory));
+                return nextInventory;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function recordPurchasedBadges(kind, details = {}) {
+            try {
+                const inventory = getBadgeInventory();
+                if (kind === 'boost' || kind === 'boost_sell') inventory.boost += 1;
+                if (kind === 'sell' || kind === 'boost_sell') inventory.sell += 1;
+                inventory.history = Array.isArray(inventory.history) ? inventory.history : [];
+                inventory.history.unshift({
+                    kind: kind || null,
+                    paymentIntentId: details.paymentIntentId || null,
+                    badgeLabel: details.badgeLabel || null,
+                    amount: details.amount || null,
+                    postId: details.postId || null,
+                    createdAt: Date.now()
+                });
+                saveBadgeInventory(inventory);
+                return inventory;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function consumeBadgeInventory(kind) {
+            try {
+                const inventory = getBadgeInventory();
+                if (kind === 'boost' || kind === 'boost_sell') inventory.boost = Math.max(0, inventory.boost - 1);
+                if (kind === 'sell' || kind === 'boost_sell') inventory.sell = Math.max(0, inventory.sell - 1);
+                saveBadgeInventory(inventory);
+                return inventory;
+            } catch (e) {
+                return null;
+            }
+        }
+
         function hasPendingPurchasedBadge() {
             try {
                 const draft = getPendingComposerDraft();
                 if (draft && draft.badgeReady) return true;
+                const inventory = getBadgeInventory();
+                if ((inventory.boost || 0) > 0 || (inventory.sell || 0) > 0) return true;
                 const orders = (typeof getPendingOrders === 'function') ? getPendingOrders() : JSON.parse(localStorage.getItem('pendingOrders') || '[]');
                 return Array.isArray(orders) && orders.some(o => o && !o.consumed && (o.kind === 'boost' || o.kind === 'sell'));
             } catch (e) {
@@ -6555,6 +6621,7 @@
                     window.lastPurchaseType = finalKind;
                     window.purchasePaidAt = now;
                     try {
+                        recordPurchasedBadges(finalKind, { paymentIntentId: sessionId, badgeLabel: verified.badgeLabel || null, amount: verified.amount || null, postId: verified.postId || null });
                         localStorage.setItem('lastPurchaseType', finalKind);
                         localStorage.setItem('purchasePaidAt', String(now));
                         localStorage.removeItem('pendingCheckoutType');
@@ -6600,6 +6667,7 @@
                             window.lastPurchaseType = finalKind;
                             window.purchasePaidAt = now;
                             try {
+                                recordPurchasedBadges(finalKind, { paymentIntentId: sessionId || ('manual-'+now), badgeLabel: verified.badgeLabel || null, amount: verified.amount || null, postId: verified.postId || null });
                                 localStorage.setItem('lastPurchaseType', finalKind);
                                 localStorage.setItem('purchasePaidAt', String(now));
                                 localStorage.removeItem('pendingCheckoutType');
@@ -42610,6 +42678,7 @@ function setUploadModalHeader(title, subtitle) {
             // survive page reloads and closing/reopening the composer.
             let lastPurchaseType = null;
             const purchasePaidAt = window.purchasePaidAt || (localStorage && localStorage.getItem('purchasePaidAt'));
+            const inventory = getBadgeInventory();
             try {
                 const orders = (typeof getPendingOrders === 'function') ? getPendingOrders() : JSON.parse(localStorage.getItem('pendingOrders') || '[]');
                 const hasBoost = orders.some(o => o && !o.consumed && o.kind === 'boost');
@@ -42622,6 +42691,12 @@ function setUploadModalHeader(title, subtitle) {
                 lastPurchaseType = window.lastPurchaseType || (localStorage && localStorage.getItem('lastPurchaseType'));
             }
 
+            if (!lastPurchaseType) {
+                if ((inventory.boost || 0) > 0 && (inventory.sell || 0) > 0) lastPurchaseType = 'boost_sell';
+                else if ((inventory.boost || 0) > 0) lastPurchaseType = 'boost';
+                else if ((inventory.sell || 0) > 0) lastPurchaseType = 'sell';
+            }
+
             if (!lastPurchaseType) return; // No pending purchase
 
             // Extra safeguard: ensure there are actually unconsumed pendingOrders
@@ -42629,19 +42704,19 @@ function setUploadModalHeader(title, subtitle) {
                 const ordersCheck = (typeof getPendingOrders === 'function') ? getPendingOrders() : JSON.parse(localStorage.getItem('pendingOrders') || '[]');
                 const hasUnconsumedBoost = ordersCheck.some(o => o && !o.consumed && o.kind === 'boost');
                 const hasUnconsumedSell = ordersCheck.some(o => o && !o.consumed && o.kind === 'sell');
-                if (lastPurchaseType === 'boost' && !hasUnconsumedBoost) {
+                if (lastPurchaseType === 'boost' && !hasUnconsumedBoost && !(inventory.boost > 0)) {
                     console.log('applyPendingPurchaseToNextPost: no unconsumed boost orders found, clearing lastPurchaseType');
                     try { localStorage.removeItem('lastPurchaseType'); } catch(_) {}
                     window.lastPurchaseType = null;
                     return;
                 }
-                if (lastPurchaseType === 'sell' && !hasUnconsumedSell) {
+                if (lastPurchaseType === 'sell' && !hasUnconsumedSell && !(inventory.sell > 0)) {
                     console.log('applyPendingPurchaseToNextPost: no unconsumed sell orders found, clearing lastPurchaseType');
                     try { localStorage.removeItem('lastPurchaseType'); } catch(_) {}
                     window.lastPurchaseType = null;
                     return;
                 }
-                if (lastPurchaseType === 'boost_sell' && !(hasUnconsumedBoost || hasUnconsumedSell)) {
+                if (lastPurchaseType === 'boost_sell' && !(hasUnconsumedBoost || hasUnconsumedSell || inventory.boost > 0 || inventory.sell > 0)) {
                     console.log('applyPendingPurchaseToNextPost: no unconsumed boost/sell orders found, clearing lastPurchaseType');
                     try { localStorage.removeItem('lastPurchaseType'); } catch(_) {}
                     window.lastPurchaseType = null;
@@ -45490,6 +45565,9 @@ function setUploadModalHeader(title, subtitle) {
                         };
                         orders.forEach(o => { if (o && o.consumed && o.kind) inc(o.kind); });
                     } catch(e) { /* ignore counter errors */ }
+                    try {
+                        orders.forEach(o => { if (o && o.consumed && o.kind) consumeBadgeInventory(o.kind); });
+                    } catch(e) { /* ignore inventory errors */ }
                     } catch(e) { console.warn('Failed clearing transient purchase flags', e); }
                 }
             } catch (e) { console.warn('consumePendingOrdersForPost failed', e); }
