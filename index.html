@@ -14601,13 +14601,76 @@
             }
         }
 
+        function isVoteMoveRenderReady() {
+            try {
+                if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
+                if (Boolean(window.__suspendBatchPruneDuringScroll)) return false;
+                if (gridScroller && gridScroller.renderScheduled) return false;
+                const settleUntil = Number((window.__feedScrollState && window.__feedScrollState.settleUntil) || 0);
+                if (settleUntil && Date.now() < settleUntil) return false;
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function clearPendingVotePositionShift(postId) {
+            try {
+                const key = String(postId || '');
+                if (!key) return;
+                window.__pendingVoteShiftTimers = window.__pendingVoteShiftTimers || {};
+                const timer = window.__pendingVoteShiftTimers[key];
+                if (timer) clearTimeout(timer);
+                delete window.__pendingVoteShiftTimers[key];
+            } catch (e) { /* ignore */ }
+        }
+
+        function isVotePositionShiftQueued(postId) {
+            try {
+                const key = String(postId || '');
+                return !!(key && window.__pendingVoteShiftTimers && window.__pendingVoteShiftTimers[key]);
+            } catch (e) {
+                return false;
+            }
+        }
+
         // Apply a single-step visual move for vote interactions and persist it
         // as the authoritative snapshot so position changes are instant + stable.
-        function applyImmediateVotePositionShift(postId, voteType) {
+        function applyImmediateVotePositionShift(postId, voteType, options = {}) {
             try {
                 if (!postId) return false;
                 const dir = String(voteType || '').toLowerCase();
                 if (dir !== 'like' && dir !== 'dislike') return false;
+
+                const deferUntilReady = !!(options && options.deferUntilReady);
+                const force = !!(options && options.force);
+                const startedAt = Number((options && options.startedAt) || Date.now());
+                const attempt = Number((options && options.attempt) || 0);
+                const maxWaitMs = Math.max(400, Number((options && options.maxWaitMs) || 1800));
+
+                if (!force && deferUntilReady && !isVoteMoveRenderReady()) {
+                    const key = String(postId);
+                    const elapsed = Date.now() - startedAt;
+                    const shouldForce = elapsed >= maxWaitMs;
+                    const delayMs = shouldForce ? 0 : Math.min(180, 60 + (attempt * 20));
+                    window.__pendingVoteShiftTimers = window.__pendingVoteShiftTimers || {};
+                    if (window.__pendingVoteShiftTimers[key]) clearTimeout(window.__pendingVoteShiftTimers[key]);
+                    window.__pendingVoteShiftTimers[key] = setTimeout(() => {
+                        try {
+                            delete window.__pendingVoteShiftTimers[key];
+                            applyImmediateVotePositionShift(postId, voteType, {
+                                deferUntilReady: true,
+                                force: shouldForce,
+                                startedAt,
+                                attempt: attempt + 1,
+                                maxWaitMs
+                            });
+                        } catch (e) { /* ignore */ }
+                    }, delayMs);
+                    return false;
+                }
+
+                clearPendingVotePositionShift(postId);
                 if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
 
                 const working = gridScroller.items.slice();
@@ -14780,7 +14843,10 @@
 
             // Immediate, single-step movement (swap one position) so users see
             // deterministic motion without multi-second reconcile flicker.
-            const movedImmediately = applyImmediateVotePositionShift(postId, newVoteType);
+            const movedImmediately = applyImmediateVotePositionShift(postId, newVoteType, {
+                deferUntilReady: true,
+                maxWaitMs: 1800
+            });
             
             // 🔥 CRITICAL: Save vote using an atomic transaction to prevent race conditions
             // Use submitVoteTransaction so aggregated counts are computed server-side and written
@@ -14803,8 +14869,11 @@
                         // If optimistic move couldn't run (e.g., scroller not ready),
                         // attempt once on authoritative counts.
                         if (!movedImmediately) {
-                            const movedOnCommit = applyImmediateVotePositionShift(postId, newVoteType);
-                            if (!movedOnCommit) {
+                            const movedOnCommit = applyImmediateVotePositionShift(postId, newVoteType, {
+                                deferUntilReady: true,
+                                maxWaitMs: 1800
+                            });
+                            if (!movedOnCommit && !isVotePositionShiftQueued(postId)) {
                                 keepVoteRerankActive(postId);
                                 window.lastRenderGridTime = 0;
                                 renderGrid();
@@ -14821,6 +14890,7 @@
                 post.likes = originalLikes;
                 post.dislikes = originalDislikes;
                 userVotes[userVoteKey] = originalVote;
+                try { clearPendingVotePositionShift(postId); } catch (e) {}
                 updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
                 window.lastRenderGridTime = 0;
                 renderGrid();
