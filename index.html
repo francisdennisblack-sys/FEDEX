@@ -21917,16 +21917,17 @@ function setUploadModalHeader(title, subtitle) {
                                     if (postObj.authId) candidateKeys.add(String(postObj.authId));
                                 } catch (e) { /* ignore key derivation errors */ }
 
-                                for (const key of Array.from(candidateKeys)) {
+                                if (!isPostHiddenForViewer(postObj, currentUserId)) {
                                     try {
-                                        gridContent[key] = gridContent[key] || [];
-                                        if (!isPostHiddenForViewer(postObj, currentUserId)) {
-                                            if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(key, postObj);
-                                            else ensureUniqueAndInsert(key, postObj);
-                                            try { if (gridContent[key].length > 300) gridContent[key].length = 300; } catch(e){}
-                                            console.log('➕ Inserted new post from post_events/added into', key, postId);
+                                        if (typeof routeNewPostToLoadedGrids === 'function') {
+                                            routeNewPostToLoadedGrids(postObj, 'shared-posts');
+                                        } else if (typeof insertNewPostIntoGrid === 'function') {
+                                            insertNewPostIntoGrid('shared-posts', postObj, { preserveAcrossKeys: true });
+                                        } else {
+                                            ensureUniqueAndInsert('shared-posts', postObj);
                                         }
-                                    } catch (e) { console.warn('Failed to insert new post into gridContent for key', key, e); }
+                                        console.log('➕ Broadcast new post from post_events/added into loaded grids', postId);
+                                    } catch (e) { console.warn('Failed to broadcast new post from post_events/added', e); }
                                 }
                             } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
                         } catch (e) { console.warn('post_added handler processing failed', e); }
@@ -37643,10 +37644,11 @@ function setUploadModalHeader(title, subtitle) {
              * This helps avoid confusing empty DOM slots after deletes and ensures
              * new posts are visible immedately without fighting the virtual scroller.
              */
-            function insertNewPostIntoGrid(contentKey, postData) {
+            function insertNewPostIntoGrid(contentKey, postData, options = {}) {
                 if (!contentKey) contentKey = currentUserId || 'temp-posts';
                 if (!postData || !postData.id) return;
                 if (!gridContent[contentKey]) gridContent[contentKey] = [];
+                const preserveAcrossKeys = !!options.preserveAcrossKeys;
 
                 // (repost insertion guard removed — reposts should create their own slot)
 
@@ -37654,23 +37656,81 @@ function setUploadModalHeader(title, subtitle) {
                 // An optimistic insert (own grid key) plus a realtime 'shared-posts'
                 // merge could otherwise place the same id under two keys, which the
                 // grid pool would then render twice. Strip the id from every other key.
-                try {
-                    Object.keys(gridContent).forEach(k => {
-                        if (k === contentKey || !Array.isArray(gridContent[k])) return;
-                        gridContent[k] = gridContent[k].filter(p => !(p && p.id === postData.id));
-                    });
-                } catch (e) { /* ignore */ }
+                if (!preserveAcrossKeys) {
+                    try {
+                        Object.keys(gridContent).forEach(k => {
+                            if (k === contentKey || !Array.isArray(gridContent[k])) return;
+                            gridContent[k] = gridContent[k].filter(p => !(p && p.id === postData.id));
+                        });
+                    } catch (e) { /* ignore */ }
+                }
 
                 // If already present in this key, update in place
                 const already = gridContent[contentKey].findIndex(p => p && p.id === postData.id);
-                if (already !== -1) { gridContent[contentKey][already] = postData; return; }
+                if (already !== -1) {
+                    gridContent[contentKey][already] = postData;
+                    try { postData._keepGridPlacement = true; postData._lockedGridPlacement = true; } catch (e) {}
+                    return;
+                }
 
                 const insertAt = getRandomNewPostInsertIndex(gridContent[contentKey].length);
+
+                try { postData._keepGridPlacement = true; postData._lockedGridPlacement = true; } catch (e) {}
 
                 // Keep the list compact and ordered: splice at the insertion point.
                 // We intentionally avoid leaving sparse holes in the array because
                 // the virtual scroller renders by index.
                 gridContent[contentKey].splice(insertAt, 0, postData);
+                            function routeNewPostToLoadedGrids(postData, preferredKey) {
+                                try {
+                                    if (!postData || !postData.id) return;
+                                    const targetKeys = new Set();
+                                    const addKey = (key) => {
+                                        if (!key) return;
+                                        targetKeys.add(String(key));
+                                    };
+
+                                    addKey('shared-posts');
+                                    addKey(preferredKey || getActiveViewerFeedKey() || currentUserId);
+                                    addKey(currentUserId);
+
+                                    try {
+                                        if (postData.zoneTag) {
+                                            addKey(postData.zoneTag);
+                                            addKey(`zone:${postData.zoneTag}`);
+                                            addKey(`zone-${postData.zoneTag}`);
+                                        }
+                                        if (postData.county) {
+                                            addKey(postData.county);
+                                            addKey(`county:${postData.county}`);
+                                        }
+                                        if (postData.networkId) addKey(postData.networkId);
+                                        if (postData.authId) addKey(String(postData.authId));
+                                    } catch (e) { /* ignore */ }
+
+                                    try {
+                                        Object.keys(gridContent || {}).forEach(k => {
+                                            const arr = gridContent[k];
+                                            if (Array.isArray(arr) && arr.length > 0) addKey(k);
+                                        });
+                                    } catch (e) { /* ignore */ }
+
+                                    for (const key of Array.from(targetKeys)) {
+                                        try {
+                                            gridContent[key] = gridContent[key] || [];
+                                            if (isPostHiddenForViewer(postData, currentUserId)) continue;
+                                            if (typeof insertNewPostIntoGrid === 'function') {
+                                                insertNewPostIntoGrid(key, postData, { preserveAcrossKeys: true });
+                                            } else if (typeof ensureUniqueAndInsert === 'function') {
+                                                ensureUniqueAndInsert(key, postData);
+                                            } else {
+                                                gridContent[key].push(postData);
+                                            }
+                                            try { if (gridContent[key].length > 300) gridContent[key].length = 300; } catch(e){}
+                                        } catch (e) { console.warn('routeNewPostToLoadedGrids failed for key', key, e); }
+                                    }
+                                } catch (e) { console.warn('routeNewPostToLoadedGrids failed', e); }
+                            }
                 try { console.log(`➕ insertNewPostIntoGrid: inserted ${postData.id} at random index ${insertAt} in ${contentKey}`); } catch(e){}
 
                 // Dump debug state: gridContent sizes, scroller items, and first DOM boxes
@@ -41129,19 +41189,17 @@ function setUploadModalHeader(title, subtitle) {
                     const localPool = sortedPosts.filter(_isLocalFor60);
                     const localQuota = Math.max(1, Math.round(sortedPosts.length * 0.60));
 
-                    // Keep NEW posts mixed in by preserving their pre-sort order/placement.
-                    // Only mature local posts are net-sorted; NEW posts join that sort after
-                    // they age out of isPostNew().
                     const localPoolInOrder = localPool.slice();
                     const matureLocalSorted = localPoolInOrder
-                        .filter(p => !isPostNew(p))
+                        .filter(p => !(p && (p._keepGridPlacement || p._lockedGridPlacement)) && !isPostNew(p))
                         .sort(_netSort);
 
                     const localHead = [];
                     let matureIdx = 0;
                     for (const p of localPoolInOrder) {
                         if (localHead.length >= localQuota) break;
-                        if (isPostNew(p)) {
+                        const isLockedPlacement = !!(p && (p._keepGridPlacement || p._lockedGridPlacement));
+                        if (isLockedPlacement || isPostNew(p)) {
                             localHead.push(p);
                             continue;
                         }
@@ -43307,7 +43365,7 @@ function setUploadModalHeader(title, subtitle) {
                     const contentKey = currentUserId || 'pending-local';
                     if (!gridContent[contentKey]) gridContent[contentKey] = [];
                     if (!gridContent[contentKey].some(p => p && p.id === postData.id)) {
-                        try { insertNewPostIntoGrid(contentKey, postData); } catch(e) { gridContent[contentKey].push(postData); }
+                        try { routeNewPostToLoadedGrids(postData, contentKey); } catch(e) { gridContent[contentKey].push(postData); }
                     } else {
                         console.log(`  ↩️ Skipping duplicate pending push for id ${postData.id}`);
                     }
@@ -43422,7 +43480,7 @@ function setUploadModalHeader(title, subtitle) {
                 if (_alreadyPresent) {
                     console.log(`  ↩️ Skipping duplicate push to gridContent[${contentKey}] - id already present: ${postData.id}`);
                 } else {
-                    try { insertNewPostIntoGrid(contentKey, postData); } catch(e) { gridContent[contentKey].push(postData); }
+                    try { routeNewPostToLoadedGrids(postData, contentKey); } catch(e) { gridContent[contentKey].push(postData); }
                 }
                 // Mark publish-settle timestamp so reconciler won't immediately
                 // yank/replace this brand-new post while feeds converge.
