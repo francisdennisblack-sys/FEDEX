@@ -20264,34 +20264,102 @@ function setUploadModalHeader(title, subtitle) {
                             });
                             if (removedIds.length > 0) {
                                 console.log(`🧽 Snapshot prune: removing ${removedIds.length} posts no longer on server`);
-                                // If the user is actively scrolling and did not just commit a location,
-                                // defer destructive removals to avoid jarring batch deletions while
-                                // the user inspects the feed.
+
+                                const nowMs = Date.now();
                                 const suspend = Boolean(window.__suspendBatchPruneDuringScroll);
                                 const lastLoc = Number(window.__lastLocationCommitAt || 0);
-                                if (suspend && (Date.now() - lastLoc) > 3000) {
-                                    window.__pendingGloballyDeletedIds = window.__pendingGloballyDeletedIds || new Set();
-                                    removedIds.forEach(id => window.__pendingGloballyDeletedIds.add(id));
-                                    // Schedule processing after a brief idle window
+                                const activeScroll = suspend && (nowMs - lastLoc) > 3000;
+                                const bulkThreshold = Math.max(8, Math.floor(Math.max(25, cachedIds.length * 0.15)));
+                                const isBulkRemoval = removedIds.length >= bulkThreshold;
+                                const pruneSignature = removedIds.slice().sort().join('|').slice(0, 2000);
+
+                                const flushPendingSnapshotPruneBatch = () => {
+                                    try {
+                                        const state = window.__pendingSnapshotPrune || { signature: null, ids: new Set(), firstSeenAt: 0 };
+                                        const queued = Array.from(state.ids || []);
+                                        const stillScrolling = Boolean(window.__suspendBatchPruneDuringScroll) && (Date.now() - Number(window.__lastLocationCommitAt || 0)) > 3000;
+                                        if (queued.length === 0 || stillScrolling) return;
+
+                                        const applyBatch = queued.slice(0, Math.max(1, Math.min(20, Math.ceil(queued.length / 3))));
+                                        const remaining = queued.slice(applyBatch.length);
+                                        if (remaining.length > 0) {
+                                            state.ids = new Set(remaining);
+                                            state.firstSeenAt = Date.now();
+                                            window.__pendingGlobalRemovalTimer = setTimeout(flushPendingSnapshotPruneBatch, 1200);
+                                        } else {
+                                            state.ids = new Set();
+                                            state.signature = null;
+                                            state.firstSeenAt = 0;
+                                            window.__pendingGlobalRemovalTimer = null;
+                                        }
+
+                                        console.log('🕒 Processing deferred snapshot-prune removals:', applyBatch.length);
+                                        applyBatch.forEach(id => {
+                                            try { window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set(); window.globallyDeletedPostIds.add(id); } catch(e){}
+                                            try { delete postCache[id]; } catch(e){}
+                                            try { Object.keys(gridContent || {}).forEach(k => { if (Array.isArray(gridContent[k])) { gridContent[k] = gridContent[k].filter(p => !(p && p.id === id)); } }); } catch(e){}
+                                            try { clearGridBoxByPostId(id); } catch(e){}
+                                        });
+                                        try { if (gridScroller && Array.isArray(gridScroller.items)) { gridScroller.items = gridScroller.items.filter(i => !(i && applyBatch.includes(i.id))); if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } } catch(e){}
+                                    } catch (e) { console.warn('Deferred snapshot-prune batch flush failed', e); }
+                                };
+
+                                window.__flushSnapshotPruneBatch = flushPendingSnapshotPruneBatch;
+
+                                window.__pendingSnapshotPrune = window.__pendingSnapshotPrune || { signature: null, ids: new Set(), firstSeenAt: 0 };
+
+                                // Large prune sets are treated as suspicious unless we see the same
+                                // removal signature twice outside of active scrolling. This prevents a
+                                // transient or partial server snapshot from wiping the feed.
+                                if (activeScroll || isBulkRemoval) {
+                                    const pending = window.__pendingSnapshotPrune;
+                                    if (pending.signature !== pruneSignature) {
+                                        pending.signature = pruneSignature;
+                                        pending.ids = new Set(removedIds);
+                                        pending.firstSeenAt = nowMs;
+                                    } else {
+                                        removedIds.forEach(id => pending.ids.add(id));
+                                    }
+
                                     if (!window.__pendingGlobalRemovalTimer) {
                                         window.__pendingGlobalRemovalTimer = setTimeout(() => {
                                             try {
-                                                const toProcess = Array.from(window.__pendingGloballyDeletedIds || []);
-                                                window.__pendingGloballyDeletedIds = new Set();
+                                                const state = window.__pendingSnapshotPrune || { ids: new Set(), signature: null, firstSeenAt: 0 };
+                                                const queued = Array.from(state.ids || []);
+                                                const stableForMs = Date.now() - Number(state.firstSeenAt || 0);
+                                                const stillScrolling = Boolean(window.__suspendBatchPruneDuringScroll) && (Date.now() - Number(window.__lastLocationCommitAt || 0)) > 3000;
+                                                const confirmBulk = !stillScrolling && (!isBulkRemoval || stableForMs >= 1500);
                                                 window.__pendingGlobalRemovalTimer = null;
-                                                if (toProcess.length === 0) return;
-                                                console.log('🕒 Processing deferred snapshot-prune removals:', toProcess.length);
-                                                toProcess.forEach(id => {
+
+                                                if (!confirmBulk || queued.length === 0) return;
+
+                                                // Apply in bounded batches so a confirmed prune cannot clear the
+                                                // whole feed in a single frame.
+                                                const applyBatch = queued.slice(0, Math.max(1, Math.min(20, Math.ceil(queued.length / 3))));
+                                                const remaining = queued.slice(applyBatch.length);
+                                                if (remaining.length > 0) {
+                                                    state.ids = new Set(remaining);
+                                                    state.firstSeenAt = Date.now();
+                                                    window.__pendingGlobalRemovalTimer = setTimeout(flushPendingSnapshotPruneBatch, 1200);
+                                                } else {
+                                                    state.ids = new Set();
+                                                    state.signature = null;
+                                                    state.firstSeenAt = 0;
+                                                }
+
+                                                console.log('🕒 Processing deferred snapshot-prune removals:', applyBatch.length);
+                                                applyBatch.forEach(id => {
                                                     try { window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set(); window.globallyDeletedPostIds.add(id); } catch(e){}
                                                     try { delete postCache[id]; } catch(e){}
                                                     try { Object.keys(gridContent || {}).forEach(k => { if (Array.isArray(gridContent[k])) { gridContent[k] = gridContent[k].filter(p => !(p && p.id === id)); } }); } catch(e){}
                                                     try { clearGridBoxByPostId(id); } catch(e){}
                                                 });
-                                                try { if (gridScroller && Array.isArray(gridScroller.items)) { gridScroller.items = gridScroller.items.filter(i => !(i && toProcess.includes(i.id))); if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } } catch(e){}
+                                                try { if (gridScroller && Array.isArray(gridScroller.items)) { gridScroller.items = gridScroller.items.filter(i => !(i && applyBatch.includes(i.id))); if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } } catch(e){}
                                             } catch (e) { console.warn('Deferred snapshot-prune processing failed', e); }
                                         }, 1200);
                                     }
                                 } else {
+                                    // Small, non-scroll-related prunes can still apply immediately.
                                     window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
                                     removedIds.forEach(id => {
                                         window.globallyDeletedPostIds.add(id);
