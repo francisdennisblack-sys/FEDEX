@@ -37187,13 +37187,9 @@ function setUploadModalHeader(title, subtitle) {
                     });
 
                     try {
-                        // Force-clear the scroller internal items before setting new ones to avoid
-                        // stale index->DOM mappings when slots were removed previously.
-                        try {
-                            if (typeof gridScroller.setItems === 'function') gridScroller.setItems([]);
-                            else if (Array.isArray(gridScroller.items)) gridScroller.items = [];
-                        } catch(e) { /* ignore */ }
-
+                        // Keep updates in-place: avoid wiping to [] first because that
+                        // forces a full blank/repaint cycle and causes visible flicker
+                        // when a single new post is inserted.
                         if (typeof gridScroller.setItems === 'function') {
                             gridScroller.setItems(all);
                         } else if (Array.isArray(gridScroller.items)) {
@@ -37205,10 +37201,9 @@ function setUploadModalHeader(title, subtitle) {
                             }
                         } catch (e) { /* ignore */ }
                         try { forceClearStaleInnerHTML(480); } catch(e){}
-                        // Force multiple refresh strategies to ensure internal indexes sync
+                        // Single refresh pass is enough after strict slot identity checks.
                         try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
-                        try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
-                        try { if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(0); } catch(e){}
+                        try { if (typeof gridScroller.enforceStrictSlotIdentity === 'function') gridScroller.enforceStrictSlotIdentity(480); } catch(e){}
                         try { console.log('🔁 rebuildGridScrollerFromGridContent: rebuilt scroller with', all.length, 'items; gridScroller.items=', (gridScroller.items && gridScroller.items.length) || '(unknown)'); } catch(e){}
                     } catch (e) {
                         console.warn('rebuildGridScrollerFromGridContent.apply failed', e);
@@ -42710,16 +42705,13 @@ function setUploadModalHeader(title, subtitle) {
                         console.error('Failed to enqueue post for retry:', e);
                     }
 
-                    // Update UI immediately and stop save flow
-                    if (typeof renderGrid === 'function') {
-                        window.lastRenderGridTime = 0; // bypass 30s throttle for user publish action
-                        window.postPublishImmediateRefresh = true;
-                        try {
-                            renderGrid();
-                        } finally {
-                            window.postPublishImmediateRefresh = false;
-                        }
-                    }
+                    // Update UI immediately with incremental scheduler to avoid
+                    // whole-grid repaint flicker on publish failure queueing.
+                    try {
+                        if (typeof requestGridUpdate === 'function') requestGridUpdate('publish-queued');
+                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('publish-queued');
+                        else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
+                    } catch (e) { /* ignore publish-queued UI update errors */ }
                     return; // Exit save flow — post will be synced later
                 }
                 
@@ -42953,16 +42945,15 @@ function setUploadModalHeader(title, subtitle) {
                         console.warn('⚠️ Failed to reset composer badge UI:', e);
                     }
 
-                    // NOW RE-RENDER GRID to show the new post immediately
-                    console.log('  🎨 Re-rendering grid to show new post...');
-                    window.lastRenderGridTime = 0; // bypass 30s throttle for publish action
-                    window.postPublishImmediateRefresh = true;
+                    // Request incremental update so the new post appears without
+                    // forcing a full-grid repaint (prevents all-slot flicker).
+                    console.log('  🎨 Requesting incremental grid update for new post...');
                     try {
-                        renderGrid();
-                    } finally {
-                        window.postPublishImmediateRefresh = false;
-                    }
-                    console.log('  ✅ Grid re-rendered - new post should be visible');
+                        if (typeof requestGridUpdate === 'function') requestGridUpdate('post-publish');
+                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-publish');
+                        else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
+                    } catch (e) { console.warn('incremental publish refresh failed', e); }
+                    console.log('  ✅ Incremental grid update requested - new post should be visible');
                     // After every publish: run recomputeAndApplyBadges() once the DOM settles.
                     // This handles two cases:
                     //   1. The new post itself has a boost/sell badge — pill must be created.
