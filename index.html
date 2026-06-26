@@ -45564,6 +45564,8 @@ function setUploadModalHeader(title, subtitle) {
                     }
                 }
 
+                const purchasedAt = Date.now();
+
                 // Ensure badges array
                 post = post || {};
                 const existingBadges = Array.isArray(post.badges) ? post.badges.slice() : [];
@@ -45576,6 +45578,21 @@ function setUploadModalHeader(title, subtitle) {
                 if (boost) {
                     updates.boostExpiresAt = Date.now() + (24 * 60 * 60 * 1000);
                     updates.boostStatus = 'active';
+                    updates.boostBadge = Object.assign({}, post.boostBadge || {}, {
+                        label: (post.boostBadge && post.boostBadge.label) || 'Boost',
+                        purchasedAt,
+                        paymentIntentId: (post.boostBadge && post.boostBadge.paymentIntentId) || null
+                    });
+                }
+
+                if (sell) {
+                    updates.primaryBadge = 'sell';
+                    updates.sellPaidAt = purchasedAt;
+                    updates.sellBadge = Object.assign({}, post.sellBadge || {}, {
+                        label: (post.sellBadge && post.sellBadge.label) || 'Buy',
+                        purchasedAt,
+                        paymentIntentId: (post.sellBadge && post.sellBadge.paymentIntentId) || (localStorage.getItem('pendingSellPaymentIntentId') || null)
+                    });
                 }
 
                 // Persist to Firebase shared posts collection if available
@@ -45588,7 +45605,8 @@ function setUploadModalHeader(title, subtitle) {
                 } catch (e) {
                     console.warn('⚠️ Failed to persist purchase badges to Firebase:', e);
                     const queued = JSON.parse(localStorage.getItem('queuedBadgeUpdates') || '[]');
-                    queued.push({ postId, updates, ts: Date.now() });
+                    if (boost) queued.push({ postId, kind: 'boost', details: updates.boostBadge || { label: 'Boost' }, ts: Date.now() });
+                    if (sell) queued.push({ postId, kind: 'sell', details: updates.sellBadge || { label: 'Buy' }, ts: Date.now() });
                     localStorage.setItem('queuedBadgeUpdates', JSON.stringify(queued));
                 }
 
@@ -45598,6 +45616,10 @@ function setUploadModalHeader(title, subtitle) {
                         postCache[postId].badges = updates.badges;
                         if (updates.boostExpiresAt) postCache[postId].boostExpiresAt = updates.boostExpiresAt;
                         if (updates.boostStatus) postCache[postId].boostStatus = updates.boostStatus;
+                        if (updates.boostBadge) postCache[postId].boostBadge = updates.boostBadge;
+                        if (updates.sellBadge) postCache[postId].sellBadge = updates.sellBadge;
+                        if (updates.sellPaidAt) postCache[postId].sellPaidAt = updates.sellPaidAt;
+                        if (updates.primaryBadge) postCache[postId].primaryBadge = updates.primaryBadge;
                     }
                     if (typeof gridContent !== 'undefined') {
                         for (const key in gridContent) {
@@ -45606,10 +45628,16 @@ function setUploadModalHeader(title, subtitle) {
                                     p.badges = updates.badges;
                                     if (updates.boostExpiresAt) p.boostExpiresAt = updates.boostExpiresAt;
                                     if (updates.boostStatus) p.boostStatus = updates.boostStatus;
+                                    if (updates.boostBadge) p.boostBadge = updates.boostBadge;
+                                    if (updates.sellBadge) p.sellBadge = updates.sellBadge;
+                                    if (updates.sellPaidAt) p.sellPaidAt = updates.sellPaidAt;
+                                    if (updates.primaryBadge) p.primaryBadge = updates.primaryBadge;
                                 }
                             });
                         }
                     }
+                    if (boost) markPostBadgePersistent(postId, 'boost', { paymentIntentId: updates.boostBadge && updates.boostBadge.paymentIntentId ? updates.boostBadge.paymentIntentId : null, badgeLabel: updates.boostBadge && updates.boostBadge.label ? updates.boostBadge.label : 'Boost' });
+                    if (sell) markPostBadgePersistent(postId, 'sell', { paymentIntentId: updates.sellBadge && updates.sellBadge.paymentIntentId ? updates.sellBadge.paymentIntentId : null, badgeLabel: updates.sellBadge && updates.sellBadge.label ? updates.sellBadge.label : 'Buy' });
                 } catch (e) { console.warn('Failed updating local caches for badges', e); }
 
                 // Update rendered elements immediately if present
@@ -45663,6 +45691,7 @@ function setUploadModalHeader(title, subtitle) {
                     }
                 } catch (e) { /* ignore DOM update failures */ }
 
+                try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch (e) { console.warn('applyPurchaseBadges recompute failed', e); }
                 scheduleRenderGrid();
             } catch (e) {
                 console.error('❌ applyPurchaseBadges failed', e);
