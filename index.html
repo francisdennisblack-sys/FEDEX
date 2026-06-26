@@ -36471,6 +36471,21 @@ function setUploadModalHeader(title, subtitle) {
             }
         }
 
+        function hasAnySettlingPublishedPost(list, nowTs = Date.now()) {
+            try {
+                if (!Array.isArray(list) || list.length === 0) return false;
+                for (const p of list) {
+                    if (!p || !p.id) continue;
+                    const id = String(p.id);
+                    if (isPublishedPostSettling(id, nowTs)) return true;
+                    if (p._optimistic && Number(p._optimisticExpiry || 0) > nowTs) return true;
+                }
+                return false;
+            } catch (e) {
+                return false;
+            }
+        }
+
         function scheduleGridReconcile() {
             if (gridReconcileInterval) return;
             // Helper: attempt a minimal, safe move for a single voted post
@@ -36569,6 +36584,7 @@ function setUploadModalHeader(title, subtitle) {
                     // strongly limit automatic ML reshuffles so posts don't drift while reading.
                     try {
                         const voteActive = !!(window.voteTriggeredRerank && isVoteReorderStabilizationActive());
+                        const hasSettlingPublish = hasAnySettlingPublishedPost(current, Date.now()) || hasAnySettlingPublishedPost(target, Date.now());
                         if (voteActive) {
                             const now = Date.now();
                             const sinceVote = now - (window.lastVoteRerankAt || 0);
@@ -36602,6 +36618,11 @@ function setUploadModalHeader(title, subtitle) {
                         }
 
                         if (!voteActive) {
+                            // While a freshly published post is still settling, freeze
+                            // non-vote reconcile moves to prevent delayed full-grid flicker.
+                            if (hasSettlingPublish) {
+                                return;
+                            }
                             const allowMove = shouldAllowNonInteractiveMove(diffIdx, current, target);
                             if (!allowMove) {
                                 return;
@@ -42865,8 +42886,13 @@ function setUploadModalHeader(title, subtitle) {
                 // Show the post immediately in the grid without waiting for
                 // later scheduled refresh cycles.
                 try {
-                    if (typeof requestGridUpdate === 'function') requestGridUpdate('post-publish-urgent');
-                    else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-publish-urgent');
+                    const _now = Date.now();
+                    const _lastUrgent = Number(window.__lastUrgentPublishGridUpdateAt || 0);
+                    if ((_now - _lastUrgent) > 1200) {
+                        window.__lastUrgentPublishGridUpdateAt = _now;
+                        if (typeof requestGridUpdate === 'function') requestGridUpdate('post-publish-urgent');
+                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-publish-urgent');
+                    }
                 } catch (e) { console.warn('urgent local post insert refresh failed', e); }
                 // Ensure grid rendering always detects media: copy photoURL into imageData
                 // for legacy or inconsistent consumers that check imageData.
@@ -43015,8 +43041,13 @@ function setUploadModalHeader(title, subtitle) {
                     // forcing a full-grid repaint (prevents all-slot flicker).
                     console.log('  🎨 Requesting incremental grid update for new post...');
                     try {
-                        if (typeof requestGridUpdate === 'function') requestGridUpdate('post-publish-urgent');
-                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-publish');
+                        const _now = Date.now();
+                        const _lastUrgent = Number(window.__lastUrgentPublishGridUpdateAt || 0);
+                        if ((_now - _lastUrgent) > 1200) {
+                            window.__lastUrgentPublishGridUpdateAt = _now;
+                            if (typeof requestGridUpdate === 'function') requestGridUpdate('post-publish-urgent');
+                            else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-publish-urgent');
+                        }
                         else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
                     } catch (e) { console.warn('incremental publish refresh failed', e); }
                     console.log('  ✅ Incremental grid update requested - new post should be visible');
