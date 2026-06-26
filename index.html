@@ -11391,10 +11391,11 @@
             } catch (e) { /* ignore */ }
         }
 
-        function syncPostVoteCountsEverywhere(postId, likes, dislikes) {
+        function syncPostVoteCountsEverywhere(postId, likes, dislikes, options = {}) {
             if (!postId) return null;
             const nextLikes = Number(likes) || 0;
             const nextDislikes = Number(dislikes) || 0;
+            const suppressGlobalRefresh = !!(options && options.suppressGlobalRefresh);
             let canonicalPost = null;
 
             try {
@@ -11483,13 +11484,16 @@
                 }
             }
 
-            // Force UI refresh for visible posts so glow/badge state updates immediately
-            try {
-                recomputeAndApplyBadges();
-            } catch (e) { /* ignore UI refresh failures */ }
-            try {
-                refreshVisiblePostGlowOutlines('votes-updated');
-            } catch (e) { /* ignore */ }
+            // Force UI refresh for visible posts unless caller requests a
+            // targeted update path (used by vote swap flow to prevent flicker).
+            if (!suppressGlobalRefresh) {
+                try {
+                    recomputeAndApplyBadges();
+                } catch (e) { /* ignore UI refresh failures */ }
+                try {
+                    refreshVisiblePostGlowOutlines('votes-updated');
+                } catch (e) { /* ignore */ }
+            }
 
             return canonicalPost;
         }
@@ -14789,9 +14793,8 @@
                     }
                 }
 
-                try { applyGridTextFontSizeToVisiblePosts(); } catch (e) {}
-                try { recomputeAndApplyBadges(); } catch (e) {}
-                try { refreshVisiblePostGlowOutlines('vote-immediate-shift'); } catch (e) {}
+                // Keep vote swaps minimal: avoid full-grid visual refreshes here.
+                // The two swapped boxes are already updated via direct DOM swap.
 
                 window.__lastImmediateVoteMoveAtByPost = window.__lastImmediateVoteMoveAtByPost || {};
                 window.__lastImmediateVoteMoveAtByPost[String(postId)] = Date.now();
@@ -14909,7 +14912,7 @@
             } catch (e) { /* ignore local vote cache errors */ }
             
             // Update all references to this post before the glow resolver runs.
-            syncPostVoteCountsEverywhere(postId, newLikes, newDislikes);
+            syncPostVoteCountsEverywhere(postId, newLikes, newDislikes, { suppressGlobalRefresh: true });
 
             // Defensive: ensure no duplicate entries exist in any gridContent array
             try {
@@ -14946,7 +14949,7 @@
                     } catch (e) { /* ignore */ }
                     post.likes = likes;
                     post.dislikes = dislikes;
-                    syncPostVoteCountsEverywhere(postId, likes, dislikes);
+                    syncPostVoteCountsEverywhere(postId, likes, dislikes, { suppressGlobalRefresh: true });
                     updateVoteDisplayInDOM(postId, likes, dislikes);
                     try { refreshVisiblePostGlowOutlines('vote-transaction-success'); } catch (e) {}
                     try {
