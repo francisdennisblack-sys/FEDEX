@@ -14600,6 +14600,60 @@
                 window.voteTriggeredRerank = true;
             }
         }
+
+        // Apply a single-step visual move for vote interactions and persist it
+        // as the authoritative snapshot so position changes are instant + stable.
+        function applyImmediateVotePositionShift(postId, voteType) {
+            try {
+                if (!postId) return false;
+                const dir = String(voteType || '').toLowerCase();
+                if (dir !== 'like' && dir !== 'dislike') return false;
+                if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
+
+                const working = gridScroller.items.slice();
+                const fromIdx = working.findIndex(p => p && String(p.id) === String(postId));
+                if (fromIdx < 0) return false;
+
+                const toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
+                if (toIdx < 0 || toIdx >= working.length) return false;
+
+                const a = working[fromIdx];
+                const b = working[toIdx];
+                if (!a || !a.id || !b || !b.id) return false;
+
+                // Swap exactly one slot.
+                working[fromIdx] = b;
+                working[toIdx] = a;
+
+                const committed = compactPostListForSlots(working);
+                gridScroller.items = committed;
+                pendingSortedPosts = committed.slice();
+                window.pendingSortedPosts = committed.slice();
+                window.latestSortedPosts = committed.slice();
+
+                keepVoteRerankActive(postId);
+
+                if (typeof gridScroller.renderItemsInRange === 'function') {
+                    const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
+                    const end = Math.min(committed.length, Math.max(fromIdx, toIdx) + 3);
+                    gridScroller.renderItemsInRange(start, end, { skipIdentityPass: true });
+                } else if (typeof gridScroller.setItems === 'function') {
+                    gridScroller.setItems(committed);
+                }
+
+                try { applyGridTextFontSizeToVisiblePosts(); } catch (e) {}
+                try { recomputeAndApplyBadges(); } catch (e) {}
+                try { refreshVisiblePostGlowOutlines('vote-immediate-shift'); } catch (e) {}
+
+                window.__lastImmediateVoteMoveAtByPost = window.__lastImmediateVoteMoveAtByPost || {};
+                window.__lastImmediateVoteMoveAtByPost[String(postId)] = Date.now();
+                console.log(`⚡ Immediate vote shift: ${String(postId).slice(0, 8)} ${fromIdx}→${toIdx}`);
+                return true;
+            } catch (e) {
+                console.warn('applyImmediateVotePositionShift failed', e);
+                return false;
+            }
+        }
         
         function voteOnPost(postId, voteType) {
             // Protect the post the user is actively engaging with from being
@@ -14720,38 +14774,13 @@
             // ⚡ INSTANT BADGE UPDATE
             // The like/dislike/balanced badge must flip the very second the user votes
             // so it feels automatic. Apply badge classes immediately (synchronously)
-            // — the position re-rank below stays slightly delayed so the post doesn't
-            // jump before the user sees their vote land.
+            // and perform one immediate slot move to avoid delayed flicker.
             try { recalculateBadgesForCurrentGrid(postId); } catch (e) { /* defensive */ }
             try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch (e) { /* defensive */ }
 
-            // 🕒 DELAYED RE-RANK
-            // Requirement: user must see the like/dislike change first, then movement.
-            const VOTE_VISUAL_DELAY_MS = 700;
-            if (!window.voteVisualUpdateTimers) window.voteVisualUpdateTimers = {};
-            if (window.voteVisualUpdateTimers[postId]) {
-                clearTimeout(window.voteVisualUpdateTimers[postId]);
-            }
-            window.voteVisualUpdateTimers[postId] = setTimeout(() => {
-                try {
-                    // 1) Re-apply per-post badges after vote (DOM was rebuilt by renderGrid)
-                    recalculateBadgesForCurrentGrid(postId);
-                    // 2) Re-run ranking so post can move to new position
-                        // Defensive dedupe before re-render to avoid duplicate artifacts
-                        try { if (typeof dedupeGridContent === 'function') dedupeGridContent(); } catch (e) {}
-                    keepVoteRerankActive(postId);
-                    window.lastRenderGridTime = 0; // bypass throttle for deliberate vote action
-                    renderGrid();
-                    try { repairGridSlotGaps('vote-delayed-rerank'); } catch (e) {}
-                    try { forceCompactNow('vote-delayed'); } catch (e) {}
-                    try { refreshVisiblePostGlowOutlines('vote-delayed-rerank'); } catch (e) {}
-                    console.log(`✅ Delayed vote refresh applied for ${postId.substring(0, 8)} after ${VOTE_VISUAL_DELAY_MS}ms`);
-                } catch (e) {
-                    console.warn('⚠️ Delayed vote refresh failed:', e);
-                } finally {
-                    delete window.voteVisualUpdateTimers[postId];
-                }
-            }, VOTE_VISUAL_DELAY_MS);
+            // Immediate, single-step movement (swap one position) so users see
+            // deterministic motion without multi-second reconcile flicker.
+            const movedImmediately = applyImmediateVotePositionShift(postId, newVoteType);
             
             // 🔥 CRITICAL: Save vote using an atomic transaction to prevent race conditions
             // Use submitVoteTransaction so aggregated counts are computed server-side and written
@@ -14771,11 +14800,16 @@
                     try { refreshVisiblePostGlowOutlines('vote-transaction-success'); } catch (e) {}
                     try {
                         recalculateBadgesForCurrentGrid(postId);
-                        keepVoteRerankActive(postId);
-                        window.lastRenderGridTime = 0;
-                        renderGrid();
-                        try { repairGridSlotGaps('vote-authoritative-rerank'); } catch (e) {}
-                        try { forceCompactNow('vote-authoritative'); } catch (e) {}
+                        // If optimistic move couldn't run (e.g., scroller not ready),
+                        // attempt once on authoritative counts.
+                        if (!movedImmediately) {
+                            const movedOnCommit = applyImmediateVotePositionShift(postId, newVoteType);
+                            if (!movedOnCommit) {
+                                keepVoteRerankActive(postId);
+                                window.lastRenderGridTime = 0;
+                                renderGrid();
+                            }
+                        }
                         try { refreshVisiblePostGlowOutlines('vote-authoritative-rerank'); } catch (e) {}
                     } catch (rankErr) {
                         console.warn('⚠️ Authoritative vote rerank failed:', rankErr);
@@ -14783,11 +14817,6 @@
                 } catch (e) { /* defensive */ }
             }).catch(err => {
                 console.error('❌ Transaction failed, rolling back UI:', err);
-                // Cancel delayed re-rank because this vote did not persist
-                if (window.voteVisualUpdateTimers && window.voteVisualUpdateTimers[postId]) {
-                    clearTimeout(window.voteVisualUpdateTimers[postId]);
-                    delete window.voteVisualUpdateTimers[postId];
-                }
                 // Rollback on failure
                 post.likes = originalLikes;
                 post.dislikes = originalDislikes;
