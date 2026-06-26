@@ -42537,111 +42537,126 @@ function setUploadModalHeader(title, subtitle) {
                 // All users will see this post via the Firebase listener
                 // (No need to copy to multiple user folders anymore)
                 
-                // Mark as NEW with dynamic expiry window
+                // Everything below is post-save bookkeeping only. A successful
+                // Firebase write must remain successful even if any of this fails.
                 try {
-                    postData.isNew = true;
-                    const windowMs = (typeof getNewBadgeWindowMs === 'function') ? getNewBadgeWindowMs(onlineUserCount || 0) : (2 * 60 * 60 * 1000);
-                    postData.newExpiresAt = Date.now() + windowMs;
-                    postData.newDurationMs = windowMs;
-                    postData.createdAt = new Date().getTime();
-                    postData.badge = 'NEW';
-                } catch (e) {
-                    postData.isNew = true;
-                    postData.createdAt = new Date().getTime();
-                    postData.badge = 'NEW';
-                }
-                
-                // 📍 TRACK POST IN AREA HIERARCHY SYSTEM
-                // This ensures the post appears on user's grid and tracks its growth
-                trackUserPost(authUserId, postId, postData);
-
-                // ✨ POST ALREADY IN LOCAL CACHES (added above)
-                // Render immediately so user sees their post
-                // This ensures instant feedback to user while Firebase updates propagate
-                
-                // Add to postCache (backup cache)
-                postCache[postId] = postData;
-                console.log(`  💾 Added to postCache: ${postId}`);
-                
-                // Add to gridContent under the current user's key (already done above)
-                console.log(`  🔑 User grid already updated`);
-                console.log(`  📝 gridContent["${authUserId}"]: ${gridContent[authUserId].length} posts now`);
-                console.log(`  🔍 gridContent keys after post: [${Object.keys(gridContent).join(', ')}]`);
-
-                // 🎯 TRACK USER POST FOR ML RECOMMENDATIONS
-                if (window.postRecommendationSystem) {
-                    window.postRecommendationSystem.trackUserPost(currentUserId, areaTag, 0);
-                    console.log(`📊 Tracked user post to area: ${areaTag}`);
-                }
-                
-                // 📝 TRACK POST CREATION IN FIREBASE SYSTEM
-                if (window.postTrackingSystem) {
-                    window.postTrackingSystem.trackPostCreation(currentUserId, postId, postData)
-                        .then(() => console.log(`📍 Post tracked in Firebase system for retrieval and analytics`))
-                        .catch((e) => console.warn('Post tracking failed (non-fatal):', e));
-                }
-
-                // Clear composer-selected badges and reset sell button UI after successful save
-                try {
-                    window.selectedBadges = [];
-                    window.primaryBadge = null;
-                    const sellBtnEl = document.getElementById('sellBtn');
-                    if (sellBtnEl) {
-                        sellBtnEl.setAttribute('aria-pressed', 'false');
-                        sellBtnEl.style.background = '#f3f4f6';
-                        sellBtnEl.style.color = '#111827';
-                        sellBtnEl.style.border = '1px solid #e5e7eb';
+                    // Mark as NEW with dynamic expiry window
+                    try {
+                        postData.isNew = true;
+                        const windowMs = (typeof getNewBadgeWindowMs === 'function') ? getNewBadgeWindowMs(onlineUserCount || 0) : (2 * 60 * 60 * 1000);
+                        postData.newExpiresAt = Date.now() + windowMs;
+                        postData.newDurationMs = windowMs;
+                        postData.createdAt = new Date().getTime();
+                        postData.badge = 'NEW';
+                    } catch (e) {
+                        postData.isNew = true;
+                        postData.createdAt = new Date().getTime();
+                        postData.badge = 'NEW';
                     }
-                    setMediaIndicator('none');
-                    selectedMediaItems = [];
-                    // Ensure full reset of payment UI (unmount Stripe elements,
-                    // restore buttons) so payments are not pre-filled for next post.
-                    try { if (typeof resetBoostButton === 'function') resetBoostButton(); } catch(e){}
-                    try { if (typeof resetSellButton === 'function') resetSellButton(); } catch(e){}
-                } catch (e) {
-                    console.warn('⚠️ Failed to reset composer badge UI:', e);
-                }
 
-                // NOW RE-RENDER GRID to show the new post immediately
-                console.log('  🎨 Re-rendering grid to show new post...');
-                window.lastRenderGridTime = 0; // bypass 30s throttle for publish action
-                window.postPublishImmediateRefresh = true;
-                try {
-                    renderGrid();
-                } finally {
-                    window.postPublishImmediateRefresh = false;
-                }
-                console.log('  ✅ Grid re-rendered - new post should be visible');
-                // After every publish: run recomputeAndApplyBadges() once the DOM settles.
-                // This handles two cases:
-                //   1. The new post itself has a boost/sell badge — pill must be created.
-                //   2. Existing boost posts shifted to new slots — renderGridItemFull now
-                //      creates their pill inline, but this call cleans up any edge cases
-                //      (e.g. a slot that was empty before gets a boost post for the first time).
-                try {
-                    setTimeout(function() { try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(e){} }, 0);
-                } catch(_) {}
-
-                // DO NOT update local grid manually after render - Firebase listener will handle updates
-                if (!userPostBoxes.includes(boxIndex)) {
-                    userPostBoxes.push(boxIndex);
-                }
-
-                // Post is published — now safe to consume any pending prepaid purchase.
-                // (We deliberately don't clear it earlier so a Stripe redirect that lands
-                //  before the composer is opened doesn't wipe the prepaid state.)
-                try {
-                    window.lastPurchaseType = null;
-                    window.purchasePaidAt = null;
-                    if (window.localStorage) {
-                        localStorage.removeItem('lastPurchaseType');
-                        localStorage.removeItem('purchasePaidAt');
+                    // 📍 TRACK POST IN AREA HIERARCHY SYSTEM
+                    try {
+                        trackUserPost(authUserId, postId, postData);
+                    } catch (e) {
+                        console.warn('⚠️ Non-fatal area tracking failure after publish:', e);
                     }
-                } catch(_) {}
+
+                    // ✨ POST ALREADY IN LOCAL CACHES (added above)
+                    // Render immediately so user sees their post
+                    // This ensures instant feedback to user while Firebase updates propagate
+                    try { postCache[postId] = postData; } catch (_) {}
+                    console.log(`  💾 Added to postCache: ${postId}`);
+
+                    // Add to gridContent under the current user's key (already done above)
+                    console.log(`  🔑 User grid already updated`);
+                    console.log(`  📝 gridContent["${authUserId}"]: ${gridContent[authUserId].length} posts now`);
+                    console.log(`  🔍 gridContent keys after post: [${Object.keys(gridContent).join(', ')}]`);
+
+                    // 🎯 TRACK USER POST FOR ML RECOMMENDATIONS
+                    try {
+                        if (window.postRecommendationSystem) {
+                            window.postRecommendationSystem.trackUserPost(currentUserId, areaTag, 0);
+                            console.log(`📊 Tracked user post to area: ${areaTag}`);
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ Non-fatal recommendation tracking failure after publish:', e);
+                    }
+
+                    // 📝 TRACK POST CREATION IN FIREBASE SYSTEM
+                    try {
+                        if (window.postTrackingSystem) {
+                            window.postTrackingSystem.trackPostCreation(currentUserId, postId, postData)
+                                .then(() => console.log(`📍 Post tracked in Firebase system for retrieval and analytics`))
+                                .catch((e) => console.warn('Post tracking failed (non-fatal):', e));
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ Non-fatal post tracking setup failure after publish:', e);
+                    }
+
+                    // Clear composer-selected badges and reset sell button UI after successful save
+                    try {
+                        window.selectedBadges = [];
+                        window.primaryBadge = null;
+                        const sellBtnEl = document.getElementById('sellBtn');
+                        if (sellBtnEl) {
+                            sellBtnEl.setAttribute('aria-pressed', 'false');
+                            sellBtnEl.style.background = '#f3f4f6';
+                            sellBtnEl.style.color = '#111827';
+                            sellBtnEl.style.border = '1px solid #e5e7eb';
+                        }
+                        setMediaIndicator('none');
+                        selectedMediaItems = [];
+                        // Ensure full reset of payment UI (unmount Stripe elements,
+                        // restore buttons) so payments are not pre-filled for next post.
+                        try { if (typeof resetBoostButton === 'function') resetBoostButton(); } catch(e){}
+                        try { if (typeof resetSellButton === 'function') resetSellButton(); } catch(e){}
+                    } catch (e) {
+                        console.warn('⚠️ Failed to reset composer badge UI:', e);
+                    }
+
+                    // NOW RE-RENDER GRID to show the new post immediately
+                    console.log('  🎨 Re-rendering grid to show new post...');
+                    window.lastRenderGridTime = 0; // bypass 30s throttle for publish action
+                    window.postPublishImmediateRefresh = true;
+                    try {
+                        renderGrid();
+                    } finally {
+                        window.postPublishImmediateRefresh = false;
+                    }
+                    console.log('  ✅ Grid re-rendered - new post should be visible');
+                    // After every publish: run recomputeAndApplyBadges() once the DOM settles.
+                    // This handles two cases:
+                    //   1. The new post itself has a boost/sell badge — pill must be created.
+                    //   2. Existing boost posts shifted to new slots — renderGridItemFull now
+                    //      creates their pill inline, but this call cleans up any edge cases
+                    //      (e.g. a slot that was empty before gets a boost post for the first time).
+                    try {
+                        setTimeout(function() { try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch(e){} }, 0);
+                    } catch(_) {}
+
+                    // DO NOT update local grid manually after render - Firebase listener will handle updates
+                    if (!userPostBoxes.includes(boxIndex)) {
+                        userPostBoxes.push(boxIndex);
+                    }
+
+                    // Post is published — now safe to consume any pending prepaid purchase.
+                    // (We deliberately don't clear it earlier so a Stripe redirect that lands
+                    //  before the composer is opened doesn't wipe the prepaid state.)
+                    try {
+                        window.lastPurchaseType = null;
+                        window.purchasePaidAt = null;
+                        if (window.localStorage) {
+                            localStorage.removeItem('lastPurchaseType');
+                            localStorage.removeItem('purchasePaidAt');
+                        }
+                    } catch(_) {}
+                } catch (postPublishSideEffectErr) {
+                    console.warn('⚠️ Non-fatal post-publish bookkeeping error:', postPublishSideEffectErr);
+                }
 
                 // Close modal and show notification
-                closeModal();
-                showNotification('Post published successfully!');
+                try { closeModal(); } catch (e) { console.warn('⚠️ Failed to close modal after publish:', e); }
+                try { showNotification('Post published successfully!'); } catch (e) { console.warn('⚠️ Failed to show publish notification:', e); }
                 console.log('=== Post creation complete - post is now visible in grid ===');
                 
                 // Reset zoom after posting
