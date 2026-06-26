@@ -14634,6 +14634,60 @@
             }
         }
 
+        function hasAnyQueuedVotePositionShift() {
+            try {
+                const timers = window.__pendingVoteShiftTimers || {};
+                return Object.keys(timers).some(k => !!timers[k]);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function freezeReconcileForVoteMove(ms = 1400) {
+            try {
+                const until = Date.now() + Math.max(300, Number(ms) || 1400);
+                window.__voteMoveInProgressUntil = Math.max(Number(window.__voteMoveInProgressUntil || 0), until);
+            } catch (e) { /* ignore */ }
+        }
+
+        function swapVoteBoxesInDOM(fromIdx, toIdx) {
+            try {
+                const boxA = document.getElementById(`box-${fromIdx + 1}`);
+                const boxB = document.getElementById(`box-${toIdx + 1}`);
+                if (!boxA || !boxB) return false;
+
+                const snap = (box) => ({
+                    postId: String(box.getAttribute('data-post-id') || ''),
+                    html: box.innerHTML,
+                    className: box.className,
+                    style: box.getAttribute('style') || '',
+                    onclick: box.onclick,
+                    onmouseenter: box.onmouseenter,
+                    onmouseleave: box.onmouseleave
+                });
+                const a = snap(boxA);
+                const b = snap(boxB);
+
+                const apply = (box, s) => {
+                    if (s.postId) box.setAttribute('data-post-id', s.postId);
+                    else box.removeAttribute('data-post-id');
+                    box.innerHTML = s.html;
+                    box.className = s.className;
+                    if (s.style) box.setAttribute('style', s.style);
+                    else box.removeAttribute('style');
+                    box.onclick = s.onclick || null;
+                    box.onmouseenter = s.onmouseenter || null;
+                    box.onmouseleave = s.onmouseleave || null;
+                };
+
+                apply(boxA, b);
+                apply(boxB, a);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
         // Apply a single-step visual move for vote interactions and persist it
         // as the authoritative snapshot so position changes are instant + stable.
         function applyImmediateVotePositionShift(postId, voteType, options = {}) {
@@ -14653,6 +14707,7 @@
                     const elapsed = Date.now() - startedAt;
                     const shouldForce = elapsed >= maxWaitMs;
                     const delayMs = shouldForce ? 0 : Math.min(180, 60 + (attempt * 20));
+                    freezeReconcileForVoteMove(1400);
                     window.__pendingVoteShiftTimers = window.__pendingVoteShiftTimers || {};
                     if (window.__pendingVoteShiftTimers[key]) clearTimeout(window.__pendingVoteShiftTimers[key]);
                     window.__pendingVoteShiftTimers[key] = setTimeout(() => {
@@ -14693,15 +14748,20 @@
                 pendingSortedPosts = committed.slice();
                 window.pendingSortedPosts = committed.slice();
                 window.latestSortedPosts = committed.slice();
+                freezeReconcileForVoteMove(1600);
 
                 keepVoteRerankActive(postId);
 
-                if (typeof gridScroller.renderItemsInRange === 'function') {
-                    const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
-                    const end = Math.min(committed.length, Math.max(fromIdx, toIdx) + 3);
-                    gridScroller.renderItemsInRange(start, end, { skipIdentityPass: true });
-                } else if (typeof gridScroller.setItems === 'function') {
-                    gridScroller.setItems(committed);
+                // Prefer direct DOM swap to avoid clear/repaint flicker.
+                const swappedInDom = swapVoteBoxesInDOM(fromIdx, toIdx);
+                if (!swappedInDom) {
+                    if (typeof gridScroller.renderItemsInRange === 'function') {
+                        const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
+                        const end = Math.min(committed.length, Math.max(fromIdx, toIdx) + 3);
+                        gridScroller.renderItemsInRange(start, end, { skipIdentityPass: true });
+                    } else if (typeof gridScroller.setItems === 'function') {
+                        gridScroller.setItems(committed);
+                    }
                 }
 
                 try { applyGridTextFontSizeToVisiblePosts(); } catch (e) {}
@@ -14891,6 +14951,7 @@
                 post.dislikes = originalDislikes;
                 userVotes[userVoteKey] = originalVote;
                 try { clearPendingVotePositionShift(postId); } catch (e) {}
+                try { window.__voteMoveInProgressUntil = 0; } catch (e) {}
                 updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
                 window.lastRenderGridTime = 0;
                 renderGrid();
@@ -36836,6 +36897,11 @@ function setUploadModalHeader(title, subtitle) {
             gridReconcileInterval = setInterval(() => {
                 try {
                     if (!gridScroller || !pendingSortedPosts || !Array.isArray(pendingSortedPosts)) return;
+
+                    // Don't let reconcile fight a queued/active vote move.
+                    const voteMoveHoldUntil = Number(window.__voteMoveInProgressUntil || 0);
+                    if (voteMoveHoldUntil && Date.now() < voteMoveHoldUntil) return;
+                    try { if (typeof hasAnyQueuedVotePositionShift === 'function' && hasAnyQueuedVotePositionShift()) return; } catch (e) {}
 
                     let target = Array.isArray(pendingSortedPosts) ? pendingSortedPosts.slice() : [];
                     const current = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
