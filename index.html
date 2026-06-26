@@ -14638,6 +14638,14 @@
                 }
                 delete window.__pendingVoteShiftTimers[key];
             } catch (e) { /* ignore */ }
+
+            // Also clear any queued planned move for this post.
+            try {
+                const q = window.__voteMoveQueue;
+                if (Array.isArray(q) && key) {
+                    window.__voteMoveQueue = q.filter(it => !(it && String(it.postId) === key));
+                }
+            } catch (e) { /* ignore */ }
         }
 
         function isVotePositionShiftQueued(postId) {
@@ -14652,10 +14660,90 @@
         function hasAnyQueuedVotePositionShift() {
             try {
                 const timers = window.__pendingVoteShiftTimers || {};
-                return Object.keys(timers).some(k => !!timers[k]);
+                const hasTimer = Object.keys(timers).some(k => !!timers[k]);
+                const q = window.__voteMoveQueue;
+                const hasQueue = Array.isArray(q) && q.length > 0;
+                return hasTimer || hasQueue;
             } catch (e) {
                 return false;
             }
+        }
+
+        function enqueueVotePositionShift(postId, voteType, options = {}) {
+            try {
+                const pid = String(postId || '');
+                const dir = String(voteType || '').toLowerCase();
+                if (!pid || (dir !== 'like' && dir !== 'dislike')) return false;
+
+                const maxWaitMs = Math.max(250, Number(options.maxWaitMs || 900));
+                window.__voteMoveQueue = window.__voteMoveQueue || [];
+
+                // Replace any existing entry for this post with latest intent.
+                window.__voteMoveQueue = window.__voteMoveQueue.filter(it => !(it && String(it.postId) === pid));
+                window.__voteMoveQueue.push({
+                    postId: pid,
+                    voteType: dir,
+                    enqueuedAt: Date.now(),
+                    maxWaitMs,
+                    readyFrames: 0
+                });
+
+                freezeReconcileForVoteMove(1100);
+                processVoteMoveQueue();
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function processVoteMoveQueue() {
+            try {
+                if (window.__voteMovePlannerRafId) return;
+
+                const tick = () => {
+                    window.__voteMovePlannerRafId = null;
+                    try {
+                        const q = Array.isArray(window.__voteMoveQueue) ? window.__voteMoveQueue : [];
+                        if (!q.length) return;
+
+                        const job = q[0];
+                        const now = Date.now();
+                        const elapsed = now - Number(job.enqueuedAt || now);
+                        const force = elapsed >= Number(job.maxWaitMs || 900);
+
+                        if (!force) {
+                            if (isVoteMoveRenderReady()) {
+                                job.readyFrames = Number(job.readyFrames || 0) + 1;
+                            } else {
+                                job.readyFrames = 0;
+                            }
+                        }
+
+                        const canRun = force || Number(job.readyFrames || 0) >= 3;
+                        if (canRun) {
+                            const moved = applyImmediateVotePositionShift(job.postId, job.voteType, {
+                                deferUntilReady: false,
+                                force: true
+                            });
+                            // Remove the job regardless to avoid endless retry churn.
+                            window.__voteMoveQueue.shift();
+                            if (!moved) {
+                                try { window.__voteMoveInProgressUntil = 0; } catch (e) {}
+                            }
+                        } else {
+                            freezeReconcileForVoteMove(500);
+                        }
+
+                        if (Array.isArray(window.__voteMoveQueue) && window.__voteMoveQueue.length > 0) {
+                            window.__voteMovePlannerRafId = requestAnimationFrame(tick);
+                        }
+                    } catch (e) {
+                        window.__voteMovePlannerRafId = null;
+                    }
+                };
+
+                window.__voteMovePlannerRafId = requestAnimationFrame(tick);
+            } catch (e) { /* ignore */ }
         }
 
         function freezeReconcileForVoteMove(ms = 600) {
@@ -14713,33 +14801,10 @@
 
                 const deferUntilReady = !!(options && options.deferUntilReady);
                 const force = !!(options && options.force);
-                const startedAt = Number((options && options.startedAt) || Date.now());
-                const attempt = Number((options && options.attempt) || 0);
                 const maxWaitMs = Math.max(180, Number((options && options.maxWaitMs) || 650));
 
                 if (!force && deferUntilReady && !isVoteMoveRenderReady()) {
-                    const key = String(postId);
-                    const elapsed = Date.now() - startedAt;
-                    const shouldForce = elapsed >= maxWaitMs;
-                    freezeReconcileForVoteMove(420);
-                    window.__pendingVoteShiftTimers = window.__pendingVoteShiftTimers || {};
-                    if (window.__pendingVoteShiftTimers[key]) {
-                        try { clearTimeout(window.__pendingVoteShiftTimers[key]); } catch (e) {}
-                        try { cancelAnimationFrame(window.__pendingVoteShiftTimers[key]); } catch (e) {}
-                    }
-                    window.__pendingVoteShiftTimers[key] = requestAnimationFrame(() => {
-                        try {
-                            delete window.__pendingVoteShiftTimers[key];
-                            applyImmediateVotePositionShift(postId, voteType, {
-                                deferUntilReady: true,
-                                force: shouldForce,
-                                startedAt,
-                                attempt: attempt + 1,
-                                maxWaitMs
-                            });
-                        } catch (e) { /* ignore */ }
-                    });
-                    return false;
+                    return enqueueVotePositionShift(postId, dir, { maxWaitMs });
                 }
 
                 clearPendingVotePositionShift(postId);
@@ -14980,6 +15045,10 @@
                 userVotes[userVoteKey] = originalVote;
                 try { clearPendingVotePositionShift(postId); } catch (e) {}
                 try { window.__voteMoveInProgressUntil = 0; } catch (e) {}
+                try {
+                    if (window.__voteMovePlannerRafId) cancelAnimationFrame(window.__voteMovePlannerRafId);
+                    window.__voteMovePlannerRafId = null;
+                } catch (e) {}
                 updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
                 window.lastRenderGridTime = 0;
                 renderGrid();
