@@ -5,54 +5,6 @@
     <style id="view-modal-action-center">
         /* Center action buttons in the post view modal */
         #viewActionRow { justify-content: center !important; width: 100%; }
-        /* Keep action icons above the media/background layer in pop-outs. */
-        #viewModal .view-modal-content { position: relative !important; isolation: isolate; }
-        #viewModal #viewMedia { position: relative; z-index: 1; }
-        #viewModal #viewActionRow,
-        #viewModal #deleteSection,
-        #viewModal #viewMediaActions,
-        #viewModal #viewTextActions { position: relative; z-index: 30; }
-        #viewModal #viewActionRow .cursiveBtn,
-        #viewModal #deleteSection .cursiveBtn { position: relative; z-index: 31; }
-        /* Permanent border removal for pop-out containers. */
-        #viewModal .view-modal-content,
-        #contactModal .view-modal-content,
-        .view-modal .view-modal-content,
-        .view-modal .view-modal-content[class*="glow-"] {
-            border: none !important;
-            border-color: transparent !important;
-            outline: none !important;
-        }
-          /* Global `button:hover` adds translateY(-2px). Disable that lift for
-              pop-out action icons so taps/clicks never move the buttons. */
-          #viewModal #viewActionRow button,
-          #viewModal #deleteSection button { transform: none !important; }
-          #viewModal #viewActionRow button:hover,
-          #viewModal #viewActionRow button:active,
-          #viewModal #viewActionRow button:focus,
-          #viewModal #deleteSection button:hover,
-          #viewModal #deleteSection button:active,
-          #viewModal #deleteSection button:focus { transform: none !important; }
-          /* Keep vote/repost circle buttons at their existing scale while removing
-              hover/tap lift from the global button rule. */
-          #viewModal #viewMediaActions .like-btn,
-          #viewModal #viewMediaActions .left-square-btn,
-          #viewModal #viewMediaActions .dislike-btn,
-          #viewModal #viewTextActions .like-btn,
-          #viewModal #viewTextActions .left-square-btn,
-          #viewModal #viewTextActions .dislike-btn { transform: scale(0.5) translateZ(0) !important; }
-          #viewModal #viewMediaActions .like-btn:hover,
-          #viewModal #viewMediaActions .left-square-btn:hover,
-          #viewModal #viewMediaActions .dislike-btn:hover,
-          #viewModal #viewTextActions .like-btn:hover,
-          #viewModal #viewTextActions .left-square-btn:hover,
-          #viewModal #viewTextActions .dislike-btn:hover,
-          #viewModal #viewMediaActions .like-btn:focus,
-          #viewModal #viewMediaActions .left-square-btn:focus,
-          #viewModal #viewMediaActions .dislike-btn:focus,
-          #viewModal #viewTextActions .like-btn:focus,
-          #viewModal #viewTextActions .left-square-btn:focus,
-          #viewModal #viewTextActions .dislike-btn:focus { transform: scale(0.5) translateZ(0) !important; }
     </style>
     <style>
         html.app-startup-loading #signInBtn {
@@ -515,16 +467,43 @@
                         document.getElementById('retryLocationBtn').addEventListener('click', async () => {
                             try { banner.remove(); } catch(_){}
                             const loc = await getFreshGeolocation(8000);
-                            /**
-                             * Get local posts from user's area (all content types)
-                             * Owned posts are treated the same as other posts and only appear
-                             * when they naturally fit the current feed rules.
-                             */
+                            resolve(loc);
+                        });
+
+                        document.getElementById('openSettingsBtn').addEventListener('click', () => {
                             try {
                                 // Provide brief instructions in a modal-like alert for now.
                                 alert('To enable location: open your browser settings → Site Settings → Location → allow for this site. Then retry.');
+                            } catch (e) {}
+                        });
+
+                        document.getElementById('dismissLocationBanner').addEventListener('click', () => {
+                            try { banner.remove(); } catch(_){}
+                            resolve(null);
+                        });
+                    } catch (e) { console.warn('maybePromptLocationOnLocalAreaUse UI failed', e); resolve(null); }
+                });
+            } catch (e) { console.warn('maybePromptLocationOnLocalAreaUse failed', e); return null; }
+        }
+
+        // Ensure a newly created/inserted post is visible immediately to the user.
+        // This forces the virtual scroller to include the item at the front and
+        // scroll to it so reposts appear without waiting for a refresh.
+        function ensureNewPostVisible(post) {
+            try {
+                if (!post || !post.id) return;
+                // Respect global max post distance filter for realtime inserts
+                try {
+                    const maxMiles = Number(window.MAX_POST_DISTANCE_MILES || 1000);
+                    if (maxMiles > 0 && userLocation && Number.isFinite(Number(userLocation.lat)) && Number.isFinite(Number(userLocation.lon))) {
+                        const plat = Number((post && (post.geolocation && (post.geolocation.lat || post.geolocation.latitude)) ) || post.lat || post.latitude || NaN);
+                        const plon = Number((post && (post.geolocation && (post.geolocation.lon || post.geolocation.longitude)) ) || post.lon || post.longitude || NaN);
+                        if (Number.isFinite(plat) && Number.isFinite(plon)) {
+                            const distanceKm = (typeof calculateDistance === 'function') ? calculateDistance(Number(userLocation.lat), Number(userLocation.lon), plat, plon) : 0;
+                            const distanceMiles = Number(distanceKm || 0) * 0.621371;
+                            if (Number.isFinite(distanceMiles) && distanceMiles > maxMiles) {
                                 try { console.log(`🔍 Realtime drop: post ${post.id} is ${distanceMiles.toFixed(1)}mi > ${maxMiles}mi`); } catch(e){}
-                                // Add area-tagged posts (general local content)
+                                return;
                             }
                         }
                     }
@@ -532,29 +511,34 @@
                 const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
                 gridContent[key] = gridContent[key] || [];
 
-                // If not present in the content bucket, insert at a random slot.
+                // If not present in the content bucket, add to front
                 if (!gridContent[key].some(p => p && p.id === post.id)) {
-                    const insertAt = getRandomNewPostInsertIndex(gridContent[key].length);
-                    gridContent[key].splice(insertAt, 0, post);
+                    gridContent[key].unshift(post);
                 }
 
                 // Update postCache
                 try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
 
-                // Force scroller items to include this post at a random slot.
+                // Force scroller items to include this post at the front
                 if (window.gridScroller && Array.isArray(gridScroller.items)) {
                     const items = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
                     const foundIdx = items.findIndex(i => i && i.id === post.id);
                     if (foundIdx === -1) {
-                        const insertAt = getRandomNewPostInsertIndex(items.length);
-                        const newItems = items.slice();
-                        newItems.splice(insertAt, 0, post);
+                        // Prepend
+                        const newItems = [post, ...items];
                         try { if (typeof gridScroller.setItems === 'function') gridScroller.setItems(newItems); else gridScroller.items = newItems; } catch(e) { gridScroller.items = newItems; }
+                    } else if (foundIdx > 0) {
+                        // Move to front
+                        const item = items.splice(foundIdx, 1)[0];
+                        items.unshift(item);
+                        try { if (typeof gridScroller.setItems === 'function') gridScroller.setItems(items); else gridScroller.items = items; } catch(e) { gridScroller.items = items; }
                     }
                     try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
+                    try { if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(0); } catch(e){}
                 } else {
-                    // Fallback: force immediate render
+                    // Fallback: force immediate render and scroll top
                     try { window.lastRenderGridTime = 0; renderGrid(); } catch(e){}
+                    try { window.scrollTo(0,0); } catch(e){}
                 }
             } catch (e) { console.warn('ensureNewPostVisible failed', e); }
         }
@@ -597,6 +581,7 @@
         /**
          * Decide whether a post from another zone may be shown on the current
          * viewer's grid. Rules:
+         * - Always include the viewer's own posts.
          * - Allow if post is top-tier / promoted (isPostAreaPromotionEligible).
          * - Allow if origin area is low-population (areaUserCounts[area] < 50).
          * - Allow if post is recent and has unusually high engagement for its area.
@@ -604,6 +589,9 @@
         function isAllowedCrossZone(post) {
             try {
                 if (!post || !post.id) return false;
+                // Always allow user's own posts (handled earlier but keep check)
+                if (post.userId && currentUserId && String(post.userId) === String(currentUserId)) return true;
+
                 // Promote explicitly flagged/shared posts
                 if (isPostAreaPromotionEligible(post)) return true;
 
@@ -882,20 +870,20 @@
     </style>
 </head>
     <style>
-        /* Force persistent white boost button with black outline. Use high specificity
-           and !important so inline JS style changes cannot visually revert it. */
-        /* Flat boost icon: transparent background, no border, no shadow so it
-           reads as a plain icon like the other media-row buttons. */
+        /* Boost button: keep a transparent 2px border by default so pressed
+           state can show a visible outline. Use !important to prevent other
+           runtime styles from making it green, but allow the pressed selector
+           to apply a colored border for the armed state. */
         #boostBtn {
             background: transparent !important;
             color: #000000 !important;
-            border: none !important;
+            border: 2px solid transparent !important;
             box-shadow: none !important;
         }
         #boostBtn[aria-pressed="true"] {
             background: transparent !important;
             color: #000000 !important;
-            border-color: transparent !important;
+            border-color: #f59e0b !important; /* show orange outline when armed */
             box-shadow: none !important;
         }
         /* Send button text pulse — grows/shrinks every 0.6s, bold at the largest. */
@@ -2510,7 +2498,7 @@
             }
             
             // 🎨 Render items only in specific range (lazy rendering)
-            renderItemsInRange(startIdx, endIdx, options = {}) {
+            renderItemsInRange(startIdx, endIdx) {
                 if (!this.onRenderItem) return;
                 
                 const actualEnd = Math.min(endIdx, this.items.length);
@@ -2527,13 +2515,8 @@
                     // Box i+1 because box-0 is add-content
                     if (!box) continue;
                     
-                    // Skip only when the exact same post is already fully rendered.
-                    // If the slot is still a placeholder/clearing shell, force an
-                    // upgrade render so loaded content replaces the grey loading card.
-                    const samePostId = (box.getAttribute('data-post-id') === item.id);
-                    const needsUpgradeRender = box.classList.contains('placeholder') ||
-                        box.getAttribute('data-clearing') === 'true';
-                    if (samePostId && !needsUpgradeRender) continue;
+                    // Skip if same item already rendered there
+                    if (box.getAttribute('data-post-id') === item.id) continue;
                     
                     this.onRenderItem(box, item);
                 }
@@ -2548,29 +2531,21 @@
                     }
                 }
 
-                // If the visible list shrank, clear stale tail boxes only when this
-                // render pass represents a full-head refresh. For partial range
-                // updates (like vote swaps near the top), broad tail clearing causes
-                // unnecessary content flicker across unrelated slots.
-                const isFullHeadRefresh = (startIdx === 0) && (endIdx >= this.items.length);
-                if (isFullHeadRefresh && actualEnd >= 0) {
+                // If the visible list shrank, clear any stale tail boxes so old
+                // glow/outline/content cannot remain from the previous longer list.
+                if (startIdx === 0 && actualEnd >= 0) {
                     this.clearBoxesBeyondItemCount(actualEnd + 1);
                 }
 
                 // Final identity scrub for this rendered window to eliminate ghost boxes
-                // left by rapid swaps/reorders. Callers can skip this for minimal
-                // move ticks to prevent visible clear/repaint flicker.
-                const skipIdentityPass = !!(options && options.skipIdentityPass);
-                if (!skipIdentityPass) {
-                    this.enforceStrictSlotIdentity(Math.max(actualEnd + 8, endIdx + 4));
-                }
+                // left by rapid swaps/reorders.
+                this.enforceStrictSlotIdentity(Math.max(actualEnd + 8, endIdx + 4));
             }
 
             clearBoxElement(box) {
                 if (!box) return;
                 try {
                     box.removeAttribute('data-post-id');
-                    box.removeAttribute('data-clearing');
                     box.classList.remove('filled', 'placeholder');
                     const removeClasses = [];
                     box.classList.forEach(cls => {
@@ -2583,13 +2558,21 @@
                     box.onclick = null;
                     box.onmouseenter = null;
                     box.onmouseleave = null;
-                    // Strict clear to prevent stale post visuals from bleeding into
-                    // another slot during rapid reorders/reconciliation.
+                    // Avoid removing `innerHTML` immediately. Removing content then
+                    // re-inserting it causes a visible grey/blank flash during
+                    // rapid reorders. Keep the existing DOM until new content is
+                    // rendered into the slot. Mark the slot as cleared so renderers
+                    // can replace it when ready.
                     try {
-                        box.innerHTML = '';
+                        // mark as clearing; renderer should overwrite `innerHTML`
+                        box.setAttribute('data-clearing', 'true');
+                        // keep existing innerHTML intact (do not clear) to avoid blank flashes
+                        // remove any visual opacity so the box remains visible
                         box.style.opacity = '';
                         box.style.transition = '';
-                    } catch (e) { /* ignore strict clear failures */ }
+                    } catch (e) {
+                        // fallback: do not error the clear flow
+                    }
                 } catch (e) { /* ignore */ }
             }
 
@@ -3334,61 +3317,11 @@
         // Helper: compute area tag for given coords using existing auto-detect helpers
         function computeAreaForCoords(coords) {
             try {
-                const isLocalAreaLiteral = (value) => {
-                    const t = String(value || '').trim().toLowerCase();
-                    return t === 'local area' || t === 'local zone' || t === '📍 local area';
-                };
-
-                // Highest priority: explicitly committed/manual label
-                try {
-                    const explicitLabel = String((coords && (coords.label || coords.name || coords.display)) || '').trim();
-                    if (explicitLabel && !isLocalAreaLiteral(explicitLabel)) return explicitLabel;
-                } catch (e) {}
-
-                // Persisted selected location label from storage
-                try {
-                    const rawSaved = localStorage.getItem('lastChosenLocation');
-                    if (rawSaved) {
-                        const saved = JSON.parse(rawSaved);
-                        const savedLabel = String((saved && (saved.label || saved.name || saved.display)) || '').trim();
-                        if (savedLabel && !isLocalAreaLiteral(savedLabel)) return savedLabel;
-                    }
-                } catch (e) {}
-
                 // If user explicitly selected a zone, respect it
                 try { if (userSelectedZone && currentZoneTag && String(currentZoneTag).trim()) return currentZoneTag; } catch(e){}
 
                 // If a persisted manual tag exists, prefer that
                 try { const latest = (window.latestUserAreaTag || '').trim(); if (latest) return latest; } catch(e){}
-
-                // Derive best real area for these coords (never silently downgrade to Local area)
-                try {
-                    const lat = Number(coords && coords.lat);
-                    const lon = Number(coords && coords.lon);
-                    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-                        if (typeof getGridForUser === 'function') {
-                            const g = getGridForUser(lat, lon);
-                            if (g && g.displayName && !isLocalAreaLiteral(g.displayName)) return String(g.displayName).trim();
-                        }
-                        if (typeof findClosestLocation === 'function') {
-                            const closest = findClosestLocation(lat, lon);
-                            if (closest && closest.location && closest.location.name) {
-                                const n = String(closest.location.name).trim();
-                                if (n && !isLocalAreaLiteral(n)) return n;
-                            }
-                        }
-                        if (typeof getLocationName === 'function') {
-                            const fallbackName = String(getLocationName(lat, lon) || '').trim();
-                            if (fallbackName && !isLocalAreaLiteral(fallbackName)) return fallbackName;
-                        }
-                    }
-                } catch (e) {}
-
-                // Keep an already-real active tag instead of downgrading
-                try {
-                    const current = String(currentZoneTag || currentAreaName || '').trim();
-                    if (current && !isLocalAreaLiteral(current)) return current;
-                } catch (e) {}
 
                 // Until the user explicitly updates their search/zone, return a neutral label
                 // This prevents auto-detected names from showing and ensures consistent UX.
@@ -3431,7 +3364,7 @@
                 if (!raw) return false;
                 console.log('🔁 applySavedLocationAuthoritative: found lastChosenLocation', raw);
                 const saved = JSON.parse(raw);
-                const coords = { lat: Number(saved.lat), lon: Number(saved.lon), label: saved.label || saved.name || saved.display || '', accuracy: saved.accuracy || 100, manual: true };
+                const coords = { lat: Number(saved.lat), lon: Number(saved.lon), accuracy: saved.accuracy || 100, manual: true };
                 // Set runtime userLocation and persist into cache (force)
                 try { const prev = Object.assign({}, userLocation || {}); userLocation = coords; console.log('📍 applySavedLocationAuthoritative: userLocation prev->new', { prev, next: userLocation }); } catch(e){}
                 try { setUserLocationCache(coords, { force: true }); } catch(e){}
@@ -3442,14 +3375,9 @@
                     const detected = computeAreaForCoords(coords);
                     if (detected) {
                         currentZoneTag = detected;
-                        currentAreaName = detected;
-                        userSelectedZone = true;
                         try { updateZonePredictor(); } catch(e){}
                     }
                 } catch(e) {}
-
-                // Guarantee currentGrid/currentGridRadius are in sync before any render path runs.
-                try { if (typeof window.refreshCurrentGridContext === 'function') window.refreshCurrentGridContext('applySavedLocationAuthoritative'); } catch (e) {}
 
                 // Refresh grid so posts reflect the saved location immediately
                 try { if (typeof forceGridRefresh === 'function') forceGridRefresh(); else if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
@@ -3619,13 +3547,14 @@
                 color: #ffffff;
                 font-weight: 700;
                 padding: 8px 12px;
-                border: none;
+                border: 1px solid #ffffff;
                 border-radius: 6px;
                 font-size: 13px;
             }
 
             #signInBtn.signed-in-mode:hover {
                 background: rgba(74, 222, 128, 0.1);
+                border-color: #ffffff;
                 color: #ffffff;
                 transform: scale(1.05);
             }
@@ -3636,7 +3565,7 @@
             <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
                 <!-- Total user count removed from UI per request -->
             </div>
-            <button id="signInBtn" class="sign-in-mode" title="Signup - Click to sign up or sign out" style="position:relative; right:0; bottom:auto; z-index:40000; background:#000000; color:#ffffff; padding:6px 10px; border-radius:999px; border:none; transform:translateY(-4px) scale(0.98); box-shadow:0 8px 30px rgba(2,6,23,0.6); align-self:center; line-height:1; font-size:13px;">Signup</button>
+            <button id="signInBtn" class="sign-in-mode" title="Signup - Click to sign up or sign out" style="position:relative; right:0; bottom:auto; z-index:40000; background:#000000; color:#ffffff; padding:6px 10px; border-radius:999px; border:1px solid #ffffff; transform:translateY(-4px) scale(0.98); box-shadow:0 8px 30px rgba(2,6,23,0.6); align-self:center; line-height:1; font-size:13px;">Signup</button>
         </div>
         <style>
             /* Tighten sign-in button spacing and ensure vertical centering */
@@ -3644,7 +3573,7 @@
                 padding: 6px 10px !important;
                 line-height: 1 !important;
                 font-size: 13px !important;
-                border: none !important;
+                border-width: 1px !important;
                 display: inline-flex !important;
                 align-items: center !important;
                 justify-content: center !important;
@@ -4048,7 +3977,6 @@
                 async function showProfileModal() {
                     ensureProfileModal();
                     const modal = document.getElementById('profileModal');
-                    const modalContent = modal ? modal.querySelector('.modal-content') : null;
                     const profileView = document.getElementById('profileView');
                     const profileForm = document.getElementById('profileForm');
                     const msg = document.getElementById('profileMsg');
@@ -4057,12 +3985,6 @@
                     // Ensure account UI is current
                     try { updateAccountUI(); } catch(e){}
                     if (window.currentUserId) {
-                        // Signed-in profile/sign-out page should not show a white panel.
-                        if (modalContent) {
-                            modalContent.style.background = 'transparent';
-                            modalContent.style.boxShadow = 'none';
-                            modalContent.style.border = 'none';
-                        }
                         // show profile view
                         profileForm.style.display = 'none';
                         profileView.style.display = 'block';
@@ -4104,12 +4026,6 @@
                             }, 60);
                         } catch (err) { profileView.innerHTML = '<div style="color:#f00">Failed loading profile</div>'; }
                     } else {
-                        // Keep signup form visual style unchanged.
-                        if (modalContent) {
-                            modalContent.style.background = '#ffffff';
-                            modalContent.style.boxShadow = '0 12px 40px rgba(2,6,23,0.12)';
-                            modalContent.style.border = 'none';
-                        }
                         // show signup form
                         profileView.style.display = 'none';
                         profileForm.style.display = 'block';
@@ -4884,8 +4800,8 @@
                     transform: translateZ(0);
                     -webkit-transform: translateZ(0);
                 " oninput="checkContentModeration(); updateCharCount();" onfocus="applyPendingPurchaseToNextPost(); this.style.boxShadow='0 8px 20px rgba(0,0,0,0.08)'; try{ stopPlaceholderRotator(); }catch(e){}" onblur="this.style.boxShadow='0 4px 12px rgba(0,0,0,0.06)'; try{ startPlaceholderRotator(); }catch(e){}"></textarea>
-                <div id="charCountDisplay" style="position: absolute; bottom: 12px; right: 12px; font-size: 16px; color: #000; background: transparent; padding: 4px 8px; border-radius: 6px; pointer-events: none; font-weight: 700;">0/137</div>
-                <div id="charError" style="color: #ff6b6b; font-size: 13px; margin-top: 8px; font-weight: 600; display: none;">❌ Maximum 137 characters allowed</div>
+                <div id="charCountDisplay" style="position: absolute; bottom: 12px; right: 12px; font-size: 16px; color: #000; background: transparent; padding: 4px 8px; border-radius: 6px; pointer-events: none; font-weight: 700;">0/200</div>
+                <div id="charError" style="color: #ff6b6b; font-size: 13px; margin-top: 8px; font-weight: 600; display: none;">❌ Maximum 200 characters allowed</div>
             </div>
             
             <!-- Link input removed for safety: external links cannot be guaranteed safe (cloaking, time-of-click switching, IDN spoofing). -->
@@ -5157,7 +5073,7 @@
         }
     </style>
     <div class="view-modal" id="viewModal">
-        <div class="view-modal-content">
+        <div class="view-modal-content" style="border: 1px solid #ffffff;">
             <button class="view-modal-close" onclick="closeViewModal()">×</button>
             <!-- Main media container (image/video) shown prominently when post has media -->
             <div id="viewMedia" style="display:block; position:relative; width:100%; max-height:92vh; margin-bottom:12px; text-align:center;"></div>
@@ -5271,7 +5187,7 @@
 
     <!-- Contact Info Modal — opened from the phone button on a post pop-out -->
     <div class="view-modal" id="contactModal">
-        <div class="view-modal-content" style="max-width:360px; text-align:center;">
+        <div class="view-modal-content" style="border:1px solid #ffffff; max-width:360px; text-align:center;">
             <button class="view-modal-close" onclick="closeContactModal()">×</button>
             <div style="display:flex; flex-direction:column; align-items:center; gap:14px; padding:8px 4px 4px;">
                 <div id="contactNumber" style="font-size:20px; font-weight:700; color:#ffffff; letter-spacing:0.5px;"></div>
@@ -6768,7 +6684,7 @@
 
 
         /**
-         * Forces a complete refresh of the grid content.
+         * Forces a complete refresh of the grid content, preserving the user's own posts.
          */
         async function forceGridRefresh() {
             console.log('🔥 forceGridRefresh: Starting full grid refresh.');
@@ -6777,13 +6693,18 @@
                 return;
             }
 
-            // Clear the existing grid content so the next render rebuilds it using
-            // the same rules as every other post.
-            gridContent[currentUserId] = [];
+            // 1. Preserve user's own posts
+            const userPosts = (gridContent[currentUserId] || []).filter(post => post.userId === currentUserId);
+            console.log(`  - Preserving ${userPosts.length} of the user's own posts.`);
 
-            // Clear the post cache to ensure fresh data.
+            // 2. Clear the existing grid content (except for the user's posts)
+            gridContent[currentUserId] = userPosts;
+            
+            // Clear post cache for all non-user posts to ensure fresh data
             for (const postId in postCache) {
-                delete postCache[postId];
+                if (postCache[postId].userId !== currentUserId) {
+                    delete postCache[postId];
+                }
             }
 
             // 3. Re-run the main data fetching and rendering logic
@@ -6817,17 +6738,24 @@
         function compareFeedPriority(a, b) {
             try {
                 if (!a || !b) return 0;
+                const ta = (typeof getPostEngagementTier === 'function') ? getPostEngagementTier(a) : { priority: 4 };
+                const tb = (typeof getPostEngagementTier === 'function') ? getPostEngagementTier(b) : { priority: 4 };
+
+                if (ta.priority !== tb.priority) return ta.priority - tb.priority;
+
+                const aBadges = Array.isArray(a.badges) ? a.badges.map(x => String(x).toLowerCase()) : [];
+                const bBadges = Array.isArray(b.badges) ? b.badges.map(x => String(x).toLowerCase()) : [];
+                const aIsHot = aBadges.some(bb => bb.includes('hot') || bb.includes('trend')) || String(a.primaryBadge || '').toLowerCase().includes('hot');
+                const bIsHot = bBadges.some(bb => bb.includes('hot') || bb.includes('trend')) || String(b.primaryBadge || '').toLowerCase().includes('hot');
+                if (aIsHot !== bIsHot) return aIsHot ? -1 : 1;
+
                 const netA = (Number(a.likes || 0) - Number(a.dislikes || 0));
                 const netB = (Number(b.likes || 0) - Number(b.dislikes || 0));
                 if (netA !== netB) return netB - netA;
 
-                const likesA = Number(a.likes || 0);
-                const likesB = Number(b.likes || 0);
-                if (likesA !== likesB) return likesB - likesA;
-
-                const dislikesA = Number(a.dislikes || 0);
-                const dislikesB = Number(b.dislikes || 0);
-                if (dislikesA !== dislikesB) return dislikesA - dislikesB;
+                const mA = Number(a.mlScore || 0);
+                const mB = Number(b.mlScore || 0);
+                if (mA !== mB) return mB - mA;
 
                 return (Number(b.timestamp || 0) - Number(a.timestamp || 0));
             } catch (e) {
@@ -6932,9 +6860,12 @@
                     const recencyScore = Math.max(0, 200 - ageHours * 8); // Slower decay
                     score += recencyScore;
                     
-                    // 4. CONTENT TYPE (type-neutral)
-                    // Do not promote media above text-only posts via ML cache score.
-                    score += 75;
+                    // 4. CONTENT TYPE PREFERENCE (15% weight)
+                    if (post.photoURL || post.imageData) {
+                        score += (userProfile.prefersMedia ? 150 : 75);
+                    } else {
+                        score += (userProfile.prefersText ? 150 : 75);
+                    }
                     
                     return { ...post, mlScore: score };
                 })
@@ -8197,64 +8128,9 @@
                     }
                 }
             } catch (e) { console.warn('syncRuntimeLocationFromCommit failed', e); }
-            try { if (typeof window.refreshCurrentGridContext === 'function') window.refreshCurrentGridContext('syncRuntimeLocationFromCommit'); } catch (e) {}
             try { window.__lastLocationCommitAt = Date.now(); } catch(e) {}
         }
         try { window.syncRuntimeLocationFromCommit = syncRuntimeLocationFromCommit; } catch (e) {}
-
-        // Rebuild the location-scoped grid context used by proximity badges and
-        // local distance tiering. Call this after every location commit/restore.
-        function refreshCurrentGridContext(reason = '') {
-            try {
-                let coords = null;
-                try { coords = getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 }); } catch (e) {}
-                if (!coords) {
-                    try {
-                        if (userLocation && Number.isFinite(Number(userLocation.lat)) && Number.isFinite(Number(userLocation.lon))) {
-                            coords = { lat: Number(userLocation.lat), lon: Number(userLocation.lon) };
-                        }
-                    } catch (e) {}
-                }
-                if (!coords) {
-                    try {
-                        const raw = localStorage.getItem('lastChosenLocation');
-                        if (raw) {
-                            const saved = JSON.parse(raw);
-                            if (saved && Number.isFinite(Number(saved.lat)) && Number.isFinite(Number(saved.lon))) {
-                                coords = { lat: Number(saved.lat), lon: Number(saved.lon) };
-                            }
-                        }
-                    } catch (e) {}
-                }
-
-                if (!coords || !Number.isFinite(Number(coords.lat)) || !Number.isFinite(Number(coords.lon))) {
-                    return false;
-                }
-
-                if (typeof getGridForUser === 'function') {
-                    const nextGrid = getGridForUser(Number(coords.lat), Number(coords.lon));
-                    if (nextGrid) {
-                        currentGrid = nextGrid;
-                        currentNearestPOI = nextGrid.poiData || null;
-                        if (Number.isFinite(Number(nextGrid.gridRadius))) currentGridRadius = Number(nextGrid.gridRadius);
-                        if (nextGrid.contentScope) currentContentScope = nextGrid.contentScope;
-                        if (!userSelectedZone && nextGrid.displayName) {
-                            maybeSetAutoZoneTag(nextGrid.displayName);
-                            currentAreaName = nextGrid.displayName;
-                        }
-                        console.log(`📍 refreshCurrentGridContext(${reason || 'no-reason'}): ${nextGrid.displayName || 'unknown'} radius=${Number(currentGridRadius || 0).toFixed(3)}`);
-                        return true;
-                    }
-                }
-
-                try { detectUserGrid(); } catch (e) {}
-                return !!currentGrid;
-            } catch (e) {
-                console.warn('refreshCurrentGridContext failed', e);
-                return false;
-            }
-        }
-        try { window.refreshCurrentGridContext = refreshCurrentGridContext; } catch (e) {}
 
         // Exposed helper: fully wipe the grid and re-subscribe to Firebase so the
         // feed refills from scratch for a new location. Called by the Change Location
@@ -8291,9 +8167,6 @@
                         }
                     }
                 } catch (e) { console.warn('resetGridForLocationChange: auto lat/lon update failed', e); }
-
-                // Keep proximity/badge context aligned with the committed coords.
-                try { if (typeof refreshCurrentGridContext === 'function') refreshCurrentGridContext('resetGridForLocationChange'); } catch (e) {}
 
                 // 1. Wipe the lexical gridContent (what renderGrid actually reads).
                 gridContent = {};
@@ -11384,7 +11257,7 @@
             try {
                 const glowKind = resolvePostGlowKind(post, { podium, badges, hasBoostFlag });
                 if (!glowKind) return;
-                if (glowKind === 'boost') { el.classList.add('glow-boost'); el.classList.add('border-boost'); return; }
+                if (glowKind === 'boost') { el.classList.add('glow-boost'); return; }
                 if (glowKind === 'spotlight') { el.classList.add('glow-spotlight'); return; }
                 if (glowKind === 'top3') { el.classList.add('glow-top3'); return; }
                 if (glowKind === 'trending') { el.classList.add('glow-trending'); return; }
@@ -11395,11 +11268,10 @@
             } catch (e) { /* ignore */ }
         }
 
-        function syncPostVoteCountsEverywhere(postId, likes, dislikes, options = {}) {
+        function syncPostVoteCountsEverywhere(postId, likes, dislikes) {
             if (!postId) return null;
             const nextLikes = Number(likes) || 0;
             const nextDislikes = Number(dislikes) || 0;
-            const suppressGlobalRefresh = !!(options && options.suppressGlobalRefresh);
             let canonicalPost = null;
 
             try {
@@ -11438,47 +11310,6 @@
                 }
             } catch (e) { /* ignore */ }
 
-            // Keep authoritative ranked snapshots in sync too. If these stay stale,
-            // the reconciler can snap a voted post back to its prior position.
-            try {
-                if (Array.isArray(window.latestSortedPosts)) {
-                    for (const post of window.latestSortedPosts) {
-                        if (post && post.id === postId) {
-                            post.likes = nextLikes;
-                            post.dislikes = nextDislikes;
-                            post.cachedBadges = null;
-                            if (!canonicalPost) canonicalPost = post;
-                        }
-                    }
-                }
-            } catch (e) { /* ignore */ }
-
-            try {
-                if (Array.isArray(window.pendingSortedPosts)) {
-                    for (const post of window.pendingSortedPosts) {
-                        if (post && post.id === postId) {
-                            post.likes = nextLikes;
-                            post.dislikes = nextDislikes;
-                            post.cachedBadges = null;
-                            if (!canonicalPost) canonicalPost = post;
-                        }
-                    }
-                }
-            } catch (e) { /* ignore */ }
-
-            try {
-                if (Array.isArray(pendingSortedPosts)) {
-                    for (const post of pendingSortedPosts) {
-                        if (post && post.id === postId) {
-                            post.likes = nextLikes;
-                            post.dislikes = nextDislikes;
-                            post.cachedBadges = null;
-                            if (!canonicalPost) canonicalPost = post;
-                        }
-                    }
-                }
-            } catch (e) { /* ignore */ }
-
             if (!canonicalPost) {
                 canonicalPost = findPostAcrossVisibleFeeds(postId);
                 if (canonicalPost) {
@@ -11488,16 +11319,13 @@
                 }
             }
 
-            // Force UI refresh for visible posts unless caller requests a
-            // targeted update path (used by vote swap flow to prevent flicker).
-            if (!suppressGlobalRefresh) {
-                try {
-                    recomputeAndApplyBadges();
-                } catch (e) { /* ignore UI refresh failures */ }
-                try {
-                    refreshVisiblePostGlowOutlines('votes-updated');
-                } catch (e) { /* ignore */ }
-            }
+            // Force UI refresh for visible posts so glow/badge state updates immediately
+            try {
+                recomputeAndApplyBadges();
+            } catch (e) { /* ignore UI refresh failures */ }
+            try {
+                refreshVisiblePostGlowOutlines('votes-updated');
+            } catch (e) { /* ignore */ }
 
             return canonicalPost;
         }
@@ -11897,9 +11725,9 @@
             if (!post) return { display: 'Unknown', emoji: '', scale: 'unknown' };
 
             const stableAreaTag = (typeof getStablePostAreaTag === 'function') ? getStablePostAreaTag(post) : null;
+            const areaPromotionEligible = (typeof isPostAreaPromotionEligible === 'function') ? isPostAreaPromotionEligible(post) : false;
 
-            // Always prefer the author's/source area's stable tag for display.
-            if (stableAreaTag) {
+            if (stableAreaTag && !areaPromotionEligible) {
                 return {
                     display: stableAreaTag,
                     emoji: post.poiEmoji || '📍',
@@ -12703,13 +12531,6 @@
         // MARK POSTS WITH PROXIMITY BADGES
         // ============================================
         function addProximityBadge(post, userGrid) {
-            try {
-                const stableTag = (typeof getStablePostAreaTag === 'function') ? getStablePostAreaTag(post) : null;
-                if (stableTag) {
-                    post.displayAreaTag = stableTag;
-                    post.originalAreaTag = post.originalAreaTag || stableTag;
-                }
-            } catch (e) { /* keep rendering on metadata failures */ }
             if (!userGrid) return post;
 
             // Use cascade tier if available
@@ -14611,313 +14432,6 @@
                 window.voteTriggeredRerank = true;
             }
         }
-
-        function isVoteMoveRenderReady() {
-            try {
-                if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
-                if (Boolean(window.__suspendBatchPruneDuringScroll)) return false;
-                if (gridScroller && gridScroller.renderScheduled) return false;
-                const now = Date.now();
-                const feedState = (window.__feedScrollState || {});
-                const lastScrollAt = Number(feedState.lastScrollAt || 0);
-                const settleUntil = Number(feedState.settleUntil || 0);
-                // Only block on settle window when scroll activity is truly recent.
-                if ((now - lastScrollAt) < 140) return false;
-                if (settleUntil && now < settleUntil && (now - lastScrollAt) < 240) return false;
-                return true;
-            } catch (e) {
-                return false;
-            }
-        }
-
-        function clearPendingVotePositionShift(postId) {
-            try {
-                const key = String(postId || '');
-                if (!key) return;
-                window.__pendingVoteShiftTimers = window.__pendingVoteShiftTimers || {};
-                const timer = window.__pendingVoteShiftTimers[key];
-                if (timer) {
-                    try { clearTimeout(timer); } catch (e) {}
-                    try { cancelAnimationFrame(timer); } catch (e) {}
-                }
-                delete window.__pendingVoteShiftTimers[key];
-            } catch (e) { /* ignore */ }
-
-            // Also clear any queued planned move for this post.
-            try {
-                const q = window.__voteMoveQueue;
-                if (Array.isArray(q) && key) {
-                    window.__voteMoveQueue = q.filter(it => !(it && String(it.postId) === key));
-                }
-            } catch (e) { /* ignore */ }
-        }
-
-        function isVotePositionShiftQueued(postId) {
-            try {
-                const key = String(postId || '');
-                return !!(key && window.__pendingVoteShiftTimers && window.__pendingVoteShiftTimers[key]);
-            } catch (e) {
-                return false;
-            }
-        }
-
-        function hasAnyQueuedVotePositionShift() {
-            try {
-                const timers = window.__pendingVoteShiftTimers || {};
-                const hasTimer = Object.keys(timers).some(k => !!timers[k]);
-                const q = window.__voteMoveQueue;
-                const hasQueue = Array.isArray(q) && q.length > 0;
-                return hasTimer || hasQueue;
-            } catch (e) {
-                return false;
-            }
-        }
-
-        function enqueueVotePositionShift(postId, voteType, options = {}) {
-            try {
-                const pid = String(postId || '');
-                const dir = String(voteType || '').toLowerCase();
-                if (!pid || (dir !== 'like' && dir !== 'dislike')) return false;
-
-                const maxWaitMs = Math.max(250, Number(options.maxWaitMs || 900));
-                window.__voteMoveQueue = window.__voteMoveQueue || [];
-
-                // Replace any existing entry for this post with latest intent.
-                window.__voteMoveQueue = window.__voteMoveQueue.filter(it => !(it && String(it.postId) === pid));
-                window.__voteMoveQueue.push({
-                    postId: pid,
-                    voteType: dir,
-                    enqueuedAt: Date.now(),
-                    maxWaitMs,
-                    readyFrames: 0
-                });
-
-                freezeReconcileForVoteMove(1100);
-                processVoteMoveQueue();
-                return true;
-            } catch (e) {
-                return false;
-            }
-        }
-
-        function processVoteMoveQueue() {
-            try {
-                if (window.__voteMovePlannerRafId) return;
-
-                const tick = () => {
-                    window.__voteMovePlannerRafId = null;
-                    try {
-                        const q = Array.isArray(window.__voteMoveQueue) ? window.__voteMoveQueue : [];
-                        if (!q.length) return;
-
-                        const job = q[0];
-                        const now = Date.now();
-                        const elapsed = now - Number(job.enqueuedAt || now);
-                        const force = elapsed >= Number(job.maxWaitMs || 900);
-
-                        if (!force) {
-                            if (isVoteMoveRenderReady()) {
-                                job.readyFrames = Number(job.readyFrames || 0) + 1;
-                            } else {
-                                job.readyFrames = 0;
-                            }
-                        }
-
-                        const canRun = force || Number(job.readyFrames || 0) >= 3;
-                        if (canRun) {
-                            const moved = applyImmediateVotePositionShift(job.postId, job.voteType, {
-                                deferUntilReady: false,
-                                force: true
-                            });
-                            // Remove the job regardless to avoid endless retry churn.
-                            window.__voteMoveQueue.shift();
-                            if (!moved) {
-                                try { window.__voteMoveInProgressUntil = 0; } catch (e) {}
-                            }
-                        } else {
-                            freezeReconcileForVoteMove(500);
-                        }
-
-                        if (Array.isArray(window.__voteMoveQueue) && window.__voteMoveQueue.length > 0) {
-                            window.__voteMovePlannerRafId = requestAnimationFrame(tick);
-                        }
-                    } catch (e) {
-                        window.__voteMovePlannerRafId = null;
-                    }
-                };
-
-                window.__voteMovePlannerRafId = requestAnimationFrame(tick);
-            } catch (e) { /* ignore */ }
-        }
-
-        function freezeReconcileForVoteMove(ms = 600) {
-            try {
-                const until = Date.now() + Math.max(120, Number(ms) || 600);
-                window.__voteMoveInProgressUntil = Math.max(Number(window.__voteMoveInProgressUntil || 0), until);
-            } catch (e) { /* ignore */ }
-        }
-
-        function swapVoteBoxesInDOM(fromIdx, toIdx) {
-            try {
-                const boxA = document.getElementById(`box-${fromIdx + 1}`);
-                const boxB = document.getElementById(`box-${toIdx + 1}`);
-                if (!boxA || !boxB) return false;
-
-                const snap = (box) => ({
-                    postId: String(box.getAttribute('data-post-id') || ''),
-                    html: box.innerHTML,
-                    className: box.className,
-                    style: box.getAttribute('style') || '',
-                    onclick: box.onclick,
-                    onmouseenter: box.onmouseenter,
-                    onmouseleave: box.onmouseleave
-                });
-                const a = snap(boxA);
-                const b = snap(boxB);
-
-                const apply = (box, s) => {
-                    if (s.postId) box.setAttribute('data-post-id', s.postId);
-                    else box.removeAttribute('data-post-id');
-                    box.innerHTML = s.html;
-                    box.className = s.className;
-                    if (s.style) box.setAttribute('style', s.style);
-                    else box.removeAttribute('style');
-                    box.onclick = s.onclick || null;
-                    box.onmouseenter = s.onmouseenter || null;
-                    box.onmouseleave = s.onmouseleave || null;
-                };
-
-                apply(boxA, b);
-                apply(boxB, a);
-                return true;
-            } catch (e) {
-                return false;
-            }
-        }
-
-        // Apply a single-step visual move for vote interactions and persist it
-        // as the authoritative snapshot so position changes are instant + stable.
-        function applyImmediateVotePositionShift(postId, voteType, options = {}) {
-            try {
-                if (!postId) return false;
-                const dir = String(voteType || '').toLowerCase();
-                if (dir !== 'like' && dir !== 'dislike') return false;
-
-                const deferUntilReady = !!(options && options.deferUntilReady);
-                const force = !!(options && options.force);
-                const maxWaitMs = Math.max(180, Number((options && options.maxWaitMs) || 650));
-
-                if (!force && deferUntilReady && !isVoteMoveRenderReady()) {
-                    return enqueueVotePositionShift(postId, dir, { maxWaitMs });
-                }
-
-                clearPendingVotePositionShift(postId);
-                if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
-
-                const working = gridScroller.items.slice();
-                let fromIdx = working.findIndex(p => p && String(p.id) === String(postId));
-                if (fromIdx < 0) {
-                    // Fallback: resolve index from currently visible DOM slot.
-                    try {
-                        const node = document.querySelector(`.grid-box[data-post-id="${String(postId)}"]`);
-                        const id = node && node.id ? String(node.id) : '';
-                        if (id.startsWith('box-')) {
-                            const boxNum = Number(id.replace('box-', ''));
-                            const idx = boxNum - 1;
-                            if (Number.isFinite(idx) && idx >= 0 && idx < working.length) fromIdx = idx;
-                        }
-                    } catch (e) { /* ignore */ }
-                }
-                if (fromIdx < 0) return false;
-
-                // Prefer a direct jump to the current target index so votes do
-                // not visually "walk" through multiple swap hops.
-                let toIdx = -1;
-                let hasRankedTarget = false;
-                try {
-                    const preferredTarget = Array.isArray(pendingSortedPosts) && pendingSortedPosts.length
-                        ? pendingSortedPosts
-                        : (Array.isArray(window.latestSortedPosts) ? window.latestSortedPosts : []);
-                    const rankedIdx = preferredTarget.findIndex(p => p && String(p.id) === String(postId));
-                    if (rankedIdx >= 0 && rankedIdx < working.length) {
-                        hasRankedTarget = true;
-                        if (rankedIdx !== fromIdx) {
-                            toIdx = rankedIdx;
-                        }
-                    }
-                } catch (e) { /* ignore target-lookup failures */ }
-
-                // If ranked target says "no index change", don't force a
-                // speculative hop that will immediately snap back.
-                if (hasRankedTarget && toIdx < 0) return false;
-
-                // Never do speculative fallback swaps. Move only when we have
-                // a ranked target index, otherwise wait for the next snapshot.
-                if (!hasRankedTarget && toIdx < 0) return false;
-
-                // During the optimistic vote window, never move opposite the
-                // user's explicit direction. Stale ranking snapshots can briefly
-                // point backward and cause flicker-back to the old slot.
-                if (dir === 'like' && toIdx > fromIdx) {
-                    toIdx = fromIdx - 1;
-                } else if (dir === 'dislike' && toIdx < fromIdx) {
-                    toIdx = fromIdx + 1;
-                }
-
-                if (toIdx < 0 || toIdx >= working.length || toIdx === fromIdx) return false;
-
-                const moving = working[fromIdx];
-                if (!moving || !moving.id) return false;
-                working.splice(fromIdx, 1);
-                const insertAt = Math.min(Math.max(0, toIdx), working.length);
-                working.splice(insertAt, 0, moving);
-
-                // Short no-backtrack lock: after a vote move, don't allow this
-                // post to be placed back toward its old index while snapshots settle.
-                try {
-                    window.__voteNoBacktrackLocks = window.__voteNoBacktrackLocks || {};
-                    window.__voteNoBacktrackLocks[String(postId)] = {
-                        direction: dir,
-                        floorIndex: insertAt,
-                        until: Date.now() + 7000
-                    };
-                } catch (e) { /* ignore */ }
-
-                const committed = compactPostListForSlots(working);
-                gridScroller.items = committed;
-                freezeReconcileForVoteMove(2200);
-                try {
-                    window.__voteMovePaintHoldUntil = Math.max(Number(window.__voteMovePaintHoldUntil || 0), Date.now() + 2200);
-                } catch (e) { /* ignore */ }
-
-                keepVoteRerankActive(postId);
-
-                // Use direct box swap only for adjacent movement; otherwise repaint
-                // the changed range to avoid transient identity mismatches.
-                const adjacentMove = Math.abs(fromIdx - toIdx) === 1;
-                const swappedInDom = adjacentMove ? swapVoteBoxesInDOM(fromIdx, toIdx) : false;
-                if (!swappedInDom) {
-                    if (typeof gridScroller.renderItemsInRange === 'function') {
-                        const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
-                        const end = Math.min(committed.length, Math.max(fromIdx, toIdx) + 3);
-                        gridScroller.renderItemsInRange(start, end, { skipIdentityPass: true });
-                    } else if (typeof gridScroller.setItems === 'function') {
-                        gridScroller.setItems(committed);
-                    }
-                }
-
-                // Keep vote swaps minimal: avoid full-grid visual refreshes here.
-                // The two swapped boxes are already updated via direct DOM swap.
-
-                window.__lastImmediateVoteMoveAtByPost = window.__lastImmediateVoteMoveAtByPost || {};
-                window.__lastImmediateVoteMoveAtByPost[String(postId)] = Date.now();
-                console.log(`⚡ Immediate vote shift: ${String(postId).slice(0, 8)} ${fromIdx}→${toIdx}`);
-                return true;
-            } catch (e) {
-                console.warn('applyImmediateVotePositionShift failed', e);
-                return false;
-            }
-        }
         
         function voteOnPost(postId, voteType) {
             // Protect the post the user is actively engaging with from being
@@ -15002,13 +14516,6 @@
             
             console.log(`   Votes: ${originalLikes}→${newLikes} likes, ${originalDislikes}→${newDislikes} dislikes`);
             console.log(`   Vote state: "${originalVote}" → "${newVoteType}"`);
-
-            // Capture explicit vote intent for one-step reconciler movement.
-            try {
-                window.lastVoteRerankDirection = (newVoteType === 'like') ? 'up' : ((newVoteType === 'dislike') ? 'down' : '');
-                window.lastVoteRerankPostId = postId;
-                window.lastVoteRerankAt = Date.now();
-            } catch (e) { /* ignore */ }
             
             // OPTIMISTIC UI: Update immediately
             post.likes = newLikes;
@@ -15025,7 +14532,7 @@
             } catch (e) { /* ignore local vote cache errors */ }
             
             // Update all references to this post before the glow resolver runs.
-            syncPostVoteCountsEverywhere(postId, newLikes, newDislikes, { suppressGlobalRefresh: true });
+            syncPostVoteCountsEverywhere(postId, newLikes, newDislikes);
 
             // Defensive: ensure no duplicate entries exist in any gridContent array
             try {
@@ -15038,19 +14545,38 @@
             // ⚡ INSTANT BADGE UPDATE
             // The like/dislike/balanced badge must flip the very second the user votes
             // so it feels automatic. Apply badge classes immediately (synchronously)
-            // and perform one immediate slot move to avoid delayed flicker.
+            // — the position re-rank below stays slightly delayed so the post doesn't
+            // jump before the user sees their vote land.
             try { recalculateBadgesForCurrentGrid(postId); } catch (e) { /* defensive */ }
+            try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch (e) { /* defensive */ }
 
-            // Build a fresh ranked target BEFORE trying immediate movement.
-            // This avoids one-off swaps based on stale ordering data.
-            try { if (typeof recomputeFeedSnapshot === 'function') recomputeFeedSnapshot(); } catch (e) { /* ignore */ }
-
-            // Immediate, single-step movement (swap one position) so users see
-            // deterministic motion without multi-second reconcile flicker.
-            const movedImmediately = applyImmediateVotePositionShift(postId, newVoteType, {
-                deferUntilReady: true,
-                maxWaitMs: 650
-            });
+            // 🕒 DELAYED RE-RANK
+            // Requirement: user must see the like/dislike change first, then movement.
+            const VOTE_VISUAL_DELAY_MS = 700;
+            if (!window.voteVisualUpdateTimers) window.voteVisualUpdateTimers = {};
+            if (window.voteVisualUpdateTimers[postId]) {
+                clearTimeout(window.voteVisualUpdateTimers[postId]);
+            }
+            window.voteVisualUpdateTimers[postId] = setTimeout(() => {
+                try {
+                    // 1) Re-apply per-post badges after vote (DOM was rebuilt by renderGrid)
+                    recalculateBadgesForCurrentGrid(postId);
+                    // 2) Re-run ranking so post can move to new position
+                        // Defensive dedupe before re-render to avoid duplicate artifacts
+                        try { if (typeof dedupeGridContent === 'function') dedupeGridContent(); } catch (e) {}
+                    keepVoteRerankActive(postId);
+                    window.lastRenderGridTime = 0; // bypass throttle for deliberate vote action
+                    renderGrid();
+                    try { repairGridSlotGaps('vote-delayed-rerank'); } catch (e) {}
+                    try { forceCompactNow('vote-delayed'); } catch (e) {}
+                    try { refreshVisiblePostGlowOutlines('vote-delayed-rerank'); } catch (e) {}
+                    console.log(`✅ Delayed vote refresh applied for ${postId.substring(0, 8)} after ${VOTE_VISUAL_DELAY_MS}ms`);
+                } catch (e) {
+                    console.warn('⚠️ Delayed vote refresh failed:', e);
+                } finally {
+                    delete window.voteVisualUpdateTimers[postId];
+                }
+            }, VOTE_VISUAL_DELAY_MS);
             
             // 🔥 CRITICAL: Save vote using an atomic transaction to prevent race conditions
             // Use submitVoteTransaction so aggregated counts are computed server-side and written
@@ -15058,33 +14584,18 @@
             submitVoteTransaction(voterId, postId, newVoteType).then(({likes, dislikes}) => {
                 // Ensure local cache/UI reflect authoritative counts from transaction
                 try {
-                    try {
-                        window.lastVoteRerankDirection = (newVoteType === 'like') ? 'up' : ((newVoteType === 'dislike') ? 'down' : '');
-                        window.lastVoteRerankPostId = postId;
-                        window.lastVoteRerankAt = Date.now();
-                    } catch (e) { /* ignore */ }
                     post.likes = likes;
                     post.dislikes = dislikes;
-                    syncPostVoteCountsEverywhere(postId, likes, dislikes, { suppressGlobalRefresh: true });
+                    syncPostVoteCountsEverywhere(postId, likes, dislikes);
                     updateVoteDisplayInDOM(postId, likes, dislikes);
                     try { refreshVisiblePostGlowOutlines('vote-transaction-success'); } catch (e) {}
                     try {
                         recalculateBadgesForCurrentGrid(postId);
-                        // If optimistic move couldn't run (e.g., scroller not ready),
-                        // attempt once on authoritative counts.
-                        if (!movedImmediately) {
-                            const movedOnCommit = applyImmediateVotePositionShift(postId, newVoteType, {
-                                deferUntilReady: true,
-                                maxWaitMs: 650
-                            });
-                            if (!movedOnCommit && !isVotePositionShiftQueued(postId)) {
-                                keepVoteRerankActive(postId);
-                                freezeReconcileForVoteMove(2200);
-                                try {
-                                    enqueueVotePositionShift(postId, newVoteType, { maxWaitMs: 1200 });
-                                } catch (e) { /* ignore planner enqueue failures */ }
-                            }
-                        }
+                        keepVoteRerankActive(postId);
+                        window.lastRenderGridTime = 0;
+                        renderGrid();
+                        try { repairGridSlotGaps('vote-authoritative-rerank'); } catch (e) {}
+                        try { forceCompactNow('vote-authoritative'); } catch (e) {}
                         try { refreshVisiblePostGlowOutlines('vote-authoritative-rerank'); } catch (e) {}
                     } catch (rankErr) {
                         console.warn('⚠️ Authoritative vote rerank failed:', rankErr);
@@ -15092,19 +14603,15 @@
                 } catch (e) { /* defensive */ }
             }).catch(err => {
                 console.error('❌ Transaction failed, rolling back UI:', err);
+                // Cancel delayed re-rank because this vote did not persist
+                if (window.voteVisualUpdateTimers && window.voteVisualUpdateTimers[postId]) {
+                    clearTimeout(window.voteVisualUpdateTimers[postId]);
+                    delete window.voteVisualUpdateTimers[postId];
+                }
                 // Rollback on failure
                 post.likes = originalLikes;
                 post.dislikes = originalDislikes;
                 userVotes[userVoteKey] = originalVote;
-                try { clearPendingVotePositionShift(postId); } catch (e) {}
-                try {
-                    if (window.__voteNoBacktrackLocks) delete window.__voteNoBacktrackLocks[String(postId)];
-                } catch (e) {}
-                try { window.__voteMoveInProgressUntil = 0; } catch (e) {}
-                try {
-                    if (window.__voteMovePlannerRafId) cancelAnimationFrame(window.__voteMovePlannerRafId);
-                    window.__voteMovePlannerRafId = null;
-                } catch (e) {}
                 updateVoteDisplayInDOM(postId, originalLikes, originalDislikes);
                 window.lastRenderGridTime = 0;
                 renderGrid();
@@ -15591,16 +15098,6 @@
             } catch (e) { console.warn('dedupeGridContent failed', e); }
         }
 
-        // Insert new posts at a random position so fresh content is mixed fairly.
-        function getRandomNewPostInsertIndex(existingLength, options = {}) {
-            const len = Math.max(0, Number(existingLength) || 0);
-            const reserveHeadSlots = Math.max(0, Number(options.reserveHeadSlots != null ? options.reserveHeadSlots : 0) || 0);
-            const minIndex = Math.min(reserveHeadSlots, len);
-            const maxIndex = len;
-            if (maxIndex <= minIndex) return maxIndex;
-            return minIndex + Math.floor(Math.random() * (maxIndex - minIndex + 1));
-        }
-
         // Ensure a post is unique across all gridContent keys, then insert into the given key.
         function ensureUniqueAndInsert(contentKey, post) {
             try {
@@ -15648,9 +15145,8 @@
                 } catch (e) { /* ignore */ }
                 // Ensure target key exists
                 gridContent[contentKey] = gridContent[contentKey] || [];
-                // Insert at a random slot so new posts are mixed fairly.
-                const insertAt = getRandomNewPostInsertIndex(gridContent[contentKey].length);
-                gridContent[contentKey].splice(insertAt, 0, post);
+                // Insert at front (new repost becomes visible)
+                gridContent[contentKey].unshift(post);
                 // Update cache
                 try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
                 // Update scroller safely if available
@@ -19643,13 +19139,41 @@ function setUploadModalHeader(title, subtitle) {
         
         /**
          * Get all local posts from user's area (all content types)
-         * Posts are ranked by the same area logic regardless of author.
+         * 🔧 BUG FIX: Always include user's own posts even if area doesn't match
          */
         function getLocalPosts(areaTag, limit) {
             const posts = [];
             const seenIds = new Set();
-
-            // Add area-tagged posts (general local content)
+            
+            // FIRST: Always include truly-owned posts (CRITICAL FIX for disappearing posts)
+            // Do NOT assume everything under gridContent[currentUserId] is owned by the viewer,
+            // because guest/device feeds can also live under that key.
+            if (currentUserId && gridContent[currentUserId]) {
+                const ownedPosts = gridContent[currentUserId].filter(post => post && (
+                    post.authId === currentUserId ||
+                    post.userId === currentUserId ||
+                    post.createdBy === currentUserId
+                ));
+                console.log(`🔐 OWN POSTS CHECK: User has ${ownedPosts.length}/${gridContent[currentUserId].length} truly-owned posts in current bucket`);
+                ownedPosts.forEach(post => {
+                    if (!seenIds.has(post.id)) {
+                        seenIds.add(post.id);
+                        const stableTag = getStablePostAreaTag(post) || areaTag;
+                        posts.push({
+                            ...post,
+                            contentSource: 'OWN_POST',
+                            displayAreaTag: stableTag,
+                            originalAreaTag: post.originalAreaTag || stableTag,
+                            isOwnPost: true
+                        });
+                    }
+                });
+                console.log(`✅ OWN POSTS ADDED: ${posts.length} of user's own posts included in grid`);
+            } else {
+                console.log(`⚠️ NO OWN POSTS FOUND: gridContent["${currentUserId}"] is empty or undefined`);
+            }
+            
+            // SECOND: Add area-tagged posts (general local content)
             if (gridContent[areaTag]) {
                 gridContent[areaTag].forEach(post => {
                     if (!seenIds.has(post.id) && posts.length < limit) {
@@ -19665,7 +19189,7 @@ function setUploadModalHeader(title, subtitle) {
                 });
             }
 
-            // Fallback to shared-posts when area-specific posts are missing
+            // THIRD: Fallback to shared-posts when area-specific posts are missing
             // This ensures signed-in users still see the global feed if no area-keyed
             // entries exist for their detected areaTag.
             if (posts.length < limit && gridContent['shared-posts']) {
@@ -21876,7 +21400,7 @@ function setUploadModalHeader(title, subtitle) {
                         const likes = Number(payload.likes) || 0;
                         const dislikes = Number(payload.dislikes) || 0;
                         // Apply counts into local caches and visible DOM
-                        try { syncPostVoteCountsEverywhere(postId, likes, dislikes, { suppressGlobalRefresh: true }); } catch(e) {}
+                        try { syncPostVoteCountsEverywhere(postId, likes, dislikes); } catch(e) {}
                         try { updateVoteDisplayInDOM(postId, likes, dislikes); } catch(e) {}
                         // Also update any gridScroller items and gridContent buckets
                         try {
@@ -21899,6 +21423,7 @@ function setUploadModalHeader(title, subtitle) {
                         // LIKED chip would otherwise linger until a hard refresh. Mirror the
                         // local-vote path so the badge updates live for everyone.
                         try { recalculateBadgesForCurrentGrid(postId); } catch (e) { /* defensive */ }
+                        try { if (typeof recomputeAndApplyBadges === 'function') recomputeAndApplyBadges(); } catch (e) { /* defensive */ }
                         // Also update the open post modal's vote counts if this post is being viewed
                         try { if (selectedPostId === postId && typeof updateVoteDisplay === 'function') updateVoteDisplay(); } catch(e) {}
                         try { refreshVisiblePostGlowOutlines('post-updated-event'); } catch(e) {}
@@ -21977,23 +21502,17 @@ function setUploadModalHeader(title, subtitle) {
                                     if (postObj.authId) candidateKeys.add(String(postObj.authId));
                                 } catch (e) { /* ignore key derivation errors */ }
 
-                                if (!isPostHiddenForViewer(postObj, currentUserId)) {
+                                for (const key of Array.from(candidateKeys)) {
                                     try {
-                                        if (typeof routeNewPostToLoadedGrids === 'function') {
-                                            routeNewPostToLoadedGrids(postObj, 'shared-posts');
-                                        } else if (typeof insertNewPostIntoGrid === 'function') {
-                                            insertNewPostIntoGrid('shared-posts', postObj, { preserveAcrossKeys: true });
-                                        } else {
-                                            ensureUniqueAndInsert('shared-posts', postObj);
+                                        gridContent[key] = gridContent[key] || [];
+                                        if (!isPostHiddenForViewer(postObj, currentUserId)) {
+                                            if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(key, postObj);
+                                            else ensureUniqueAndInsert(key, postObj);
+                                            try { if (gridContent[key].length > 300) gridContent[key].length = 300; } catch(e){}
+                                            console.log('➕ Inserted new post from post_events/added into', key, postId);
                                         }
-                                        console.log('➕ Broadcast new post from post_events/added into loaded grids', postId);
-                                    } catch (e) { console.warn('Failed to broadcast new post from post_events/added', e); }
+                                    } catch (e) { console.warn('Failed to insert new post into gridContent for key', key, e); }
                                 }
-                                try {
-                                    window._lastIncrementalRender = 0;
-                                    if (typeof rebuildGridScrollerFromGridContent === 'function' && gridScroller) rebuildGridScrollerFromGridContent();
-                                    else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
-                                } catch (e) { console.warn('forced post-added repaint failed', e); }
                             } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
                         } catch (e) { console.warn('post_added handler processing failed', e); }
                     } catch (e) { console.warn('post_added handler failed', e); }
@@ -31818,8 +31337,11 @@ function setUploadModalHeader(title, subtitle) {
                 score += poiWeight * 0.2;
             }
             
-            // Content type preference is intentionally disabled so media content
-            // is never auto-promoted above text-only content by ML preference.
+            // Match content type preferences
+            const contentType = post.photoURL || post.imageData ? 'photo' : post.mediaType === 'video' ? 'video' : 'text';
+            const contentScore = userPrefs.contentTypeScores[contentType] || 0;
+            const contentWeight = Math.max(0, Math.min(1, contentScore / 10));
+            score += contentWeight * 0.15;
             
             // Engagement quality (posts with good engagement are more likely to be liked)
             const netEngagement = (post.likes || 0) - (post.dislikes || 0);
@@ -32666,20 +32188,20 @@ function setUploadModalHeader(title, subtitle) {
             }
             rankedPosts.forEach(p => { p._proximityRating = _computeProximityRating(p); });
 
-            // Viewer-authored posts are part of the same ranking pool as all
-            // other posts, so we only keep this count for diagnostics.
+            // 1️⃣ USER'S OWN POSTS (always show first)
             const userPosts = rankedPosts.filter(p =>
                 p.authId === currentUserId ||
                 p.userId === currentUserId ||
                 p.createdBy === currentUserId
             );
+            const userPostIds = new Set(userPosts.map(p => p.id));
 
             // � BOOST-ONLY PRIORITY BUCKET (highest priority for non-owner posts)
             // Sell posts are NOT included — they're not paid promotion and flow
             // through the normal local / near-local / top / fallback path.
             const isBoost = (p) => !!(p && (p._isBoosted || isStrictBoostActive(p)));
             const boostPosts = rankedPosts
-                .filter(p => isBoost(p));
+                .filter(p => !userPostIds.has(p.id) && isBoost(p));
 
             // 🎯 BOOST PERFORMANCE TARGETING (per-viewer)
             // -----------------------------------------------------------------
@@ -32699,7 +32221,8 @@ function setUploadModalHeader(title, subtitle) {
                 // Baseline: average likes of a normal local post (exclude boosts).
                 const baseline = rankedPosts.filter(p =>
                     p.county === userArea &&
-                    !isBoost(p)
+                    !isBoost(p) &&
+                    !userPostIds.has(p.id)
                 );
                 const sumLikes = baseline.reduce((s, p) => s + (Number(p.likes) || 0), 0);
                 const avgLocalLikes = baseline.length > 0 ? (sumLikes / baseline.length) : 1;
@@ -32740,7 +32263,7 @@ function setUploadModalHeader(title, subtitle) {
             function _computeAdaptiveLocalRadiusKm() {
                 if (!_viewerCoords) return null;
                 const rated = rankedPosts.filter(p =>
-                    p._viewerDistanceKm != null && !boostIds.has(p.id)
+                    p._viewerDistanceKm != null && !userPostIds.has(p.id) && !boostIds.has(p.id)
                 );
                 if (!rated.length) return null;
                 const TARGET_LOCAL = 40;                 // aim for ~this many local posts
@@ -32758,7 +32281,7 @@ function setUploadModalHeader(title, subtitle) {
             // an exact area-label match. Falls back to the area-label match only
             // when the viewer's (or the post's) coordinates are unavailable.
             const hyperLocal = rankedPosts.filter(p => {
-                if (boostIds.has(p.id)) return false;
+                if (userPostIds.has(p.id) || boostIds.has(p.id)) return false;
                 if (adaptiveLocalRadiusKm != null && p._viewerDistanceKm != null) {
                     return p._viewerDistanceKm <= adaptiveLocalRadiusKm;
                 }
@@ -32768,7 +32291,7 @@ function setUploadModalHeader(title, subtitle) {
 
             // 3️⃣ NEAR-LOCAL WELL-REVIEWED POSTS
             const nearLocalWellReviewed = rankedPosts.filter(p =>
-                !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
+                !userPostIds.has(p.id) && !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
                 p.county !== userArea &&
                 p.netLikes >= 3 &&
                 (p.proximityClass === 'nearby' || p.proximityClass === 'community')
@@ -32777,7 +32300,7 @@ function setUploadModalHeader(title, subtitle) {
             // 4️⃣ WEBSITE TOP POSTS
             const websiteTopPosts = rankedPosts
                 .filter(p =>
-                    !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
+                    !userPostIds.has(p.id) && !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
                     p.county !== userArea &&
                     !nearLocalWellReviewed.find(n => n.id === p.id) &&
                     p.netLikes >= 5
@@ -32797,7 +32320,7 @@ function setUploadModalHeader(title, subtitle) {
             };
             const distantFiller = rankedPosts
                 .filter(p =>
-                    !boostIds.has(p.id) &&
+                    !userPostIds.has(p.id) && !boostIds.has(p.id) &&
                     p._distantFiller === true
                 )
                 .sort((a, b) => {
@@ -32808,6 +32331,7 @@ function setUploadModalHeader(title, subtitle) {
 
             // 6️⃣ FALLBACK (everything else)
             const usedIds = new Set([
+                ...userPostIds,
                 ...boostIds,
                 ...hyperLocal.map(p => p.id),
                 ...nearLocalWellReviewed.map(p => p.id),
@@ -32816,6 +32340,8 @@ function setUploadModalHeader(title, subtitle) {
             ]);
             const fallbackPosts = rankedPosts.filter(p => !usedIds.has(p.id));
 
+            // Sort each category by unified rank
+            userPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
             // Deterministic LOCAL ordering shared by everyone in the area:
             // closest first (grouped into proximity bands so tiny GPS jitter
             // doesn't reshuffle), then engagement, then a stable id tiebreak.
@@ -32970,6 +32496,7 @@ function setUploadModalHeader(title, subtitle) {
 
             console.log(`🌐 Website scale: onlineUsers=${liveOnline}, totalPosts=${liveTotalPosts}, networkSignal=${networkSignal}, t=${t.toFixed(3)}`);
             console.log(`📊 Scale-adaptive Distribution Plan (local shortfall=${localShortfall}):`);
+            console.log(`   User own posts:       ${userPosts.length}`);
             console.log(`   Boost (urgent first): need ${boostTarget}, have ${boostPosts.length}`);
             console.log(`   Hyper-local:          need ${hyperLocalTarget}, have ${hyperLocal.length}`);
             console.log(`   Near-local reviewed:  need ${nearLocalTarget}, have ${nearLocalWellReviewed.length}`);
@@ -32978,6 +32505,9 @@ function setUploadModalHeader(title, subtitle) {
             console.log(`   Fallback available:   ${fallbackPosts.length}`);
 
             const result = [];
+
+            // Always show user's own posts FIRST
+            result.push(...userPosts);
 
             // Take target amounts from each category
             const boostToAdd      = boostPosts.slice(0, boostTarget);
@@ -33037,7 +32567,7 @@ function setUploadModalHeader(title, subtitle) {
             const normalBoosts = boostToAdd.filter(p => !urgentBoosts.includes(p));
             if (urgentBoosts.length > 0) {
                 console.log(`🚀 Front-loading ${urgentBoosts.length} urgent boost(s) above local top (urgency ≥ ${FRONT_LOAD_URGENCY})`);
-                // Place urgent boosts before any local content.
+                // Place urgent boosts immediately after user's own posts, before any local content.
                 result.push(...urgentBoosts);
             }
             const allLocalPosts = [...hyperLocalToAdd];
@@ -36057,69 +35587,17 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         function getGridTextFontSizePx() {
-            // Legacy fallback. Runtime rendering now uses per-tile auto-fit.
-            return 48;
-        }
-
-        function fitPostTextToSlot(el) {
-            if (!el || !(el instanceof HTMLElement)) return;
-            const text = (el.textContent || '').trim();
-            if (!text) return;
-
-            const boxW = el.clientWidth;
-            const boxH = el.clientHeight;
-            if (boxW <= 0 || boxH <= 0) return;
-
-            // Cache by geometry + text length so repeated reconcile passes stay cheap.
-            const cacheKey = `${boxW}x${boxH}:${text.length}`;
-            if (el.dataset.fitKey === cacheKey && el.dataset.fitSize) {
-                el.style.fontSize = `${el.dataset.fitSize}px`;
-                el.style.overflowY = 'hidden';
-                return;
-            }
-
-            // Requested: make text much larger across devices. Keep auto-fit, but
-            // double the baseline bounds so small and large screens both scale up.
-            const minSize = 28;
-            const maxSize = Math.min(168, Math.floor(boxH * 0.90));
-            const lineHeight = 1.24;
-
-            const fits = (size) => {
-                el.style.fontSize = `${size}px`;
-                el.style.lineHeight = String(lineHeight);
-                el.style.overflowY = 'hidden';
-                return (el.scrollHeight <= el.clientHeight + 1) && (el.scrollWidth <= el.clientWidth + 1);
-            };
-
-            let lo = minSize;
-            let hi = Math.max(minSize, maxSize);
-            let best = minSize;
-
-            // Quick high-bound check avoids unnecessary binary iterations for short text.
-            if (fits(hi)) {
-                best = hi;
-            } else {
-                while (lo <= hi) {
-                    const mid = (lo + hi) >> 1;
-                    if (fits(mid)) {
-                        best = mid;
-                        lo = mid + 1;
-                    } else {
-                        hi = mid - 1;
-                    }
-                }
-            }
-
-            el.style.fontSize = `${best}px`;
-            el.style.lineHeight = String(lineHeight);
-            el.style.overflowY = 'hidden';
-            el.dataset.fitKey = cacheKey;
-            el.dataset.fitSize = String(best);
+            const w = window.innerWidth || 0;
+            // More aggressive reduction for denser tiles
+            if (w >= 1024) return 40;
+            if (w >= 768) return 32;
+            return 18;
         }
 
         function applyGridTextFontSizeToVisiblePosts() {
+            const sizePx = getGridTextFontSizePx();
             document.querySelectorAll('.post-text-content').forEach(el => {
-                fitPostTextToSlot(el);
+                el.style.fontSize = `${sizePx}px`;
             });
         }
 
@@ -36127,20 +35605,7 @@ function setUploadModalHeader(title, subtitle) {
             if (!post || typeof post !== 'object') return false;
             const text = String(post.content || post.text || post.description || '').trim();
             const hasText = text.length > 0;
-            const hasMedia = !!(
-                post.photoURL ||
-                post.imageData ||
-                post.videoURL ||
-                post.mediaURL ||
-                post.mediaType === 'video' ||
-                post.mediaType === 'image' ||
-                (Array.isArray(post.mediaItems) && post.mediaItems.length > 0) ||
-                (Array.isArray(post.media) && post.media.length > 0) ||
-                (Array.isArray(post.mediaURLs) && post.mediaURLs.length > 0) ||
-                (Array.isArray(post.photoURLs) && post.photoURLs.length > 0) ||
-                (Array.isArray(post.images) && post.images.length > 0) ||
-                (Array.isArray(post.videos) && post.videos.length > 0)
-            );
+            const hasMedia = !!(post.photoURL || post.imageData || post.videoURL || post.mediaURL);
             return hasText || hasMedia;
         }
 
@@ -36170,7 +35635,7 @@ function setUploadModalHeader(title, subtitle) {
                         (String(c.content || '').trim().length > 0 ? 4 : 0) +
                         (String(c.text || '').trim().length > 0 ? 3 : 0) +
                         (String(c.description || '').trim().length > 0 ? 2 : 0) +
-                        ((c.photoURL || c.imageData || c.videoURL || c.mediaURL || c.mediaType === 'video' || c.mediaType === 'image' || (Array.isArray(c.mediaItems) && c.mediaItems.length > 0) || (Array.isArray(c.media) && c.media.length > 0) || (Array.isArray(c.mediaURLs) && c.mediaURLs.length > 0) || (Array.isArray(c.photoURLs) && c.photoURLs.length > 0) || (Array.isArray(c.images) && c.images.length > 0) || (Array.isArray(c.videos) && c.videos.length > 0)) ? 4 : 0) +
+                        ((c.photoURL || c.imageData || c.videoURL || c.mediaURL) ? 4 : 0) +
                         (Array.isArray(c.cachedBadges) ? 1 : 0);
                     if (score > bestScore) {
                         bestScore = score;
@@ -36187,12 +35652,6 @@ function setUploadModalHeader(title, subtitle) {
                 if (!merged.videoURL && richest.videoURL) merged.videoURL = richest.videoURL;
                 if (!merged.mediaURL && richest.mediaURL) merged.mediaURL = richest.mediaURL;
                 if (!merged.mediaType && richest.mediaType) merged.mediaType = richest.mediaType;
-                if ((!merged.mediaItems || merged.mediaItems.length === 0) && Array.isArray(richest.mediaItems) && richest.mediaItems.length > 0) merged.mediaItems = richest.mediaItems;
-                if ((!merged.media || merged.media.length === 0) && Array.isArray(richest.media) && richest.media.length > 0) merged.media = richest.media;
-                if ((!merged.mediaURLs || merged.mediaURLs.length === 0) && Array.isArray(richest.mediaURLs) && richest.mediaURLs.length > 0) merged.mediaURLs = richest.mediaURLs;
-                if ((!merged.photoURLs || merged.photoURLs.length === 0) && Array.isArray(richest.photoURLs) && richest.photoURLs.length > 0) merged.photoURLs = richest.photoURLs;
-                if ((!merged.images || merged.images.length === 0) && Array.isArray(richest.images) && richest.images.length > 0) merged.images = richest.images;
-                if ((!merged.videos || merged.videos.length === 0) && Array.isArray(richest.videos) && richest.videos.length > 0) merged.videos = richest.videos;
                 if ((!merged.cachedBadges || merged.cachedBadges.length === 0) && Array.isArray(richest.cachedBadges)) {
                     merged.cachedBadges = richest.cachedBadges;
                 }
@@ -36220,10 +35679,6 @@ function setUploadModalHeader(title, subtitle) {
          */
         function renderGridItemFull(box, post) {
             if (!box || !post || !post.id) return;
-            try {
-                box.removeAttribute('data-clearing');
-                box.classList.remove('placeholder');
-            } catch (e) { /* ignore state-reset errors */ }
             // Preserve any prominent boost badge element so we can reattach it
             // after we clear the slot. This prevents animation restarts while
             // ensuring the slot does not accumulate stacked content.
@@ -36233,19 +35688,11 @@ function setUploadModalHeader(title, subtitle) {
             // If the rendered post object is missing media but we have a cached copy,
             // prefer the cached media so the grid shows the photo/video on the main tile.
             try {
-                if (post.id && (!post.photoURL && !post.imageData && !post.videoURL && !post.mediaURL && !(Array.isArray(post.mediaItems) && post.mediaItems.length > 0) && !(Array.isArray(post.media) && post.media.length > 0) && !(Array.isArray(post.mediaURLs) && post.mediaURLs.length > 0) && !(Array.isArray(post.photoURLs) && post.photoURLs.length > 0) && !(Array.isArray(post.images) && post.images.length > 0) && !(Array.isArray(post.videos) && post.videos.length > 0)) && window.postCache && postCache[post.id]) {
+                if (post.id && (!post.photoURL && !post.imageData) && window.postCache && postCache[post.id]) {
                     const cached = postCache[post.id];
-                    if (cached.photoURL || cached.imageData || cached.videoURL || cached.mediaURL || (Array.isArray(cached.mediaItems) && cached.mediaItems.length > 0) || (Array.isArray(cached.media) && cached.media.length > 0) || (Array.isArray(cached.mediaURLs) && cached.mediaURLs.length > 0) || (Array.isArray(cached.photoURLs) && cached.photoURLs.length > 0) || (Array.isArray(cached.images) && cached.images.length > 0) || (Array.isArray(cached.videos) && cached.videos.length > 0) || cached.mediaType === 'video' || cached.mediaType === 'image') {
+                    if (cached.photoURL || cached.imageData) {
                         post.photoURL = post.photoURL || cached.photoURL || cached.imageData;
                         post.imageData = post.imageData || post.photoURL;
-                        post.videoURL = post.videoURL || cached.videoURL;
-                        post.mediaURL = post.mediaURL || cached.mediaURL;
-                        if ((!post.mediaItems || post.mediaItems.length === 0) && Array.isArray(cached.mediaItems) && cached.mediaItems.length > 0) post.mediaItems = cached.mediaItems;
-                        if ((!post.media || post.media.length === 0) && Array.isArray(cached.media) && cached.media.length > 0) post.media = cached.media;
-                        if ((!post.mediaURLs || post.mediaURLs.length === 0) && Array.isArray(cached.mediaURLs) && cached.mediaURLs.length > 0) post.mediaURLs = cached.mediaURLs;
-                        if ((!post.photoURLs || post.photoURLs.length === 0) && Array.isArray(cached.photoURLs) && cached.photoURLs.length > 0) post.photoURLs = cached.photoURLs;
-                        if ((!post.images || post.images.length === 0) && Array.isArray(cached.images) && cached.images.length > 0) post.images = cached.images;
-                        if ((!post.videos || post.videos.length === 0) && Array.isArray(cached.videos) && cached.videos.length > 0) post.videos = cached.videos;
                         post.mediaType = post.mediaType || cached.mediaType;
                         // ensure description/content stays sane
                         post.description = post.description || cached.description || cached.content || '';
@@ -36344,43 +35791,20 @@ function setUploadModalHeader(title, subtitle) {
                 // is intentionally empty so no offset is baked into the inline style.
                 const boostContentOffset = '';
                 
-                // Check for any media payload shape (single URL fields or media arrays).
-                const mediaList = (typeof buildPostMediaList === 'function') ? (buildPostMediaList(post) || []) : [];
-                const hasAnyMedia = mediaList.length > 0 || !!(
-                    post.photoURL ||
-                    post.imageData ||
-                    post.videoURL ||
-                    post.mediaURL ||
-                    post.mediaType === 'video' ||
-                    post.mediaType === 'image' ||
-                    (Array.isArray(post.mediaItems) && post.mediaItems.length > 0) ||
-                    (Array.isArray(post.media) && post.media.length > 0) ||
-                    (Array.isArray(post.mediaURLs) && post.mediaURLs.length > 0) ||
-                    (Array.isArray(post.photoURLs) && post.photoURLs.length > 0) ||
-                    (Array.isArray(post.images) && post.images.length > 0) ||
-                    (Array.isArray(post.videos) && post.videos.length > 0)
-                );
-
-                if (hasAnyMedia) {
-                    const primaryMedia = mediaList[0] || null;
-                    const imageSource = (primaryMedia && primaryMedia.src) || post.photoURL || post.imageData || post.videoURL || post.mediaURL || '';
-                    const isVideo = !!(
-                        (primaryMedia && primaryMedia.isVideo) ||
-                        post.mediaType === 'video' ||
-                        (typeof imageSource === 'string' && (imageSource.includes('.mp4') || imageSource.includes('.webm') || imageSource.includes('.mov')))
-                    );
+                // Check for Firebase Storage URL (photoURL) or legacy base64 (imageData)
+                if (post.photoURL || post.imageData) {
+                    const imageSource = post.photoURL || post.imageData;
+                    const isVideo = post.mediaType === 'video' || 
+                                   (typeof imageSource === 'string' && (imageSource.includes('.mp4') || imageSource.includes('.webm') || imageSource.includes('.mov')));
 
                     // Detect whether this post carries BOTH photos and videos so we can
                     // show a combined 📷🎥 indicator instead of a single emoji.
                     let hasPhoto = false, hasVideo = false;
                     try {
-                        for (const _m of mediaList) {
+                        const _mediaList = (typeof buildPostMediaList === 'function') ? buildPostMediaList(post) : [];
+                        for (const _m of _mediaList) {
                             if (!_m) continue;
                             if (_m.isVideo) hasVideo = true; else hasPhoto = true;
-                        }
-                        // Fallback inference when mediaList is empty but URL fields exist.
-                        if (!hasPhoto && !hasVideo && typeof imageSource === 'string' && imageSource) {
-                            if (isVideo) hasVideo = true; else hasPhoto = true;
                         }
                     } catch (e) { /* ignore media-list errors */ }
                     const hasBoth = hasPhoto && hasVideo;
@@ -36452,7 +35876,7 @@ function setUploadModalHeader(title, subtitle) {
                 } else {
                     // Text-only post
                     const tileText = (post.content || post.text || post.description || '');
-                    const content = String(tileText).substring(0, 137);
+                    const content = String(tileText).substring(0, 200);
                     // 🟢 FAST PATH: author's frozen displayAreaTag (Firebase-backed).
                     const stableAreaTagText = getStablePostAreaTag(post);
                     const areaTagText = stableAreaTagText || post.county || post.zoneTag || post.area || post.customTag ||
@@ -36484,11 +35908,7 @@ function setUploadModalHeader(title, subtitle) {
                     const repostCountText = post.repostCount || post.reposts || 0;
                     // Repost badge removed for text tiles — keep repostCount in data but do not render badge
                     const repostBadgeHTMLText = ``;
-                    box.innerHTML = `${repostBadgeHTMLText}<div class="post-text-content" style="padding: 0 4px 4px 2px; ${boostContentOffset} overflow-y: hidden; height: 100%; display:flex; align-items:flex-start; justify-content:flex-start; text-align:left; line-height: 1.24; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}`;
-                    try {
-                        const textEl = box.querySelector('.post-text-content');
-                        if (textEl) fitPostTextToSlot(textEl);
-                    } catch (e) {}
+                    box.innerHTML = `${repostBadgeHTMLText}<div class="post-text-content" style="padding: 0 8px 8px 4px; ${boostContentOffset} overflow-y: auto; height: 100%; display:flex; align-items:flex-start; justify-content:flex-start; text-align:left; line-height: 1.45; font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; box-sizing: border-box; font-size: ${getGridTextFontSizePx()}px;">${content}</div>${voteBadge}`;
                 }
 
                 // Ensure boost-badge-prominent pill is always present for boost posts.
@@ -36856,12 +36276,6 @@ function setUploadModalHeader(title, subtitle) {
                     return true;
                 }
 
-                // Hard freeze for non-interactive rank reshuffles.
-                // This prevents visible position churn/flicker while users read.
-                // Interactive actions (vote-triggered rerank) bypass this path.
-                window.__nonInteractiveMoveState = state;
-                return false;
-
                 // If the user is actively scrolling, avoid non-interactive ML moves
                 // (don't reposition posts) unless there was a recent location commit.
                 try {
@@ -36958,45 +36372,7 @@ function setUploadModalHeader(title, subtitle) {
             window.nonInteractiveMoveCooldownMs = Number(window.nonInteractiveMoveCooldownMs || 45000); // 45s cooldown between non-interactive moves
             window.maxNonInteractiveMovesPerMinute = Number(window.maxNonInteractiveMovesPerMinute || 2); // max auto moves per minute
             window.exploratorySlotPercent = Number(window.exploratorySlotPercent || 8); // percent of slots reserved for exploratory/rotated content
-            window.__publishedPostSettleMs = Number(window.__publishedPostSettleMs || 12000); // protect newly published posts for 12s
-            window.__publishedPostSettleAt = window.__publishedPostSettleAt || {};
         } catch(e) { /* ignore */ }
-
-        function isPublishedPostSettling(postId, nowTs = Date.now()) {
-            try {
-                if (!postId) return false;
-                const id = String(postId);
-                const startedAt = Number((window.__publishedPostSettleAt || {})[id] || 0);
-                if (!startedAt) return false;
-                const windowMs = Number(window.__publishedPostSettleMs || 12000);
-                return (nowTs - startedAt) < windowMs;
-            } catch (e) {
-                return false;
-            }
-        }
-
-        function hasAnySettlingPublishedPost(list, nowTs = Date.now()) {
-            try {
-                if (!Array.isArray(list) || list.length === 0) return false;
-                for (const p of list) {
-                    if (!p || !p.id) continue;
-                    const id = String(p.id);
-                    if (isPublishedPostSettling(id, nowTs)) return true;
-                    if (p._optimistic && Number(p._optimisticExpiry || 0) > nowTs) return true;
-                }
-                return false;
-            } catch (e) {
-                return false;
-            }
-        }
-
-        function isVoteMovePaintHoldActive() {
-            try {
-                return Date.now() < Number(window.__voteMovePaintHoldUntil || 0);
-            } catch (e) {
-                return false;
-            }
-        }
 
         function scheduleGridReconcile() {
             if (gridReconcileInterval) return;
@@ -37008,72 +36384,30 @@ function setUploadModalHeader(title, subtitle) {
                     const curIdx = current.findIndex(p => p && String(p.id) === vid);
                     const tgtIdx = target.findIndex(p => p && String(p.id) === vid);
                     if (tgtIdx === -1) return false; // not present in new target
-                    let fromIdx = curIdx;
-                    let toIdx = curIdx;
-                    let moved = false;
-
                     if (curIdx === -1) {
                         // Post not currently in scroller - insert at target index
-                        const insertAt = Math.min(Math.max(0, tgtIdx), current.length);
-                        current.splice(insertAt, 0, hydratePostForRender(target[tgtIdx]));
-                        fromIdx = insertAt;
-                        toIdx = insertAt;
-                        moved = true;
+                        current.splice(tgtIdx, 0, hydratePostForRender(target[tgtIdx]));
                     } else if (curIdx !== tgtIdx) {
-                        // Guard against stale targets that briefly point back to
-                        // the old slot right after a vote. Ignore opposite-direction
-                        // corrections while vote stabilization is active.
-                        try {
-                            if (typeof isVoteReorderStabilizationActive === 'function' && isVoteReorderStabilizationActive()) {
-                                const intent = String(window.lastVoteRerankDirection || '').toLowerCase();
-                                if ((intent === 'up' && tgtIdx > curIdx) || (intent === 'down' && tgtIdx < curIdx)) {
-                                    return true;
-                                }
-                            }
-                        } catch (e) { /* ignore guard failures */ }
-
                         // Move in-place with minimal splice operations
                         const [moved] = current.splice(curIdx, 1);
                         // Clamp target index to current length after removal
                         const insertAt = Math.min(Math.max(0, tgtIdx), current.length);
                         current.splice(insertAt, 0, hydratePostForRender(moved || target[tgtIdx]));
-                        toIdx = insertAt;
-                        moved = true;
                     } else {
-                        // Already at target index for this tick.
+                        // Already at desired position - nothing to do
                         return true;
                     }
 
-                    if (!moved) return false;
-
-                    // Apply compacting to the live list only. Do NOT overwrite
-                    // pending/latest sorted targets here, or the vote move can stall
-                    // after a single step instead of finishing to the true rank.
-                    const committed = compactPostListForSlots(current);
-                    gridScroller.items = committed;
-
-                    // Refresh no-backtrack lock whenever reconcile performs a
-                    // vote-driven move so later ticks cannot pull it backward.
-                    try {
-                        const intent = String(window.lastVoteRerankDirection || '').toLowerCase();
-                        if (intent === 'up' || intent === 'down') {
-                            window.__voteNoBacktrackLocks = window.__voteNoBacktrackLocks || {};
-                            window.__voteNoBacktrackLocks[String(vid)] = {
-                                direction: (intent === 'up') ? 'like' : 'dislike',
-                                floorIndex: Math.max(0, Number(toIdx) || 0),
-                                until: Date.now() + 7000
-                            };
-                        }
-                    } catch (e) { /* ignore */ }
-
+                    // Apply compacting and set items, but avoid clearing unrelated slots
+                    gridScroller.items = compactPostListForSlots(current);
                     try { if (typeof gridScroller.renderItemsInRange === 'function') {
-                        const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
-                        const end = Math.min(gridScroller.items.length, Math.max(fromIdx, toIdx) + 3);
-                        gridScroller.renderItemsInRange(start, end, { skipIdentityPass: true });
+                        const start = Math.max(0, Math.min(curIdx, tgtIdx) - 2);
+                        const end = Math.min(gridScroller.items.length, Math.max(curIdx, tgtIdx) + 3);
+                        gridScroller.renderItemsInRange(start, end);
                     } }
                     catch(e) { try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(_) {} }
                     try { recomputeAndApplyBadges(); } catch(e) {}
-                    console.log(`🧠 Smart vote move applied for ${vid}: ${fromIdx}→${toIdx}`);
+                    console.log(`🧠 Smart vote move applied for ${vid}: ${curIdx}→${tgtIdx}`);
                     return true;
                 } catch (e) { console.warn('applySmartVoteMove failed', e); return false; }
             }
@@ -37083,11 +36417,6 @@ function setUploadModalHeader(title, subtitle) {
             gridReconcileInterval = setInterval(() => {
                 try {
                     if (!gridScroller || !pendingSortedPosts || !Array.isArray(pendingSortedPosts)) return;
-
-                    // Don't let reconcile fight a queued/active vote move.
-                    const voteMoveHoldUntil = Number(window.__voteMoveInProgressUntil || 0);
-                    if (voteMoveHoldUntil && Date.now() < voteMoveHoldUntil) return;
-                    try { if (typeof hasAnyQueuedVotePositionShift === 'function' && hasAnyQueuedVotePositionShift()) return; } catch (e) {}
 
                     let target = Array.isArray(pendingSortedPosts) ? pendingSortedPosts.slice() : [];
                     const current = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
@@ -37101,40 +36430,6 @@ function setUploadModalHeader(title, subtitle) {
                     // Foreground resume can briefly produce sparse ML snapshots while
                     // subscriptions/data warm up. Stabilize target before diffing.
                     target = stabilizeReconcileTargetForRecovery(target, current);
-
-                    // Vote no-backtrack guard: while lock is active, prevent target
-                    // snapshots from placing the voted post back toward its old slot.
-                    try {
-                        const locks = window.__voteNoBacktrackLocks || {};
-                        const nowTs = Date.now();
-                        const moveIdInList = (arr, pid, toIndex) => {
-                            if (!Array.isArray(arr) || !pid) return arr;
-                            const idx = arr.findIndex(p => p && String(p.id) === String(pid));
-                            if (idx < 0) return arr;
-                            const [item] = arr.splice(idx, 1);
-                            const at = Math.min(Math.max(0, Number(toIndex) || 0), arr.length);
-                            arr.splice(at, 0, item);
-                            return arr;
-                        };
-
-                        for (const pid of Object.keys(locks)) {
-                            const lock = locks[pid];
-                            if (!lock || nowTs >= Number(lock.until || 0)) {
-                                delete locks[pid];
-                                continue;
-                            }
-                            const floorIdx = Math.max(0, Number(lock.floorIndex || 0));
-                            const dir = String(lock.direction || '').toLowerCase();
-                            const tgtIdx = target.findIndex(p => p && String(p.id) === String(pid));
-                            if (tgtIdx < 0) continue;
-
-                            if (dir === 'like' && tgtIdx > floorIdx) {
-                                moveIdInList(target, pid, floorIdx);
-                            } else if (dir === 'dislike' && tgtIdx < floorIdx) {
-                                moveIdInList(target, pid, floorIdx);
-                            }
-                        }
-                    } catch (e) { /* ignore no-backtrack guard failures */ }
 
                     // Never replace a visible non-empty grid with empty data (prevents black-out).
                     if (target.length === 0 && current.length > 0) return;
@@ -37160,24 +36455,10 @@ function setUploadModalHeader(title, subtitle) {
 
                     if (diffIdx === -1) return; // already aligned
 
-                    // Freshly published posts can transiently disappear/reappear across
-                    // snapshot sources. If reconcile diff touches one, defer this tick
-                    // so the post can settle in-place without grid-wide flicker.
-                    try {
-                        const nowTs = Date.now();
-                        const curDiffId = current[diffIdx] && current[diffIdx].id ? String(current[diffIdx].id) : '';
-                        const tgtDiffId = target[diffIdx] && target[diffIdx].id ? String(target[diffIdx].id) : '';
-                        if (isPublishedPostSettling(curDiffId, nowTs) || isPublishedPostSettling(tgtDiffId, nowTs)) {
-                            console.log(`⏸️ Reconcile: deferring diff @${diffIdx} while published post settles (${curDiffId || tgtDiffId})`);
-                            return;
-                        }
-                    } catch (e) { /* ignore settle guard errors */ }
-
                     // Second-layer movement guard: outside explicit vote actions,
                     // strongly limit automatic ML reshuffles so posts don't drift while reading.
                     try {
                         const voteActive = !!(window.voteTriggeredRerank && isVoteReorderStabilizationActive());
-                        const hasSettlingPublish = hasAnySettlingPublishedPost(current, Date.now()) || hasAnySettlingPublishedPost(target, Date.now());
                         if (voteActive) {
                             const now = Date.now();
                             const sinceVote = now - (window.lastVoteRerankAt || 0);
@@ -37211,11 +36492,6 @@ function setUploadModalHeader(title, subtitle) {
                         }
 
                         if (!voteActive) {
-                            // While a freshly published post is still settling, freeze
-                            // non-vote reconcile moves to prevent delayed full-grid flicker.
-                            if (hasSettlingPublish) {
-                                return;
-                            }
                             const allowMove = shouldAllowNonInteractiveMove(diffIdx, current, target);
                             if (!allowMove) {
                                 return;
@@ -37258,10 +36534,6 @@ function setUploadModalHeader(title, subtitle) {
                             if (addedAt && (Date.now() - addedAt) < 8000) {
                                 console.log(`⏸️ Reconcile: deferring remove of post (just added ${Date.now() - addedAt}ms ago)`);
                                 return; // skip this tick, retry next second
-                            }
-                            if (isPublishedPostSettling(removedPost.id, Date.now())) {
-                                console.log('⏸️ Reconcile: deferring remove of freshly published post during settle window');
-                                return;
                             }
                         }
                         current.splice(diffIdx, 1);
@@ -37341,23 +36613,11 @@ function setUploadModalHeader(title, subtitle) {
                     // Render the full affected range so the old slot gets cleared too.
                     // A moved post changes both its new slot and the slot it left behind.
                     if (typeof gridScroller.renderItemsInRange === 'function') {
-                        // Extra anti-flicker guard: for non-vote visual moves, throttle
-                        // how often we repaint moved ranges.
-                        const isVoteActiveNow = !!(window.voteTriggeredRerank && isVoteReorderStabilizationActive());
-                        if (!isVoteActiveNow && opKind === 'move') {
-                            const nowTs = Date.now();
-                            const lastVisualMoveAt = Number(window.__lastVisualMoveAt || 0);
-                            const minVisualMoveGapMs = 2500;
-                            if ((nowTs - lastVisualMoveAt) < minVisualMoveGapMs) {
-                                return;
-                            }
-                            window.__lastVisualMoveAt = nowTs;
-                        }
-
                         const startIdx = (movedFromIdx !== -1) ? Math.min(diffIdx, movedFromIdx) : diffIdx;
                         const endIdx = (movedFromIdx !== -1) ? Math.max(diffIdx, movedFromIdx) + 1 : diffIdx + 1;
-                        gridScroller.renderItemsInRange(startIdx, endIdx, { skipIdentityPass: true });
+                        gridScroller.renderItemsInRange(startIdx, endIdx);
                         applyGridTextFontSizeToVisiblePosts();
+                        try { if (typeof gridScroller.enforceStrictSlotIdentity === 'function') gridScroller.enforceStrictSlotIdentity(endIdx + 20); } catch(e) {}
                         try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
                     } else if (typeof gridScroller.setItems === 'function') {
                         // Fallback if API changes
@@ -37758,11 +37018,10 @@ function setUploadModalHeader(title, subtitle) {
              * This helps avoid confusing empty DOM slots after deletes and ensures
              * new posts are visible immedately without fighting the virtual scroller.
              */
-            function insertNewPostIntoGrid(contentKey, postData, options = {}) {
+            function insertNewPostIntoGrid(contentKey, postData) {
                 if (!contentKey) contentKey = currentUserId || 'temp-posts';
                 if (!postData || !postData.id) return;
                 if (!gridContent[contentKey]) gridContent[contentKey] = [];
-                const preserveAcrossKeys = !!options.preserveAcrossKeys;
 
                 // (repost insertion guard removed — reposts should create their own slot)
 
@@ -37770,82 +37029,32 @@ function setUploadModalHeader(title, subtitle) {
                 // An optimistic insert (own grid key) plus a realtime 'shared-posts'
                 // merge could otherwise place the same id under two keys, which the
                 // grid pool would then render twice. Strip the id from every other key.
-                if (!preserveAcrossKeys) {
-                    try {
-                        Object.keys(gridContent).forEach(k => {
-                            if (k === contentKey || !Array.isArray(gridContent[k])) return;
-                            gridContent[k] = gridContent[k].filter(p => !(p && p.id === postData.id));
-                        });
-                    } catch (e) { /* ignore */ }
-                }
+                try {
+                    Object.keys(gridContent).forEach(k => {
+                        if (k === contentKey || !Array.isArray(gridContent[k])) return;
+                        gridContent[k] = gridContent[k].filter(p => !(p && p.id === postData.id));
+                    });
+                } catch (e) { /* ignore */ }
 
                 // If already present in this key, update in place
                 const already = gridContent[contentKey].findIndex(p => p && p.id === postData.id);
-                if (already !== -1) {
-                    gridContent[contentKey][already] = postData;
-                    try { postData._keepGridPlacement = true; postData._lockedGridPlacement = true; } catch (e) {}
-                    return;
+                if (already !== -1) { gridContent[contentKey][already] = postData; return; }
+
+                // Determine insertion index: after top-3 initial slots and after any
+                // leading posts owned by the current user.
+                let insertAt = 3; // prefer after top-3
+                if (insertAt > gridContent[contentKey].length) insertAt = gridContent[contentKey].length;
+
+                // Advance insertAt past any leading posts that are owned by currentUserId
+                while (insertAt < gridContent[contentKey].length && gridContent[contentKey][insertAt] && (gridContent[contentKey][insertAt].ownerUid === currentUserId || gridContent[contentKey][insertAt].authId === currentUserId)) {
+                    insertAt++;
                 }
-
-                const insertAt = getRandomNewPostInsertIndex(gridContent[contentKey].length);
-
-                try { postData._keepGridPlacement = true; postData._lockedGridPlacement = true; } catch (e) {}
 
                 // Keep the list compact and ordered: splice at the insertion point.
                 // We intentionally avoid leaving sparse holes in the array because
                 // the virtual scroller renders by index.
                 gridContent[contentKey].splice(insertAt, 0, postData);
-                            function routeNewPostToLoadedGrids(postData, preferredKey) {
-                                try {
-                                    if (!postData || !postData.id) return;
-                                    const targetKeys = new Set();
-                                    const addKey = (key) => {
-                                        if (!key) return;
-                                        targetKeys.add(String(key));
-                                    };
-
-                                    addKey('shared-posts');
-                                    addKey(preferredKey || getActiveViewerFeedKey() || currentUserId);
-                                    addKey(currentUserId);
-
-                                    try {
-                                        if (postData.zoneTag) {
-                                            addKey(postData.zoneTag);
-                                            addKey(`zone:${postData.zoneTag}`);
-                                            addKey(`zone-${postData.zoneTag}`);
-                                        }
-                                        if (postData.county) {
-                                            addKey(postData.county);
-                                            addKey(`county:${postData.county}`);
-                                        }
-                                        if (postData.networkId) addKey(postData.networkId);
-                                        if (postData.authId) addKey(String(postData.authId));
-                                    } catch (e) { /* ignore */ }
-
-                                    try {
-                                        Object.keys(gridContent || {}).forEach(k => {
-                                            const arr = gridContent[k];
-                                            if (Array.isArray(arr) && arr.length > 0) addKey(k);
-                                        });
-                                    } catch (e) { /* ignore */ }
-
-                                    for (const key of Array.from(targetKeys)) {
-                                        try {
-                                            gridContent[key] = gridContent[key] || [];
-                                            if (isPostHiddenForViewer(postData, currentUserId)) continue;
-                                            if (typeof insertNewPostIntoGrid === 'function') {
-                                                insertNewPostIntoGrid(key, postData, { preserveAcrossKeys: true });
-                                            } else if (typeof ensureUniqueAndInsert === 'function') {
-                                                ensureUniqueAndInsert(key, postData);
-                                            } else {
-                                                gridContent[key].push(postData);
-                                            }
-                                            try { if (gridContent[key].length > 300) gridContent[key].length = 300; } catch(e){}
-                                        } catch (e) { console.warn('routeNewPostToLoadedGrids failed for key', key, e); }
-                                    }
-                                } catch (e) { console.warn('routeNewPostToLoadedGrids failed', e); }
-                            }
-                try { console.log(`➕ insertNewPostIntoGrid: inserted ${postData.id} at random index ${insertAt} in ${contentKey}`); } catch(e){}
+                try { console.log(`➕ insertNewPostIntoGrid: inserted ${postData.id} at index ${insertAt} in ${contentKey}`); } catch(e){}
 
                 // Dump debug state: gridContent sizes, scroller items, and first DOM boxes
                 try {
@@ -37896,9 +37105,13 @@ function setUploadModalHeader(title, subtitle) {
                     });
 
                     try {
-                        // Keep updates in-place: avoid wiping to [] first because that
-                        // forces a full blank/repaint cycle and causes visible flicker
-                        // when a single new post is inserted.
+                        // Force-clear the scroller internal items before setting new ones to avoid
+                        // stale index->DOM mappings when slots were removed previously.
+                        try {
+                            if (typeof gridScroller.setItems === 'function') gridScroller.setItems([]);
+                            else if (Array.isArray(gridScroller.items)) gridScroller.items = [];
+                        } catch(e) { /* ignore */ }
+
                         if (typeof gridScroller.setItems === 'function') {
                             gridScroller.setItems(all);
                         } else if (Array.isArray(gridScroller.items)) {
@@ -37910,9 +37123,10 @@ function setUploadModalHeader(title, subtitle) {
                             }
                         } catch (e) { /* ignore */ }
                         try { forceClearStaleInnerHTML(480); } catch(e){}
-                        // Single refresh pass is enough after strict slot identity checks.
+                        // Force multiple refresh strategies to ensure internal indexes sync
                         try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
-                        try { if (typeof gridScroller.enforceStrictSlotIdentity === 'function') gridScroller.enforceStrictSlotIdentity(480); } catch(e){}
+                        try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
+                        try { if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(0); } catch(e){}
                         try { console.log('🔁 rebuildGridScrollerFromGridContent: rebuilt scroller with', all.length, 'items; gridScroller.items=', (gridScroller.items && gridScroller.items.length) || '(unknown)'); } catch(e){}
                     } catch (e) {
                         console.warn('rebuildGridScrollerFromGridContent.apply failed', e);
@@ -37929,9 +37143,7 @@ function setUploadModalHeader(title, subtitle) {
         window.requestGridUpdate = function(reason) {
             try {
                 const now = Date.now();
-                const reasonText = String(reason || '').toLowerCase();
-                const isUrgentPostPublish = /post-publish|publish-queued|new-post|post-create/.test(reasonText);
-                const MIN_MS = isUrgentPostPublish ? 0 : (isFastBulkLoadAllowed() ? 10 : 1000); // allow fast updates after refresh/loc commit
+                const MIN_MS = isFastBulkLoadAllowed() ? 10 : 1000; // allow fast updates after refresh/loc commit
                 if (now - (window._lastIncrementalRender || 0) < MIN_MS) {
                     // schedule a deferred incremental render at MIN_MS boundary
                     if (window._gridUpdateTimeout) clearTimeout(window._gridUpdateTimeout);
@@ -37949,14 +37161,9 @@ function setUploadModalHeader(title, subtitle) {
         function renderGridIncremental(reason) {
             try {
                 const now = Date.now();
-                const reasonText = String(reason || '').toLowerCase();
-                const isUrgentPostPublish = /post-publish|publish-queued|new-post|post-create/.test(reasonText);
-                if (isVoteMovePaintHoldActive() && !isUrgentPostPublish) {
-                    return;
-                }
                 // enforce throttle as a safety net (normally 900ms). Reduce to
                 // ~10ms when fast bulk loading is allowed (hard refresh / location commit).
-                const safetyThreshold = isUrgentPostPublish ? 0 : (isFastBulkLoadAllowed() ? 9 : 900);
+                const safetyThreshold = isFastBulkLoadAllowed() ? 9 : 900;
                 if (now - (window._lastIncrementalRender || 0) < safetyThreshold) return;
                 window._lastIncrementalRender = now;
                 console.log(`⚡ incremental render triggered (${reason || 'unspecified'})`);
@@ -37965,18 +37172,6 @@ function setUploadModalHeader(title, subtitle) {
                 if (!gridScroller || typeof gridScroller.setItems !== 'function') {
                     try { renderGrid(); } catch (e) { console.warn('incremental->renderGrid failed', e); }
                     return;
-                }
-
-                // New post publish path: update visible scroller immediately from
-                // local gridContent (already optimistically inserted) without waiting
-                // for broader recompute cycles.
-                if (isUrgentPostPublish && typeof rebuildGridScrollerFromGridContent === 'function') {
-                    try {
-                        rebuildGridScrollerFromGridContent();
-                        return;
-                    } catch (e) {
-                        console.warn('urgent publish incremental rebuild failed', e);
-                    }
                 }
 
                 // Preferred path: recompute latestSortedPosts quickly and set pendingSortedPosts
@@ -38695,10 +37890,29 @@ function setUploadModalHeader(title, subtitle) {
                     baseIds.push(p.id);
                 }
 
-                // Desired index from fresh ranking.
+                // Desired index from fresh ranking, but clamp movement so one vote
+                // cannot teleport a post through large portions of the feed.
                 const desiredIndex = Math.max(0, next.findIndex(p => p && p.id === votedPostId));
                 const oldIndex = Math.max(0, prev.findIndex(p => p && p.id === votedPostId));
-                const targetIndex = desiredIndex;
+                const votedPost = byId.get(votedPostId);
+                const likes = Number(votedPost && votedPost.likes) || 0;
+                const dislikes = Number(votedPost && votedPost.dislikes) || 0;
+                const net = likes - dislikes;
+
+                // A vote is an explicit ML update, so let meaningful engagement move
+                // farther than an adjacent swap while still preventing whole-feed churn.
+                // Positive posts can climb faster; negative posts can fall faster.
+                let maxStepUp = 2;
+                let maxStepDown = 2;
+                if (net >= 3) maxStepUp = 4;
+                if (net >= 8) maxStepUp = 8;
+                if (net >= 15) maxStepUp = 12;
+                if (net < 0) maxStepDown = Math.min(12, 3 + Math.abs(net));
+
+                const MAX_STEP = desiredIndex < oldIndex ? maxStepUp : maxStepDown;
+                const minAllowed = Math.max(0, oldIndex - MAX_STEP);
+                const maxAllowed = Math.min(baseIds.length, oldIndex + MAX_STEP);
+                const targetIndex = Math.max(minAllowed, Math.min(maxAllowed, desiredIndex));
 
                 const finalIds = baseIds.slice();
                 finalIds.splice(targetIndex, 0, votedPostId);
@@ -38729,7 +37943,7 @@ function setUploadModalHeader(title, subtitle) {
                     }
                 }
 
-                console.log(`🧊 Vote reorder stabilization: old=${oldIndex} desired=${desiredIndex} final=${targetIndex}`);
+                console.log(`🧊 Vote reorder stabilization: old=${oldIndex} desired=${desiredIndex} final=${targetIndex} net=${net} maxStep=${MAX_STEP}`);
                 return stabilized;
             } catch (e) {
                 console.warn('stabilizeVoteDrivenReorder failed:', e);
@@ -38981,31 +38195,6 @@ function setUploadModalHeader(title, subtitle) {
                     rankedSnapshot = applyContentFreshnessWaterfall(rankedSnapshot, 'incremental');
                 } catch (e) {
                     console.warn('incremental freshness pass failed:', e);
-                }
-
-                // Keep newly published posts in the live snapshot until a real
-                // refresh rebuilds the feed. This prevents reconcile from
-                // pruning them back out after they are inserted into the grid.
-                try {
-                    const lockedPosts = [];
-                    const lockedSeen = new Set(rankedSnapshot.map(p => p && p.id).filter(Boolean));
-                    for (const key of Object.keys(gridContent || {})) {
-                        const arr = gridContent[key];
-                        if (!Array.isArray(arr)) continue;
-                        for (const p of arr) {
-                            if (!p || !p.id) continue;
-                            if (!(p._keepGridPlacement || p._lockedGridPlacement)) continue;
-                            if (lockedSeen.has(p.id)) continue;
-                            lockedSeen.add(p.id);
-                            lockedPosts.push(p);
-                        }
-                    }
-                    if (lockedPosts.length > 0) {
-                        rankedSnapshot = mergeUniquePosts(lockedPosts, rankedSnapshot);
-                        console.log(`🧷 Snapshot lock: preserved ${lockedPosts.length} published post(s) in live feed snapshot`);
-                    }
-                } catch (e) {
-                    console.warn('locked-post snapshot preservation failed', e);
                 }
 
                 try {
@@ -40135,8 +39324,34 @@ function setUploadModalHeader(title, subtitle) {
                 gridContent[area].push(post);
             });
             
-            // Do not preserve a special user bucket of owned posts. All posts
-            // should flow through the same area and ranking logic.
+            // CRITICAL: Also keep posts indexed by userId so vote updates still work
+            // This dual-indexing approach allows both the algorithm to work AND vote sync to continue
+            if (preservedUserContent.length > 0) {
+                gridContent[currentUserId] = preservedUserContent.map(oldPost => {
+                    // Find the same post in allPosts (which may have updated vote counts)
+                    const updatedPost = allPosts.find(p => p.id === oldPost.id);
+                    
+                    // CRITICAL SAFETY: Never lose content during merge
+                    if (updatedPost) {
+                        // Preserve content from oldPost if updatedPost is missing it
+                        if (!updatedPost.content && oldPost.content) {
+                            updatedPost.content = oldPost.content;
+                        }
+                        // Preserve media fields (photoURL/imageData/mediaType/description) from the local preserved copy
+                        try {
+                            if ((!updatedPost.photoURL || updatedPost.photoURL === '') && oldPost.photoURL) updatedPost.photoURL = oldPost.photoURL;
+                            if ((!updatedPost.imageData || updatedPost.imageData === '') && oldPost.imageData) updatedPost.imageData = oldPost.imageData;
+                            if ((!updatedPost.mediaType || updatedPost.mediaType === '') && oldPost.mediaType) updatedPost.mediaType = oldPost.mediaType;
+                            if ((!updatedPost.description || updatedPost.description === '') && oldPost.description) updatedPost.description = oldPost.description;
+                        } catch (e) { /* ignore field merge errors */ }
+                        return updatedPost;
+                    } else {
+                        // If post not found in allPosts, keep original
+                        console.warn(`⚠️ Post ${oldPost.id} not found in allPosts, keeping original`);
+                        return oldPost;
+                    }
+                });
+            }
 
             // Ensure any posts missing media fields inherit them from postCache
             try {
@@ -40233,8 +39448,6 @@ function setUploadModalHeader(title, subtitle) {
             console.log(`   ✅ Distribution applied: ${displayPosts.length} posts blended`);
             console.log(`   📍 Local: ${displayPosts.filter(p => p.county === userAreaTag).length} | 🌍 Global: ${displayPosts.filter(p => p.county !== userAreaTag).length}`);
             
-            // Refresh location grid context first, then add proximity badges.
-            try { if (typeof refreshCurrentGridContext === 'function') refreshCurrentGridContext('pre-addProximityBadge'); } catch (e) {}
             // Add proximity badges to all posts
             displayPosts = displayPosts.map(post => addProximityBadge(post, currentGrid));
 
@@ -40484,6 +39697,12 @@ function setUploadModalHeader(title, subtitle) {
 
             displayPosts = displayPosts.filter(post => {
                 if (!post) return false;
+                // Always show user's own posts
+                const isOwnPost = post.authId === currentUserId || 
+                                 post.userId === currentUserId || 
+                                 post.createdBy === currentUserId;
+                if (isOwnPost) { post._distantFiller = false; return true; }
+
                 // KEEP: Post's area tag matches user's area exactly
                 if (post.county === userAreaTag) { post._distantFiller = false; return true; }
 
@@ -41273,64 +40492,6 @@ function setUploadModalHeader(title, subtitle) {
                 }
             } catch (e) {
                 console.warn('⚠️ Positivity threshold insertion failed:', e);
-            }
-
-            // ========================================================================
-            // ✅ FINAL AUTHORITATIVE LOCAL SORT
-            // Requirement: local-area posts must appear top-to-bottom in strict net-like
-            // order (highest likes-dislikes at top, lowest at the bottom of local block).
-            // Non-local posts keep their relative order and remain after local posts.
-            // ========================================================================
-            try {
-                if (Array.isArray(sortedPosts) && sortedPosts.length > 1) {
-                    const _localKey = String(userAreaTag || window.latestUserAreaTag || currentAreaName || currentZoneTag || '').trim();
-                    const _norm = (v) => String(v || '').trim().toLowerCase();
-                    const _localKeyNorm = _norm(_localKey);
-
-                    const _isLocalPost = (p) => {
-                        if (!p || !p.id) return false;
-                        const prox = _norm(p.proximityClass);
-                        if (prox === 'local' || prox === 'community' || prox === 'nearby') return true;
-                        if (_localKeyNorm) {
-                            const pArea = _norm(p.county || p.zoneTag || p.area || p.region || '');
-                            if (pArea && pArea === _localKeyNorm) return true;
-                        }
-                        return false;
-                    };
-
-                    const _netSort = (a, b) => {
-                        const netA = (Number((a && a.likes) || 0) - Number((a && a.dislikes) || 0));
-                        const netB = (Number((b && b.likes) || 0) - Number((b && b.dislikes) || 0));
-                        if (netA !== netB) return netB - netA;
-                        const likesA = Number((a && a.likes) || 0);
-                        const likesB = Number((b && b.likes) || 0);
-                        if (likesA !== likesB) return likesB - likesA;
-                        const dislikesA = Number((a && a.dislikes) || 0);
-                        const dislikesB = Number((b && b.dislikes) || 0);
-                        if (dislikesA !== dislikesB) return dislikesA - dislikesB;
-                        const timeA = Number((a && a.timestamp) || 0);
-                        const timeB = Number((b && b.timestamp) || 0);
-                        return timeB - timeA;
-                    };
-
-                    const _local = [];
-                    const _nonLocal = [];
-                    for (const p of sortedPosts) {
-                        if (_isLocalPost(p)) _local.push(p);
-                        else _nonLocal.push(p);
-                    }
-
-                    if (_local.length > 0) {
-                        _local.sort(_netSort);
-                        sortedPosts = [..._local, ..._nonLocal];
-                        const topNet = Number((_local[0] && _local[0].likes) || 0) - Number((_local[0] && _local[0].dislikes) || 0);
-                        const bottomLocal = _local[_local.length - 1] || null;
-                        const bottomNet = Number((bottomLocal && bottomLocal.likes) || 0) - Number((bottomLocal && bottomLocal.dislikes) || 0);
-                        console.log(`✅ FINAL LOCAL SORT: ${_local.length} local posts ordered by net likes (${topNet} → ${bottomNet})`);
-                    }
-                }
-            } catch (e) {
-                console.warn('⚠️ Final authoritative local sort failed:', e);
             }
 
             // Refresh latest snapshot after position-1 rotation
@@ -42330,7 +41491,7 @@ function setUploadModalHeader(title, subtitle) {
         function updateCharCount() {
             const postText = document.getElementById('postText').value;
             const charCount = postText.length;
-            const maxChars = 137;
+            const maxChars = 200;
             const charCountDisplay = document.getElementById('charCountDisplay');
             const charError = document.getElementById('charError');
             const uploadBtn = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
@@ -42368,7 +41529,7 @@ function setUploadModalHeader(title, subtitle) {
                 }
             }
             
-            // Prevent input over 137 characters
+            // Prevent input over 200 characters
             if (charCount > maxChars) {
                 const postTextElement = document.getElementById('postText');
                 postTextElement.value = postTextElement.value.substring(0, maxChars);
@@ -43481,7 +42642,7 @@ function setUploadModalHeader(title, subtitle) {
                     const contentKey = currentUserId || 'pending-local';
                     if (!gridContent[contentKey]) gridContent[contentKey] = [];
                     if (!gridContent[contentKey].some(p => p && p.id === postData.id)) {
-                        try { routeNewPostToLoadedGrids(postData, contentKey); } catch(e) { gridContent[contentKey].push(postData); }
+                        try { insertNewPostIntoGrid(contentKey, postData); } catch(e) { gridContent[contentKey].push(postData); }
                     } else {
                         console.log(`  ↩️ Skipping duplicate pending push for id ${postData.id}`);
                     }
@@ -43497,13 +42658,16 @@ function setUploadModalHeader(title, subtitle) {
                         console.error('Failed to enqueue post for retry:', e);
                     }
 
-                    // Update UI immediately with incremental scheduler to avoid
-                    // whole-grid repaint flicker on publish failure queueing.
-                    try {
-                        if (typeof requestGridUpdate === 'function') requestGridUpdate('publish-queued-urgent');
-                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('publish-queued');
-                        else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
-                    } catch (e) { /* ignore publish-queued UI update errors */ }
+                    // Update UI immediately and stop save flow
+                    if (typeof renderGrid === 'function') {
+                        window.lastRenderGridTime = 0; // bypass 30s throttle for user publish action
+                        window.postPublishImmediateRefresh = true;
+                        try {
+                            renderGrid();
+                        } finally {
+                            window.postPublishImmediateRefresh = false;
+                        }
+                    }
                     return; // Exit save flow — post will be synced later
                 }
                 
@@ -43596,32 +42760,8 @@ function setUploadModalHeader(title, subtitle) {
                 if (_alreadyPresent) {
                     console.log(`  ↩️ Skipping duplicate push to gridContent[${contentKey}] - id already present: ${postData.id}`);
                 } else {
-                    try { routeNewPostToLoadedGrids(postData, contentKey); } catch(e) { gridContent[contentKey].push(postData); }
+                    try { insertNewPostIntoGrid(contentKey, postData); } catch(e) { gridContent[contentKey].push(postData); }
                 }
-                try {
-                    window._lastIncrementalRender = 0;
-                    if (typeof rebuildGridScrollerFromGridContent === 'function' && gridScroller) rebuildGridScrollerFromGridContent();
-                    else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
-                } catch (e) { console.warn('forced publish repaint failed', e); }
-                // Mark publish-settle timestamp so reconciler won't immediately
-                // yank/replace this brand-new post while feeds converge.
-                try {
-                    window.__publishedPostSettleAt = window.__publishedPostSettleAt || {};
-                    window.__publishedPostSettleAt[postData.id] = Date.now();
-                    window.__reconcilerPostAddedAt = window.__reconcilerPostAddedAt || {};
-                    window.__reconcilerPostAddedAt[postData.id] = Date.now();
-                } catch (e) { /* ignore settle marker failures */ }
-                // Show the post immediately in the grid without waiting for
-                // later scheduled refresh cycles.
-                try {
-                    const _now = Date.now();
-                    const _lastUrgent = Number(window.__lastUrgentPublishGridUpdateAt || 0);
-                    if ((_now - _lastUrgent) > 1200) {
-                        window.__lastUrgentPublishGridUpdateAt = _now;
-                        if (typeof requestGridUpdate === 'function') requestGridUpdate('post-publish-urgent');
-                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-publish-urgent');
-                    }
-                } catch (e) { console.warn('urgent local post insert refresh failed', e); }
                 // Ensure grid rendering always detects media: copy photoURL into imageData
                 // for legacy or inconsistent consumers that check imageData.
                 try {
@@ -43633,11 +42773,7 @@ function setUploadModalHeader(title, subtitle) {
                 postCache[postId] = postData;
                 console.log(`  ✅ Pushed postData to gridContent`);
                 console.log(`  gridContent[${contentKey}] length AFTER: ${gridContent[contentKey].length}`);
-                try {
-                    const _tail = gridContent[contentKey][gridContent[contentKey].length - 1] || {};
-                    const _preview = String(_tail.content || _tail.text || _tail.description || _tail.photoURL || _tail.videoURL || '').substring(0, 30);
-                    console.log(`  Post in grid: ${_preview}`);
-                } catch (e) { /* non-fatal debug log */ }
+                console.log(`  Post in grid: ${gridContent[contentKey][gridContent[contentKey].length - 1].content.substring(0, 30)}`);
                 
                 console.log(`✅ Added to own grid immediately - user will see post now`);
                 console.log(`   📝 Own grid now has ${gridContent[contentKey].length} posts`);
@@ -43765,20 +42901,16 @@ function setUploadModalHeader(title, subtitle) {
                         console.warn('⚠️ Failed to reset composer badge UI:', e);
                     }
 
-                    // Request incremental update so the new post appears without
-                    // forcing a full-grid repaint (prevents all-slot flicker).
-                    console.log('  🎨 Requesting incremental grid update for new post...');
+                    // NOW RE-RENDER GRID to show the new post immediately
+                    console.log('  🎨 Re-rendering grid to show new post...');
+                    window.lastRenderGridTime = 0; // bypass 30s throttle for publish action
+                    window.postPublishImmediateRefresh = true;
                     try {
-                        const _now = Date.now();
-                        const _lastUrgent = Number(window.__lastUrgentPublishGridUpdateAt || 0);
-                        if ((_now - _lastUrgent) > 1200) {
-                            window.__lastUrgentPublishGridUpdateAt = _now;
-                            if (typeof requestGridUpdate === 'function') requestGridUpdate('post-publish-urgent');
-                            else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-publish-urgent');
-                        }
-                        else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
-                    } catch (e) { console.warn('incremental publish refresh failed', e); }
-                    console.log('  ✅ Incremental grid update requested - new post should be visible');
+                        renderGrid();
+                    } finally {
+                        window.postPublishImmediateRefresh = false;
+                    }
+                    console.log('  ✅ Grid re-rendered - new post should be visible');
                     // After every publish: run recomputeAndApplyBadges() once the DOM settles.
                     // This handles two cases:
                     //   1. The new post itself has a boost/sell badge — pill must be created.
@@ -46354,7 +45486,6 @@ function setUploadModalHeader(title, subtitle) {
                         // Without this the modal (separate <script> scope) only set window.* and the
                         // grid never re-sorted. Top global posts stay via the sentiment-first sort.
                         try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: sel || null, label: (sel && (sel.label || sel.name || sel.display)) || window.latestUserAreaTag || null }); } catch(e) {}
-                        try { if (typeof window.refreshCurrentGridContext === 'function') window.refreshCurrentGridContext('modal-commit'); } catch (e) {}
 
                         // ── FULL GRID RESET FOR NEW LOCATION ─────────────────────────────
                         // Delegate to the window-exposed helper that lives in the same scope
@@ -46408,7 +45539,6 @@ function setUploadModalHeader(title, subtitle) {
                         // 🔁 Return Home: sync the lexical location to the restored coords so the
                         // grid re-ranks back to the home location on the renderGrid below.
                         try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: (cacheObj && cacheObj.lat != null && cacheObj.lon != null) ? cacheObj : null, userSelected: false }); } catch(e) {}
-                        try { if (typeof window.refreshCurrentGridContext === 'function') window.refreshCurrentGridContext('modal-restore-home'); } catch (e) {}
 
                         // ── FULL GRID RESET FOR HOME LOCATION ────────────────────────────
                         // Wipe content and resubscribe so the feed refills ranked for the
