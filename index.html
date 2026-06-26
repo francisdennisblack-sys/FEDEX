@@ -44,73 +44,28 @@
     </script>
     <script>
         (function enforceChangeLocationsLabel(){
-            <span class="cp-globe" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;transition:none;opacity:1;pointer-events:none;">🌍</span>
-            <span class="cp-plus" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;transition:none;opacity:0;pointer-events:none;">
-                    try {
-                        b.textContent = 'change locations';
-                        b.setAttribute('aria-label','change locations');
-                        b.style.setProperty('background', '#ffffff', 'important');
-                        b.style.setProperty('color', '#0f172a', 'important');
-                    } catch(e){}
-                }
+            function setLabel(b) {
+                if (!b) return;
+                try {
+                    b.textContent = 'change locations';
+                    b.setAttribute('aria-label', 'change locations');
+                    b.style.setProperty('background', '#ffffff', 'important');
+                    b.style.setProperty('color', '#0f172a', 'important');
+                } catch (e) { /* ignore */ }
+            }
+
+            try {
                 const btn = document.getElementById('changeLocationBtn');
                 if (btn) setLabel(btn);
 
                 const observer = new MutationObserver(() => {
                     const b = document.getElementById('changeLocationBtn');
-                    if (b && (String(b.textContent||'').trim().toLowerCase() !== 'change locations')) setLabel(b);
-                });
-
-            const createdAt = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(post) : (Number(post.timestamp) || 0);
-            // If the post is an optimistic local insert (just created client-side)
-            // treat it as brand-new so the NEW badge appears immediately.
-            let postAge = now - (createdAt || 0);
-            if ((!createdAt || createdAt === 0) && post && post._optimistic) {
-                postAge = 0;
-            }
-                            overlay.addEventListener('click', function(e){
-                                try {
-                                    vidEl.controls = true;
-                                    vidEl.muted = true;
-                                    vidEl.defaultMuted = true;
-                                    const p = vidEl.play();
-                                    if (p && typeof p.then === 'function') p.catch(()=>{});
-                                    overlay.style.display = 'none';
-                                } catch (err) { /* ignore */ }
-                            });
-
-                            // Immediately start playback muted so users see motion
-                            try {
-                                vidEl.muted = true;
-                                vidEl.defaultMuted = true;
-                                const p = vidEl.play();
-                                if (p && typeof p.then === 'function') {
-                                    p.then(() => {
-                                        try { overlay.style.display = 'none'; } catch(e){}
-                                    }).catch(() => {
-                                        // If autoplay prevented, still hide the overlay so user
-                                        // can tap the native play control which will start playback.
-                                        try { overlay.style.display = 'none'; } catch(e){}
-                                    });
-                                } else {
-                                    // If play() didn't return a promise, still hide overlay
-                                    try { overlay.style.display = 'none'; } catch(e){}
-                                }
-                                // Keep native controls hidden during the muted preview;
-                                // they only appear when the user taps the video itself.
-                                vidEl.addEventListener('playing', () => { try { overlay.style.display = 'none'; } catch(e){} }, { once: true });
-                            } catch (e) {
-                                try { overlay.style.display = 'none'; } catch(e){}
-                            }
-                        }
-                                const actions = node.querySelector && node.querySelector('.change-grid-actions');
-                                if (actions) fixActions(actions);
-                            }
-                        }
+                    if (b && String(b.textContent || '').trim().toLowerCase() !== 'change locations') {
+                        setLabel(b);
                     }
                 });
-                obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
-            } catch (e) {}
+                observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
+            } catch (e) { /* ignore */ }
         })();
     </script>
 
@@ -17026,6 +16981,8 @@
         let refreshInterval = null;
         let firebaseUnsubscribe = null;
         let isPostingInProgress = false; // Prevent duplicate submissions
+        let postingStartedAt = 0; // Tracks active post attempt start time for stale-lock recovery
+        const POSTING_STUCK_TIMEOUT_MS = 45000;
         let spotlightPostId = null; // Current post being spotlighted
         let spotlightInterval = null; // Spotlight rotation timer
         let onlineUserCount = 0; // Track current online user count for dynamic NEW badge duration
@@ -19794,6 +19751,7 @@ function setUploadModalHeader(title, subtitle) {
                 // Always clear posting state and restore submit button so user can retry
                 try {
                     isPostingInProgress = false;
+                    postingStartedAt = 0;
                     const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
                     if (submitButton) {
                         submitButton.disabled = false;
@@ -41576,9 +41534,24 @@ function setUploadModalHeader(title, subtitle) {
             } catch (err) {
                 console.warn('⚠️ Failed to verify user post count, allowing post by default', err);
             }
-            // Prevent duplicate submissions
+            // Prevent duplicate submissions with stale-lock recovery.
             if (isPostingInProgress) {
-                return;
+                const elapsed = postingStartedAt ? (Date.now() - postingStartedAt) : Number.MAX_SAFE_INTEGER;
+                if (elapsed > POSTING_STUCK_TIMEOUT_MS) {
+                    console.warn(`⚠️ Recovered stale posting lock after ${elapsed}ms`);
+                    isPostingInProgress = false;
+                    postingStartedAt = 0;
+                    const staleBtn = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
+                    if (staleBtn) {
+                        staleBtn.disabled = false;
+                        staleBtn.style.opacity = '1';
+                        staleBtn.style.cursor = 'pointer';
+                    }
+                    try { showNotification('Recovered stuck send state. Please tap Post again.'); } catch (_) {}
+                } else {
+                    try { showNotification('Post is already sending. Please wait…'); } catch (_) {}
+                    return;
+                }
             }
             
             // Prevent posting while media is being processed
@@ -41700,6 +41673,7 @@ function setUploadModalHeader(title, subtitle) {
 
             // Mark as posting in progress
             isPostingInProgress = true;
+            postingStartedAt = Date.now();
             
             // Disable the submit button
             const submitButton = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
@@ -42668,6 +42642,7 @@ function setUploadModalHeader(title, subtitle) {
             } finally {
                 // Always reset the posting flag and media type
                 isPostingInProgress = false;
+                postingStartedAt = 0;
                 selectedMediaType = null;
                 // Always close the upload-progress overlay (media posts only ever showed it).
                 try { hideMediaLoadingOverlay(); } catch (e) {}
