@@ -7129,6 +7129,56 @@
         // Expose cache system globally
         window.postCacheSystem = postCacheSystem;
 
+        function getPersistedDeletedPostIds() {
+            try {
+                const raw = localStorage.getItem('deletedPostIds');
+                const list = raw ? JSON.parse(raw) : [];
+                return Array.isArray(list) ? list.filter(Boolean).map(String) : [];
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function persistDeletedPostId(postId) {
+            try {
+                if (!postId) return;
+                const id = String(postId);
+                const current = new Set(getPersistedDeletedPostIds());
+                current.add(id);
+                localStorage.setItem('deletedPostIds', JSON.stringify(Array.from(current)));
+            } catch (e) { /* ignore */ }
+        }
+
+        function purgePostFromCachedAllPosts(postId) {
+            try {
+                if (!postId) return;
+                const id = String(postId);
+                const raw = localStorage.getItem('cachedAllPosts');
+                if (!raw) return;
+                const arr = JSON.parse(raw);
+                if (!Array.isArray(arr)) return;
+                const filtered = arr.filter(p => !(p && String(p.id) === id));
+                if (filtered.length !== arr.length) {
+                    localStorage.setItem('cachedAllPosts', JSON.stringify(filtered));
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        function markPostDeletedEverywhere(postId) {
+            try {
+                if (!postId) return;
+                const id = String(postId);
+                window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
+                window.globallyDeletedPostIds.add(id);
+                window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
+                window.pendingRemovedPosts.add(id);
+                persistDeletedPostId(id);
+                purgePostFromCachedAllPosts(id);
+                try { if (typeof postCache === 'object' && postCache && postCache[id]) delete postCache[id]; } catch(e){}
+                try { if (window.latestSortedPosts && Array.isArray(window.latestSortedPosts)) window.latestSortedPosts = window.latestSortedPosts.filter(p => !(p && String(p.id) === id)); } catch(e){}
+            } catch (e) { /* ignore */ }
+        }
+
         // Prune any expired entries from the legacy `cachedAllPosts` localStorage
         // to avoid briefly flashing stale posts on startup. Uses same 24h TTL.
         (function pruneCachedAllPostsOnStartup(){
@@ -7139,8 +7189,10 @@
                 if (!Array.isArray(arr) || arr.length === 0) return;
                 const now = Date.now();
                 const TTL = 24 * 60 * 60 * 1000;
+                const deletedIds = new Set(getPersistedDeletedPostIds());
                 const fresh = arr.filter(p => {
                     try {
+                        if (p && p.id && deletedIds.has(String(p.id))) return false;
                         const ts = Number(p && (p.timestamp || p.createdAt || p.postedAt) || 0);
                         if (!ts) return true;
                         return (now - ts) <= TTL;
@@ -16749,6 +16801,7 @@
             if (new Set(getHiddenReportedPosts()).has(id)) return true;
             if (new Set(getDeletedOwnPosts()).has(id)) return true;
             if (new Set(getPendingDeletedPosts()).has(id)) return true;
+            if (new Set(getPersistedDeletedPostIds()).has(id)) return true;
 
             return false;
         }
@@ -20076,7 +20129,8 @@ function setUploadModalHeader(title, subtitle) {
                             if (raw) {
                                 const arr = JSON.parse(raw);
                                 if (Array.isArray(arr)) {
-                                    arr.forEach(p => { if (p && p.id) cachedPostsMap[p.id] = p; });
+                                    const deletedIds = new Set(getPersistedDeletedPostIds());
+                                    arr.forEach(p => { if (p && p.id && !deletedIds.has(String(p.id))) cachedPostsMap[p.id] = p; });
                                 }
                             }
                         } catch (e) { /* ignore parse errors */ }
@@ -20430,14 +20484,16 @@ function setUploadModalHeader(title, subtitle) {
                             }
                         } catch (e) {}
                     } catch (e) { console.warn('Failed to merge local badge queues into posts', e); }
-                    try { if (typeof __orig_localStorage_getItem === 'function') localStorage.getItem = __orig_localStorage_getItem; } catch(e) { /* ignore */ }
+                        try { if (typeof __orig_localStorage_getItem === 'function') localStorage.getItem = __orig_localStorage_getItem; } catch(e) { /* ignore */ }
 
                     // 💾 AGGRESSIVE PERSISTENCE: Save posts to localStorage immediately
                     if (allPosts.length > 0) {
                         try {
-                            localStorage.setItem('cachedAllPosts', JSON.stringify(allPosts));
+                            const deletedIds = new Set(getPersistedDeletedPostIds());
+                            const filteredPosts = allPosts.filter(p => !(p && p.id && deletedIds.has(String(p.id))));
+                            localStorage.setItem('cachedAllPosts', JSON.stringify(filteredPosts));
                             localStorage.setItem('postsLastSaved', new Date().toISOString());
-                            console.log(`✅ Saved ${allPosts.length} posts to localStorage`);
+                            console.log(`✅ Saved ${filteredPosts.length} posts to localStorage`);
                         } catch (e) {
                             console.warn('⚠️ Could not save posts to localStorage:', e.message);
                         }
@@ -20715,6 +20771,7 @@ function setUploadModalHeader(title, subtitle) {
                 throw error;
             }
             // Best-effort client-side purge so the current runtime doesn't retain any traces.
+            try { markPostDeletedEverywhere(postId); } catch (e) { /* ignore */ }
             try { if (typeof purgeDeletedPostFromDOM === 'function') purgeDeletedPostFromDOM(postId); } catch (e) { /* ignore */ }
         }
 
@@ -20808,10 +20865,7 @@ function setUploadModalHeader(title, subtitle) {
                         console.log('📣 Received post_removed tombstone for', postId, '→ purging immediately');
                         // Track + immediately purge so the deletion is visible
                         // to ALL clients without requiring a manual refresh.
-                        window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
-                        window.pendingRemovedPosts.add(postId);
-                        window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
-                        window.globallyDeletedPostIds.add(postId);
+                        markPostDeletedEverywhere(postId);
 
                         // If the tombstone includes repost/root metadata, atomically decrement the root's repostCount
                         try {
@@ -20917,10 +20971,7 @@ function setUploadModalHeader(title, subtitle) {
                             if (!postId) return;
                             console.log('🗑️ posts/ onChildRemoved fired for', postId, '→ purging all clients');
                             // Mark globally deleted so onValue can never resurrect it
-                            window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
-                            window.globallyDeletedPostIds.add(postId);
-                            window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
-                            window.pendingRemovedPosts.add(postId);
+                            markPostDeletedEverywhere(postId);
                             // Drop from in-memory caches
                             try { if (postCache) delete postCache[postId]; } catch(e){}
                             try {
@@ -24156,10 +24207,7 @@ function setUploadModalHeader(title, subtitle) {
                     localStorage.setItem('pendingDeletedPosts', JSON.stringify(pending));
                 }
                 // Tombstone locally so realtime snapshots never resurrect this post.
-                window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set();
-                window.globallyDeletedPostIds.add(deletedPostId);
-                window.pendingRemovedPosts = window.pendingRemovedPosts || new Set();
-                window.pendingRemovedPosts.add(deletedPostId);
+                markPostDeletedEverywhere(deletedPostId);
             } catch(e) { console.warn('pendingDeletedPosts write failed', e); }
 
             // If this deleted post is a repost (we have it locally), optimistically
@@ -36400,7 +36448,8 @@ function setUploadModalHeader(title, subtitle) {
                                 console.log('   🔁 No local posts available — fetching posts directly from Firebase as fallback');
                                 const fetched = await getPostsFromFirebase();
                                 if (Array.isArray(fetched) && fetched.length > 0) {
-                                    allFirebasePosts = fetched;
+                                    const deletedIds = new Set(getPersistedDeletedPostIds());
+                                    allFirebasePosts = fetched.filter(p => !(p && p.id && deletedIds.has(String(p.id))));
                                     console.log(`   ✅ Fetched ${allFirebasePosts.length} posts from Firebase fallback`);
                                     try { localStorage.setItem('cachedAllPosts', JSON.stringify(allFirebasePosts)); } catch(e){}
                                 }
