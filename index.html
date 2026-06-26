@@ -15901,7 +15901,8 @@
         });
 
         const initialGridSize = 12; // Start with 12 squares visible
-        const USER_VISIBLE_POST_GOAL = 140; // Goal amount of posts users should see
+        const USER_VISIBLE_POST_MIN = 100; // Minimum posts users should see
+        const USER_VISIBLE_POST_GOAL = 140; // Maximum goal posts users should see
         let maxGridSize = 2000; // Pre-create 2000 boxes total for virtually unlimited scrolling
         let isConnected = false;
         let gridContent = {}; // Store posts by user ID instead of POI
@@ -32055,14 +32056,14 @@ function setUploadModalHeader(title, subtitle) {
          *   2      asking for content → local-first, top up with older local
          *   3+     cross-area mode    → up to 50% non-local, but throttled
          *                                to 1 new non-local post per second,
-         *                                capped at 100 posts OR 3 minutes,
+         *                                capped at 140 posts OR 3 minutes,
          *                                then auto-exits back to local-first.
          *
-         * Targets a local feed of 175–590 posts before ever leaning cross-area.
+         * Targets a local feed of 100–140 posts before ever leaning cross-area.
          */
-        const LOCAL_FEED_TARGET_MIN = 175;
-        const LOCAL_FEED_TARGET_MAX = 590;
-        const CROSS_AREA_MAX_POSTS  = 100;
+        const LOCAL_FEED_TARGET_MIN = USER_VISIBLE_POST_MIN;
+        const LOCAL_FEED_TARGET_MAX = USER_VISIBLE_POST_GOAL;
+        const CROSS_AREA_MAX_POSTS  = USER_VISIBLE_POST_GOAL;
         const CROSS_AREA_MAX_MS     = 3 * 60 * 1000;
         const CROSS_AREA_RATE_MS    = 1000;          // 1 post/sec throttle
 
@@ -32096,7 +32097,7 @@ function setUploadModalHeader(title, subtitle) {
         /**
          * Called by performSoftRefresh() each time the user pulls to refresh.
          * Bumps the counter and, if we're in cross-area mode, decides whether
-         * to exit (timer expired or 100-post cap hit).
+         * to exit (timer expired or 140-post cap hit).
          */
         function recordRefreshTick() {
             const rs = window.refreshSession;
@@ -32377,7 +32378,7 @@ function setUploadModalHeader(title, subtitle) {
             // fill the local quota, the shortfall flows into distant filler so
             // the feed stays full.
             // ========================================================================
-            const totalTarget = Math.min(2000, rankedPosts.length);
+            const totalTarget = Math.min(USER_VISIBLE_POST_GOAL, rankedPosts.length);
 
             // Read live signals. onlineUsers is a Map<userId, presence>. allPosts
             // is the global post array. Use whichever gives a stronger signal.
@@ -32426,17 +32427,17 @@ function setUploadModalHeader(title, subtitle) {
             // The base distribution above is what we'd serve a fresh, calm session.
             // We now ADJUST those numbers based on how the user is refreshing:
             //
-            //   Refresh 0..1  → maximize hyper-local (use up to 590 local posts
+            //   Refresh 0..1  → maximize hyper-local (use up to 140 local posts
             //                   before allowing any cross-area content). One
             //                   refresh = "testing"; ignore it.
             //   Refresh 2     → still local-first, but burn more of the local
             //                   reserve before going cross-area. Local up to
-            //                   min(hyperLocal.length, 590), cross-area kept to
+            //                   min(hyperLocal.length, 140), cross-area kept to
             //                   ~15% so user feels new content arriving.
             //   Refresh 3+    → CROSS-AREA MODE: up to 50% of the feed becomes
             //                   non-local content, but throttled to 1 NEW
             //                   non-local post per second since cross-area mode
-            //                   started, and the mode auto-exits after 100 posts
+            //                   started, and the mode auto-exits after 140 posts
             //                   served or 3 minutes elapsed.
             // ========================================================================
             const rs = window.refreshSession;
@@ -32538,7 +32539,7 @@ function setUploadModalHeader(title, subtitle) {
                 nearLocalToAdd  = apply(nearLocalToAdd,  budgetRef);
                 websiteTopToAdd = apply(websiteTopToAdd, budgetRef);
                 distantToAdd    = apply(distantToAdd,    budgetRef);
-                // Mark newly-served IDs and count them toward the 100-post cap.
+                // Mark newly-served IDs and count them toward the 140-post cap.
                 const tagAndCount = (arr) => {
                     for (const p of arr) {
                         if (!served.has(p.id)) {
@@ -32596,8 +32597,8 @@ function setUploadModalHeader(title, subtitle) {
                 scatterIdx++;
             }
             
-            // Fill remaining spots with fallback posts (up to 2000 max)
-            const remainingSlots = 2000 - result.length;
+            // Fill remaining spots with fallback posts up to the visible-goal cap.
+            const remainingSlots = USER_VISIBLE_POST_GOAL - result.length;
             if (remainingSlots > 0 && fallbackPosts.length > 0) {
                 result.push(...fallbackPosts.slice(0, remainingSlots));
             }
@@ -32652,7 +32653,7 @@ function setUploadModalHeader(title, subtitle) {
                 const reordered = [...boosts, ...positive, ...neutral, ...negative];
                 console.log(`🔀 Strict engagement ordering: boosts=${boosts.length}, positive=${positive.length}, neutral=${neutral.length}, negative=${negative.length}`);
 
-                return reordered.slice(0, 2000);
+                return reordered.slice(0, USER_VISIBLE_POST_GOAL);
             } catch (e) {
                 console.warn('⚠️ Failed to apply strict engagement ordering:', e);
                 return result;
@@ -32706,13 +32707,13 @@ function setUploadModalHeader(title, subtitle) {
         /**
          * Calculate content budget for user
          * Determines how many posts they should see based on behavior
-         * Min: 15 posts (sparse content safety), Max: 200 posts (full engagement)
+         * Min: 100 posts, Max: 140 posts
          */
         function calculateContentBudget(userId) {
             const profile = adaptiveSystem.userProfiles[userId];
-            if (!profile) return 50; // Default
+            if (!profile) return 120; // Default within 100-140 range
             
-            let budget = 50; // Base budget
+            let budget = 120; // Base budget within 100-140 range
             
             // Factor 1: Visit frequency (more visits = more content)
             // 1 visit: 30 posts, 10 visits: 80 posts, 50+ visits: 150 posts
@@ -32733,11 +32734,11 @@ function setUploadModalHeader(title, subtitle) {
             // Factor 4: New user bonus (first-time visitors get curated best content)
             // Quality > Quantity for new users
             if (profile.isNewUser) {
-                budget = Math.min(budget, 30); // Cap at 30 for new users (quality focus)
+                budget = Math.min(budget, 110); // Slightly lower cap for new users
             }
             
             // Hard limits before geographic adjustment
-            budget = Math.max(15, Math.min(200, budget)); // 15-200 posts
+            budget = Math.max(USER_VISIBLE_POST_MIN, Math.min(USER_VISIBLE_POST_GOAL, budget)); // 100-140 posts
             
             // Apply geographic modifier (sparse areas get more content)
             budget = calculateGeographicContentBudget(userId, budget);
@@ -39796,12 +39797,11 @@ function setUploadModalHeader(title, subtitle) {
             // Filter hidden/deleted posts from display list
             let sortedPosts = displayPosts.filter(post => !isPostHiddenForViewer(post, currentUserId));
 
-            // FEED VOLUME TARGET: Show maximum posts to all users
-            // Simple: Show all available posts up to grid size
+            // FEED VOLUME TARGET: keep visible feed within the 100-140 goal range.
             // ========================================================================
-            const FEED_MIN_POSTS = 100;
-            const FEED_TARGET_POSTS = 200;
-            const FEED_MAX_POSTS = Math.min(400, maxGridSize - 1);
+            const FEED_MIN_POSTS = USER_VISIBLE_POST_MIN;
+            const FEED_TARGET_POSTS = USER_VISIBLE_POST_GOAL;
+            const FEED_MAX_POSTS = Math.min(USER_VISIBLE_POST_GOAL, maxGridSize - 1);
 
             if (sortedPosts.length < FEED_MIN_POSTS && allPosts.length > sortedPosts.length) {
                 const existingIds = new Set(sortedPosts.map(p => p.id));
