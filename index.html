@@ -6530,6 +6530,59 @@
             }
         }
 
+        function getPostBadgeLedger() {
+            try {
+                const raw = localStorage.getItem('postBadgeLedger');
+                if (!raw) return {};
+                const parsed = JSON.parse(raw);
+                return parsed && typeof parsed === 'object' ? parsed : {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function savePostBadgeLedger(ledger) {
+            try {
+                localStorage.setItem('postBadgeLedger', JSON.stringify(ledger && typeof ledger === 'object' ? ledger : {}));
+            } catch (e) {}
+        }
+
+        function markPostBadgePersistent(postId, kind, details = {}) {
+            try {
+                if (!postId || !kind) return;
+                const ledger = getPostBadgeLedger();
+                const entry = ledger[postId] && typeof ledger[postId] === 'object' ? ledger[postId] : {};
+                if (kind === 'boost' || kind === 'boost_sell') {
+                    entry.boost = true;
+                    entry.boostPaymentIntentId = details.paymentIntentId || entry.boostPaymentIntentId || null;
+                    entry.boostBadgeLabel = details.badgeLabel || entry.boostBadgeLabel || 'Boost';
+                }
+                if (kind === 'sell' || kind === 'boost_sell') {
+                    entry.sell = true;
+                    entry.sellPaymentIntentId = details.paymentIntentId || entry.sellPaymentIntentId || null;
+                    entry.sellBadgeLabel = details.badgeLabel || entry.sellBadgeLabel || 'Buy';
+                }
+                entry.updatedAt = Date.now();
+                ledger[postId] = entry;
+                savePostBadgeLedger(ledger);
+            } catch (e) {}
+        }
+
+        function getPersistentBadgeState(postId) {
+            try {
+                const ledger = getPostBadgeLedger();
+                const entry = postId && ledger[postId] ? ledger[postId] : {};
+                return {
+                    boost: !!(entry && entry.boost),
+                    sell: !!(entry && entry.sell),
+                    boostLabel: entry && entry.boostBadgeLabel ? entry.boostBadgeLabel : 'Boost',
+                    sellLabel: entry && entry.sellBadgeLabel ? entry.sellBadgeLabel : 'Buy'
+                };
+            } catch (e) {
+                return { boost: false, sell: false, boostLabel: 'Boost', sellLabel: 'Buy' };
+            }
+        }
+
         function hasPendingPurchasedBadge() {
             try {
                 const draft = getPendingComposerDraft();
@@ -11745,8 +11798,9 @@
                         // podium glow handled separately; position badges are applied later
 
                         // Boost / Buy badges (persisted flags)
-                        const hasBoostFlag = isStrictBoostActive(post) || hasBadgeKind(post, 'boost');
-                        const hasSellFlag = hasBadgeKind(post, 'sell') || !!(post.sellBadge || post.forSale || post.buyBadge || post.sellPaidAt);
+                        const persistentBadgeState = getPersistentBadgeState(post.id);
+                        const hasBoostFlag = isStrictBoostActive(post) || hasBadgeKind(post, 'boost') || persistentBadgeState.boost;
+                        const hasSellFlag = hasBadgeKind(post, 'sell') || !!(post.sellBadge || post.forSale || post.buyBadge || post.sellPaidAt) || persistentBadgeState.sell;
                         // We render the BOOST badge as a dedicated prominent element (top-left)
                         // but also include a compact BOOST indicator on the right-side badge
                         // container so users see both cues. Sell/buy stays in the top-right
@@ -45674,6 +45728,7 @@ function setUploadModalHeader(title, subtitle) {
                             });
                         }
                     }
+                    markPostBadgePersistent(postId, kind, { paymentIntentId: details.paymentIntentId || null, badgeLabel: details.badgeLabel || null });
                 } catch (e) { console.warn('applyBadgeToPost: local cache update failed', e); }
 
                 // Recompute badges for visible posts and re-render
