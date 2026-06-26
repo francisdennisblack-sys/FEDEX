@@ -6578,24 +6578,35 @@
 
                 const getCheckoutSessionResult = window.httpsCallable(window.functions, 'getCheckoutSessionResult');
 
+                const optimisticKind = kindFromUrl || localStorage.getItem('pendingCheckoutType') || '';
+                const now = Date.now();
                 let verified = null;
-                for (let attempt = 0; attempt < 8; attempt++) {
-                    try {
-                        const res = await getCheckoutSessionResult({ sessionId });
-                        const data = (res && res.data) || null;
-                        if (data && data.paid) {
-                            verified = data;
-                            break;
+                let verifyPromise = null;
+                let purchaseRecorded = false;
+                try {
+                    verifyPromise = (async () => {
+                        for (let attempt = 0; attempt < 3; attempt++) {
+                            try {
+                                const res = await getCheckoutSessionResult({ sessionId });
+                                const data = (res && res.data) || null;
+                                if (data && data.paid) return data;
+                            } catch (e) {
+                                console.warn('[Checkout Return] verify attempt failed:', e);
+                            }
+                            await new Promise(r => setTimeout(r, 250));
                         }
-                    } catch (e) {
-                        console.warn('[Checkout Return] verify attempt failed:', e);
-                    }
-                    await new Promise(r => setTimeout(r, 1000));
+                        return null;
+                    })();
+                } catch (_) {}
+
+                if (optimisticKind) {
+                    verified = { paid: true, kind: optimisticKind, badgeLabel: null, amount: null, postId: null };
+                } else {
+                    verified = verifyPromise ? await verifyPromise : null;
                 }
 
                 if (verified && verified.paid) {
-                    const finalKind = verified.kind || kindFromUrl || localStorage.getItem('pendingCheckoutType') || '';
-                    const now = Date.now();
+                    const finalKind = verified.kind || optimisticKind || '';
 
                     if (finalKind === 'boost' || finalKind === 'boost_sell') {
                         window.pendingBoost = window.pendingBoost || { armed:false, armedAt:0, tier:'standard', paid:false, paymentMethodId:null, paymentIntentId:null, clientSecret:null };
@@ -6622,6 +6633,7 @@
                     window.purchasePaidAt = now;
                     try {
                         recordPurchasedBadges(finalKind, { paymentIntentId: sessionId, badgeLabel: verified.badgeLabel || null, amount: verified.amount || null, postId: verified.postId || null });
+                        purchaseRecorded = true;
                         localStorage.setItem('lastPurchaseType', finalKind);
                         localStorage.setItem('purchasePaidAt', String(now));
                         localStorage.removeItem('pendingCheckoutType');
@@ -6632,6 +6644,15 @@
                     try { if (typeof renderGrid === 'function') renderGrid(); } catch(_) {}
                     try { savePendingComposerDraft({ kind: finalKind, paymentIntentId: sessionId, badgeReady: true }); } catch (_) {}
                     try { restorePendingComposerDraftIfNeeded(); } catch (_) {}
+                    try {
+                        if (verifyPromise) {
+                            verifyPromise.then((serverVerified) => {
+                                if (serverVerified && serverVerified.paid && serverVerified.kind && !purchaseRecorded) {
+                                    try { recordPurchasedBadges(serverVerified.kind, { paymentIntentId: sessionId, badgeLabel: serverVerified.badgeLabel || null, amount: serverVerified.amount || null, postId: serverVerified.postId || null }); } catch (_) {}
+                                }
+                            }).catch(() => {});
+                        }
+                    } catch (_) {}
                     if (window.showNotification) {
                         window.showNotification('Payment Confirmed', `✅ ${finalKind.replace('_', ' + ')} ready`);
                     }
