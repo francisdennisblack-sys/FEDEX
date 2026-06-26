@@ -6755,6 +6755,26 @@
         function compareFeedPriority(a, b) {
             try {
                 if (!a || !b) return 0;
+                const hasMedia = (p) => !!(
+                    p && (
+                        p.photoURL ||
+                        p.imageData ||
+                        p.videoURL ||
+                        p.mediaURL ||
+                        (Array.isArray(p.mediaItems) && p.mediaItems.length > 0) ||
+                        (Array.isArray(p.media) && p.media.length > 0) ||
+                        (Array.isArray(p.mediaURLs) && p.mediaURLs.length > 0) ||
+                        (Array.isArray(p.photoURLs) && p.photoURLs.length > 0) ||
+                        (Array.isArray(p.images) && p.images.length > 0) ||
+                        (Array.isArray(p.videos) && p.videos.length > 0)
+                    )
+                );
+                const aTextOnly = !hasMedia(a);
+                const bTextOnly = !hasMedia(b);
+
+                // Product rule: text-only posts always rank ahead of media posts.
+                if (aTextOnly !== bTextOnly) return aTextOnly ? -1 : 1;
+
                 const ta = (typeof getPostEngagementTier === 'function') ? getPostEngagementTier(a) : { priority: 4 };
                 const tb = (typeof getPostEngagementTier === 'function') ? getPostEngagementTier(b) : { priority: 4 };
 
@@ -6877,12 +6897,9 @@
                     const recencyScore = Math.max(0, 200 - ageHours * 8); // Slower decay
                     score += recencyScore;
                     
-                    // 4. CONTENT TYPE PREFERENCE (15% weight)
-                    if (post.photoURL || post.imageData) {
-                        score += (userProfile.prefersMedia ? 150 : 75);
-                    } else {
-                        score += (userProfile.prefersText ? 150 : 75);
-                    }
+                    // 4. CONTENT TYPE (type-neutral)
+                    // Do not promote media above text-only posts via ML cache score.
+                    score += 75;
                     
                     return { ...post, mlScore: score };
                 })
@@ -31391,11 +31408,8 @@ function setUploadModalHeader(title, subtitle) {
                 score += poiWeight * 0.2;
             }
             
-            // Match content type preferences
-            const contentType = post.photoURL || post.imageData ? 'photo' : post.mediaType === 'video' ? 'video' : 'text';
-            const contentScore = userPrefs.contentTypeScores[contentType] || 0;
-            const contentWeight = Math.max(0, Math.min(1, contentScore / 10));
-            score += contentWeight * 0.15;
+            // Content type preference is intentionally disabled so media content
+            // is never auto-promoted above text-only content by ML preference.
             
             // Engagement quality (posts with good engagement are more likely to be liked)
             const netEngagement = (post.likes || 0) - (post.dislikes || 0);
