@@ -14684,6 +14684,13 @@
             
             console.log(`   Votes: ${originalLikes}→${newLikes} likes, ${originalDislikes}→${newDislikes} dislikes`);
             console.log(`   Vote state: "${originalVote}" → "${newVoteType}"`);
+
+            // Capture explicit vote intent for one-step reconciler movement.
+            try {
+                window.lastVoteRerankDirection = (newVoteType === 'like') ? 'up' : ((newVoteType === 'dislike') ? 'down' : '');
+                window.lastVoteRerankPostId = postId;
+                window.lastVoteRerankAt = Date.now();
+            } catch (e) { /* ignore */ }
             
             // OPTIMISTIC UI: Update immediately
             post.likes = newLikes;
@@ -14752,6 +14759,11 @@
             submitVoteTransaction(voterId, postId, newVoteType).then(({likes, dislikes}) => {
                 // Ensure local cache/UI reflect authoritative counts from transaction
                 try {
+                    try {
+                        window.lastVoteRerankDirection = (newVoteType === 'like') ? 'up' : ((newVoteType === 'dislike') ? 'down' : '');
+                        window.lastVoteRerankPostId = postId;
+                        window.lastVoteRerankAt = Date.now();
+                    } catch (e) { /* ignore */ }
                     post.likes = likes;
                     post.dislikes = dislikes;
                     syncPostVoteCountsEverywhere(postId, likes, dislikes);
@@ -36657,30 +36669,65 @@ function setUploadModalHeader(title, subtitle) {
                     const curIdx = current.findIndex(p => p && String(p.id) === vid);
                     const tgtIdx = target.findIndex(p => p && String(p.id) === vid);
                     if (tgtIdx === -1) return false; // not present in new target
+                    let fromIdx = curIdx;
+                    let toIdx = curIdx;
+                    let moved = false;
+
                     if (curIdx === -1) {
                         // Post not currently in scroller - insert at target index
-                        current.splice(tgtIdx, 0, hydratePostForRender(target[tgtIdx]));
+                        const insertAt = Math.min(Math.max(0, tgtIdx), current.length);
+                        current.splice(insertAt, 0, hydratePostForRender(target[tgtIdx]));
+                        fromIdx = insertAt;
+                        toIdx = insertAt;
+                        moved = true;
                     } else if (curIdx !== tgtIdx) {
                         // Move in-place with minimal splice operations
                         const [moved] = current.splice(curIdx, 1);
                         // Clamp target index to current length after removal
                         const insertAt = Math.min(Math.max(0, tgtIdx), current.length);
                         current.splice(insertAt, 0, hydratePostForRender(moved || target[tgtIdx]));
+                        toIdx = insertAt;
+                        moved = true;
                     } else {
-                        // Already at desired position - nothing to do
-                        return true;
+                        // Ranking can tie and keep the same index. In that case,
+                        // force exactly one swap in the vote direction so the user
+                        // sees movement (up for like, down for dislike).
+                        const intent = (String(window.lastVoteRerankDirection || '').toLowerCase());
+                        if (intent === 'up' && curIdx > 0) {
+                            const tmp = current[curIdx - 1];
+                            current[curIdx - 1] = current[curIdx];
+                            current[curIdx] = tmp;
+                            toIdx = curIdx - 1;
+                            moved = true;
+                        } else if (intent === 'down' && curIdx < (current.length - 1)) {
+                            const tmp = current[curIdx + 1];
+                            current[curIdx + 1] = current[curIdx];
+                            current[curIdx] = tmp;
+                            toIdx = curIdx + 1;
+                            moved = true;
+                        } else {
+                            return true;
+                        }
                     }
 
-                    // Apply compacting and set items, but avoid clearing unrelated slots
-                    gridScroller.items = compactPostListForSlots(current);
+                    if (!moved) return false;
+
+                    // Apply compacting and persist this exact vote result as the
+                    // authoritative order so later ticks do not snap it back.
+                    const committed = compactPostListForSlots(current);
+                    gridScroller.items = committed;
+                    pendingSortedPosts = committed.slice();
+                    window.pendingSortedPosts = committed.slice();
+                    window.latestSortedPosts = committed.slice();
+
                     try { if (typeof gridScroller.renderItemsInRange === 'function') {
-                        const start = Math.max(0, Math.min(curIdx, tgtIdx) - 2);
-                        const end = Math.min(gridScroller.items.length, Math.max(curIdx, tgtIdx) + 3);
-                        gridScroller.renderItemsInRange(start, end);
+                        const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
+                        const end = Math.min(gridScroller.items.length, Math.max(fromIdx, toIdx) + 3);
+                        gridScroller.renderItemsInRange(start, end, { skipIdentityPass: true });
                     } }
                     catch(e) { try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(_) {} }
                     try { recomputeAndApplyBadges(); } catch(e) {}
-                    console.log(`🧠 Smart vote move applied for ${vid}: ${curIdx}→${tgtIdx}`);
+                    console.log(`🧠 Smart vote move applied for ${vid}: ${fromIdx}→${toIdx}`);
                     return true;
                 } catch (e) { console.warn('applySmartVoteMove failed', e); return false; }
             }
@@ -36771,20 +36818,6 @@ function setUploadModalHeader(title, subtitle) {
                                 const votedPostId = String(window.lastVoteRerankPostId || '');
                                 if (votedPostId) {
                                     console.log(`🔎 Vote-stabilized reconcile for ${votedPostId} (sinceVote=${sinceVote}ms)`);
-                                    // Authoritative vote commit: apply the full vote-ranked
-                                    // target once so the new position sticks immediately.
-                                    if (typeof gridScroller.setItems === 'function') {
-                                        const committed = compactPostListForSlots(target);
-                                        gridScroller.setItems(committed);
-                                        gridScroller.items = committed;
-                                        pendingSortedPosts = committed.slice();
-                                        window.pendingSortedPosts = committed.slice();
-                                        window.latestSortedPosts = committed.slice();
-                                        try { applyGridTextFontSizeToVisiblePosts(); } catch (e) {}
-                                        try { recomputeAndApplyBadges(); } catch (e) {}
-                                        console.log(`✅ Vote authoritative commit: ${votedPostId} locked into current ranked snapshot`);
-                                        return;
-                                    }
                                     if (applySmartVoteMove(current, target, votedPostId)) {
                                         return; // smart move applied, skip further reconcile work
                                     }
