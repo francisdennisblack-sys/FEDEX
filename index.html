@@ -35658,7 +35658,18 @@ function setUploadModalHeader(title, subtitle) {
             if (!post || typeof post !== 'object') return false;
             const text = String(post.content || post.text || post.description || '').trim();
             const hasText = text.length > 0;
-            const hasMedia = !!(post.photoURL || post.imageData || post.videoURL || post.mediaURL);
+            const hasMedia = !!(
+                post.photoURL ||
+                post.imageData ||
+                post.videoURL ||
+                post.mediaURL ||
+                (Array.isArray(post.mediaItems) && post.mediaItems.length > 0) ||
+                (Array.isArray(post.media) && post.media.length > 0) ||
+                (Array.isArray(post.mediaURLs) && post.mediaURLs.length > 0) ||
+                (Array.isArray(post.photoURLs) && post.photoURLs.length > 0) ||
+                (Array.isArray(post.images) && post.images.length > 0) ||
+                (Array.isArray(post.videos) && post.videos.length > 0)
+            );
             return hasText || hasMedia;
         }
 
@@ -35848,20 +35859,41 @@ function setUploadModalHeader(title, subtitle) {
                 // is intentionally empty so no offset is baked into the inline style.
                 const boostContentOffset = '';
                 
-                // Check for Firebase Storage URL (photoURL) or legacy base64 (imageData)
-                if (post.photoURL || post.imageData) {
-                    const imageSource = post.photoURL || post.imageData;
-                    const isVideo = post.mediaType === 'video' || 
-                                   (typeof imageSource === 'string' && (imageSource.includes('.mp4') || imageSource.includes('.webm') || imageSource.includes('.mov')));
+                // Check for any media payload shape (single URL fields or media arrays).
+                const mediaList = (typeof buildPostMediaList === 'function') ? (buildPostMediaList(post) || []) : [];
+                const hasAnyMedia = mediaList.length > 0 || !!(
+                    post.photoURL ||
+                    post.imageData ||
+                    post.videoURL ||
+                    post.mediaURL ||
+                    (Array.isArray(post.mediaItems) && post.mediaItems.length > 0) ||
+                    (Array.isArray(post.media) && post.media.length > 0) ||
+                    (Array.isArray(post.mediaURLs) && post.mediaURLs.length > 0) ||
+                    (Array.isArray(post.photoURLs) && post.photoURLs.length > 0) ||
+                    (Array.isArray(post.images) && post.images.length > 0) ||
+                    (Array.isArray(post.videos) && post.videos.length > 0)
+                );
+
+                if (hasAnyMedia) {
+                    const primaryMedia = mediaList[0] || null;
+                    const imageSource = (primaryMedia && primaryMedia.src) || post.photoURL || post.imageData || post.videoURL || post.mediaURL || '';
+                    const isVideo = !!(
+                        (primaryMedia && primaryMedia.isVideo) ||
+                        post.mediaType === 'video' ||
+                        (typeof imageSource === 'string' && (imageSource.includes('.mp4') || imageSource.includes('.webm') || imageSource.includes('.mov')))
+                    );
 
                     // Detect whether this post carries BOTH photos and videos so we can
                     // show a combined 📷🎥 indicator instead of a single emoji.
                     let hasPhoto = false, hasVideo = false;
                     try {
-                        const _mediaList = (typeof buildPostMediaList === 'function') ? buildPostMediaList(post) : [];
-                        for (const _m of _mediaList) {
+                        for (const _m of mediaList) {
                             if (!_m) continue;
                             if (_m.isVideo) hasVideo = true; else hasPhoto = true;
+                        }
+                        // Fallback inference when mediaList is empty but URL fields exist.
+                        if (!hasPhoto && !hasVideo && typeof imageSource === 'string' && imageSource) {
+                            if (isVideo) hasVideo = true; else hasPhoto = true;
                         }
                     } catch (e) { /* ignore media-list errors */ }
                     const hasBoth = hasPhoto && hasVideo;
