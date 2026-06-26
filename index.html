@@ -467,43 +467,16 @@
                         document.getElementById('retryLocationBtn').addEventListener('click', async () => {
                             try { banner.remove(); } catch(_){}
                             const loc = await getFreshGeolocation(8000);
-                            resolve(loc);
-                        });
-
-                        document.getElementById('openSettingsBtn').addEventListener('click', () => {
+                            /**
+                             * Get local posts from user's area (all content types)
+                             * Owned posts are treated the same as other posts and only appear
+                             * when they naturally fit the current feed rules.
+                             */
                             try {
                                 // Provide brief instructions in a modal-like alert for now.
                                 alert('To enable location: open your browser settings → Site Settings → Location → allow for this site. Then retry.');
-                            } catch (e) {}
-                        });
-
-                        document.getElementById('dismissLocationBanner').addEventListener('click', () => {
-                            try { banner.remove(); } catch(_){}
-                            resolve(null);
-                        });
-                    } catch (e) { console.warn('maybePromptLocationOnLocalAreaUse UI failed', e); resolve(null); }
-                });
-            } catch (e) { console.warn('maybePromptLocationOnLocalAreaUse failed', e); return null; }
-        }
-
-        // Ensure a newly created/inserted post is visible immediately to the user.
-        // This forces the virtual scroller to include the item at the front and
-        // scroll to it so reposts appear without waiting for a refresh.
-        function ensureNewPostVisible(post) {
-            try {
-                if (!post || !post.id) return;
-                // Respect global max post distance filter for realtime inserts
-                try {
-                    const maxMiles = Number(window.MAX_POST_DISTANCE_MILES || 1000);
-                    if (maxMiles > 0 && userLocation && Number.isFinite(Number(userLocation.lat)) && Number.isFinite(Number(userLocation.lon))) {
-                        const plat = Number((post && (post.geolocation && (post.geolocation.lat || post.geolocation.latitude)) ) || post.lat || post.latitude || NaN);
-                        const plon = Number((post && (post.geolocation && (post.geolocation.lon || post.geolocation.longitude)) ) || post.lon || post.longitude || NaN);
-                        if (Number.isFinite(plat) && Number.isFinite(plon)) {
-                            const distanceKm = (typeof calculateDistance === 'function') ? calculateDistance(Number(userLocation.lat), Number(userLocation.lon), plat, plon) : 0;
-                            const distanceMiles = Number(distanceKm || 0) * 0.621371;
-                            if (Number.isFinite(distanceMiles) && distanceMiles > maxMiles) {
                                 try { console.log(`🔍 Realtime drop: post ${post.id} is ${distanceMiles.toFixed(1)}mi > ${maxMiles}mi`); } catch(e){}
-                                return;
+                                // Add area-tagged posts (general local content)
                             }
                         }
                     }
@@ -581,7 +554,6 @@
         /**
          * Decide whether a post from another zone may be shown on the current
          * viewer's grid. Rules:
-         * - Always include the viewer's own posts.
          * - Allow if post is top-tier / promoted (isPostAreaPromotionEligible).
          * - Allow if origin area is low-population (areaUserCounts[area] < 50).
          * - Allow if post is recent and has unusually high engagement for its area.
@@ -589,9 +561,6 @@
         function isAllowedCrossZone(post) {
             try {
                 if (!post || !post.id) return false;
-                // Always allow user's own posts (handled earlier but keep check)
-                if (post.userId && currentUserId && String(post.userId) === String(currentUserId)) return true;
-
                 // Promote explicitly flagged/shared posts
                 if (isPostAreaPromotionEligible(post)) return true;
 
@@ -4855,8 +4824,8 @@
                     transform: translateZ(0);
                     -webkit-transform: translateZ(0);
                 " oninput="checkContentModeration(); updateCharCount();" onfocus="applyPendingPurchaseToNextPost(); this.style.boxShadow='0 8px 20px rgba(0,0,0,0.08)'; try{ stopPlaceholderRotator(); }catch(e){}" onblur="this.style.boxShadow='0 4px 12px rgba(0,0,0,0.06)'; try{ startPlaceholderRotator(); }catch(e){}"></textarea>
-                <div id="charCountDisplay" style="position: absolute; bottom: 12px; right: 12px; font-size: 16px; color: #000; background: transparent; padding: 4px 8px; border-radius: 6px; pointer-events: none; font-weight: 700;">0/200</div>
-                <div id="charError" style="color: #ff6b6b; font-size: 13px; margin-top: 8px; font-weight: 600; display: none;">❌ Maximum 200 characters allowed</div>
+                <div id="charCountDisplay" style="position: absolute; bottom: 12px; right: 12px; font-size: 16px; color: #000; background: transparent; padding: 4px 8px; border-radius: 6px; pointer-events: none; font-weight: 700;">0/140</div>
+                <div id="charError" style="color: #ff6b6b; font-size: 13px; margin-top: 8px; font-weight: 600; display: none;">❌ Maximum 140 characters allowed</div>
             </div>
             
             <!-- Link input removed for safety: external links cannot be guaranteed safe (cloaking, time-of-click switching, IDN spoofing). -->
@@ -6739,7 +6708,7 @@
 
 
         /**
-         * Forces a complete refresh of the grid content, preserving the user's own posts.
+         * Forces a complete refresh of the grid content.
          */
         async function forceGridRefresh() {
             console.log('🔥 forceGridRefresh: Starting full grid refresh.');
@@ -6748,18 +6717,13 @@
                 return;
             }
 
-            // 1. Preserve user's own posts
-            const userPosts = (gridContent[currentUserId] || []).filter(post => post.userId === currentUserId);
-            console.log(`  - Preserving ${userPosts.length} of the user's own posts.`);
+            // Clear the existing grid content so the next render rebuilds it using
+            // the same rules as every other post.
+            gridContent[currentUserId] = [];
 
-            // 2. Clear the existing grid content (except for the user's posts)
-            gridContent[currentUserId] = userPosts;
-            
-            // Clear post cache for all non-user posts to ensure fresh data
+            // Clear the post cache to ensure fresh data.
             for (const postId in postCache) {
-                if (postCache[postId].userId !== currentUserId) {
-                    delete postCache[postId];
-                }
+                delete postCache[postId];
             }
 
             // 3. Re-run the main data fetching and rendering logic
@@ -19259,41 +19223,13 @@ function setUploadModalHeader(title, subtitle) {
         
         /**
          * Get all local posts from user's area (all content types)
-         * 🔧 BUG FIX: Always include user's own posts even if area doesn't match
+         * Posts are ranked by the same area logic regardless of author.
          */
         function getLocalPosts(areaTag, limit) {
             const posts = [];
             const seenIds = new Set();
-            
-            // FIRST: Always include truly-owned posts (CRITICAL FIX for disappearing posts)
-            // Do NOT assume everything under gridContent[currentUserId] is owned by the viewer,
-            // because guest/device feeds can also live under that key.
-            if (currentUserId && gridContent[currentUserId]) {
-                const ownedPosts = gridContent[currentUserId].filter(post => post && (
-                    post.authId === currentUserId ||
-                    post.userId === currentUserId ||
-                    post.createdBy === currentUserId
-                ));
-                console.log(`🔐 OWN POSTS CHECK: User has ${ownedPosts.length}/${gridContent[currentUserId].length} truly-owned posts in current bucket`);
-                ownedPosts.forEach(post => {
-                    if (!seenIds.has(post.id)) {
-                        seenIds.add(post.id);
-                        const stableTag = getStablePostAreaTag(post) || areaTag;
-                        posts.push({
-                            ...post,
-                            contentSource: 'OWN_POST',
-                            displayAreaTag: stableTag,
-                            originalAreaTag: post.originalAreaTag || stableTag,
-                            isOwnPost: true
-                        });
-                    }
-                });
-                console.log(`✅ OWN POSTS ADDED: ${posts.length} of user's own posts included in grid`);
-            } else {
-                console.log(`⚠️ NO OWN POSTS FOUND: gridContent["${currentUserId}"] is empty or undefined`);
-            }
-            
-            // SECOND: Add area-tagged posts (general local content)
+
+            // Add area-tagged posts (general local content)
             if (gridContent[areaTag]) {
                 gridContent[areaTag].forEach(post => {
                     if (!seenIds.has(post.id) && posts.length < limit) {
@@ -19309,7 +19245,7 @@ function setUploadModalHeader(title, subtitle) {
                 });
             }
 
-            // THIRD: Fallback to shared-posts when area-specific posts are missing
+            // Fallback to shared-posts when area-specific posts are missing
             // This ensures signed-in users still see the global feed if no area-keyed
             // entries exist for their detected areaTag.
             if (posts.length < limit && gridContent['shared-posts']) {
@@ -32308,20 +32244,20 @@ function setUploadModalHeader(title, subtitle) {
             }
             rankedPosts.forEach(p => { p._proximityRating = _computeProximityRating(p); });
 
-            // 1️⃣ USER'S OWN POSTS (always show first)
+            // Viewer-authored posts are part of the same ranking pool as all
+            // other posts, so we only keep this count for diagnostics.
             const userPosts = rankedPosts.filter(p =>
                 p.authId === currentUserId ||
                 p.userId === currentUserId ||
                 p.createdBy === currentUserId
             );
-            const userPostIds = new Set(userPosts.map(p => p.id));
 
             // � BOOST-ONLY PRIORITY BUCKET (highest priority for non-owner posts)
             // Sell posts are NOT included — they're not paid promotion and flow
             // through the normal local / near-local / top / fallback path.
             const isBoost = (p) => !!(p && (p._isBoosted || isStrictBoostActive(p)));
             const boostPosts = rankedPosts
-                .filter(p => !userPostIds.has(p.id) && isBoost(p));
+                .filter(p => isBoost(p));
 
             // 🎯 BOOST PERFORMANCE TARGETING (per-viewer)
             // -----------------------------------------------------------------
@@ -32341,8 +32277,7 @@ function setUploadModalHeader(title, subtitle) {
                 // Baseline: average likes of a normal local post (exclude boosts).
                 const baseline = rankedPosts.filter(p =>
                     p.county === userArea &&
-                    !isBoost(p) &&
-                    !userPostIds.has(p.id)
+                    !isBoost(p)
                 );
                 const sumLikes = baseline.reduce((s, p) => s + (Number(p.likes) || 0), 0);
                 const avgLocalLikes = baseline.length > 0 ? (sumLikes / baseline.length) : 1;
@@ -32383,7 +32318,7 @@ function setUploadModalHeader(title, subtitle) {
             function _computeAdaptiveLocalRadiusKm() {
                 if (!_viewerCoords) return null;
                 const rated = rankedPosts.filter(p =>
-                    p._viewerDistanceKm != null && !userPostIds.has(p.id) && !boostIds.has(p.id)
+                    p._viewerDistanceKm != null && !boostIds.has(p.id)
                 );
                 if (!rated.length) return null;
                 const TARGET_LOCAL = 40;                 // aim for ~this many local posts
@@ -32401,7 +32336,7 @@ function setUploadModalHeader(title, subtitle) {
             // an exact area-label match. Falls back to the area-label match only
             // when the viewer's (or the post's) coordinates are unavailable.
             const hyperLocal = rankedPosts.filter(p => {
-                if (userPostIds.has(p.id) || boostIds.has(p.id)) return false;
+                if (boostIds.has(p.id)) return false;
                 if (adaptiveLocalRadiusKm != null && p._viewerDistanceKm != null) {
                     return p._viewerDistanceKm <= adaptiveLocalRadiusKm;
                 }
@@ -32411,7 +32346,7 @@ function setUploadModalHeader(title, subtitle) {
 
             // 3️⃣ NEAR-LOCAL WELL-REVIEWED POSTS
             const nearLocalWellReviewed = rankedPosts.filter(p =>
-                !userPostIds.has(p.id) && !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
+                !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
                 p.county !== userArea &&
                 p.netLikes >= 3 &&
                 (p.proximityClass === 'nearby' || p.proximityClass === 'community')
@@ -32420,7 +32355,7 @@ function setUploadModalHeader(title, subtitle) {
             // 4️⃣ WEBSITE TOP POSTS
             const websiteTopPosts = rankedPosts
                 .filter(p =>
-                    !userPostIds.has(p.id) && !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
+                    !boostIds.has(p.id) && !hyperLocalIds.has(p.id) &&
                     p.county !== userArea &&
                     !nearLocalWellReviewed.find(n => n.id === p.id) &&
                     p.netLikes >= 5
@@ -32440,7 +32375,7 @@ function setUploadModalHeader(title, subtitle) {
             };
             const distantFiller = rankedPosts
                 .filter(p =>
-                    !userPostIds.has(p.id) && !boostIds.has(p.id) &&
+                    !boostIds.has(p.id) &&
                     p._distantFiller === true
                 )
                 .sort((a, b) => {
@@ -32451,7 +32386,6 @@ function setUploadModalHeader(title, subtitle) {
 
             // 6️⃣ FALLBACK (everything else)
             const usedIds = new Set([
-                ...userPostIds,
                 ...boostIds,
                 ...hyperLocal.map(p => p.id),
                 ...nearLocalWellReviewed.map(p => p.id),
@@ -32460,8 +32394,6 @@ function setUploadModalHeader(title, subtitle) {
             ]);
             const fallbackPosts = rankedPosts.filter(p => !usedIds.has(p.id));
 
-            // Sort each category by unified rank
-            userPosts.sort((a, b) => b.unifiedRank - a.unifiedRank);
             // Deterministic LOCAL ordering shared by everyone in the area:
             // closest first (grouped into proximity bands so tiny GPS jitter
             // doesn't reshuffle), then engagement, then a stable id tiebreak.
@@ -32616,7 +32548,6 @@ function setUploadModalHeader(title, subtitle) {
 
             console.log(`🌐 Website scale: onlineUsers=${liveOnline}, totalPosts=${liveTotalPosts}, networkSignal=${networkSignal}, t=${t.toFixed(3)}`);
             console.log(`📊 Scale-adaptive Distribution Plan (local shortfall=${localShortfall}):`);
-            console.log(`   User own posts:       ${userPosts.length}`);
             console.log(`   Boost (urgent first): need ${boostTarget}, have ${boostPosts.length}`);
             console.log(`   Hyper-local:          need ${hyperLocalTarget}, have ${hyperLocal.length}`);
             console.log(`   Near-local reviewed:  need ${nearLocalTarget}, have ${nearLocalWellReviewed.length}`);
@@ -32625,9 +32556,6 @@ function setUploadModalHeader(title, subtitle) {
             console.log(`   Fallback available:   ${fallbackPosts.length}`);
 
             const result = [];
-
-            // Always show user's own posts FIRST
-            result.push(...userPosts);
 
             // Take target amounts from each category
             const boostToAdd      = boostPosts.slice(0, boostTarget);
@@ -32687,7 +32615,7 @@ function setUploadModalHeader(title, subtitle) {
             const normalBoosts = boostToAdd.filter(p => !urgentBoosts.includes(p));
             if (urgentBoosts.length > 0) {
                 console.log(`🚀 Front-loading ${urgentBoosts.length} urgent boost(s) above local top (urgency ≥ ${FRONT_LOAD_URGENCY})`);
-                // Place urgent boosts immediately after user's own posts, before any local content.
+                // Place urgent boosts before any local content.
                 result.push(...urgentBoosts);
             }
             const allLocalPosts = [...hyperLocalToAdd];
@@ -39444,34 +39372,8 @@ function setUploadModalHeader(title, subtitle) {
                 gridContent[area].push(post);
             });
             
-            // CRITICAL: Also keep posts indexed by userId so vote updates still work
-            // This dual-indexing approach allows both the algorithm to work AND vote sync to continue
-            if (preservedUserContent.length > 0) {
-                gridContent[currentUserId] = preservedUserContent.map(oldPost => {
-                    // Find the same post in allPosts (which may have updated vote counts)
-                    const updatedPost = allPosts.find(p => p.id === oldPost.id);
-                    
-                    // CRITICAL SAFETY: Never lose content during merge
-                    if (updatedPost) {
-                        // Preserve content from oldPost if updatedPost is missing it
-                        if (!updatedPost.content && oldPost.content) {
-                            updatedPost.content = oldPost.content;
-                        }
-                        // Preserve media fields (photoURL/imageData/mediaType/description) from the local preserved copy
-                        try {
-                            if ((!updatedPost.photoURL || updatedPost.photoURL === '') && oldPost.photoURL) updatedPost.photoURL = oldPost.photoURL;
-                            if ((!updatedPost.imageData || updatedPost.imageData === '') && oldPost.imageData) updatedPost.imageData = oldPost.imageData;
-                            if ((!updatedPost.mediaType || updatedPost.mediaType === '') && oldPost.mediaType) updatedPost.mediaType = oldPost.mediaType;
-                            if ((!updatedPost.description || updatedPost.description === '') && oldPost.description) updatedPost.description = oldPost.description;
-                        } catch (e) { /* ignore field merge errors */ }
-                        return updatedPost;
-                    } else {
-                        // If post not found in allPosts, keep original
-                        console.warn(`⚠️ Post ${oldPost.id} not found in allPosts, keeping original`);
-                        return oldPost;
-                    }
-                });
-            }
+            // Do not preserve a special user bucket of owned posts. All posts
+            // should flow through the same area and ranking logic.
 
             // Ensure any posts missing media fields inherit them from postCache
             try {
@@ -39819,12 +39721,6 @@ function setUploadModalHeader(title, subtitle) {
 
             displayPosts = displayPosts.filter(post => {
                 if (!post) return false;
-                // Always show user's own posts
-                const isOwnPost = post.authId === currentUserId || 
-                                 post.userId === currentUserId || 
-                                 post.createdBy === currentUserId;
-                if (isOwnPost) { post._distantFiller = false; return true; }
-
                 // KEEP: Post's area tag matches user's area exactly
                 if (post.county === userAreaTag) { post._distantFiller = false; return true; }
 
@@ -41613,7 +41509,7 @@ function setUploadModalHeader(title, subtitle) {
         function updateCharCount() {
             const postText = document.getElementById('postText').value;
             const charCount = postText.length;
-            const maxChars = 200;
+            const maxChars = 140;
             const charCountDisplay = document.getElementById('charCountDisplay');
             const charError = document.getElementById('charError');
             const uploadBtn = document.querySelector('#uploadModal button[onclick="uploadPost()"]');
@@ -41651,7 +41547,7 @@ function setUploadModalHeader(title, subtitle) {
                 }
             }
             
-            // Prevent input over 200 characters
+            // Prevent input over 140 characters
             if (charCount > maxChars) {
                 const postTextElement = document.getElementById('postText');
                 postTextElement.value = postTextElement.value.substring(0, maxChars);
