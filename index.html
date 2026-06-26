@@ -6606,6 +6606,50 @@
             }
         }
 
+        function mergePersistentBadgeStateIntoPosts(posts) {
+            try {
+                if (!Array.isArray(posts) || posts.length === 0) return posts;
+                posts.forEach((post) => {
+                    try {
+                        if (!post || !post.id) return;
+                        const persistentBadgeState = getPersistentBadgeState(post.id);
+                        if (!persistentBadgeState.boost && !persistentBadgeState.sell) return;
+
+                        post.badges = Array.isArray(post.badges) ? post.badges : [];
+                        if (persistentBadgeState.boost && !post.badges.includes('boost')) post.badges.push('boost');
+                        if (persistentBadgeState.sell && !post.badges.includes('sell')) post.badges.push('sell');
+
+                        if (persistentBadgeState.boost) {
+                            post.boostStatus = post.boostStatus || 'active';
+                            post.boostBadge = Object.assign({}, post.boostBadge || {}, {
+                                label: (post.boostBadge && post.boostBadge.label) || persistentBadgeState.boostLabel || 'Boost'
+                            });
+                        }
+
+                        if (persistentBadgeState.sell) {
+                            post.primaryBadge = post.primaryBadge || 'sell';
+                            post.sellPaidAt = post.sellPaidAt || Date.now();
+                            post.sellBadge = Object.assign({}, post.sellBadge || {}, {
+                                label: (post.sellBadge && post.sellBadge.label) || persistentBadgeState.sellLabel || 'Buy'
+                            });
+                        }
+
+                        if (window.postCache && window.postCache[post.id]) {
+                            Object.assign(window.postCache[post.id], {
+                                badges: post.badges,
+                                boostStatus: post.boostStatus,
+                                boostBadge: post.boostBadge,
+                                primaryBadge: post.primaryBadge,
+                                sellPaidAt: post.sellPaidAt,
+                                sellBadge: post.sellBadge
+                            });
+                        }
+                    } catch (e) { /* continue */ }
+                });
+            } catch (e) { console.warn('mergePersistentBadgeStateIntoPosts failed', e); }
+            return posts;
+        }
+
         function hasQueuedBoostForPost(postId) {
             try {
                 if (!postId) return false;
@@ -21639,6 +21683,7 @@ function setUploadModalHeader(title, subtitle) {
                     }
                     
                     console.log(`  📞 About to call callback with ${allPosts.length} posts`);
+                    try { mergePersistentBadgeStateIntoPosts(allPosts); } catch (e) { console.warn('Persistent badge merge before callback failed', e); }
                     callback(allPosts);
                     try { setTimeout(() => { if (typeof hydrateVisiblePostBadges === 'function') hydrateVisiblePostBadges(allPosts); }, 150); } catch(e) {}
                     console.log('  ✅ callback completed');
@@ -21670,6 +21715,7 @@ function setUploadModalHeader(title, subtitle) {
                                 return !ts || (_nowFb - ts) <= _ttlFb;
                             });
                             console.log(`⚠️ Firebase error - using cached ${freshCached.length}/${cachedPosts.length} posts from localStorage (${cachedPosts.length - freshCached.length} expired stripped)`);
+                            try { mergePersistentBadgeStateIntoPosts(freshCached); } catch (e) { console.warn('Persistent badge merge for cached fallback failed', e); }
                             callback(freshCached);
                         }
                     } catch (e) {
