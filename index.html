@@ -6585,6 +6585,39 @@
             }
         }
 
+        function hasQueuedBoostForPost(postId) {
+            try {
+                if (!postId) return false;
+                const targetId = String(postId);
+                const orders = (typeof getPendingOrders === 'function') ? getPendingOrders() : JSON.parse(localStorage.getItem('pendingOrders') || '[]');
+                if (Array.isArray(orders) && orders.some(o => o && !o.consumed && String(o.postId || '') === targetId && (o.kind === 'boost' || o.kind === 'boost_sell'))) {
+                    return true;
+                }
+                const pendingPayments = JSON.parse(localStorage.getItem('pendingPayments') || '{}');
+                if (pendingPayments && typeof pendingPayments === 'object') {
+                    return Object.values(pendingPayments).some(p => p && !p.consumed && String(p.postId || '') === targetId && String(p.kind || '').toLowerCase().indexOf('boost') !== -1);
+                }
+            } catch (e) { /* ignore */ }
+            return false;
+        }
+
+        function getCanonicalBoostState(post) {
+            try {
+                if (!post || !post.id) return false;
+                const persistentBadgeState = getPersistentBadgeState(post.id);
+                return !!(
+                    hasVerifiedBoostPurchase(post) ||
+                    hasBadgeKind(post, 'boost') ||
+                    !!post.boostBadge ||
+                    (post.boostStatus === 'active') ||
+                    persistentBadgeState.boost ||
+                    hasQueuedBoostForPost(post.id)
+                );
+            } catch (e) {
+                return false;
+            }
+        }
+
         function hasPendingPurchasedBadge() {
             try {
                 const draft = getPendingComposerDraft();
@@ -11741,7 +11774,7 @@
                     let post = (postCache && postCache[postId]) || postMap.get(postId) || findPostAcrossVisibleFeeds(postId);
                     if (!post) return;
                     const badges = calculateBadges(post, orderedPosts) || [];
-                    applyGlowAndBorder(node, post, { podium, badges, hasBoostFlag: isStrictBoostActive(post) });
+                    applyGlowAndBorder(node, post, { podium, badges, hasBoostFlag: getCanonicalBoostState(post) });
                 });
 
                 if (reason) console.log(`✨ Glow refresh complete: ${reason} (visible=${visibleNodes.length})`);
@@ -11811,7 +11844,7 @@
 
                         // Boost / Buy badges (persisted flags)
                         const persistentBadgeState = getPersistentBadgeState(post.id);
-                        const hasBoostFlag = isStrictBoostActive(post) || hasBadgeKind(post, 'boost') || persistentBadgeState.boost;
+                        const hasBoostFlag = getCanonicalBoostState(post) || hasBadgeKind(post, 'boost') || persistentBadgeState.boost;
                         const hasSellFlag = hasBadgeKind(post, 'sell') || !!(post.sellBadge || post.forSale || post.buyBadge || post.sellPaidAt) || persistentBadgeState.sell;
                         // We render the BOOST badge as a dedicated prominent element (top-left)
                         // but also include a compact BOOST indicator on the right-side badge
@@ -14813,7 +14846,7 @@
                     const podium = orderedPosts.slice(0, 3).filter(isPostEligibleForPositionBadge).map(p => p.id);
                     const post = syncedPost || findPostAcrossVisibleFeeds(postId) || { id: postId, likes: newLikes, dislikes: newDislikes };
                     const badges = calculateBadges(post, orderedPosts) || [];
-                    applyGlowAndBorder(box, post, { podium, badges, hasBoostFlag: isStrictBoostActive(post) });
+                    applyGlowAndBorder(box, post, { podium, badges, hasBoostFlag: getCanonicalBoostState(post) });
                 } catch (e) { /* ignore */ }
             });
             console.log(`✅ Updated vote display in DOM for post ${postId.substring(0, 8)}: ${newLikes} likes, ${newDislikes} dislikes`);
@@ -32322,7 +32355,7 @@ function setUploadModalHeader(title, subtitle) {
             if (expiresAt > 0 && now >= expiresAt) return { active: false, expired: true };
             if ((status === 'active' || expiresAt > now) && hasPurchase) return { active: true, expired: false };
             // Durable fallback: some flows denormalize only badge objects/flags on refresh.
-            if (status === 'active' || expiresAt > now || hasBadgeKind(post, 'boost') || persistentBadgeState.boost) return { active: true, expired: false };
+            if (status === 'active' || expiresAt > now || hasBadgeKind(post, 'boost') || persistentBadgeState.boost || hasQueuedBoostForPost(post.id)) return { active: true, expired: false };
             return inactive;
         }
 
