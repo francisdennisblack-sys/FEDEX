@@ -14851,10 +14851,9 @@
                 // speculative hop that will immediately snap back.
                 if (hasRankedTarget && toIdx < 0) return false;
 
-                // Fallback only when ranked target is not yet available.
-                if (!hasRankedTarget && toIdx < 0) {
-                    toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
-                }
+                // Never do speculative fallback swaps. Move only when we have
+                // a ranked target index, otherwise wait for the next snapshot.
+                if (!hasRankedTarget && toIdx < 0) return false;
 
                 // During the optimistic vote window, never move opposite the
                 // user's explicit direction. Stale ranking snapshots can briefly
@@ -15041,6 +15040,10 @@
             // so it feels automatic. Apply badge classes immediately (synchronously)
             // and perform one immediate slot move to avoid delayed flicker.
             try { recalculateBadgesForCurrentGrid(postId); } catch (e) { /* defensive */ }
+
+            // Build a fresh ranked target BEFORE trying immediate movement.
+            // This avoids one-off swaps based on stale ordering data.
+            try { if (typeof recomputeFeedSnapshot === 'function') recomputeFeedSnapshot(); } catch (e) { /* ignore */ }
 
             // Immediate, single-step movement (swap one position) so users see
             // deterministic motion without multi-second reconcile flicker.
@@ -37048,6 +37051,20 @@ function setUploadModalHeader(title, subtitle) {
                     // after a single step instead of finishing to the true rank.
                     const committed = compactPostListForSlots(current);
                     gridScroller.items = committed;
+
+                    // Refresh no-backtrack lock whenever reconcile performs a
+                    // vote-driven move so later ticks cannot pull it backward.
+                    try {
+                        const intent = String(window.lastVoteRerankDirection || '').toLowerCase();
+                        if (intent === 'up' || intent === 'down') {
+                            window.__voteNoBacktrackLocks = window.__voteNoBacktrackLocks || {};
+                            window.__voteNoBacktrackLocks[String(vid)] = {
+                                direction: (intent === 'up') ? 'like' : 'dislike',
+                                floorIndex: Math.max(0, Number(toIdx) || 0),
+                                until: Date.now() + 7000
+                            };
+                        }
+                    } catch (e) { /* ignore */ }
 
                     try { if (typeof gridScroller.renderItemsInRange === 'function') {
                         const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
