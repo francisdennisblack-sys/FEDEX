@@ -14606,8 +14606,13 @@
                 if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
                 if (Boolean(window.__suspendBatchPruneDuringScroll)) return false;
                 if (gridScroller && gridScroller.renderScheduled) return false;
-                const settleUntil = Number((window.__feedScrollState && window.__feedScrollState.settleUntil) || 0);
-                if (settleUntil && Date.now() < settleUntil) return false;
+                const now = Date.now();
+                const feedState = (window.__feedScrollState || {});
+                const lastScrollAt = Number(feedState.lastScrollAt || 0);
+                const settleUntil = Number(feedState.settleUntil || 0);
+                // Only block on settle window when scroll activity is truly recent.
+                if ((now - lastScrollAt) < 140) return false;
+                if (settleUntil && now < settleUntil && (now - lastScrollAt) < 240) return false;
                 return true;
             } catch (e) {
                 return false;
@@ -14620,7 +14625,10 @@
                 if (!key) return;
                 window.__pendingVoteShiftTimers = window.__pendingVoteShiftTimers || {};
                 const timer = window.__pendingVoteShiftTimers[key];
-                if (timer) clearTimeout(timer);
+                if (timer) {
+                    try { clearTimeout(timer); } catch (e) {}
+                    try { cancelAnimationFrame(timer); } catch (e) {}
+                }
                 delete window.__pendingVoteShiftTimers[key];
             } catch (e) { /* ignore */ }
         }
@@ -14643,9 +14651,9 @@
             }
         }
 
-        function freezeReconcileForVoteMove(ms = 1400) {
+        function freezeReconcileForVoteMove(ms = 600) {
             try {
-                const until = Date.now() + Math.max(300, Number(ms) || 1400);
+                const until = Date.now() + Math.max(120, Number(ms) || 600);
                 window.__voteMoveInProgressUntil = Math.max(Number(window.__voteMoveInProgressUntil || 0), until);
             } catch (e) { /* ignore */ }
         }
@@ -14700,17 +14708,19 @@
                 const force = !!(options && options.force);
                 const startedAt = Number((options && options.startedAt) || Date.now());
                 const attempt = Number((options && options.attempt) || 0);
-                const maxWaitMs = Math.max(400, Number((options && options.maxWaitMs) || 1800));
+                const maxWaitMs = Math.max(180, Number((options && options.maxWaitMs) || 650));
 
                 if (!force && deferUntilReady && !isVoteMoveRenderReady()) {
                     const key = String(postId);
                     const elapsed = Date.now() - startedAt;
                     const shouldForce = elapsed >= maxWaitMs;
-                    const delayMs = shouldForce ? 0 : Math.min(180, 60 + (attempt * 20));
-                    freezeReconcileForVoteMove(1400);
+                    freezeReconcileForVoteMove(420);
                     window.__pendingVoteShiftTimers = window.__pendingVoteShiftTimers || {};
-                    if (window.__pendingVoteShiftTimers[key]) clearTimeout(window.__pendingVoteShiftTimers[key]);
-                    window.__pendingVoteShiftTimers[key] = setTimeout(() => {
+                    if (window.__pendingVoteShiftTimers[key]) {
+                        try { clearTimeout(window.__pendingVoteShiftTimers[key]); } catch (e) {}
+                        try { cancelAnimationFrame(window.__pendingVoteShiftTimers[key]); } catch (e) {}
+                    }
+                    window.__pendingVoteShiftTimers[key] = requestAnimationFrame(() => {
                         try {
                             delete window.__pendingVoteShiftTimers[key];
                             applyImmediateVotePositionShift(postId, voteType, {
@@ -14721,7 +14731,7 @@
                                 maxWaitMs
                             });
                         } catch (e) { /* ignore */ }
-                    }, delayMs);
+                    });
                     return false;
                 }
 
@@ -14748,7 +14758,7 @@
                 pendingSortedPosts = committed.slice();
                 window.pendingSortedPosts = committed.slice();
                 window.latestSortedPosts = committed.slice();
-                freezeReconcileForVoteMove(1600);
+                freezeReconcileForVoteMove(520);
 
                 keepVoteRerankActive(postId);
 
@@ -14905,7 +14915,7 @@
             // deterministic motion without multi-second reconcile flicker.
             const movedImmediately = applyImmediateVotePositionShift(postId, newVoteType, {
                 deferUntilReady: true,
-                maxWaitMs: 1800
+                maxWaitMs: 650
             });
             
             // 🔥 CRITICAL: Save vote using an atomic transaction to prevent race conditions
@@ -14931,7 +14941,7 @@
                         if (!movedImmediately) {
                             const movedOnCommit = applyImmediateVotePositionShift(postId, newVoteType, {
                                 deferUntilReady: true,
-                                maxWaitMs: 1800
+                                maxWaitMs: 650
                             });
                             if (!movedOnCommit && !isVotePositionShiftQueued(postId)) {
                                 keepVoteRerankActive(postId);
