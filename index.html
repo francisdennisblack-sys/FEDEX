@@ -36454,7 +36454,22 @@ function setUploadModalHeader(title, subtitle) {
             window.nonInteractiveMoveCooldownMs = Number(window.nonInteractiveMoveCooldownMs || 45000); // 45s cooldown between non-interactive moves
             window.maxNonInteractiveMovesPerMinute = Number(window.maxNonInteractiveMovesPerMinute || 2); // max auto moves per minute
             window.exploratorySlotPercent = Number(window.exploratorySlotPercent || 8); // percent of slots reserved for exploratory/rotated content
+            window.__publishedPostSettleMs = Number(window.__publishedPostSettleMs || 12000); // protect newly published posts for 12s
+            window.__publishedPostSettleAt = window.__publishedPostSettleAt || {};
         } catch(e) { /* ignore */ }
+
+        function isPublishedPostSettling(postId, nowTs = Date.now()) {
+            try {
+                if (!postId) return false;
+                const id = String(postId);
+                const startedAt = Number((window.__publishedPostSettleAt || {})[id] || 0);
+                if (!startedAt) return false;
+                const windowMs = Number(window.__publishedPostSettleMs || 12000);
+                return (nowTs - startedAt) < windowMs;
+            } catch (e) {
+                return false;
+            }
+        }
 
         function scheduleGridReconcile() {
             if (gridReconcileInterval) return;
@@ -36537,6 +36552,19 @@ function setUploadModalHeader(title, subtitle) {
 
                     if (diffIdx === -1) return; // already aligned
 
+                    // Freshly published posts can transiently disappear/reappear across
+                    // snapshot sources. If reconcile diff touches one, defer this tick
+                    // so the post can settle in-place without grid-wide flicker.
+                    try {
+                        const nowTs = Date.now();
+                        const curDiffId = current[diffIdx] && current[diffIdx].id ? String(current[diffIdx].id) : '';
+                        const tgtDiffId = target[diffIdx] && target[diffIdx].id ? String(target[diffIdx].id) : '';
+                        if (isPublishedPostSettling(curDiffId, nowTs) || isPublishedPostSettling(tgtDiffId, nowTs)) {
+                            console.log(`⏸️ Reconcile: deferring diff @${diffIdx} while published post settles (${curDiffId || tgtDiffId})`);
+                            return;
+                        }
+                    } catch (e) { /* ignore settle guard errors */ }
+
                     // Second-layer movement guard: outside explicit vote actions,
                     // strongly limit automatic ML reshuffles so posts don't drift while reading.
                     try {
@@ -36616,6 +36644,10 @@ function setUploadModalHeader(title, subtitle) {
                             if (addedAt && (Date.now() - addedAt) < 8000) {
                                 console.log(`⏸️ Reconcile: deferring remove of post (just added ${Date.now() - addedAt}ms ago)`);
                                 return; // skip this tick, retry next second
+                            }
+                            if (isPublishedPostSettling(removedPost.id, Date.now())) {
+                                console.log('⏸️ Reconcile: deferring remove of freshly published post during settle window');
+                                return;
                             }
                         }
                         current.splice(diffIdx, 1);
@@ -37118,22 +37150,9 @@ function setUploadModalHeader(title, subtitle) {
                     });
                 } catch (e) { /* ignore */ }
 
-                // If already present in this key, merge in place and trigger a
-                // fast refresh so optimistic stubs are upgraded immediately.
+                // If already present in this key, update in place
                 const already = gridContent[contentKey].findIndex(p => p && p.id === postData.id);
-                if (already !== -1) {
-                    try {
-                        const existing = gridContent[contentKey][already] || {};
-                        gridContent[contentKey][already] = Object.assign({}, existing, postData);
-                    } catch (e) {
-                        gridContent[contentKey][already] = postData;
-                    }
-                    try {
-                        if (typeof requestGridUpdate === 'function') requestGridUpdate('new-post-merge-urgent');
-                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('new-post-merge-urgent');
-                    } catch (e) { /* ignore update-trigger failures */ }
-                    return;
-                }
+                if (already !== -1) { gridContent[contentKey][already] = postData; return; }
 
                 // Determine insertion index: after top-3 initial slots and after any
                 // leading posts owned by the current user.
@@ -37359,49 +37378,35 @@ function setUploadModalHeader(title, subtitle) {
             let hash = 0;
             for (let i = 0; i < str.length; i++) {
                 hash = ((hash << 5) - hash) + str.charCodeAt(i);
-                            try {
-                                if (isPostHiddenForViewer(postObj, currentUserId)) return;
+                hash |= 0;
+            }
+            return Math.abs(hash) % 100;
+        }
 
-                                // First, merge in place anywhere this post already exists to
-                                // avoid moving it across keys and triggering whole-grid churn.
-                                let mergedExisting = false;
-                                try {
-                                    Object.keys(gridContent || {}).forEach((k) => {
-                                        const arr = gridContent[k];
-                                        if (!Array.isArray(arr)) return;
-                                        const idx = arr.findIndex(p => p && p.id === postId);
-                                        if (idx === -1) return;
-                                        arr[idx] = Object.assign({}, arr[idx] || {}, postObj);
-                                        mergedExisting = true;
-                                    });
-                                } catch (e) { /* ignore merge scan failures */ }
+        function isContentFreshnessEnabled() {
+            if (!window.CLEANUP_FLAGS || window.CLEANUP_FLAGS.ENABLE_CONTENT_FRESHNESS === false) return false;
+            const cfg = getFreshnessConfig();
+            if (!cfg.enabled) return false;
+            if (cfg.rolloutPercent >= 100) return true;
+            const id = currentUserId || permanentUid || firebaseUid || 'anon';
+            return freshnessHashPercent(id) < Math.max(0, Math.min(100, cfg.rolloutPercent));
+        }
 
-                                if (mergedExisting) {
-                                    try {
-                                        if (typeof requestGridUpdate === 'function') requestGridUpdate('post-added-merge-urgent');
-                                        else if (typeof renderGridIncremental === 'function') renderGridIncremental('post-added-merge-urgent');
-                                    } catch (e) { /* ignore */ }
-                                    return;
-                                }
+        function getContentFreshnessState() {
+            if (!window._contentFreshnessState) {
+                const cfg = getFreshnessConfig();
+                const now = Date.now();
+                window._contentFreshnessState = {
+                    lastTopSignature: '',
+                    lastMeaningfulFreshAt: now,
+                    nextTopFallbackAt: now + freshnessRandomInt(cfg.minStaleMs, cfg.maxStaleMs),
+                    recentInjected: {}
+                };
+            }
+            return window._contentFreshnessState;
+        }
 
-                                // Insert exactly once into a stable key to prevent
-                                // repeated rebuilds/flicker from multi-key inserts.
-                                let targetKey = 'shared-posts';
-                                try {
-                                    const activeKey = (typeof getActiveViewerFeedKey === 'function') ? getActiveViewerFeedKey() : null;
-                                    if (postObj.authId && currentUserId && String(postObj.authId) === String(currentUserId)) {
-                                        targetKey = String(currentUserId);
-                                    } else if (activeKey && typeof activeKey === 'string' && activeKey.trim()) {
-                                        targetKey = activeKey.trim();
-                                    }
-                                } catch (e) { /* keep shared-posts fallback */ }
-
-                                gridContent[targetKey] = gridContent[targetKey] || [];
-                                if (typeof insertNewPostIntoGrid === 'function') insertNewPostIntoGrid(targetKey, postObj);
-                                else ensureUniqueAndInsert(targetKey, postObj);
-                                try { if (gridContent[targetKey].length > 300) gridContent[targetKey].length = 300; } catch(e){}
-                                console.log('➕ Inserted new post from post_events/added into', targetKey, postId);
-                            } catch(e) { console.warn('Failed to insert new post into gridContent', e); }
+        function getTop15LockStorageKey(uid) {
             return `top15_engagement_lock_${uid || 'anon'}`;
         }
 
@@ -42849,6 +42854,14 @@ function setUploadModalHeader(title, subtitle) {
                 } else {
                     try { insertNewPostIntoGrid(contentKey, postData); } catch(e) { gridContent[contentKey].push(postData); }
                 }
+                // Mark publish-settle timestamp so reconciler won't immediately
+                // yank/replace this brand-new post while feeds converge.
+                try {
+                    window.__publishedPostSettleAt = window.__publishedPostSettleAt || {};
+                    window.__publishedPostSettleAt[postData.id] = Date.now();
+                    window.__reconcilerPostAddedAt = window.__reconcilerPostAddedAt || {};
+                    window.__reconcilerPostAddedAt[postData.id] = Date.now();
+                } catch (e) { /* ignore settle marker failures */ }
                 // Show the post immediately in the grid without waiting for
                 // later scheduled refresh cycles.
                 try {
