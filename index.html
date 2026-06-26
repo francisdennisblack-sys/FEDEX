@@ -38885,6 +38885,31 @@ function setUploadModalHeader(title, subtitle) {
                     console.warn('incremental freshness pass failed:', e);
                 }
 
+                // Keep newly published posts in the live snapshot until a real
+                // refresh rebuilds the feed. This prevents reconcile from
+                // pruning them back out after they are inserted into the grid.
+                try {
+                    const lockedPosts = [];
+                    const lockedSeen = new Set(rankedSnapshot.map(p => p && p.id).filter(Boolean));
+                    for (const key of Object.keys(gridContent || {})) {
+                        const arr = gridContent[key];
+                        if (!Array.isArray(arr)) continue;
+                        for (const p of arr) {
+                            if (!p || !p.id) continue;
+                            if (!(p._keepGridPlacement || p._lockedGridPlacement)) continue;
+                            if (lockedSeen.has(p.id)) continue;
+                            lockedSeen.add(p.id);
+                            lockedPosts.push(p);
+                        }
+                    }
+                    if (lockedPosts.length > 0) {
+                        rankedSnapshot = mergeUniquePosts(lockedPosts, rankedSnapshot);
+                        console.log(`🧷 Snapshot lock: preserved ${lockedPosts.length} published post(s) in live feed snapshot`);
+                    }
+                } catch (e) {
+                    console.warn('locked-post snapshot preservation failed', e);
+                }
+
                 try {
                     rankedSnapshot = window.stabilizeTargetForScrollActivity ? window.stabilizeTargetForScrollActivity(rankedSnapshot, (gridScroller && Array.isArray(gridScroller.items)) ? gridScroller.items : []) : rankedSnapshot;
                 } catch (e) {
