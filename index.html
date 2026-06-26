@@ -15058,6 +15058,15 @@
                 const dir = String(voteType || '').toLowerCase();
                 if (dir !== 'like' && dir !== 'dislike') return false;
 
+                // One-step rule: each vote interaction may move at most one slot.
+                // If this vote event already consumed its single move, stop here.
+                try {
+                    const lock = window.__voteOneStepEventState;
+                    if (lock && String(lock.postId || '') === String(postId) && lock.moved === true) {
+                        return false;
+                    }
+                } catch (e) { /* ignore */ }
+
                 const deferUntilReady = !!(options && options.deferUntilReady);
                 const force = !!(options && options.force);
                 const maxWaitMs = Math.max(180, Number((options && options.maxWaitMs) || 650));
@@ -15085,39 +15094,8 @@
                 }
                 if (fromIdx < 0) return false;
 
-                // Prefer a direct jump to the current target index so votes do
-                // not visually "walk" through multiple swap hops.
-                let toIdx = -1;
-                let hasRankedTarget = false;
-                try {
-                    const preferredTarget = Array.isArray(pendingSortedPosts) && pendingSortedPosts.length
-                        ? pendingSortedPosts
-                        : (Array.isArray(window.latestSortedPosts) ? window.latestSortedPosts : []);
-                    const rankedIdx = preferredTarget.findIndex(p => p && String(p.id) === String(postId));
-                    if (rankedIdx >= 0 && rankedIdx < working.length) {
-                        hasRankedTarget = true;
-                        if (rankedIdx !== fromIdx) {
-                            toIdx = rankedIdx;
-                        }
-                    }
-                } catch (e) { /* ignore target-lookup failures */ }
-
-                // If ranked target says "no index change", don't force a
-                // speculative hop that will immediately snap back.
-                if (hasRankedTarget && toIdx < 0) return false;
-
-                // Never do speculative fallback swaps. Move only when we have
-                // a ranked target index, otherwise wait for the next snapshot.
-                if (!hasRankedTarget && toIdx < 0) return false;
-
-                // During the optimistic vote window, never move opposite the
-                // user's explicit direction. Stale ranking snapshots can briefly
-                // point backward and cause flicker-back to the old slot.
-                if (dir === 'like' && toIdx > fromIdx) {
-                    toIdx = fromIdx - 1;
-                } else if (dir === 'dislike' && toIdx < fromIdx) {
-                    toIdx = fromIdx + 1;
-                }
+                // Hard cap: one adjacent slot only.
+                let toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
 
                 if (toIdx < 0 || toIdx >= working.length || toIdx === fromIdx) return false;
 
@@ -15166,6 +15144,12 @@
 
                 window.__lastImmediateVoteMoveAtByPost = window.__lastImmediateVoteMoveAtByPost || {};
                 window.__lastImmediateVoteMoveAtByPost[String(postId)] = Date.now();
+                try {
+                    if (window.__voteOneStepEventState && String(window.__voteOneStepEventState.postId || '') === String(postId)) {
+                        window.__voteOneStepEventState.moved = true;
+                        window.__voteOneStepEventState.movedAt = Date.now();
+                    }
+                } catch (e) { /* ignore */ }
                 console.log(`⚡ Immediate vote shift: ${String(postId).slice(0, 8)} ${fromIdx}→${toIdx}`);
                 return true;
             } catch (e) {
@@ -15263,6 +15247,13 @@
                 window.lastVoteRerankDirection = (newVoteType === 'like') ? 'up' : ((newVoteType === 'dislike') ? 'down' : '');
                 window.lastVoteRerankPostId = postId;
                 window.lastVoteRerankAt = Date.now();
+                window.__voteOneStepEventState = {
+                    postId: postId,
+                    voteType: newVoteType,
+                    at: Date.now(),
+                    moved: false,
+                    movedAt: 0
+                };
             } catch (e) { /* ignore */ }
             
             // OPTIMISTIC UI: Update immediately
@@ -37339,6 +37330,12 @@ function setUploadModalHeader(title, subtitle) {
                 try {
                     if (!votedPostId) return false;
                     const vid = String(votedPostId);
+                    try {
+                        const lock = window.__voteOneStepEventState;
+                        if (lock && String(lock.postId || '') === vid && lock.moved === true) {
+                            return true;
+                        }
+                    } catch (e) { /* ignore */ }
                     const curIdx = current.findIndex(p => p && String(p.id) === vid);
                     const tgtIdx = target.findIndex(p => p && String(p.id) === vid);
                     if (tgtIdx === -1) return false; // not present in new target
@@ -37366,10 +37363,14 @@ function setUploadModalHeader(title, subtitle) {
                             }
                         } catch (e) { /* ignore guard failures */ }
 
+                        // One-step rule: move at most one adjacent slot per vote event.
+                        const stepDir = (tgtIdx < curIdx) ? -1 : 1;
+                        const cappedTarget = curIdx + stepDir;
+
                         // Move in-place with minimal splice operations
                         const [moved] = current.splice(curIdx, 1);
                         // Clamp target index to current length after removal
-                        const insertAt = Math.min(Math.max(0, tgtIdx), current.length);
+                        const insertAt = Math.min(Math.max(0, cappedTarget), current.length);
                         current.splice(insertAt, 0, hydratePostForRender(moved || target[tgtIdx]));
                         toIdx = insertAt;
                         moved = true;
@@ -37407,6 +37408,13 @@ function setUploadModalHeader(title, subtitle) {
                     } }
                     catch(e) { try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(_) {} }
                     try { recomputeAndApplyBadges(); } catch(e) {}
+                    try {
+                        const lock = window.__voteOneStepEventState;
+                        if (lock && String(lock.postId || '') === vid) {
+                            lock.moved = true;
+                            lock.movedAt = Date.now();
+                        }
+                    } catch (e) { /* ignore */ }
                     console.log(`🧠 Smart vote move applied for ${vid}: ${fromIdx}→${toIdx}`);
                     return true;
                 } catch (e) { console.warn('applySmartVoteMove failed', e); return false; }
