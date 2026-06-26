@@ -16627,6 +16627,161 @@
         }
         try { window.purgeExpiredPostsFromFirebase = purgeExpiredPostsFromFirebase; } catch (e) { /* ignore */ }
 
+        const POST_INTEGRITY_SWEEP_INTERVAL_MS = 1000;
+        const POST_INTEGRITY_SWEEP_BATCH_SIZE = 12;
+        let __postIntegritySweepRunning = false;
+        let __postIntegritySweepQueue = [];
+        let __postIntegritySweepQueueBuiltAt = 0;
+
+        function rebuildPostIntegritySweepQueue() {
+            try {
+                const ids = new Set();
+                const deletedIds = new Set(getPersistedDeletedPostIds());
+                deletedIds.forEach(id => ids.add(String(id)));
+
+                try {
+                    if (window.globallyDeletedPostIds && typeof window.globallyDeletedPostIds.forEach === 'function') {
+                        window.globallyDeletedPostIds.forEach(id => { if (id) ids.add(String(id)); });
+                    }
+                } catch (e) { /* ignore */ }
+
+                try {
+                    if (window.pendingRemovedPosts && typeof window.pendingRemovedPosts.forEach === 'function') {
+                        window.pendingRemovedPosts.forEach(id => { if (id) ids.add(String(id)); });
+                    }
+                } catch (e) { /* ignore */ }
+
+                try {
+                    if (postCache && typeof postCache === 'object') {
+                        Object.keys(postCache).forEach(id => { if (id) ids.add(String(id)); });
+                    }
+                } catch (e) { /* ignore */ }
+
+                try {
+                    if (window.latestSortedPosts && Array.isArray(window.latestSortedPosts)) {
+                        window.latestSortedPosts.forEach(p => { if (p && p.id) ids.add(String(p.id)); });
+                    }
+                } catch (e) { /* ignore */ }
+
+                try {
+                    if (window.gridScroller && Array.isArray(gridScroller.items)) {
+                        gridScroller.items.forEach(p => { if (p && p.id) ids.add(String(p.id)); });
+                    }
+                } catch (e) { /* ignore */ }
+
+                try {
+                    Object.keys(gridContent || {}).forEach(key => {
+                        const arr = gridContent[key];
+                        if (!Array.isArray(arr)) return;
+                        arr.forEach(p => { if (p && p.id) ids.add(String(p.id)); });
+                    });
+                } catch (e) { /* ignore */ }
+
+                __postIntegritySweepQueue = Array.from(ids);
+                __postIntegritySweepQueueBuiltAt = Date.now();
+            } catch (e) {
+                __postIntegritySweepQueue = [];
+                __postIntegritySweepQueueBuiltAt = 0;
+            }
+        }
+
+        function sweepPostIntegrityBatch() {
+            if (__postIntegritySweepRunning) return;
+            if (typeof document === 'undefined') return;
+            __postIntegritySweepRunning = true;
+            try {
+                if (!__postIntegritySweepQueue.length || (Date.now() - __postIntegritySweepQueueBuiltAt) > 15000) {
+                    rebuildPostIntegritySweepQueue();
+                }
+
+                const batch = __postIntegritySweepQueue.splice(0, POST_INTEGRITY_SWEEP_BATCH_SIZE);
+                if (!batch.length) return;
+
+                const persistedDeletedIds = new Set(getPersistedDeletedPostIds());
+                const now = Date.now();
+                let changed = false;
+                let foundExpired = false;
+
+                for (const rawId of batch) {
+                    if (!rawId) continue;
+                    const postId = String(rawId);
+
+                    let shouldPurge = persistedDeletedIds.has(postId);
+                    if (!shouldPurge) {
+                        try { if (window.globallyDeletedPostIds && window.globallyDeletedPostIds.has(postId)) shouldPurge = true; } catch (e) {}
+                    }
+                    if (!shouldPurge) {
+                        try { if (window.pendingRemovedPosts && window.pendingRemovedPosts.has(postId)) shouldPurge = true; } catch (e) {}
+                    }
+
+                    let post = null;
+                    try {
+                        if (!post && postCache && postCache[postId]) post = postCache[postId];
+                        if (!post && window.latestSortedPosts && Array.isArray(window.latestSortedPosts)) {
+                            post = window.latestSortedPosts.find(p => p && p.id === postId) || null;
+                        }
+                        if (!post && window.gridScroller && Array.isArray(gridScroller.items)) {
+                            post = gridScroller.items.find(p => p && p.id === postId) || null;
+                        }
+                        if (!post) {
+                            for (const key in gridContent) {
+                                if (!Array.isArray(gridContent[key])) continue;
+                                const found = gridContent[key].find(p => p && p.id === postId);
+                                if (found) { post = found; break; }
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+
+                    if (!shouldPurge && post) {
+                        const createdAt = (typeof getPostCreatedAt === 'function') ? getPostCreatedAt(post) : Number(post.timestamp || post.createdAt || 0);
+                        if (createdAt && (now - createdAt) > POST_MAX_AGE_MS) {
+                            shouldPurge = true;
+                            foundExpired = true;
+                            try { persistDeletedPostId(postId); } catch (e) { /* ignore */ }
+                        }
+                    }
+
+                    if (!shouldPurge) continue;
+
+                    changed = true;
+                    try { purgeDeletedPostFromDOM(postId); } catch (e) { /* ignore */ }
+                    try { purgePostFromCachedAllPosts(postId); } catch (e) { /* ignore */ }
+                    try { if (typeof postCache === 'object' && postCache && postCache[postId]) delete postCache[postId]; } catch (e) { /* ignore */ }
+                    try {
+                        if (window.latestSortedPosts && Array.isArray(window.latestSortedPosts)) {
+                            window.latestSortedPosts = window.latestSortedPosts.filter(p => !(p && p.id === postId));
+                        }
+                    } catch (e) { /* ignore */ }
+                    try {
+                        Object.keys(gridContent || {}).forEach(key => {
+                            if (Array.isArray(gridContent[key])) {
+                                gridContent[key] = gridContent[key].filter(p => !(p && p.id === postId));
+                            }
+                        });
+                    } catch (e) { /* ignore */ }
+                }
+
+                if (foundExpired) {
+                    try { purgeExpiredPostsFromFirebase(); } catch (e) { /* ignore */ }
+                }
+
+                if (changed) {
+                    try { rebuildGridScrollerFromGridContent(); } catch (e) { /* ignore */ }
+                    try { window.lastRenderGridTime = 0; } catch (e) { /* ignore */ }
+                    try { renderGrid(); } catch (e) { /* ignore */ }
+                }
+            } catch (e) {
+                console.warn('Post integrity sweep failed:', e && e.message);
+            } finally {
+                __postIntegritySweepRunning = false;
+            }
+        }
+
+        try {
+            setTimeout(() => { sweepPostIntegrityBatch(); }, 2000);
+            setInterval(() => { sweepPostIntegrityBatch(); }, POST_INTEGRITY_SWEEP_INTERVAL_MS);
+        } catch (e) { /* ignore */ }
+
         // Run an initial purge shortly after load (lets Firebase warm up) so posts
         // that were already live > 24h get cleaned up on this update, then re-check
         // every 5 minutes so posts are deleted as they cross the 24h mark.
