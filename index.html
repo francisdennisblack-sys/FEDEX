@@ -6776,44 +6776,17 @@
         function compareFeedPriority(a, b) {
             try {
                 if (!a || !b) return 0;
-                const hasMedia = (p) => !!(
-                    p && (
-                        p.photoURL ||
-                        p.imageData ||
-                        p.videoURL ||
-                        p.mediaURL ||
-                        (Array.isArray(p.mediaItems) && p.mediaItems.length > 0) ||
-                        (Array.isArray(p.media) && p.media.length > 0) ||
-                        (Array.isArray(p.mediaURLs) && p.mediaURLs.length > 0) ||
-                        (Array.isArray(p.photoURLs) && p.photoURLs.length > 0) ||
-                        (Array.isArray(p.images) && p.images.length > 0) ||
-                        (Array.isArray(p.videos) && p.videos.length > 0)
-                    )
-                );
-                const aTextOnly = !hasMedia(a);
-                const bTextOnly = !hasMedia(b);
-
-                // Product rule: text-only posts always rank ahead of media posts.
-                if (aTextOnly !== bTextOnly) return aTextOnly ? -1 : 1;
-
-                const ta = (typeof getPostEngagementTier === 'function') ? getPostEngagementTier(a) : { priority: 4 };
-                const tb = (typeof getPostEngagementTier === 'function') ? getPostEngagementTier(b) : { priority: 4 };
-
-                if (ta.priority !== tb.priority) return ta.priority - tb.priority;
-
-                const aBadges = Array.isArray(a.badges) ? a.badges.map(x => String(x).toLowerCase()) : [];
-                const bBadges = Array.isArray(b.badges) ? b.badges.map(x => String(x).toLowerCase()) : [];
-                const aIsHot = aBadges.some(bb => bb.includes('hot') || bb.includes('trend')) || String(a.primaryBadge || '').toLowerCase().includes('hot');
-                const bIsHot = bBadges.some(bb => bb.includes('hot') || bb.includes('trend')) || String(b.primaryBadge || '').toLowerCase().includes('hot');
-                if (aIsHot !== bIsHot) return aIsHot ? -1 : 1;
-
                 const netA = (Number(a.likes || 0) - Number(a.dislikes || 0));
                 const netB = (Number(b.likes || 0) - Number(b.dislikes || 0));
                 if (netA !== netB) return netB - netA;
 
-                const mA = Number(a.mlScore || 0);
-                const mB = Number(b.mlScore || 0);
-                if (mA !== mB) return mB - mA;
+                const likesA = Number(a.likes || 0);
+                const likesB = Number(b.likes || 0);
+                if (likesA !== likesB) return likesB - likesA;
+
+                const dislikesA = Number(a.dislikes || 0);
+                const dislikesB = Number(b.dislikes || 0);
+                if (dislikesA !== dislikesB) return dislikesA - dislikesB;
 
                 return (Number(b.timestamp || 0) - Number(a.timestamp || 0));
             } catch (e) {
@@ -40715,6 +40688,35 @@ function setUploadModalHeader(title, subtitle) {
                 }
             } catch (e) {
                 console.warn('⚠️ Positivity threshold insertion failed:', e);
+            }
+
+            // ========================================================================
+            // ✅ FINAL AUTHORITATIVE FEED ORDER
+            // Sort strictly by engagement: (likes - dislikes), then likes, then fewer
+            // dislikes, then recency. This pass runs last so media/text type can never
+            // override the engagement order.
+            // ========================================================================
+            try {
+                if (Array.isArray(sortedPosts) && sortedPosts.length > 1) {
+                    sortedPosts = sortedPosts.slice().sort((a, b) => {
+                        const netA = (Number(a && a.likes || 0) - Number(a && a.dislikes || 0));
+                        const netB = (Number(b && b.likes || 0) - Number(b && b.dislikes || 0));
+                        if (netA !== netB) return netB - netA;
+
+                        const likesA = Number(a && a.likes || 0);
+                        const likesB = Number(b && b.likes || 0);
+                        if (likesA !== likesB) return likesB - likesA;
+
+                        const dislikesA = Number(a && a.dislikes || 0);
+                        const dislikesB = Number(b && b.dislikes || 0);
+                        if (dislikesA !== dislikesB) return dislikesA - dislikesB;
+
+                        return Number(b && b.timestamp || 0) - Number(a && a.timestamp || 0);
+                    });
+                    console.log('✅ FINAL FEED ORDER: strict net-engagement sort applied');
+                }
+            } catch (e) {
+                console.warn('⚠️ Final net-engagement sort failed:', e);
             }
 
             // Refresh latest snapshot after position-1 rotation
