@@ -523,34 +523,29 @@
                 const key = getActiveViewerFeedKey() || (currentUserId || 'shared-posts');
                 gridContent[key] = gridContent[key] || [];
 
-                // If not present in the content bucket, add to front
+                // If not present in the content bucket, insert at a random slot.
                 if (!gridContent[key].some(p => p && p.id === post.id)) {
-                    gridContent[key].unshift(post);
+                    const insertAt = getRandomNewPostInsertIndex(gridContent[key].length);
+                    gridContent[key].splice(insertAt, 0, post);
                 }
 
                 // Update postCache
                 try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
 
-                // Force scroller items to include this post at the front
+                // Force scroller items to include this post at a random slot.
                 if (window.gridScroller && Array.isArray(gridScroller.items)) {
                     const items = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
                     const foundIdx = items.findIndex(i => i && i.id === post.id);
                     if (foundIdx === -1) {
-                        // Prepend
-                        const newItems = [post, ...items];
+                        const insertAt = getRandomNewPostInsertIndex(items.length);
+                        const newItems = items.slice();
+                        newItems.splice(insertAt, 0, post);
                         try { if (typeof gridScroller.setItems === 'function') gridScroller.setItems(newItems); else gridScroller.items = newItems; } catch(e) { gridScroller.items = newItems; }
-                    } else if (foundIdx > 0) {
-                        // Move to front
-                        const item = items.splice(foundIdx, 1)[0];
-                        items.unshift(item);
-                        try { if (typeof gridScroller.setItems === 'function') gridScroller.setItems(items); else gridScroller.items = items; } catch(e) { gridScroller.items = items; }
                     }
                     try { if (typeof gridScroller.refresh === 'function') gridScroller.refresh(); } catch(e){}
-                    try { if (typeof gridScroller.scrollToIndex === 'function') gridScroller.scrollToIndex(0); } catch(e){}
                 } else {
-                    // Fallback: force immediate render and scroll top
+                    // Fallback: force immediate render
                     try { window.lastRenderGridTime = 0; renderGrid(); } catch(e){}
-                    try { window.scrollTo(0,0); } catch(e){}
                 }
             } catch (e) { console.warn('ensureNewPostVisible failed', e); }
         }
@@ -15535,6 +15530,16 @@
             } catch (e) { console.warn('dedupeGridContent failed', e); }
         }
 
+        // Insert new posts at a random position so fresh content is mixed fairly.
+        function getRandomNewPostInsertIndex(existingLength, options = {}) {
+            const len = Math.max(0, Number(existingLength) || 0);
+            const reserveHeadSlots = Math.max(0, Number(options.reserveHeadSlots != null ? options.reserveHeadSlots : 0) || 0);
+            const minIndex = Math.min(reserveHeadSlots, len);
+            const maxIndex = len;
+            if (maxIndex <= minIndex) return maxIndex;
+            return minIndex + Math.floor(Math.random() * (maxIndex - minIndex + 1));
+        }
+
         // Ensure a post is unique across all gridContent keys, then insert into the given key.
         function ensureUniqueAndInsert(contentKey, post) {
             try {
@@ -15582,8 +15587,9 @@
                 } catch (e) { /* ignore */ }
                 // Ensure target key exists
                 gridContent[contentKey] = gridContent[contentKey] || [];
-                // Insert at front (new repost becomes visible)
-                gridContent[contentKey].unshift(post);
+                // Insert at a random slot so new posts are mixed fairly.
+                const insertAt = getRandomNewPostInsertIndex(gridContent[contentKey].length);
+                gridContent[contentKey].splice(insertAt, 0, post);
                 // Update cache
                 try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
                 // Update scroller safely if available
@@ -37659,21 +37665,13 @@ function setUploadModalHeader(title, subtitle) {
                 const already = gridContent[contentKey].findIndex(p => p && p.id === postData.id);
                 if (already !== -1) { gridContent[contentKey][already] = postData; return; }
 
-                // Determine insertion index: after top-3 initial slots and after any
-                // leading posts owned by the current user.
-                let insertAt = 3; // prefer after top-3
-                if (insertAt > gridContent[contentKey].length) insertAt = gridContent[contentKey].length;
-
-                // Advance insertAt past any leading posts that are owned by currentUserId
-                while (insertAt < gridContent[contentKey].length && gridContent[contentKey][insertAt] && (gridContent[contentKey][insertAt].ownerUid === currentUserId || gridContent[contentKey][insertAt].authId === currentUserId)) {
-                    insertAt++;
-                }
+                const insertAt = getRandomNewPostInsertIndex(gridContent[contentKey].length);
 
                 // Keep the list compact and ordered: splice at the insertion point.
                 // We intentionally avoid leaving sparse holes in the array because
                 // the virtual scroller renders by index.
                 gridContent[contentKey].splice(insertAt, 0, postData);
-                try { console.log(`➕ insertNewPostIntoGrid: inserted ${postData.id} at index ${insertAt} in ${contentKey}`); } catch(e){}
+                try { console.log(`➕ insertNewPostIntoGrid: inserted ${postData.id} at random index ${insertAt} in ${contentKey}`); } catch(e){}
 
                 // Dump debug state: gridContent sizes, scroller items, and first DOM boxes
                 try {
