@@ -3317,11 +3317,61 @@
         // Helper: compute area tag for given coords using existing auto-detect helpers
         function computeAreaForCoords(coords) {
             try {
+                const isLocalAreaLiteral = (value) => {
+                    const t = String(value || '').trim().toLowerCase();
+                    return t === 'local area' || t === 'local zone' || t === '📍 local area';
+                };
+
+                // Highest priority: explicitly committed/manual label
+                try {
+                    const explicitLabel = String((coords && (coords.label || coords.name || coords.display)) || '').trim();
+                    if (explicitLabel && !isLocalAreaLiteral(explicitLabel)) return explicitLabel;
+                } catch (e) {}
+
+                // Persisted selected location label from storage
+                try {
+                    const rawSaved = localStorage.getItem('lastChosenLocation');
+                    if (rawSaved) {
+                        const saved = JSON.parse(rawSaved);
+                        const savedLabel = String((saved && (saved.label || saved.name || saved.display)) || '').trim();
+                        if (savedLabel && !isLocalAreaLiteral(savedLabel)) return savedLabel;
+                    }
+                } catch (e) {}
+
                 // If user explicitly selected a zone, respect it
                 try { if (userSelectedZone && currentZoneTag && String(currentZoneTag).trim()) return currentZoneTag; } catch(e){}
 
                 // If a persisted manual tag exists, prefer that
                 try { const latest = (window.latestUserAreaTag || '').trim(); if (latest) return latest; } catch(e){}
+
+                // Derive best real area for these coords (never silently downgrade to Local area)
+                try {
+                    const lat = Number(coords && coords.lat);
+                    const lon = Number(coords && coords.lon);
+                    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+                        if (typeof getGridForUser === 'function') {
+                            const g = getGridForUser(lat, lon);
+                            if (g && g.displayName && !isLocalAreaLiteral(g.displayName)) return String(g.displayName).trim();
+                        }
+                        if (typeof findClosestLocation === 'function') {
+                            const closest = findClosestLocation(lat, lon);
+                            if (closest && closest.location && closest.location.name) {
+                                const n = String(closest.location.name).trim();
+                                if (n && !isLocalAreaLiteral(n)) return n;
+                            }
+                        }
+                        if (typeof getLocationName === 'function') {
+                            const fallbackName = String(getLocationName(lat, lon) || '').trim();
+                            if (fallbackName && !isLocalAreaLiteral(fallbackName)) return fallbackName;
+                        }
+                    }
+                } catch (e) {}
+
+                // Keep an already-real active tag instead of downgrading
+                try {
+                    const current = String(currentZoneTag || currentAreaName || '').trim();
+                    if (current && !isLocalAreaLiteral(current)) return current;
+                } catch (e) {}
 
                 // Until the user explicitly updates their search/zone, return a neutral label
                 // This prevents auto-detected names from showing and ensures consistent UX.
@@ -3364,7 +3414,7 @@
                 if (!raw) return false;
                 console.log('🔁 applySavedLocationAuthoritative: found lastChosenLocation', raw);
                 const saved = JSON.parse(raw);
-                const coords = { lat: Number(saved.lat), lon: Number(saved.lon), accuracy: saved.accuracy || 100, manual: true };
+                const coords = { lat: Number(saved.lat), lon: Number(saved.lon), label: saved.label || saved.name || saved.display || '', accuracy: saved.accuracy || 100, manual: true };
                 // Set runtime userLocation and persist into cache (force)
                 try { const prev = Object.assign({}, userLocation || {}); userLocation = coords; console.log('📍 applySavedLocationAuthoritative: userLocation prev->new', { prev, next: userLocation }); } catch(e){}
                 try { setUserLocationCache(coords, { force: true }); } catch(e){}
@@ -3375,9 +3425,14 @@
                     const detected = computeAreaForCoords(coords);
                     if (detected) {
                         currentZoneTag = detected;
+                        currentAreaName = detected;
+                        userSelectedZone = true;
                         try { updateZonePredictor(); } catch(e){}
                     }
                 } catch(e) {}
+
+                // Guarantee currentGrid/currentGridRadius are in sync before any render path runs.
+                try { if (typeof window.refreshCurrentGridContext === 'function') window.refreshCurrentGridContext('applySavedLocationAuthoritative'); } catch (e) {}
 
                 // Refresh grid so posts reflect the saved location immediately
                 try { if (typeof forceGridRefresh === 'function') forceGridRefresh(); else if (typeof renderGrid === 'function') renderGrid(); } catch(e){}
@@ -8128,9 +8183,64 @@
                     }
                 }
             } catch (e) { console.warn('syncRuntimeLocationFromCommit failed', e); }
+            try { if (typeof window.refreshCurrentGridContext === 'function') window.refreshCurrentGridContext('syncRuntimeLocationFromCommit'); } catch (e) {}
             try { window.__lastLocationCommitAt = Date.now(); } catch(e) {}
         }
         try { window.syncRuntimeLocationFromCommit = syncRuntimeLocationFromCommit; } catch (e) {}
+
+        // Rebuild the location-scoped grid context used by proximity badges and
+        // local distance tiering. Call this after every location commit/restore.
+        function refreshCurrentGridContext(reason = '') {
+            try {
+                let coords = null;
+                try { coords = getCanonicalUserCoords({ maxAgeMs: 15 * 60 * 1000 }); } catch (e) {}
+                if (!coords) {
+                    try {
+                        if (userLocation && Number.isFinite(Number(userLocation.lat)) && Number.isFinite(Number(userLocation.lon))) {
+                            coords = { lat: Number(userLocation.lat), lon: Number(userLocation.lon) };
+                        }
+                    } catch (e) {}
+                }
+                if (!coords) {
+                    try {
+                        const raw = localStorage.getItem('lastChosenLocation');
+                        if (raw) {
+                            const saved = JSON.parse(raw);
+                            if (saved && Number.isFinite(Number(saved.lat)) && Number.isFinite(Number(saved.lon))) {
+                                coords = { lat: Number(saved.lat), lon: Number(saved.lon) };
+                            }
+                        }
+                    } catch (e) {}
+                }
+
+                if (!coords || !Number.isFinite(Number(coords.lat)) || !Number.isFinite(Number(coords.lon))) {
+                    return false;
+                }
+
+                if (typeof getGridForUser === 'function') {
+                    const nextGrid = getGridForUser(Number(coords.lat), Number(coords.lon));
+                    if (nextGrid) {
+                        currentGrid = nextGrid;
+                        currentNearestPOI = nextGrid.poiData || null;
+                        if (Number.isFinite(Number(nextGrid.gridRadius))) currentGridRadius = Number(nextGrid.gridRadius);
+                        if (nextGrid.contentScope) currentContentScope = nextGrid.contentScope;
+                        if (!userSelectedZone && nextGrid.displayName) {
+                            maybeSetAutoZoneTag(nextGrid.displayName);
+                            currentAreaName = nextGrid.displayName;
+                        }
+                        console.log(`📍 refreshCurrentGridContext(${reason || 'no-reason'}): ${nextGrid.displayName || 'unknown'} radius=${Number(currentGridRadius || 0).toFixed(3)}`);
+                        return true;
+                    }
+                }
+
+                try { detectUserGrid(); } catch (e) {}
+                return !!currentGrid;
+            } catch (e) {
+                console.warn('refreshCurrentGridContext failed', e);
+                return false;
+            }
+        }
+        try { window.refreshCurrentGridContext = refreshCurrentGridContext; } catch (e) {}
 
         // Exposed helper: fully wipe the grid and re-subscribe to Firebase so the
         // feed refills from scratch for a new location. Called by the Change Location
@@ -8167,6 +8277,9 @@
                         }
                     }
                 } catch (e) { console.warn('resetGridForLocationChange: auto lat/lon update failed', e); }
+
+                // Keep proximity/badge context aligned with the committed coords.
+                try { if (typeof refreshCurrentGridContext === 'function') refreshCurrentGridContext('resetGridForLocationChange'); } catch (e) {}
 
                 // 1. Wipe the lexical gridContent (what renderGrid actually reads).
                 gridContent = {};
@@ -11725,9 +11838,9 @@
             if (!post) return { display: 'Unknown', emoji: '', scale: 'unknown' };
 
             const stableAreaTag = (typeof getStablePostAreaTag === 'function') ? getStablePostAreaTag(post) : null;
-            const areaPromotionEligible = (typeof isPostAreaPromotionEligible === 'function') ? isPostAreaPromotionEligible(post) : false;
 
-            if (stableAreaTag && !areaPromotionEligible) {
+            // Always prefer the author's/source area's stable tag for display.
+            if (stableAreaTag) {
                 return {
                     display: stableAreaTag,
                     emoji: post.poiEmoji || '📍',
@@ -12531,6 +12644,13 @@
         // MARK POSTS WITH PROXIMITY BADGES
         // ============================================
         function addProximityBadge(post, userGrid) {
+            try {
+                const stableTag = (typeof getStablePostAreaTag === 'function') ? getStablePostAreaTag(post) : null;
+                if (stableTag) {
+                    post.displayAreaTag = stableTag;
+                    post.originalAreaTag = post.originalAreaTag || stableTag;
+                }
+            } catch (e) { /* keep rendering on metadata failures */ }
             if (!userGrid) return post;
 
             // Use cascade tier if available
@@ -39448,6 +39568,8 @@ function setUploadModalHeader(title, subtitle) {
             console.log(`   ✅ Distribution applied: ${displayPosts.length} posts blended`);
             console.log(`   📍 Local: ${displayPosts.filter(p => p.county === userAreaTag).length} | 🌍 Global: ${displayPosts.filter(p => p.county !== userAreaTag).length}`);
             
+            // Refresh location grid context first, then add proximity badges.
+            try { if (typeof refreshCurrentGridContext === 'function') refreshCurrentGridContext('pre-addProximityBadge'); } catch (e) {}
             // Add proximity badges to all posts
             displayPosts = displayPosts.map(post => addProximityBadge(post, currentGrid));
 
@@ -45486,6 +45608,7 @@ function setUploadModalHeader(title, subtitle) {
                         // Without this the modal (separate <script> scope) only set window.* and the
                         // grid never re-sorted. Top global posts stay via the sentiment-first sort.
                         try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: sel || null, label: (sel && (sel.label || sel.name || sel.display)) || window.latestUserAreaTag || null }); } catch(e) {}
+                        try { if (typeof window.refreshCurrentGridContext === 'function') window.refreshCurrentGridContext('modal-commit'); } catch (e) {}
 
                         // ── FULL GRID RESET FOR NEW LOCATION ─────────────────────────────
                         // Delegate to the window-exposed helper that lives in the same scope
@@ -45539,6 +45662,7 @@ function setUploadModalHeader(title, subtitle) {
                         // 🔁 Return Home: sync the lexical location to the restored coords so the
                         // grid re-ranks back to the home location on the renderGrid below.
                         try { if (typeof window.syncRuntimeLocationFromCommit === 'function') window.syncRuntimeLocationFromCommit({ coords: (cacheObj && cacheObj.lat != null && cacheObj.lon != null) ? cacheObj : null, userSelected: false }); } catch(e) {}
+                        try { if (typeof window.refreshCurrentGridContext === 'function') window.refreshCurrentGridContext('modal-restore-home'); } catch (e) {}
 
                         // ── FULL GRID RESET FOR HOME LOCATION ────────────────────────────
                         // Wipe content and resubscribe so the feed refills ranked for the
