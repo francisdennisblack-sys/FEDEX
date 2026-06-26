@@ -41656,44 +41656,6 @@ function setUploadModalHeader(title, subtitle) {
                 }
             }
 
-            // If area tag is stale, refresh from real location / nearest POI before blocking post.
-            if (__isStaleAreaTag(currentZoneTag)) {
-                const refreshedAreaTag = await __resolveFreshAreaTagFromLocation();
-                if (refreshedAreaTag) {
-                    currentZoneTag = refreshedAreaTag;
-                    try { if (!userSelectedZone && window.persistZoneTagForUser) window.persistZoneTagForUser(currentZoneTag); } catch (e) {}
-                    try { updateZonePredictor(); } catch (e) {}
-                    console.log(`✅ Step 3 PRECHECK: Refreshed stale area tag to "${currentZoneTag}"`);
-                } else {
-                    console.warn('⚠️ Step 3 PRECHECK: Area tag still stale after refresh attempt');
-                }
-            }
-
-            // If user is explicitly using the neutral 'Local area' tag, attempt
-            // to re-request geolocation so we can acquire a precise location for
-            // routing. This will trigger a browser prompt when possible; if the
-            // permission is denied we'll show a retry UI.
-            try {
-                const normalized = String(currentZoneTag || '').trim().toLowerCase();
-                if (normalized === 'local area' || normalized === 'local') {
-                    const loc = await maybePromptLocationOnLocalAreaUse();
-                    if (loc && loc.lat != null && loc.lon != null) {
-                        userLocation = loc;
-                        try { setUserLocationCache && typeof setUserLocationCache === 'function' && setUserLocationCache(userLocation); } catch(_){}
-                        // Try to compute a fresher area tag from the obtained coords
-                        try {
-                            const fresh = await __resolveFreshAreaTagFromLocation();
-                            if (fresh) {
-                                currentZoneTag = fresh;
-                                try { if (!userSelectedZone && window.persistZoneTagForUser) window.persistZoneTagForUser(currentZoneTag); } catch (e) {}
-                                try { updateZonePredictor(); } catch (e) {}
-                                console.log('✅ Updated area tag after retrying location:', currentZoneTag);
-                            }
-                        } catch (e) { console.warn('Failed to resolve fresh area tag after location retry', e); }
-                    }
-                }
-            } catch (e) { console.warn('Local-area permission retry check failed', e); }
-            
             if (__isStaleAreaTag(currentZoneTag)) {
                 // If geolocation is slow or unavailable, fall back to the last known
                 // readable area instead of blocking post submission.
@@ -41897,16 +41859,22 @@ function setUploadModalHeader(title, subtitle) {
                 const postLink = '';
                 const customTagInput = document.getElementById('customZoneTag');
                 const customTag = customTagInput ? customTagInput.value.trim() : '';
-                // Ensure geolocation is requested at post-time (only when user presses Post)
+                // Best-effort geolocation refresh only. Posting must not wait on GPS.
                 try {
                     const manualActive = localStorage.getItem('manualLocationActive') === '1' || !!localStorage.getItem('lastChosenLocation');
-                    if (!manualActive) {
-                        console.log('📍 Requesting fresh geolocation now because user pressed Post');
-                        try {
-                            // Attempt a fresh high-accuracy position (prompts user if needed)
-                            const fresh = await getFreshGeolocation(5000);
-                            console.log('  Fresh geolocation obtained for post-time:', fresh && fresh.lat ? `${fresh.lat.toFixed(6)}, ${fresh.lon.toFixed(6)} (acc ${fresh.accuracy})` : fresh);
-                        } catch (e) { console.warn('Post-time fresh geolocation failed', e); }
+                    if (!manualActive && typeof getFreshGeolocation === 'function') {
+                        console.log('📍 Scheduling background geolocation refresh because user pressed Post');
+                        setTimeout(() => {
+                            try {
+                                Promise.resolve(getFreshGeolocation(5000)).then((fresh) => {
+                                    if (fresh && fresh.lat != null && fresh.lon != null) {
+                                        userLocation = fresh;
+                                        try { setUserLocationCache && typeof setUserLocationCache === 'function' && setUserLocationCache(userLocation); } catch(_){ }
+                                        console.log('  Background geolocation refresh completed for post-time:', fresh && fresh.lat ? `${fresh.lat.toFixed(6)}, ${fresh.lon.toFixed(6)} (acc ${fresh.accuracy})` : fresh);
+                                    }
+                                }).catch((e) => console.warn('Background post-time geolocation failed', e));
+                            } catch (e) { console.warn('Background geolocation refresh scheduling failed', e); }
+                        }, 0);
                     }
                 } catch (e) { /* ignore */ }
                 
@@ -42603,8 +42571,9 @@ function setUploadModalHeader(title, subtitle) {
                 
                 // 📝 TRACK POST CREATION IN FIREBASE SYSTEM
                 if (window.postTrackingSystem) {
-                    await window.postTrackingSystem.trackPostCreation(currentUserId, postId, postData);
-                    console.log(`📍 Post tracked in Firebase system for retrieval and analytics`);
+                    window.postTrackingSystem.trackPostCreation(currentUserId, postId, postData)
+                        .then(() => console.log(`📍 Post tracked in Firebase system for retrieval and analytics`))
+                        .catch((e) => console.warn('Post tracking failed (non-fatal):', e));
                 }
 
                 // Clear composer-selected badges and reset sell button UI after successful save
