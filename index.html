@@ -14830,16 +14830,30 @@
                 }
                 if (fromIdx < 0) return false;
 
-                const toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
-                if (toIdx < 0 || toIdx >= working.length) return false;
+                // Prefer a direct jump to the current target index so votes do
+                // not visually "walk" through multiple swap hops.
+                let toIdx = -1;
+                try {
+                    const preferredTarget = Array.isArray(pendingSortedPosts) && pendingSortedPosts.length
+                        ? pendingSortedPosts
+                        : (Array.isArray(window.latestSortedPosts) ? window.latestSortedPosts : []);
+                    const rankedIdx = preferredTarget.findIndex(p => p && String(p.id) === String(postId));
+                    if (rankedIdx >= 0 && rankedIdx < working.length && rankedIdx !== fromIdx) {
+                        toIdx = rankedIdx;
+                    }
+                } catch (e) { /* ignore target-lookup failures */ }
 
-                const a = working[fromIdx];
-                const b = working[toIdx];
-                if (!a || !a.id || !b || !b.id) return false;
+                // Fallback when a ranked target is not yet available.
+                if (toIdx < 0) {
+                    toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
+                }
+                if (toIdx < 0 || toIdx >= working.length || toIdx === fromIdx) return false;
 
-                // Swap exactly one slot.
-                working[fromIdx] = b;
-                working[toIdx] = a;
+                const moving = working[fromIdx];
+                if (!moving || !moving.id) return false;
+                working.splice(fromIdx, 1);
+                const insertAt = Math.min(Math.max(0, toIdx), working.length);
+                working.splice(insertAt, 0, moving);
 
                 const committed = compactPostListForSlots(working);
                 gridScroller.items = committed;
@@ -14850,8 +14864,10 @@
 
                 keepVoteRerankActive(postId);
 
-                // Prefer direct DOM swap to avoid clear/repaint flicker.
-                const swappedInDom = swapVoteBoxesInDOM(fromIdx, toIdx);
+                // Use direct box swap only for adjacent movement; otherwise repaint
+                // the changed range to avoid transient identity mismatches.
+                const adjacentMove = Math.abs(fromIdx - toIdx) === 1;
+                const swappedInDom = adjacentMove ? swapVoteBoxesInDOM(fromIdx, toIdx) : false;
                 if (!swappedInDom) {
                     if (typeof gridScroller.renderItemsInRange === 'function') {
                         const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
@@ -36977,25 +36993,8 @@ function setUploadModalHeader(title, subtitle) {
                         toIdx = insertAt;
                         moved = true;
                     } else {
-                        // Ranking can tie and keep the same index. In that case,
-                        // force exactly one swap in the vote direction so the user
-                        // sees movement (up for like, down for dislike).
-                        const intent = (String(window.lastVoteRerankDirection || '').toLowerCase());
-                        if (intent === 'up' && curIdx > 0) {
-                            const tmp = current[curIdx - 1];
-                            current[curIdx - 1] = current[curIdx];
-                            current[curIdx] = tmp;
-                            toIdx = curIdx - 1;
-                            moved = true;
-                        } else if (intent === 'down' && curIdx < (current.length - 1)) {
-                            const tmp = current[curIdx + 1];
-                            current[curIdx + 1] = current[curIdx];
-                            current[curIdx] = tmp;
-                            toIdx = curIdx + 1;
-                            moved = true;
-                        } else {
-                            return true;
-                        }
+                        // Already at target index for this tick.
+                        return true;
                     }
 
                     if (!moved) return false;
@@ -38601,29 +38600,10 @@ function setUploadModalHeader(title, subtitle) {
                     baseIds.push(p.id);
                 }
 
-                // Desired index from fresh ranking, but clamp movement so one vote
-                // cannot teleport a post through large portions of the feed.
+                // Desired index from fresh ranking.
                 const desiredIndex = Math.max(0, next.findIndex(p => p && p.id === votedPostId));
                 const oldIndex = Math.max(0, prev.findIndex(p => p && p.id === votedPostId));
-                const votedPost = byId.get(votedPostId);
-                const likes = Number(votedPost && votedPost.likes) || 0;
-                const dislikes = Number(votedPost && votedPost.dislikes) || 0;
-                const net = likes - dislikes;
-
-                // A vote is an explicit ML update, so let meaningful engagement move
-                // farther than an adjacent swap while still preventing whole-feed churn.
-                // Positive posts can climb faster; negative posts can fall faster.
-                let maxStepUp = 2;
-                let maxStepDown = 2;
-                if (net >= 3) maxStepUp = 4;
-                if (net >= 8) maxStepUp = 8;
-                if (net >= 15) maxStepUp = 12;
-                if (net < 0) maxStepDown = Math.min(12, 3 + Math.abs(net));
-
-                const MAX_STEP = desiredIndex < oldIndex ? maxStepUp : maxStepDown;
-                const minAllowed = Math.max(0, oldIndex - MAX_STEP);
-                const maxAllowed = Math.min(baseIds.length, oldIndex + MAX_STEP);
-                const targetIndex = Math.max(minAllowed, Math.min(maxAllowed, desiredIndex));
+                const targetIndex = desiredIndex;
 
                 const finalIds = baseIds.slice();
                 finalIds.splice(targetIndex, 0, votedPostId);
@@ -38654,7 +38634,7 @@ function setUploadModalHeader(title, subtitle) {
                     }
                 }
 
-                console.log(`🧊 Vote reorder stabilization: old=${oldIndex} desired=${desiredIndex} final=${targetIndex} net=${net} maxStep=${MAX_STEP}`);
+                console.log(`🧊 Vote reorder stabilization: old=${oldIndex} desired=${desiredIndex} final=${targetIndex}`);
                 return stabilized;
             } catch (e) {
                 console.warn('stabilizeVoteDrivenReorder failed:', e);
