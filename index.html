@@ -8681,9 +8681,15 @@
                         }
                     },
                     (error) => {
-                        console.warn('⚠️ Geolocation poll error:', error.message);
+                        if (error && error.code === 3) {
+                            // Timeout is common on mobile/high-accuracy polling. Keep the
+                            // last known location and retry on the next poll instead of
+                            // surfacing a noisy warning that looks like a hard failure.
+                            return;
+                        }
+                        console.warn('⚠️ Geolocation poll error:', error && error.message ? error.message : error);
                     },
-                    { enableHighAccuracy: true, timeout: 5000, maximumAge: 1000 }
+                    { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
                 );
             }, 1000); // Poll every 1 second
 
@@ -41689,12 +41695,20 @@ function setUploadModalHeader(title, subtitle) {
             } catch (e) { console.warn('Local-area permission retry check failed', e); }
             
             if (__isStaleAreaTag(currentZoneTag)) {
-                // Check if user has set a custom area
+                // If geolocation is slow or unavailable, fall back to the last known
+                // readable area instead of blocking post submission.
                 const customZoneInput = document.getElementById('customZoneTag');
-                if (!customZoneInput || !customZoneInput.value.trim()) {
-                    console.error('❌ Step 3 FAILED: No location selected');
-                    alert('❌ Please select or specify an area before posting. This helps us route your post to the right community.');
-                    return;
+                const customValue = customZoneInput ? String(customZoneInput.value || '').trim() : '';
+                if (!customValue) {
+                    const fallbackArea = (currentAreaName && !__isStaleAreaTag(currentAreaName))
+                        ? currentAreaName
+                        : (userLocation && userLocation.lat != null && userLocation.lon != null)
+                            ? (typeof getLocationName === 'function' ? getLocationName(userLocation.lat, userLocation.lon) : 'Local area')
+                            : 'Local area';
+                    currentZoneTag = fallbackArea || 'Local area';
+                    areaTag = currentZoneTag;
+                    areaTagSource = 'location_fallback';
+                    console.warn(`⚠️ Step 3 fallback: using "${currentZoneTag}" because fresh location lookup timed out`);
                 }
             }
             console.log('✅ Step 3 PASSED: Location set');
