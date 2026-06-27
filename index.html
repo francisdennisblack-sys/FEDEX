@@ -583,6 +583,58 @@
                    null;
         }
 
+        // Keep Firebase's canonical author tag untouched while allowing non-owners
+        // to see a concrete nearby area when the author used the neutral "Local area" tag.
+        function getViewerDisplayAreaTag(post) {
+            const stable = getStablePostAreaTag(post);
+            if (!stable) return null;
+
+            const stableNorm = String(stable).trim();
+            if (!/^local area$/i.test(stableNorm)) return stable;
+
+            let isOwner = false;
+            try {
+                if (typeof isOwnedByCurrentUser === 'function') {
+                    isOwner = !!isOwnedByCurrentUser(post);
+                } else {
+                    isOwner = !!(post && currentUserId && (
+                        post.authId === currentUserId ||
+                        post.userId === currentUserId ||
+                        post.createdBy === currentUserId ||
+                        post.ownerUid === currentUserId
+                    ));
+                }
+            } catch (e) { /* keep default false */ }
+
+            if (isOwner) return stable;
+
+            const publicTag = (post && (
+                (post.publicAreaTag && String(post.publicAreaTag).trim()) ||
+                (post.routedAreaTag && String(post.routedAreaTag).trim()) ||
+                (post.routeAreaTag && String(post.routeAreaTag).trim())
+            )) || '';
+
+            if (publicTag && !/^local area$/i.test(publicTag)) return publicTag;
+
+            try {
+                const lat = Number((post && post.geolocation && post.geolocation.lat) || (post && post.postOrigin && post.postOrigin.lat));
+                const lon = Number((post && post.geolocation && post.geolocation.lon) || (post && post.postOrigin && post.postOrigin.lon));
+                if (Number.isFinite(lat) && Number.isFinite(lon)) {
+                    let derived = null;
+                    if (typeof getLocationName === 'function') {
+                        derived = String(getLocationName(lat, lon) || '').trim();
+                    }
+                    if ((!derived || /^local area$/i.test(derived)) && typeof findClosestLocation === 'function') {
+                        const hit = findClosestLocation(lat, lon);
+                        derived = (hit && hit.location && hit.location.name) ? String(hit.location.name).trim() : derived;
+                    }
+                    if (derived && !/^local area$/i.test(derived)) return derived;
+                }
+            } catch (e) { /* keep stable fallback */ }
+
+            return stable;
+        }
+
         function isPostAreaPromotionEligible(post) {
             if (!post) return false;
             const likes = Number(post.likes || 0);
@@ -36757,8 +36809,8 @@ function setUploadModalHeader(title, subtitle) {
                     // Generate zone/area tag display (always show immediately, even on first load)
                     // Fast path: avoid expensive enrichment for every card; read directly
                     // from already-hydrated post fields so the tag paints with first render.
-                    const stableResolvedAreaTag = (typeof getStablePostAreaTag === 'function')
-                        ? getStablePostAreaTag(post)
+                    const stableResolvedAreaTag = (typeof getViewerDisplayAreaTag === 'function')
+                        ? getViewerDisplayAreaTag(post)
                         : ((post.displayAreaTag && String(post.displayAreaTag).trim()) ||
                            (post.selectedAreaTag && String(post.selectedAreaTag).trim()) ||
                            (post.customTag && String(post.customTag).trim()) ||
@@ -36817,8 +36869,8 @@ function setUploadModalHeader(title, subtitle) {
                     const tileText = (post.content || post.text || post.description || '');
                     const content = String(tileText).substring(0, 126);
                     // 🟢 FAST PATH: author's frozen displayAreaTag (Firebase-backed).
-                    const stableAreaTagText = (typeof getStablePostAreaTag === 'function')
-                        ? getStablePostAreaTag(post)
+                    const stableAreaTagText = (typeof getViewerDisplayAreaTag === 'function')
+                        ? getViewerDisplayAreaTag(post)
                         : ((post.displayAreaTag && String(post.displayAreaTag).trim()) ||
                            (post.selectedAreaTag && String(post.selectedAreaTag).trim()) ||
                            (post.customTag && String(post.customTag).trim()) ||
@@ -36841,8 +36893,9 @@ function setUploadModalHeader(title, subtitle) {
                     let voteBadge = '';
                     // Area tag pinned to the very bottom, BELOW the like/dislike buttons.
                     // When `post.displayAreaTag` is set we use it verbatim (one read, zero formatter cost).
-                    const renderedAreaTag = post.displayAreaTag
-                        ? post.displayAreaTag
+                    const viewerAreaTag = (typeof getViewerDisplayAreaTag === 'function') ? getViewerDisplayAreaTag(post) : null;
+                    const renderedAreaTag = viewerAreaTag
+                        ? viewerAreaTag
                         : (typeof formatEarthAreaTag === 'function' ? formatEarthAreaTag(areaTagText) : areaTagText);
                     // Show scaled area tag for remote / well-liked posts
                     let areaTagHTML = '';
@@ -43586,6 +43639,29 @@ function setUploadModalHeader(title, subtitle) {
                     || (userLocation && userLocation.lat != null && userLocation.lon != null ? { lat: userLocation.lat, lon: userLocation.lon } : null);
                 try { console.log(`🌍 POST ROUTING: tag="${areaTag}" → ${postRoutingCoords ? postRoutingCoords.lat.toFixed(4) + ',' + postRoutingCoords.lon.toFixed(4) : 'null'} (area-tag coords: ${areaTagCoords ? 'yes' : 'no'})`); } catch (e) {}
 
+                let publicAreaTagForPost = displayAreaTagForPost || areaTag || null;
+                try {
+                    const authorTag = String(displayAreaTagForPost || areaTag || '').trim();
+                    const isLocalLiteral = /^local area$/i.test(authorTag);
+                    if (isLocalLiteral && postRoutingCoords && Number.isFinite(Number(postRoutingCoords.lat)) && Number.isFinite(Number(postRoutingCoords.lon))) {
+                        let resolved = null;
+                        if (typeof getLocationName === 'function') {
+                            resolved = String(getLocationName(Number(postRoutingCoords.lat), Number(postRoutingCoords.lon)) || '').trim();
+                        }
+                        if ((!resolved || /^local area$/i.test(resolved)) && typeof findClosestLocation === 'function') {
+                            const hit = findClosestLocation(Number(postRoutingCoords.lat), Number(postRoutingCoords.lon));
+                            resolved = (hit && hit.location && hit.location.name) ? String(hit.location.name).trim() : resolved;
+                        }
+                        if ((!resolved || /^local area$/i.test(resolved)) && typeof findClosestPOIInZone === 'function') {
+                            const poiHit = findClosestPOIInZone(Number(postRoutingCoords.lat), Number(postRoutingCoords.lon));
+                            resolved = (poiHit && poiHit.poi && poiHit.poi.name) ? String(poiHit.poi.name).trim() : resolved;
+                        }
+                        if (resolved && !/^local area$/i.test(resolved)) {
+                            publicAreaTagForPost = resolved;
+                        }
+                    }
+                } catch (e) { console.warn('Failed deriving public area tag for post', e); }
+
                 // MVP: Disable payment/boost for now
                 const boostChecked = false;
 
@@ -43611,6 +43687,8 @@ function setUploadModalHeader(title, subtitle) {
                     // 🟢 FROZEN AUTHOR AREA TAG — saved to Firebase as part of the post.
                     // Omitted for media posts so photos/videos do not carry area badges.
                     displayAreaTag: (selectedMediaType === 'image' || selectedMediaType === 'video') ? null : displayAreaTagForPost,
+                    authorAreaTag: (selectedMediaType === 'image' || selectedMediaType === 'video') ? null : (displayAreaTagForPost || areaTag || null),
+                    publicAreaTag: (selectedMediaType === 'image' || selectedMediaType === 'video') ? null : (publicAreaTagForPost || displayAreaTagForPost || areaTag || null),
                     areaTagSource: (selectedMediaType === 'image' || selectedMediaType === 'video') ? null : areaTagSource,
                     geolocation: postRoutingCoords ? {lat: postRoutingCoords.lat, lon: postRoutingCoords.lon} : null,
                     timestamp: new Date().getTime(),
@@ -43679,6 +43757,8 @@ function setUploadModalHeader(title, subtitle) {
                     // Also set zoneTag/displayAreaTag for indexing and immediate display
                     postData.zoneTag = postData.zoneTag || postData.county || postData.customTag || postData.selectedAreaTag || null;
                     postData.displayAreaTag = postData.displayAreaTag || postData.zoneTag || postData.county || null;
+                    postData.authorAreaTag = postData.authorAreaTag || postData.displayAreaTag || postData.zoneTag || postData.county || null;
+                    postData.publicAreaTag = postData.publicAreaTag || postData.authorAreaTag || postData.zoneTag || postData.county || null;
                     // Persist area source so server-side metrics can distinguish POI vs location vs custom
                     postData.areaSource = areaTagSource || 'zone';
                 } catch (e) { console.warn('Failed to attach original area tag metadata', e); }
