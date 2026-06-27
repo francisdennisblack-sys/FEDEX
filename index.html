@@ -18120,6 +18120,7 @@
         let adminLongPressTimer = null;
         let refreshInterval = null;
         let firebaseUnsubscribe = null;
+        let packagedPostsUnsubscribe = null;
         let isPostingInProgress = false; // Prevent duplicate submissions
         let postingStartedAt = 0; // Tracks active post attempt start time for stale-lock recovery
         const POSTING_STUCK_TIMEOUT_MS = 45000;
@@ -18129,6 +18130,7 @@
         // Use window-scoped globals (initialized earlier) to avoid TDZ issues
         window.globalLocationDatabase = window.globalLocationDatabase || [];
         window.globalPOIDatabase = window.globalPOIDatabase || [];
+        window.packagedPostCache = window.packagedPostCache || {};
 
         // ============================================================================
         // GEO-INDEX — 4-layer spatial index for 820k+ POIs
@@ -20699,6 +20701,80 @@ function setUploadModalHeader(title, subtitle) {
                     if (!postData.displayAreaTag && postData.zoneTag) postData.displayAreaTag = postData.zoneTag;
                 } catch (e) { console.warn('Failed to enforce areaTag lock before save', e); }
 
+                // Build a duplicated, mutable packaging record that can be changed
+                // for audience display without mutating the canonical post fields.
+                function buildPackagedPostPayload(pid, pData) {
+                    const normalizeContextKey = (v) => String(v || '').trim().toLowerCase();
+                    const canonicalAreaTag =
+                        (pData.authorAreaTag && String(pData.authorAreaTag).trim()) ||
+                        (pData.displayAreaTag && String(pData.displayAreaTag).trim()) ||
+                        (pData.originalAreaTag && String(pData.originalAreaTag).trim()) ||
+                        (pData.zoneTag && String(pData.zoneTag).trim()) ||
+                        (pData.county && String(pData.county).trim()) ||
+                        null;
+
+                    const publicAreaTag =
+                        (pData.publicAreaTag && String(pData.publicAreaTag).trim()) ||
+                        canonicalAreaTag ||
+                        null;
+
+                    // Context-aware display tags let rebadging vary by viewer area
+                    // without mutating the canonical author tag.
+                    const inputContextMap = (pData && pData.contextAreaTags && typeof pData.contextAreaTags === 'object')
+                        ? pData.contextAreaTags
+                        : {};
+                    const contextAreaTags = {};
+
+                    Object.keys(inputContextMap).forEach((rawKey) => {
+                        const k = normalizeContextKey(rawKey);
+                        const v = String(inputContextMap[rawKey] || '').trim();
+                        if (k && v) contextAreaTags[k] = v;
+                    });
+
+                    if (canonicalAreaTag) {
+                        const canonicalKey = normalizeContextKey(canonicalAreaTag);
+                        if (canonicalKey && !contextAreaTags[canonicalKey]) {
+                            contextAreaTags[canonicalKey] = canonicalAreaTag;
+                        }
+                    }
+
+                    const defaultAreaTag =
+                        contextAreaTags.default ||
+                        publicAreaTag ||
+                        canonicalAreaTag ||
+                        null;
+
+                    if (defaultAreaTag && !contextAreaTags.default) {
+                        contextAreaTags.default = defaultAreaTag;
+                    }
+
+                    return {
+                        id: pid,
+                        sourcePostPath: `posts/${pid}`,
+                        mirroredAt: Date.now(),
+                        canonical: {
+                            areaTag: canonicalAreaTag,
+                            zoneTag: pData.zoneTag || pData.county || null,
+                            geolocation: pData.geolocation || null,
+                            authorUid: pData.authId || pData.userId || pData.ownerUid || pData.createdBy || null,
+                            createdAt: pData.createdAt || pData.timestamp || Date.now()
+                        },
+                        presentation: {
+                            areaTag: defaultAreaTag,
+                            defaultAreaTag,
+                            contextAreaTags,
+                            updatedAt: Date.now(),
+                            source: 'client_publish'
+                        }
+                    };
+                }
+
+                async function savePackagedPostCopy(pid, pData) {
+                    const packagedRef = ref(database, `posts_packaged/${pid}`);
+                    const packagedPayload = buildPackagedPostPayload(pid, pData);
+                    await set(packagedRef, packagedPayload);
+                }
+
                 // Save to shared posts collection (not per-user)
                 const postRef = ref(database, `posts/${postId}`);
                 console.log('🔥 Calling Firebase set()...');
@@ -20706,6 +20782,15 @@ function setUploadModalHeader(title, subtitle) {
                 console.log(`   Auth UID: ${auth?.currentUser?.uid || 'none'}`);
                 await set(postRef, postData);
                 console.log('✅ Firebase set() completed successfully');
+
+                // Duplicate packaged post info to a separate path so mutable audience
+                // labels can be updated independently of canonical post metadata.
+                try {
+                    await savePackagedPostCopy(postId, postData);
+                    console.log('✅ Packaged post mirror saved:', `posts_packaged/${postId}`);
+                } catch (packErr) {
+                    console.warn('⚠️ Failed to save packaged post mirror (non-fatal):', packErr);
+                }
 
                 // Immediately consume any unconsumed user-level badge purchase so
                 // the badge is persisted on the newly-created post and visible
@@ -30704,6 +30789,28 @@ function setUploadModalHeader(title, subtitle) {
 
         function subscribeToFirebasePostsWithReconnect() {
             try {
+                // Keep a separate live mirror of mutable packaged post metadata.
+                // This lets us adjust viewer-facing tags without touching canonical posts.
+                try {
+                    if (!packagedPostsUnsubscribe) {
+                        const packagedRef = ref(database, 'posts_packaged');
+                        packagedPostsUnsubscribe = onValue(packagedRef, (snap) => {
+                            try {
+                                window.packagedPostCache = (snap && snap.exists()) ? (snap.val() || {}) : {};
+                            } catch (e) {
+                                console.warn('packaged posts cache update failed', e);
+                                window.packagedPostCache = {};
+                            }
+                        }, (err) => {
+                            console.warn('packaged posts listener error', err);
+                        });
+                        try { window.packagedPostsUnsubscribe = packagedPostsUnsubscribe; } catch (e) {}
+                        console.log('📦 Subscribed to posts_packaged mirror');
+                    }
+                } catch (e) {
+                    console.warn('Failed to subscribe posts_packaged mirror', e);
+                }
+
                 // Prevent creating multiple listeners — if one exists, skip creating another
                 if ((firebaseUnsubscribe && typeof firebaseUnsubscribe === 'function') ||
                     (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function')) {
@@ -30788,6 +30895,43 @@ function setUploadModalHeader(title, subtitle) {
                         const beforeOwner = { authId: post.authId, userId: post.userId, createdBy: post.createdBy };
                         try {
                             normalizePostFields(post);
+                            // Overlay duplicated packaged metadata (if present) without
+                            // mutating canonical post ownership/location fields.
+                            try {
+                                const packaged = window.packagedPostCache && post.id ? window.packagedPostCache[post.id] : null;
+                                if (packaged && typeof packaged === 'object') {
+                                    const canonicalTag =
+                                        (packaged.canonical && packaged.canonical.areaTag && String(packaged.canonical.areaTag).trim()) ||
+                                        null;
+                                    const normalizeContextKey = (v) => String(v || '').trim().toLowerCase();
+                                    const viewerContextTag =
+                                        (typeof getAutoGeneratedAreaDisplayLabel === 'function' && getAutoGeneratedAreaDisplayLabel()) ||
+                                        currentZoneTag ||
+                                        (window && window.currentZoneTag) ||
+                                        null;
+                                    const viewerContextKey = normalizeContextKey(viewerContextTag);
+
+                                    const contextMap = (packaged.presentation && packaged.presentation.contextAreaTags && typeof packaged.presentation.contextAreaTags === 'object')
+                                        ? packaged.presentation.contextAreaTags
+                                        : null;
+
+                                    const presentationTag =
+                                        (contextMap && viewerContextKey && String(contextMap[viewerContextKey] || '').trim()) ||
+                                        (contextMap && String(contextMap.default || '').trim()) ||
+                                        (packaged.presentation && packaged.presentation.defaultAreaTag && String(packaged.presentation.defaultAreaTag).trim()) ||
+                                        (packaged.presentation && packaged.presentation.areaTag && String(packaged.presentation.areaTag).trim()) ||
+                                        null;
+
+                                    if (canonicalTag) {
+                                        post.authorAreaTag = post.authorAreaTag || canonicalTag;
+                                        post.originalAreaTag = post.originalAreaTag || canonicalTag;
+                                        post.displayAreaTag = post.displayAreaTag || canonicalTag;
+                                    }
+                                    if (presentationTag) {
+                                        post.publicAreaTag = presentationTag;
+                                    }
+                                }
+                            } catch (e) { /* keep post hydration resilient */ }
                             // Normalization: ensure media fields are consistent for rendering
                             try {
                                 if (post.photoURL && !post.imageData) post.imageData = post.photoURL;
@@ -43761,6 +43905,22 @@ function setUploadModalHeader(title, subtitle) {
                     postData.publicAreaTag = postData.publicAreaTag || postData.authorAreaTag || postData.zoneTag || postData.county || null;
                     // Persist area source so server-side metrics can distinguish POI vs location vs custom
                     postData.areaSource = areaTagSource || 'zone';
+
+                    // Context-aware area tags: keep canonical area in its own context,
+                    // while allowing a different default display area elsewhere.
+                    const canonicalTagForContext = String(
+                        postData.authorAreaTag || postData.displayAreaTag || postData.zoneTag || postData.county || ''
+                    ).trim();
+                    const publicTagForContext = String(
+                        postData.publicAreaTag || canonicalTagForContext || ''
+                    ).trim();
+                    const contextAreaTags = {};
+                    if (publicTagForContext) contextAreaTags.default = publicTagForContext;
+                    if (canonicalTagForContext) {
+                        const canonicalKey = canonicalTagForContext.toLowerCase();
+                        contextAreaTags[canonicalKey] = canonicalTagForContext;
+                    }
+                    postData.contextAreaTags = contextAreaTags;
                 } catch (e) { console.warn('Failed to attach original area tag metadata', e); }
 
                 // Composer-selected badges: include user-initialized badges (e.g., 'sell')
