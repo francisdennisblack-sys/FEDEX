@@ -629,6 +629,51 @@
             }
         }
 
+        // Resolve a concrete area tag from the POST'S own metadata/origin only.
+        // Never use viewer location context here, so cross-area feed fills keep
+        // the post's local identity instead of inheriting the viewer grid label.
+        function resolvePostOriginAreaTag(post) {
+            if (!post) return null;
+
+            const intrinsic = (post && (
+                (post.publicAreaTag && String(post.publicAreaTag).trim()) ||
+                (post.routedAreaTag && String(post.routedAreaTag).trim()) ||
+                (post.routeAreaTag && String(post.routeAreaTag).trim()) ||
+                (post.displayAreaTag && String(post.displayAreaTag).trim()) ||
+                (post.selectedAreaTag && String(post.selectedAreaTag).trim()) ||
+                (post.customTag && String(post.customTag).trim()) ||
+                (post.originalAreaTag && String(post.originalAreaTag).trim()) ||
+                (post.county && String(post.county).trim()) ||
+                (post.zoneTag && String(post.zoneTag).trim()) ||
+                (post.area && String(post.area).trim()) ||
+                (post.neighborhood && String(post.neighborhood).trim()) ||
+                (post.city && String(post.city).trim()) ||
+                (post.district && String(post.district).trim()) ||
+                (post.state && String(post.state).trim()) ||
+                (post.region && String(post.region).trim()) ||
+                (post.poiName && String(post.poiName).trim())
+            )) || '';
+            if (intrinsic && !/^local area$/i.test(intrinsic)) return intrinsic;
+
+            try {
+                const lat = Number((post && post.geolocation && post.geolocation.lat) || (post && post.postOrigin && post.postOrigin.lat));
+                const lon = Number((post && post.geolocation && post.geolocation.lon) || (post && post.postOrigin && post.postOrigin.lon));
+                if (Number.isFinite(lat) && Number.isFinite(lon)) {
+                    let derived = null;
+                    if (typeof getLocationName === 'function') {
+                        derived = String(getLocationName(lat, lon) || '').trim();
+                    }
+                    if ((!derived || /^local area$/i.test(derived)) && typeof findClosestLocation === 'function') {
+                        const hit = findClosestLocation(lat, lon);
+                        derived = (hit && hit.location && hit.location.name) ? String(hit.location.name).trim() : derived;
+                    }
+                    if (derived && !/^local area$/i.test(derived)) return derived;
+                }
+            } catch (e) { /* keep fallback null */ }
+
+            return null;
+        }
+
         function isViewerInCommittedLocationMode() {
             try {
                 if (String(window.__fsLocationMode || '').trim().toLowerCase() === 'committed') return true;
@@ -683,35 +728,8 @@
 
             if (publicTag && !/^local area$/i.test(publicTag)) return publicTag;
 
-            const nonLocalFallbackTag = (post && (
-                (post.county && String(post.county).trim()) ||
-                (post.zoneTag && String(post.zoneTag).trim()) ||
-                (post.area && String(post.area).trim()) ||
-                (post.neighborhood && String(post.neighborhood).trim()) ||
-                (post.city && String(post.city).trim()) ||
-                (post.district && String(post.district).trim()) ||
-                (post.state && String(post.state).trim()) ||
-                (post.region && String(post.region).trim()) ||
-                (post.poiName && String(post.poiName).trim())
-            )) || '';
-
-            if (nonLocalFallbackTag && !/^local area$/i.test(nonLocalFallbackTag)) return nonLocalFallbackTag;
-
-            try {
-                const lat = Number((post && post.geolocation && post.geolocation.lat) || (post && post.postOrigin && post.postOrigin.lat));
-                const lon = Number((post && post.geolocation && post.geolocation.lon) || (post && post.postOrigin && post.postOrigin.lon));
-                if (Number.isFinite(lat) && Number.isFinite(lon)) {
-                    let derived = null;
-                    if (typeof getLocationName === 'function') {
-                        derived = String(getLocationName(lat, lon) || '').trim();
-                    }
-                    if ((!derived || /^local area$/i.test(derived)) && typeof findClosestLocation === 'function') {
-                        const hit = findClosestLocation(lat, lon);
-                        derived = (hit && hit.location && hit.location.name) ? String(hit.location.name).trim() : derived;
-                    }
-                    if (derived && !/^local area$/i.test(derived)) return derived;
-                }
-            } catch (e) { /* keep stable fallback */ }
+            const originTag = resolvePostOriginAreaTag(post);
+            if (originTag && !/^local area$/i.test(originTag)) return originTag;
 
             // Critical rule: users who committed to a different location should
             // never see generic "Local area" tags on viewed posts.
@@ -37589,10 +37607,8 @@ function setUploadModalHeader(title, subtitle) {
                            (post.area && String(post.area).trim()) ||
                            (post.neighborhood && String(post.neighborhood).trim()) ||
                            null);
-                    const resolvedAreaTag = stableResolvedAreaTag || post.county || post.zoneTag || post.area || post.customTag ||
-                                            post.neighborhood || post.city || post.district ||
-                                            post.poiName || post.state || post.region ||
-                                            post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
+                    const resolvedAreaTag = stableResolvedAreaTag ||
+                                            ((typeof resolvePostOriginAreaTag === 'function') ? resolvePostOriginAreaTag(post) : null) ||
                                             'Nearby Area';
                     let mediaAreaTagHTML = '';
                     // Show scaled area tag for remote / well-liked posts
@@ -37649,10 +37665,8 @@ function setUploadModalHeader(title, subtitle) {
                            (post.area && String(post.area).trim()) ||
                            (post.neighborhood && String(post.neighborhood).trim()) ||
                            null);
-                    const areaTagText = stableAreaTagText || post.county || post.zoneTag || post.area || post.customTag ||
-                                       post.neighborhood || post.city || post.district ||
-                                       post.poiName || post.state || post.region ||
-                                       post.originalAreaTag || window.currentZoneTag || window.userDetectedCounty ||
+                    const areaTagText = stableAreaTagText ||
+                                       ((typeof resolvePostOriginAreaTag === 'function') ? resolvePostOriginAreaTag(post) : null) ||
                                        'Nearby Area';
                     // Like/dislike/repost buttons are intentionally NOT rendered on
                     // content-only grid tiles. They live only inside the post pop-out,
