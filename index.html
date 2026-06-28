@@ -15335,6 +15335,10 @@
                 const committed = compactPostListForSlots(working);
                 gridScroller.items = committed;
 
+                // Pin the voted post at its swapped slot for a short window so
+                // later ranking/reconcile passes cannot yank it back instantly.
+                try { setVoteForcedSlotPin(postId, toIdx, dir, 15000); } catch (e) { /* ignore */ }
+
                 // Keep all ranking snapshots aligned with the forced adjacent swap,
                 // so delayed reconcile ticks do not instantly undo it.
                 try {
@@ -15594,6 +15598,9 @@
                 try { clearPendingVotePositionShift(postId); } catch (e) {}
                 try {
                     if (window.__voteNoBacktrackLocks) delete window.__voteNoBacktrackLocks[String(postId)];
+                } catch (e) {}
+                try {
+                    if (window.__voteForcedSlotPins) delete window.__voteForcedSlotPins[String(postId)];
                 } catch (e) {}
                 try { window.__voteMoveInProgressUntil = 0; } catch (e) {}
                 try {
@@ -37974,6 +37981,12 @@ function setUploadModalHeader(title, subtitle) {
                         }
                     } catch (e) { /* ignore no-backtrack guard failures */ }
 
+                    // Hard vote-pin guard: if a vote swap just occurred, keep the
+                    // voted post in its forced slot during this reconcile window.
+                    try {
+                        target = applyVoteForcedSlotPins(target);
+                    } catch (e) { /* ignore forced pin guard failures */ }
+
                     // Never replace a visible non-empty grid with empty data (prevents black-out).
                     if (target.length === 0 && current.length > 0) return;
 
@@ -39497,6 +39510,56 @@ function setUploadModalHeader(title, subtitle) {
             }
         }
 
+        function setVoteForcedSlotPin(postId, index, direction, ttlMs = 15000) {
+            try {
+                const id = String(postId || '').trim();
+                if (!id) return;
+                const idx = Number(index);
+                if (!Number.isFinite(idx)) return;
+                const dir = String(direction || '').toLowerCase();
+                window.__voteForcedSlotPins = window.__voteForcedSlotPins || {};
+                window.__voteForcedSlotPins[id] = {
+                    index: Math.max(0, Math.floor(idx)),
+                    direction: (dir === 'like' || dir === 'dislike') ? dir : null,
+                    setAt: Date.now(),
+                    until: Date.now() + Math.max(1000, Number(ttlMs) || 15000)
+                };
+            } catch (e) { /* ignore */ }
+        }
+
+        function applyVoteForcedSlotPins(list) {
+            try {
+                const source = Array.isArray(list) ? list : [];
+                if (source.length < 2) return source;
+
+                const pins = window.__voteForcedSlotPins || {};
+                const now = Date.now();
+                const activePins = Object.entries(pins).filter(([pid, pin]) => {
+                    if (!pid || !pin) return false;
+                    if (now >= Number(pin.until || 0)) {
+                        delete pins[pid];
+                        return false;
+                    }
+                    return true;
+                });
+
+                if (!activePins.length) return source;
+
+                const out = source.slice();
+                for (const [pid, pin] of activePins) {
+                    const from = out.findIndex(p => p && String(p.id) === String(pid));
+                    if (from < 0) continue;
+                    const target = Math.min(Math.max(0, Number(pin.index) || 0), out.length - 1);
+                    if (from === target) continue;
+                    const [item] = out.splice(from, 1);
+                    out.splice(target, 0, item);
+                }
+                return out;
+            } catch (e) {
+                return Array.isArray(list) ? list : [];
+            }
+        }
+
         function stabilizeVoteDrivenReorder(newList, previousList, votedPostId) {
             try {
                 const next = Array.isArray(newList) ? newList.filter(p => p && p.id) : [];
@@ -39856,6 +39919,7 @@ function setUploadModalHeader(title, subtitle) {
                     console.warn('scroll-aware stabilization failed', e);
                 }
 
+                rankedSnapshot = applyVoteForcedSlotPins(rankedSnapshot);
                 pendingSortedPosts = compactPostListForSlots(rankedSnapshot);
                 // Kick off the 1/sec reconciler to apply minimal diffs
                 try { scheduleGridReconcile(); } catch (e) { /* ignore */ }
@@ -41753,6 +41817,7 @@ function setUploadModalHeader(title, subtitle) {
             // ========================================================================
 
             // Keep latest feed snapshot available for timed rotators/refresher systems
+            sortedPosts = applyVoteForcedSlotPins(sortedPosts);
             window.latestSortedPosts = [...sortedPosts];
             window.latestUserAreaTag = userAreaTag;
             
@@ -42176,6 +42241,7 @@ function setUploadModalHeader(title, subtitle) {
             }
 
             // Refresh latest snapshot after position-1 rotation
+            sortedPosts = applyVoteForcedSlotPins(sortedPosts);
             window.latestSortedPosts = [...sortedPosts];
             
             // ⭐ PRE-CALCULATE BADGES AT FEED LOAD TIME
@@ -42215,6 +42281,7 @@ function setUploadModalHeader(title, subtitle) {
                 } catch (e) { console.warn('Final dedupe before scroller failed', e); }
 
                 // Save latest target snapshot and reconcile gradually (1 post per second)
+                sortedPosts = applyVoteForcedSlotPins(sortedPosts);
                 pendingSortedPosts = compactPostListForSlots(Array.isArray(sortedPosts) ? sortedPosts : []);
                 scheduleGridReconcile();
 
