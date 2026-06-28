@@ -5638,6 +5638,14 @@
                         const totalPosts = Number(window.__consoleSummaryTotalPosts);
                         const active = Number.isFinite(activeUsers) ? activeUsers : Number(window.onlineUserCount || 0);
                         const posts = Number.isFinite(totalPosts) ? totalPosts : computeTotalPosts();
+                        const move = window.__consoleSummaryLastMove || {};
+                        const moveReason = move.reason ? String(move.reason) : 'none';
+                        const movePost = move.postId ? String(move.postId) : '-';
+                        const moveFrom = Number.isFinite(Number(move.fromIdx)) ? Number(move.fromIdx) : '-';
+                        const moveTo = Number.isFinite(Number(move.toIdx)) ? Number(move.toIdx) : '-';
+                        const moveCause = move.cause ? String(move.cause) : '-';
+                        const moveExtra = move.extra ? String(move.extra) : '-';
+                        const moveAt = move.at ? new Date(Number(move.at)).toLocaleTimeString() : '-';
 
                         nativeConsole.clear();
                         nativeConsole.log([
@@ -5647,6 +5655,14 @@
                             `Reason: ${reason}`,
                             `Active Online Users: ${active}`,
                             `Total Posts On Website: ${posts}`,
+                            '----------------------------------------',
+                            'Swap Diagnostics',
+                            `Last Move Event: ${moveReason}`,
+                            `Post: ${movePost}`,
+                            `From -> To: ${moveFrom} -> ${moveTo}`,
+                            `Cause: ${moveCause}`,
+                            `Detail: ${moveExtra}`,
+                            `At: ${moveAt}`,
                             '========================================'
                         ].join('\n'));
                     } catch (e) { /* ignore */ }
@@ -15344,21 +15360,38 @@
         // as the authoritative snapshot so position changes are instant + stable.
         function applyImmediateVotePositionShift(postId, voteType, options = {}) {
             try {
-                if (!postId) return false;
+                let fromIdx = null;
+                let toIdx = null;
+                const reportBlocked = (cause, extra = '') => {
+                    try {
+                        logPostPositionMove('vote-swap-blocked', {
+                            postId,
+                            fromIdx,
+                            toIdx,
+                            cause,
+                            extra
+                        });
+                    } catch (e) { /* ignore */ }
+                    return false;
+                };
+
+                if (!postId) return reportBlocked('missing-post-id');
                 const dir = String(voteType || '').toLowerCase();
-                if (dir !== 'like' && dir !== 'dislike') return false;
+                if (dir !== 'like' && dir !== 'dislike') return reportBlocked('invalid-vote-type', String(voteType || ''));
 
                 // One-step rule: each vote interaction may move at most one slot.
                 // If this vote event already consumed its single move, stop here.
                 try {
                     const lock = window.__voteOneStepEventState;
                     if (lock && String(lock.postId || '') === String(postId) && lock.moved === true) {
-                        return false;
+                        return reportBlocked('one-step-lock-consumed');
                     }
                 } catch (e) { /* ignore */ }
 
                 clearPendingVotePositionShift(postId);
-                if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
+                if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) {
+                    return reportBlocked('grid-scroller-not-ready');
+                }
 
                 const working = gridScroller.items.slice();
 
@@ -15377,24 +15410,28 @@
                     }
                 } catch (e) { /* ignore */ }
 
-                let fromIdx = -1;
+                fromIdx = -1;
                 if (domIdx >= 0 && working[domIdx] && String(working[domIdx].id) === String(postId)) {
                     fromIdx = domIdx;
                 } else {
                     fromIdx = working.findIndex(p => p && String(p.id) === String(postId));
                 }
-                if (fromIdx < 0) return false;
+                if (fromIdx < 0) return reportBlocked('post-not-found-in-live-feed');
 
                 // AUTHORITATIVE OVERRIDE:
                 // like    => one slot left  (index - 1)
                 // dislike => one slot right (index + 1)
-                const toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
+                toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
 
-                if (toIdx < 0 || toIdx >= working.length || toIdx === fromIdx) return false;
+                if (toIdx < 0 || toIdx >= working.length || toIdx === fromIdx) {
+                    return reportBlocked('boundary-no-adjacent-slot', `from=${fromIdx}, to=${toIdx}, len=${working.length}`);
+                }
 
                 const moving = working[fromIdx];
                 const adjacent = working[toIdx];
-                if (!moving || !moving.id || !adjacent || !adjacent.id) return false;
+                if (!moving || !moving.id || !adjacent || !adjacent.id) {
+                    return reportBlocked('missing-neighbor-post', `moving=${!!(moving && moving.id)}, adjacent=${!!(adjacent && adjacent.id)}`);
+                }
 
                 // Strict adjacent swap (never multi-slot drift).
                 working[fromIdx] = adjacent;
@@ -15513,6 +15550,13 @@
                 return true;
             } catch (e) {
                 console.warn('applyImmediateVotePositionShift failed', e);
+                try {
+                    logPostPositionMove('vote-swap-exception', {
+                        postId,
+                        cause: 'exception',
+                        extra: String((e && e.message) || e || 'unknown error')
+                    });
+                } catch (_) {}
                 return false;
             }
         }
@@ -15535,6 +15579,7 @@
             }
             if (!voterId) {
                 console.warn('⚠️ Cannot vote: no voterId available');
+                try { logPostPositionMove('vote-swap-blocked', { postId, cause: 'no-voter-id' }); } catch (e) {}
                 showNotification && showNotification('Unable to vote right now. Please try again.');
                 return;
             }
@@ -15548,6 +15593,7 @@
             const post = findPostAcrossVisibleFeeds(postId);
             if (!post) {
                 console.warn(`⚠️ Post not found in cache: ${postId}`);
+                try { logPostPositionMove('vote-swap-blocked', { postId, cause: 'post-not-found-in-cache' }); } catch (e) {}
                 return;
             }
             
@@ -15556,6 +15602,7 @@
             const lastVoteTime = window.voteDebounceMap ? (window.voteDebounceMap[voteKey] || 0) : 0;
             if (Date.now() - lastVoteTime < 500) {
                 console.log('⏳ Vote debounced - too soon');
+                try { logPostPositionMove('vote-swap-blocked', { postId, cause: 'vote-debounced' }); } catch (e) {}
                 return;
             }
             if (!window.voteDebounceMap) window.voteDebounceMap = {};
@@ -15575,6 +15622,7 @@
             if (voteType === 'like') {
                 if (originalVote === 'like') {
                     // Already liked — no change needed, return silently.
+                    try { logPostPositionMove('vote-swap-blocked', { postId, cause: 'already-liked-no-op' }); } catch (e) {}
                     return;
                 } else {
                     // Add like or switch from dislike
@@ -15587,6 +15635,7 @@
             } else if (voteType === 'dislike') {
                 if (originalVote === 'dislike') {
                     // Already disliked — no change needed, return silently.
+                    try { logPostPositionMove('vote-swap-blocked', { postId, cause: 'already-disliked-no-op' }); } catch (e) {}
                     return;
                 } else {
                     // Add dislike or switch from like
@@ -37575,12 +37624,20 @@ function setUploadModalHeader(title, subtitle) {
         function logPostPositionMove(reason, details = {}) {
             try {
                 if (window.__postMoveAuditEnabled === false) return;
-                const postId = details.postId ? String(details.postId) : 'unknown';
-                const fromIdx = Number.isFinite(Number(details.fromIdx)) ? Number(details.fromIdx) : '-';
-                const toIdx = Number.isFinite(Number(details.toIdx)) ? Number(details.toIdx) : '-';
-                const cause = details.cause ? String(details.cause) : '-';
-                const extra = details.extra ? ` | ${String(details.extra)}` : '';
-                console.log(`📍 MOVE AUDIT [${reason}] post=${postId} from=${fromIdx} to=${toIdx} cause=${cause}${extra}`);
+                window.__consoleSummaryLastMove = {
+                    reason: String(reason || 'unknown'),
+                    postId: details.postId ? String(details.postId) : 'unknown',
+                    fromIdx: Number.isFinite(Number(details.fromIdx)) ? Number(details.fromIdx) : null,
+                    toIdx: Number.isFinite(Number(details.toIdx)) ? Number(details.toIdx) : null,
+                    cause: details.cause ? String(details.cause) : '-',
+                    extra: details.extra ? String(details.extra) : '',
+                    at: Date.now()
+                };
+                try {
+                    if (typeof window.__setConsoleSummaryMetrics === 'function') {
+                        window.__setConsoleSummaryMetrics({ reason: `move:${String(reason || 'unknown')}` });
+                    }
+                } catch (e) { /* ignore */ }
             } catch (e) { /* ignore */ }
         }
 
