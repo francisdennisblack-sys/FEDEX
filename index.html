@@ -15242,6 +15242,19 @@
 
                 apply(boxA, b);
                 apply(boxB, a);
+
+                // Keep scroller's slot map aligned with the DOM swap so
+                // strict identity/reconcile passes do not immediately undo it.
+                try {
+                    if (window.gridScroller && window.gridScroller.renderedBoxes) {
+                        const aId = String(boxA.getAttribute('data-post-id') || '');
+                        const bId = String(boxB.getAttribute('data-post-id') || '');
+                        if (aId) window.gridScroller.renderedBoxes.set(boxA.id, aId);
+                        else window.gridScroller.renderedBoxes.delete(boxA.id);
+                        if (bId) window.gridScroller.renderedBoxes.set(boxB.id, bId);
+                        else window.gridScroller.renderedBoxes.delete(boxB.id);
+                    }
+                } catch (e) { /* ignore map sync failures */ }
                 return true;
             } catch (e) {
                 return false;
@@ -15277,18 +15290,27 @@
                 if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
 
                 const working = gridScroller.items.slice();
-                let fromIdx = working.findIndex(p => p && String(p.id) === String(postId));
-                if (fromIdx < 0) {
-                    // Fallback: resolve index from currently visible DOM slot.
-                    try {
-                        const node = document.querySelector(`.grid-box[data-post-id="${String(postId)}"]`);
-                        const id = node && node.id ? String(node.id) : '';
-                        if (id.startsWith('box-')) {
-                            const boxNum = Number(id.replace('box-', ''));
-                            const idx = boxNum - 1;
-                            if (Number.isFinite(idx) && idx >= 0 && idx < working.length) fromIdx = idx;
+
+                // Resolve from the user's visible slot first so one-step swaps
+                // always apply to the currently seen post instance.
+                let domIdx = -1;
+                try {
+                    const node = document.querySelector(`.grid-box[data-post-id="${String(postId)}"]`);
+                    const id = node && node.id ? String(node.id) : '';
+                    if (id.startsWith('box-')) {
+                        const boxNum = Number(id.replace('box-', ''));
+                        const idx = boxNum - 1;
+                        if (Number.isFinite(idx) && idx >= 0 && idx < working.length) {
+                            domIdx = idx;
                         }
-                    } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
+
+                let fromIdx = -1;
+                if (domIdx >= 0 && working[domIdx] && String(working[domIdx].id) === String(postId)) {
+                    fromIdx = domIdx;
+                } else {
+                    fromIdx = working.findIndex(p => p && String(p.id) === String(postId));
                 }
                 if (fromIdx < 0) return false;
 
@@ -15340,6 +15362,12 @@
                     } else if (typeof gridScroller.setItems === 'function') {
                         gridScroller.setItems(committed);
                     }
+                } else {
+                    try {
+                        if (typeof gridScroller.enforceStrictSlotIdentity === 'function') {
+                            gridScroller.enforceStrictSlotIdentity(Math.max(Math.max(fromIdx, toIdx) + 10, 64));
+                        }
+                    } catch (e) { /* ignore */ }
                 }
 
                 // Keep vote swaps minimal: avoid full-grid visual refreshes here.
@@ -15497,7 +15525,7 @@
             // Immediate, single-step movement (swap one position) so users see
             // deterministic motion without multi-second reconcile flicker.
             const movedImmediately = applyImmediateVotePositionShift(postId, newVoteType, {
-                deferUntilReady: true,
+                deferUntilReady: false,
                 maxWaitMs: 650
             });
             
@@ -15523,7 +15551,7 @@
                         // attempt once on authoritative counts.
                         if (!movedImmediately) {
                             const movedOnCommit = applyImmediateVotePositionShift(postId, newVoteType, {
-                                deferUntilReady: true,
+                                deferUntilReady: false,
                                 maxWaitMs: 650
                             });
                             if (!movedOnCommit && !isVotePositionShiftQueued(postId)) {
