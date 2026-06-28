@@ -15278,14 +15278,6 @@
                     }
                 } catch (e) { /* ignore */ }
 
-                const deferUntilReady = !!(options && options.deferUntilReady);
-                const force = !!(options && options.force);
-                const maxWaitMs = Math.max(180, Number((options && options.maxWaitMs) || 650));
-
-                if (!force && deferUntilReady && !isVoteMoveRenderReady()) {
-                    return enqueueVotePositionShift(postId, dir, { maxWaitMs });
-                }
-
                 clearPendingVotePositionShift(postId);
                 if (!gridScroller || !Array.isArray(gridScroller.items) || gridScroller.items.length < 2) return false;
 
@@ -15314,16 +15306,20 @@
                 }
                 if (fromIdx < 0) return false;
 
-                // Hard cap: one adjacent slot only.
-                let toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
+                // AUTHORITATIVE OVERRIDE:
+                // like    => one slot left  (index - 1)
+                // dislike => one slot right (index + 1)
+                const toIdx = (dir === 'like') ? (fromIdx - 1) : (fromIdx + 1);
 
                 if (toIdx < 0 || toIdx >= working.length || toIdx === fromIdx) return false;
 
                 const moving = working[fromIdx];
-                if (!moving || !moving.id) return false;
-                working.splice(fromIdx, 1);
-                const insertAt = Math.min(Math.max(0, toIdx), working.length);
-                working.splice(insertAt, 0, moving);
+                const adjacent = working[toIdx];
+                if (!moving || !moving.id || !adjacent || !adjacent.id) return false;
+
+                // Strict adjacent swap (never multi-slot drift).
+                working[fromIdx] = adjacent;
+                working[toIdx] = moving;
 
                 // Short no-backtrack lock: after a vote move, don't allow this
                 // post to be placed back toward its old index while snapshots settle.
@@ -15331,13 +15327,37 @@
                     window.__voteNoBacktrackLocks = window.__voteNoBacktrackLocks || {};
                     window.__voteNoBacktrackLocks[String(postId)] = {
                         direction: dir,
-                        floorIndex: insertAt,
+                        floorIndex: toIdx,
                         until: Date.now() + 7000
                     };
                 } catch (e) { /* ignore */ }
 
                 const committed = compactPostListForSlots(working);
                 gridScroller.items = committed;
+
+                // Keep all ranking snapshots aligned with the forced adjacent swap,
+                // so delayed reconcile ticks do not instantly undo it.
+                try {
+                    const swapInList = (list) => {
+                        if (!Array.isArray(list) || list.length < 2) return list;
+                        const f = list.findIndex(p => p && String(p.id) === String(postId));
+                        if (f < 0) return list;
+                        const t = (dir === 'like') ? (f - 1) : (f + 1);
+                        if (t < 0 || t >= list.length) return list;
+                        const out = list.slice();
+                        const tmp = out[f];
+                        out[f] = out[t];
+                        out[t] = tmp;
+                        return out;
+                    };
+                    if (Array.isArray(window.pendingSortedPosts)) {
+                        window.pendingSortedPosts = compactPostListForSlots(swapInList(window.pendingSortedPosts));
+                    }
+                    if (Array.isArray(window.latestSortedPosts)) {
+                        window.latestSortedPosts = compactPostListForSlots(swapInList(window.latestSortedPosts));
+                    }
+                } catch (e) { /* ignore snapshot sync failures */ }
+
                 freezeReconcileForVoteMove(2200);
                 try {
                     window.__voteMovePaintHoldUntil = Math.max(Number(window.__voteMovePaintHoldUntil || 0), Date.now() + 2200);
@@ -15345,10 +15365,8 @@
 
                 keepVoteRerankActive(postId);
 
-                // Use direct box swap only for adjacent movement; otherwise repaint
-                // the changed range to avoid transient identity mismatches.
-                const adjacentMove = Math.abs(fromIdx - toIdx) === 1;
-                const swappedInDom = adjacentMove ? swapVoteBoxesInDOM(fromIdx, toIdx) : false;
+                // Use direct DOM swap for adjacent vote movement; repaint fallback if needed.
+                const swappedInDom = swapVoteBoxesInDOM(fromIdx, toIdx);
                 if (!swappedInDom) {
                     if (typeof gridScroller.renderItemsInRange === 'function') {
                         const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
@@ -15381,7 +15399,7 @@
                         window.__voteOneStepEventState.movedAt = Date.now();
                     }
                 } catch (e) { /* ignore */ }
-                console.log(`⚡ Immediate vote shift: ${String(postId).slice(0, 8)} ${fromIdx}→${toIdx}`);
+                console.log(`⚡ Authoritative vote swap: ${String(postId).slice(0, 8)} ${fromIdx}↔${toIdx} (${dir})`);
                 return true;
             } catch (e) {
                 console.warn('applyImmediateVotePositionShift failed', e);
