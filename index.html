@@ -11945,11 +11945,11 @@
             const hasBoostFlag = !!opts.hasBoostFlag;
 
             try {
-                // Remove existing visual classes so stale outlines never persist.
-                Array.from(el.classList || []).forEach(c => {
-                    if (!c || !c.indexOf) return;
-                    if (c.indexOf('glow-') === 0 || c.indexOf('border-') === 0) el.classList.remove(c);
-                });
+                // Remove existing glow-* classes
+                Array.from(el.classList || []).forEach(c => { if (c && c.indexOf && c.indexOf('glow-') === 0) el.classList.remove(c); });
+                // Also clear any legacy boost border class so boost posts do not
+                // keep an outline after rerenders.
+                try { el.classList.remove('border-boost'); } catch (_) {}
             } catch (e) { /* ignore */ }
 
             try {
@@ -12072,10 +12072,60 @@
 
             return canonicalPost;
         }
-                                // Do NOT auto-shift later posts upward here.
-                                // That movement caused visible slot glitches/jumps.
-                                this.clearBoxElement(box);
-                                try { this.renderedBoxes.delete(box.id); } catch (e) { /* ignore */ }
+
+        function refreshVisiblePostGlowOutlines(reason = '') {
+            try {
+                const orderedPosts = (window.gridScroller && Array.isArray(window.gridScroller.items) && window.gridScroller.items.length > 0)
+                    ? window.gridScroller.items.filter(p => p && p.id)
+                    : getActiveViewerFeedPosts().filter(p => p && p.id);
+                if (!orderedPosts.length) return;
+
+                const podium = orderedPosts.slice(0, 3).filter(isPostEligibleForPositionBadge).map(p => p.id);
+                window.lastVisibleTop3 = podium.slice(0, 3);
+                const postMap = new Map(orderedPosts.map((p) => [String(p.id), p]));
+                const visibleNodes = Array.from(document.querySelectorAll('.grid-box[data-post-id]'));
+
+                visibleNodes.forEach((node) => {
+                    const postId = String(node.getAttribute('data-post-id') || '');
+                    if (!postId) return;
+                    let post = (postCache && postCache[postId]) || postMap.get(postId) || findPostAcrossVisibleFeeds(postId);
+                    if (!post) return;
+                    const badges = calculateBadges(post, orderedPosts) || [];
+                    applyGlowAndBorder(node, post, { podium, badges, hasBoostFlag: getCanonicalBoostState(post) });
+                });
+
+                if (reason) console.log(`✨ Glow refresh complete: ${reason} (visible=${visibleNodes.length})`);
+            } catch (e) {
+                console.warn('refreshVisiblePostGlowOutlines failed', e);
+            }
+        }
+
+        // Recompute badge assignments for visible posts and apply DOM updates
+        function recomputeAndApplyBadges() {
+            try {
+                // Podium must follow current on-screen ordering so glow/position stay in sync.
+                const orderedPosts = (window.gridScroller && Array.isArray(window.gridScroller.items) && window.gridScroller.items.length > 0)
+                    ? window.gridScroller.items.filter(p => p && p.id)
+                    : getActiveViewerFeedPosts().filter(p => p && p.id);
+                // Feed the adaptive NEW-badge turnover tracker with the current feed
+                // so it can learn how quickly the user's local grid is turning over.
+                try {
+                    NewBadgeTurnoverML.setArea((typeof currentZoneTag !== 'undefined' && currentZoneTag) ? currentZoneTag : (window.currentZoneTag || ''));
+                    NewBadgeTurnoverML.observe(orderedPosts);
+                } catch (e) { /* tracking is best-effort */ }
+                // Feed the grid-replacement ML with the active feed + total shared-pool
+                // size so it can decide locality reach and replacement cadence.
+                try {
+                    let __totalPool = 0;
+                    for (const __k in gridContent) { if (Array.isArray(gridContent[__k])) __totalPool += gridContent[__k].length; }
+                    GridReplacementML.observe(orderedPosts, __totalPool);
+                } catch (e) { /* tracking is best-effort */ }
+                const podium = orderedPosts.slice(0, 3).filter(isPostEligibleForPositionBadge).map(p => p.id);
+
+                // Cache last visible top-3 for modal mapping consistency
+                try { window.lastVisibleTop3 = podium.slice(0,3); } catch(e) { window.lastVisibleTop3 = podium.slice(0,3); }
+
+                // Determine visible boxes from gridScroller if available, otherwise query DOM
                 let visibleBoxes = [];
                 if (window.gridScroller && typeof gridScroller.getVisibleItems === 'function') {
                     const vis = gridScroller.getVisibleItems();
@@ -25062,20 +25112,23 @@ function setUploadModalHeader(title, subtitle) {
                 .grid-box .boost-badge { opacity: 0; transform: translateY(-6px) scale(0.96); }
                 .boost-badge:hover { box-shadow: 0 12px 40px rgba(0,0,0,0.40), 0 0 22px rgba(251,191,36,0.12), 0 0 20px rgba(255,255,255,0.02); transform: translateY(-3px) scale(1.02); }
                 /* Special border styles for purchased posts */
-                .grid-box.border-boost { box-shadow: none !important; border: none !important; border-radius: 12px; }
+                .grid-box.border-boost { box-shadow: 0 0 0 4px rgba(100,116,139,0.06), 0 8px 24px rgba(15,23,42,0.06) inset; border-radius: 12px; }
                 .grid-box.border-sell { box-shadow: 0 0 0 4px rgba(59,130,246,0.12), 0 8px 24px rgba(59,130,246,0.04) inset; border-radius: 12px; }
-                .grid-box.border-boost.border-sell { box-shadow: none !important; border: none !important; }
+                .grid-box.border-boost.border-sell { box-shadow: 0 0 0 4px rgba(100,116,139,0.06), 0 0 0 4px rgba(59,130,246,0.08); }
                 /* Enforce visible boost border even if JS clears inline border styles.
                    Use !important so stylesheet wins over inline style resets. */
                 .grid-box.border-boost, .grid-box.glow-boost {
-                    border: none !important;
-                    box-shadow: none !important;
+                    border: 2px solid rgba(250,204,21,0.18) !important;
+                    box-shadow: 0 0 0 4px rgba(250,204,21,0.12) !important, inset 0 8px 24px rgba(15,23,42,0.06) !important;
                     border-radius: 12px !important;
                 }
                 /* Glow class for purchased BOOST posts: neutral tile glow + prominent gold accent on the badge */
-                .grid-box.glow-boost { position: relative; z-index: 22; border-radius: 12px; box-shadow: none !important; }
+                .grid-box.glow-boost { position: relative; z-index: 22; border-radius: 12px; /* ensure consistent corner radius */
+                    /* Keep a neutral inset for the tile so boost doesn't clash with top-3 or liked outlines */
+                    box-shadow: inset 0 0 0 6px rgba(100,116,139,0.05), 0 18px 48px rgba(2,6,23,0.12);
+                }
                 /* Modal glow for boost when viewing post */
-                     .view-modal-content.glow-boost { box-shadow: none !important; border: none !important; }
+                     .view-modal-content.glow-boost { box-shadow: 0 12px 40px rgba(0,0,0,0.30), 0 0 30px rgba(0,0,0,0.12); border: 1px solid #ffffff; }
 
                 /* Boost pill gold halo defined in static CSS above — do not override here */
                 /* Stronger gold glow when the prominent boost element is explicitly marked as boosted */
@@ -37695,6 +37748,8 @@ function setUploadModalHeader(title, subtitle) {
                         } catch(e){}
                     
                         try { box.classList.add('badge-boost'); } catch(e){}
+                        try { box.classList.remove('glow-boost'); } catch(e){}
+                        try { box.classList.remove('border-boost'); } catch(e){}
                         // Clear any inline shadow/border overrides so CSS class styles take effect
                         try { box.style.boxShadow = ''; box.style.borderColor = ''; box.style.outline = ''; } catch(e){}
                     }
@@ -46670,7 +46725,7 @@ function setUploadModalHeader(title, subtitle) {
                             }
                             // Keep badge interactive: click shows details if needed
                             if (!badgeEl.onclick) badgeEl.onclick = (ev) => { ev.stopPropagation(); openBadgeInfoModal && openBadgeInfoModal(postId); };
-                            // Ensure boost visual prominence: remove any NEW badge/glow and add boost glow
+                            // Keep only badge prominence without adding boost glow/border.
                             try { box.classList.remove('badge-new'); } catch(e){}
                             try { box.classList.remove('glow-new'); } catch(e){}
                             try { box.classList.remove('glow-boost'); } catch(e){}
