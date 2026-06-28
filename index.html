@@ -12737,6 +12737,8 @@
         const LOCAL_ZONE_BASE_RADIUS_M  = 139;
         // 8,000 sq ft circle: area=743 m², r=sqrt(743/π)≈15.4 m
         const LOCAL_ZONE_DENSE_RADIUS_M = 15.4;
+        // Hyper-dense ceiling: roughly a crowded frontage/doorway scale.
+        const LOCAL_ZONE_SUPER_DENSE_RADIUS_M = 9;
         // Users-in-base-zone threshold that triggers shrinkage
         const LOCAL_ZONE_DENSITY_CAP    = 10000;
 
@@ -12786,6 +12788,12 @@
                 if (cached && Date.now() - cached.ts < _LZ_CACHE_TTL) return cached.radiusM;
 
                 const users = countNearbyActiveUsers(postLat, postLon, LOCAL_ZONE_BASE_RADIUS_M);
+                const peakSeenUsers = Math.max(
+                    users,
+                    Number(window.__maxObservedLocalZoneUsers || 0),
+                    LOCAL_ZONE_DENSITY_CAP
+                );
+                window.__maxObservedLocalZoneUsers = peakSeenUsers;
                 const LOW = LOCAL_ZONE_DENSITY_CAP * 0.25; // 2,500
                 let radiusM;
                 if (users <= LOW) {
@@ -12796,6 +12804,15 @@
                     const t = (users - LOW) / (LOCAL_ZONE_DENSITY_CAP - LOW);
                     radiusM = LOCAL_ZONE_BASE_RADIUS_M -
                               t * (LOCAL_ZONE_BASE_RADIUS_M - LOCAL_ZONE_DENSE_RADIUS_M);
+                }
+
+                // If this zone is operating near the historical max density, clamp
+                // local radius harder so tags become extremely close-range.
+                const nearPeak = peakSeenUsers > 0 ? (users / peakSeenUsers) : 0;
+                const peakPressure = Math.max(0, Math.min(1, (nearPeak - 0.70) / 0.30));
+                if (peakPressure > 0) {
+                    const floorRadius = LOCAL_ZONE_SUPER_DENSE_RADIUS_M + (1 - peakPressure) * (LOCAL_ZONE_DENSE_RADIUS_M - LOCAL_ZONE_SUPER_DENSE_RADIUS_M);
+                    radiusM = Math.max(floorRadius, Math.min(radiusM, LOCAL_ZONE_DENSE_RADIUS_M));
                 }
 
                 _lzRadiusCache.set(key, { radiusM, ts: Date.now() });
@@ -12884,13 +12901,23 @@
 
                 // Density-adjusted local zone for this post's origin
                 const localRadiusM = getLocalZoneRadiusM(postLat, postLon);
-                const densityFactor = Math.max(0.2, Math.min(1.0, Number(localRadiusM || LOCAL_ZONE_BASE_RADIUS_M) / Number(LOCAL_ZONE_BASE_RADIUS_M || 1)));
+                const nearbyUsers = countNearbyActiveUsers(postLat, postLon, LOCAL_ZONE_BASE_RADIUS_M);
+                const peakSeenUsersForScale = Math.max(
+                    nearbyUsers,
+                    Number(window.__maxObservedLocalZoneUsers || 0),
+                    LOCAL_ZONE_DENSITY_CAP
+                );
+                const densityFactor = Math.max(0.05, Math.min(1.0, Number(localRadiusM || LOCAL_ZONE_BASE_RADIUS_M) / Number(LOCAL_ZONE_BASE_RADIUS_M || 1)));
+                const crowdPressure = Math.max(0, Math.min(1, (nearbyUsers - (LOCAL_ZONE_DENSITY_CAP * 0.4)) / (LOCAL_ZONE_DENSITY_CAP * 0.6)));
+                const peakPressureScale = peakSeenUsersForScale > 0 ? Math.max(0, Math.min(1, nearbyUsers / peakSeenUsersForScale)) : 0;
+                const pressure = Math.max(crowdPressure, peakPressureScale * crowdPressure);
 
                 // Dynamic distance tiers scale with local user density.
                 // Dense areas shrink promotion radii; sparse areas expand them.
-                const tier1MaxM = Math.max(1_200, Math.min(8_000, Math.round(5_000 * densityFactor)));
-                const tier2MaxM = Math.max(25_000, Math.min(140_000, Math.round(100_000 * Math.max(0.35, densityFactor))));
-                const tier3MaxM = Math.max(180_000, Math.min(1_400_000, Math.round(1_000_000 * Math.max(0.2, densityFactor))));
+                const tier1BaseM = Math.max(90, Math.round(localRadiusM * (6.5 - (4.8 * pressure))));
+                const tier1MaxM = Math.max(90, Math.min(6_500, tier1BaseM));
+                const tier2MaxM = Math.max(2_500, Math.min(90_000, Math.round((40_000 * Math.max(0.08, densityFactor)) * (1 - 0.72 * pressure))));
+                const tier3MaxM = Math.max(35_000, Math.min(900_000, Math.round((600_000 * Math.max(0.08, densityFactor)) * (1 - 0.65 * pressure))));
 
                 // Geographic label hierarchy: most-specific → broadest
                 const hier = [{ label: originalTag, tier: 0 }];
