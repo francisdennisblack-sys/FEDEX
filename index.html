@@ -16477,18 +16477,17 @@
                 } catch (e) { /* ignore */ }
                 // Ensure target key exists
                 gridContent[contentKey] = gridContent[contentKey] || [];
-                // Insert at a random slot so new posts are mixed fairly.
-                const insertAt = getRandomNewPostInsertIndex(gridContent[contentKey].length);
-                gridContent[contentKey].splice(insertAt, 0, post);
+                // FIXED: Insert new posts at the TOP (index 0) instead of random position
+                // This prevents posts from "swapping places" and grid glitches
+                gridContent[contentKey].splice(0, 0, post);
                 // Update cache
                 try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
-                // Update scroller safely if available
+                // Update scroller safely if available - use incremental add, NOT full rebuild
                 try {
                     if (window.gridScroller && typeof safeAddItemsToGridScroller === 'function') {
                         safeAddItemsToGridScroller([post]);
-                    } else if (window.gridScroller && typeof gridScroller.setItems === 'function') {
-                        rebuildGridScrollerFromGridContent();
                     }
+                    // Do NOT call rebuildGridScrollerFromGridContent() - it causes full grid redraw and position swaps
                 } catch (e) { /* ignore scroller update failures */ }
             } catch (e) { console.warn('ensureUniqueAndInsert failed', e); }
         }
@@ -39139,7 +39138,9 @@ function setUploadModalHeader(title, subtitle) {
                     return;
                 }
 
-                const insertAt = getRandomNewPostInsertIndex(gridContent[contentKey].length);
+                // FIXED: Insert at TOP (index 0) instead of random position
+                // This ensures new posts appear at the top of the grid
+                const insertAt = 0;
 
                 try { postData._keepGridPlacement = true; postData._lockedGridPlacement = true; } catch (e) {}
 
@@ -45111,8 +45112,16 @@ function setUploadModalHeader(title, subtitle) {
                 try { if (typeof ensureNewPostVisible === 'function') ensureNewPostVisible(postData); } catch (e) { console.warn('ensureNewPostVisible after publish failed', e); }
                 try {
                     window._lastIncrementalRender = 0;
-                    if (typeof rebuildGridScrollerFromGridContent === 'function' && gridScroller) rebuildGridScrollerFromGridContent();
-                    else if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); }
+                    // FIXED: Use incremental grid update instead of full rebuild
+                    // Full rebuild causes position swaps and grid glitches
+                    if (typeof requestGridUpdate === 'function') {
+                        requestGridUpdate('post-publish-final');
+                    } else if (typeof renderGridIncremental === 'function') {
+                        renderGridIncremental('post-publish-final');
+                    } else if (typeof renderGrid === 'function') {
+                        window.lastRenderGridTime = 0;
+                        renderGrid();
+                    }
                 } catch (e) { console.warn('forced publish repaint failed', e); }
                 // Mark publish-settle timestamp so reconciler won't immediately
                 // yank/replace this brand-new post while feeds converge.
