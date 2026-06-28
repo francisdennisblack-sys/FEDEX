@@ -2626,16 +2626,32 @@
                     
                     // Box i+1 because box-0 is add-content
                     if (!box) continue;
+
+                    const expectedId = String(item.id);
                     
                     // Skip only when the exact same post is already fully rendered.
                     // If the slot is still a placeholder/clearing shell, force an
                     // upgrade render so loaded content replaces the grey loading card.
-                    const samePostId = (box.getAttribute('data-post-id') === item.id);
+                    const actualId = String(box.getAttribute('data-post-id') || '');
+                    const samePostId = (actualId === expectedId);
                     const needsUpgradeRender = box.classList.contains('placeholder') ||
                         box.getAttribute('data-clearing') === 'true';
-                    if (samePostId && !needsUpgradeRender) continue;
+                    const hasVisualContent = !!String(box.innerHTML || '').trim();
+                    const mapSaysCorrect = String(this.renderedBoxes.get(box.id) || '') === expectedId;
+                    if (samePostId && !needsUpgradeRender && hasVisualContent && mapSaysCorrect) continue;
+
+                    // Single-owner invariant: this post id can exist in only one slot.
+                    // If any other box still claims it, clear that stale claim first.
+                    try {
+                        const dupes = document.querySelectorAll(`[data-post-id="${expectedId}"]`);
+                        dupes.forEach(node => {
+                            if (node && node.id !== box.id) this.clearBoxElement(node);
+                        });
+                    } catch (e) { /* ignore duplicate sweep failures */ }
                     
                     this.onRenderItem(box, item);
+                    try { box.setAttribute('data-post-id', expectedId); } catch (e) { /* ignore */ }
+                    this.renderedBoxes.set(box.id, expectedId);
                 }
 
                 // If this requested window extends past loaded items, clear that window tail.
@@ -2669,6 +2685,7 @@
             clearBoxElement(box) {
                 if (!box) return;
                 try {
+                    try { this.renderedBoxes.delete(box.id); } catch (e) { /* ignore */ }
                     box.removeAttribute('data-post-id');
                     box.removeAttribute('data-clearing');
                     box.classList.remove('filled', 'placeholder');
@@ -2707,6 +2724,26 @@
             // If any mismatch is found, clear and repaint that exact slot.
             enforceStrictSlotIdentity(maxSlots = 420) {
                 try {
+                    // Data-level invariant: `this.items` should contain each id only once.
+                    // When duplicates slip in, positional slot identity becomes undefined.
+                    try {
+                        if (Array.isArray(this.items) && this.items.length > 1) {
+                            const seen = new Set();
+                            const deduped = [];
+                            for (const it of this.items) {
+                                if (!it || !it.id) continue;
+                                const id = String(it.id);
+                                if (seen.has(id)) continue;
+                                seen.add(id);
+                                deduped.push(it);
+                            }
+                            if (deduped.length !== this.items.length) {
+                                console.log(`🧹 Slot identity dedupe: ${this.items.length} → ${deduped.length}`);
+                                this.items = deduped;
+                            }
+                        }
+                    } catch (e) { /* ignore item dedupe failures */ }
+
                     const limit = Math.max(1, Math.min(2000, Number(maxSlots) || 420));
                     for (let boxIndex = 1; boxIndex <= limit; boxIndex++) {
                         const box = document.getElementById(`box-${boxIndex}`);
@@ -2768,9 +2805,11 @@
                                     }
                                     if (!moved) {
                                         this.clearBoxElement(box);
+                                        try { this.renderedBoxes.delete(box.id); } catch (e) { /* ignore */ }
                                     }
                                 } catch (e) {
                                     this.clearBoxElement(box);
+                                    try { this.renderedBoxes.delete(box.id); } catch (e) { /* ignore */ }
                                 }
                             }
                             continue;
@@ -2802,6 +2841,7 @@
                                 this.renderItemDefault(box, expected);
                             }
                             try { box.setAttribute('data-post-id', expectedId); } catch (e) { /* ignore */ }
+                            this.renderedBoxes.set(box.id, expectedId);
                             try { box.style.opacity = ''; box.style.transition = ''; } catch (e) { /* ignore */ }
                         }
                     }
@@ -15292,6 +15332,11 @@
                         const start = Math.max(0, Math.min(fromIdx, toIdx) - 2);
                         const end = Math.min(committed.length, Math.max(fromIdx, toIdx) + 3);
                         gridScroller.renderItemsInRange(start, end, { skipIdentityPass: true });
+                        try {
+                            if (typeof gridScroller.enforceStrictSlotIdentity === 'function') {
+                                gridScroller.enforceStrictSlotIdentity(Math.max(end + 8, 64));
+                            }
+                        } catch (e) { /* ignore */ }
                     } else if (typeof gridScroller.setItems === 'function') {
                         gridScroller.setItems(committed);
                     }
@@ -38091,6 +38136,11 @@ function setUploadModalHeader(title, subtitle) {
                         const startIdx = (movedFromIdx !== -1) ? Math.min(diffIdx, movedFromIdx) : diffIdx;
                         const endIdx = (movedFromIdx !== -1) ? Math.max(diffIdx, movedFromIdx) + 1 : diffIdx + 1;
                         gridScroller.renderItemsInRange(startIdx, endIdx, { skipIdentityPass: true });
+                        try {
+                            if (typeof gridScroller.enforceStrictSlotIdentity === 'function') {
+                                gridScroller.enforceStrictSlotIdentity(Math.max(endIdx + 10, 80));
+                            }
+                        } catch (e) { /* ignore */ }
                         applyGridTextFontSizeToVisiblePosts();
                         try { recomputeAndApplyBadges(); } catch(e) { console.warn('recompute badges failed', e); }
                     } else if (typeof gridScroller.setItems === 'function') {
