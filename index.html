@@ -665,14 +665,6 @@
             return stable;
         }
 
-        function clamp01(value) {
-            const n = Number(value);
-            if (!Number.isFinite(n)) return 0;
-            if (n <= 0) return 0;
-            if (n >= 1) return 1;
-            return n;
-        }
-
         function isPostAreaPromotionEligible(post) {
             if (!post) return false;
             const likes = Number(post.likes || 0);
@@ -1570,7 +1562,6 @@
     .badge--sell { background: linear-gradient(135deg,#06b6d4,#3b82f6); color: #04121a; box-shadow: 0 6px 18px rgba(59,130,246,0.28); }
     .badge--new  { position: absolute; left: 8px; top: 8px; background: linear-gradient(135deg,#ffffff,#e9eef5); color:#1f2937; box-shadow: 0 6px 18px rgba(255,255,255,0.28), inset 0 0 18px rgba(255,255,255,0.10); font-weight:900; }
     .badge--liked { background: linear-gradient(135deg,#ffffff,#e9eef5); color:#1f2937; box-shadow: 0 6px 18px rgba(255,255,255,0.28), inset 0 0 18px rgba(255,255,255,0.10); font-weight:900; }
-    .badge--outside-local { background: linear-gradient(135deg,#f1f5f9,#e2e8f0); color:#0f172a; box-shadow:none; font-weight:900; }
     .badge--default { background: rgba(0,0,0,0.5); }
 
     /* Position badges (top-3) - styled like a 'dislike' chip but in gold */
@@ -1619,15 +1610,12 @@
     .liked-badge-prominent { position:static; z-index:26; display:flex; align-items:center; gap:var(--badge-gap); pointer-events:auto; }
     .liked-badge-prominent .liked-inner { display:flex; align-items:center; gap:6px; padding:6px 10px; border-radius:10px; background:linear-gradient(135deg,#ffffff,#e9eef5); color:#1f2937; box-shadow:0 6px 18px rgba(255,255,255,0.28), inset 0 0 18px rgba(255,255,255,0.10); font-weight:800; transform:scale(0.75); transform-origin:right top; }
     .liked-badge-prominent .liked-label { font-size:13px; letter-spacing:0.4px; }
-    .outside-badge-prominent { position:static; z-index:29; display:flex; align-items:center; gap:var(--badge-gap); pointer-events:auto; }
-    .outside-badge-prominent .outside-inner { display:flex; align-items:center; gap:6px; padding:6px 10px; border-radius:10px; background:linear-gradient(135deg,#f1f5f9,#e2e8f0); color:#0f172a; box-shadow:none; font-weight:800; }
-    .outside-badge-prominent .outside-label { font-size:11px; letter-spacing:0.4px; }
     /* Content offset is driven by the ACTUAL badge elements present on a tile.
        Posts without a BOOST/BUY/NEW/LIKED badge keep their content flush to the
        top; only tiles that truly render one of these badges push the text down
        so the badge never overlaps it. */
     .grid-box:has(.boost-badge-prominent) .post-text-content,
-    .grid-box:has(.sell-badge-prominent) .post-text-content { padding-top: 28px !important; }
+    .grid-box:has(.sell-badge-prominent) .post-text-content { padding-top: 24px !important; }
     .grid-box:has(.new-badge-prominent) .post-text-content,
     .grid-box:has(.liked-badge-prominent) .post-text-content { padding-top: 10px !important; }
 </style>
@@ -11600,18 +11588,6 @@
         function getPostEngagementTier(post) {
             const likes = Number(post.likes) || 0;
             const dislikes = Number(post.dislikes) || 0;
-
-            let isOutsideLocalForViewer = false;
-            try {
-                const _vLat = userLocation && Number(userLocation.lat || userLocation.latitude || 0);
-                const _vLon = userLocation && Number(userLocation.lon || userLocation.longitude || 0);
-                const _scaled = (typeof getScaledAreaTagForViewer === 'function') ? getScaledAreaTagForViewer(post, _vLat, _vLon) : null;
-                isOutsideLocalForViewer = !!(_scaled && _scaled.isOutsideLocal);
-            } catch (e) { /* ignore outside-local scoring failures */ }
-
-            const appendOutsideLocalBadge = () => {
-                if (isOutsideLocalForViewer && !badges.includes('outside-local')) badges.push('outside-local');
-            };
             const likeRatio = likes - dislikes;
             
             // Check if post is NEW using the adaptive turnover system
@@ -12207,14 +12183,6 @@
                         // by the cleanup branches below.
                         const hasNewFlag = false;
                         const hasLikedFlag = false;
-                        const hasOutsideLocalFlag = (() => {
-                            try {
-                                const _vLat = userLocation && Number(userLocation.lat || userLocation.latitude || 0);
-                                const _vLon = userLocation && Number(userLocation.lon || userLocation.longitude || 0);
-                                const _scaled = (typeof getScaledAreaTagForViewer === 'function') ? getScaledAreaTagForViewer(post, _vLat, _vLon) : null;
-                                return !!(_scaled && _scaled.isOutsideLocal);
-                            } catch (_e) { return false; }
-                        })();
                         let leftBadges = box.querySelector('.left-badges');
                         if ((hasBoostFlag || hasSellFlag) && !leftBadges) {
                             leftBadges = document.createElement('div');
@@ -12223,7 +12191,7 @@
                         }
                         // Right-anchored container holds the LIKED and NEW badges.
                         let rightBadges = box.querySelector('.right-badges');
-                        if ((hasLikedFlag || hasNewFlag || hasOutsideLocalFlag) && !rightBadges) {
+                        if ((hasLikedFlag || hasNewFlag) && !rightBadges) {
                             rightBadges = document.createElement('div');
                             rightBadges.className = 'right-badges';
                             box.appendChild(rightBadges);
@@ -12303,27 +12271,10 @@
                             }
                         } catch(e) { /* ignore liked rendering errors */ }
 
-                        // Render OUTSIDE badge for posts displayed outside their strict local zone.
-                        try {
-                            const existingOutsideProm = box.querySelector('.outside-badge-prominent');
-                            if (hasOutsideLocalFlag) {
-                                if (!existingOutsideProm && rightBadges) {
-                                    const op = document.createElement('div');
-                                    op.className = 'outside-badge-prominent';
-                                    const innerO = document.createElement('div'); innerO.className = 'outside-inner';
-                                    const labelO = document.createElement('span'); labelO.className = 'outside-label'; labelO.textContent = 'OUTSIDE';
-                                    innerO.appendChild(labelO); op.appendChild(innerO);
-                                    rightBadges.appendChild(op);
-                                }
-                            } else {
-                                if (existingOutsideProm && existingOutsideProm.parentNode) existingOutsideProm.parentNode.removeChild(existingOutsideProm);
-                            }
-                        } catch(e) { /* ignore outside rendering errors */ }
-
                         // Clean up empty left-badges container so it never reserves space
                         try { if (leftBadges && !leftBadges.querySelector('.boost-badge-prominent') && !leftBadges.querySelector('.sell-badge-prominent') && leftBadges.parentNode) leftBadges.parentNode.removeChild(leftBadges); } catch(_) {}
                         // Clean up empty right-badges container so it never reserves space
-                        try { if (rightBadges && !rightBadges.querySelector('.liked-badge-prominent') && !rightBadges.querySelector('.new-badge-prominent') && !rightBadges.querySelector('.outside-badge-prominent') && rightBadges.parentNode) rightBadges.parentNode.removeChild(rightBadges); } catch(_) {}
+                        try { if (rightBadges && !rightBadges.querySelector('.liked-badge-prominent') && !rightBadges.querySelector('.new-badge-prominent') && rightBadges.parentNode) rightBadges.parentNode.removeChild(rightBadges); } catch(_) {}
 
                         // Add position badges for podium (1st/2nd/3rd) so the top three
                         // show explicit badge parts. Ensure the top post gets the crowned badge.
@@ -13013,43 +12964,16 @@
 
                 const finalLevel = Math.max(distLevel, engLevel);
 
-                // Viewer-locality score drives rebadging and progressive area broadening.
-                const createdAt = (typeof getPostCreatedAt === 'function')
-                    ? Number(getPostCreatedAt(post) || 0)
-                    : Number(post.createdAt || post.timestamp || 0);
-                const ageHours = Math.max(0, (Date.now() - createdAt) / (60 * 60 * 1000));
-                const ageDecay = Math.max(0.15, Math.exp(-ageHours / 18));
-                const voteTrust = clamp01((likes + 1) / Math.max(2, likes + dislikes + 2));
-                const distDen = Math.max(Number(localRadiusM || 0) * 4, 200);
-                const localDistanceScore = Number.isFinite(distanceM)
-                    ? clamp01(1 - (distanceM / distDen))
-                    : 0;
-                const localityScore = clamp01((localDistanceScore * 0.55) + (voteTrust * 0.30) + (ageDecay * 0.15));
-
-                const isStrictlyLocal = Number.isFinite(distanceM)
-                    ? (distanceM <= Math.max(Number(localRadiusM || 0) * 1.35, 120) && localityScore >= 0.72)
-                    : false;
-
-                let rebadgedLevel = finalLevel;
-                if (!isStrictlyLocal && rebadgedLevel < 1) rebadgedLevel = 1;
-                if (localityScore < 0.45 && rebadgedLevel < 2) rebadgedLevel = 2;
-                if (localityScore < 0.30 && rebadgedLevel < 3) rebadgedLevel = 3;
-
                 let chosen = hier[0];
                 for (const h of hier) {
-                    if (h.tier <= rebadgedLevel) chosen = h;
+                    if (h.tier <= finalLevel) chosen = h;
                     else break;
                 }
 
                 return {
                     label: chosen.label, tier: chosen.tier,
                     distanceM, localRadiusM, tier1MaxM, tier2MaxM, tier3MaxM,
-                    netLikes, original: originalTag,
-                    localityScore,
-                    isLocal: isStrictlyLocal,
-                    isOutsideLocal: !isStrictlyLocal,
-                    voteTrust,
-                    ageHours
+                    netLikes, original: originalTag
                 };
             } catch (e) { return null; }
         }
@@ -25314,6 +25238,10 @@ function setUploadModalHeader(title, subtitle) {
                         text-align: left !important;
                     }
                     .post-text-content > div { text-align: left !important; margin-left: 2px !important; }
+                    .grid-box:has(.boost-badge-prominent) .post-text-content,
+                    .grid-box:has(.sell-badge-prominent) .post-text-content {
+                        padding-top: 16px !important;
+                    }
                     /* Media emoji tiles stay perfectly centered on mobile (immune to the
                        text-content left-align overrides above). */
                     .media-emoji-tile {
@@ -37184,13 +37112,23 @@ function setUploadModalHeader(title, subtitle) {
                 }
             })();
 
+            const isBoostOrSellTile = (() => {
+                try {
+                    const box = el.closest('.grid-box');
+                    if (!box) return false;
+                    return !!(box.querySelector('.boost-badge-prominent') || box.querySelector('.sell-badge-prominent'));
+                } catch (e) {
+                    return false;
+                }
+            })();
+
             // Keep desktop sizing as-is, but cap mobile text lower so iPhone
             // text-only tiles don't look oversized.
-            const minSize = isSmallScreen ? 11 : 18;
+            const minSize = isSmallScreen ? (isBoostOrSellTile ? 10 : 11) : 18;
             const maxSize = isSmallScreen
-                ? Math.min(84, Math.floor(boxH * 0.56))
+                ? Math.min(isBoostOrSellTile ? 72 : 84, Math.floor(boxH * (isBoostOrSellTile ? 0.50 : 0.56)))
                 : Math.min(166, Math.floor(boxH * 0.88));
-            const lineHeight = isSmallScreen ? 1.16 : 1.24;
+            const lineHeight = isSmallScreen ? (isBoostOrSellTile ? 1.12 : 1.16) : 1.24;
 
             const fits = (size) => {
                 el.style.fontSize = `${size}px`;
@@ -37222,10 +37160,11 @@ function setUploadModalHeader(title, subtitle) {
             // full text fits or we reach a readability floor.
             if (isSmallScreen && !fits(best)) {
                 let emergency = best;
-                while (emergency > 9 && !fits(emergency)) {
+                const emergencyFloor = isBoostOrSellTile ? 8 : 9;
+                while (emergency > emergencyFloor && !fits(emergency)) {
                     emergency -= 1;
                 }
-                best = Math.max(9, emergency);
+                best = Math.max(emergencyFloor, emergency);
             }
 
             el.style.fontSize = `${best}px`;
@@ -37475,7 +37414,6 @@ function setUploadModalHeader(title, subtitle) {
                 // restart on every renderGridItemFull call (position rotation etc.).
                 let _isBoostPost = false;
                 let _isSellPost = false;
-                let _isOutsideLocalPost = false;
                 let _savedBoostProm = null;
                 let _savedLeftBadges = null;
                 // Clear any stale badge/border/glow state on this slot so when posts
@@ -37495,12 +37433,6 @@ function setUploadModalHeader(title, subtitle) {
                     const _persistentBadgeState = getPersistentBadgeState(post.id);
                     _isBoostPost = getCanonicalBoostState(post) || !!_persistentBadgeState.boost;
                     _isSellPost = hasBadgeKind(post, 'sell') || !!(post.sellBadge || post.forSale || post.buyBadge || post.sellPaidAt) || !!_persistentBadgeState.sell;
-                    try {
-                        const _vLat = userLocation && Number(userLocation.lat || userLocation.latitude || 0);
-                        const _vLon = userLocation && Number(userLocation.lon || userLocation.longitude || 0);
-                        const _scaled = (typeof getScaledAreaTagForViewer === 'function') ? getScaledAreaTagForViewer(post, _vLat, _vLon) : null;
-                        _isOutsideLocalPost = !!(_scaled && _scaled.isOutsideLocal);
-                    } catch (_err) { _isOutsideLocalPost = false; }
                     // Prefer any pre-saved element captured before we cleared the slot
                     _savedLeftBadges = _preSavedLeftBadges || (box.querySelector && box.querySelector('.left-badges'));
                     _savedBoostProm = _preSavedBoostProm || (box.querySelector && box.querySelector('.boost-badge-prominent'));
@@ -37753,31 +37685,6 @@ function setUploadModalHeader(title, subtitle) {
                         }
                     }
                 } catch(_e) {}
-
-                try {
-                    let _rb = box.querySelector('.right-badges');
-                    if (_isOutsideLocalPost && !_rb) {
-                        _rb = document.createElement('div');
-                        _rb.className = 'right-badges';
-                        box.appendChild(_rb);
-                    }
-                    const _existingOutside = _rb && _rb.querySelector('.outside-badge-prominent');
-                    if (_isOutsideLocalPost) {
-                        if (!_existingOutside && _rb) {
-                            const _op = document.createElement('div');
-                            _op.className = 'outside-badge-prominent';
-                            const _innerO = document.createElement('div'); _innerO.className = 'outside-inner';
-                            const _labelO = document.createElement('span'); _labelO.className = 'outside-label'; _labelO.textContent = 'OUTSIDE';
-                            _innerO.appendChild(_labelO); _op.appendChild(_innerO);
-                            _rb.appendChild(_op);
-                        }
-                    } else if (_existingOutside && _existingOutside.parentNode) {
-                        _existingOutside.parentNode.removeChild(_existingOutside);
-                    }
-                    if (_rb && !_rb.querySelector('.outside-badge-prominent') && !_rb.querySelector('.liked-badge-prominent') && !_rb.querySelector('.new-badge-prominent') && _rb.parentNode) {
-                        _rb.parentNode.removeChild(_rb);
-                    }
-                } catch (_e) {}
                 
                 // Set attributes and classes
                 box.setAttribute('data-post-id', post.id);
@@ -37839,10 +37746,6 @@ function setUploadModalHeader(title, subtitle) {
                             box.classList.add(`badge-${badge}`);
                         }
                     });
-                    try {
-                        if (_isOutsideLocalPost) box.classList.add('badge-outside-local');
-                        else box.classList.remove('badge-outside-local');
-                    } catch (_e) {}
                     // If this post has a purchased BOOST, ensure boost visuals take precedence
                     const hasBoostFlag = getCanonicalBoostState(post);
                     if (hasBoostFlag) {
@@ -42927,21 +42830,18 @@ function setUploadModalHeader(title, subtitle) {
             const tenMinutesMs = 10 * 60 * 1000;
             if (likes >= 5 && postAge > tenMinutesMs && likes > dislikes) {
                 badges.push('hot');
-                appendOutsideLocalBadge();
                 return badges; // HOT takes precedence
             }
             
             // 4. DISLIKED BADGE: More dislikes than likes
             if (dislikes > likes) {
                 badges.push('disliked');
-                appendOutsideLocalBadge();
                 return badges; // DISLIKED takes precedence
             }
             
             // 5. BALANCED BADGE: Equal likes and dislikes (requires at least 1 vote each)
             if (likes === dislikes && likes > 0) {
                 badges.push('balanced');
-                appendOutsideLocalBadge();
                 return badges; // BALANCED takes precedence
             }
 
@@ -42949,12 +42849,10 @@ function setUploadModalHeader(title, subtitle) {
             //    Distinct from BALANCED (which requires equal non-zero votes).
             if (likes === 0 && dislikes === 0) {
                 badges.push('untouched');
-                appendOutsideLocalBadge();
                 return badges;
             }
             
             // 7. NO BADGE: Normal posts fall through (badges array remains empty)
-            appendOutsideLocalBadge();
             return badges;
         }
 
