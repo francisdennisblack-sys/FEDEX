@@ -691,11 +691,26 @@
             } catch (e) { return false; }
         }
 
+        function isPostOutsideViewerLocalZone(post) {
+            try {
+                const vLat = userLocation && Number(userLocation.lat || userLocation.latitude || 0);
+                const vLon = userLocation && Number(userLocation.lon || userLocation.longitude || 0);
+                if (!Number.isFinite(vLat) || !Number.isFinite(vLon)) return false;
+                if (typeof getScaledAreaTagForViewer !== 'function') return false;
+                const scaled = getScaledAreaTagForViewer(post, vLat, vLon);
+                if (!scaled) return false;
+                if (typeof scaled.isOutsideLocal === 'boolean') return !!scaled.isOutsideLocal;
+                return Number(scaled.tier || 0) >= 1;
+            } catch (e) {
+                return false;
+            }
+        }
+
         // Keep Firebase's canonical author tag untouched while allowing non-owners
         // to see a concrete nearby area when the author used the neutral "Local area" tag.
         function getViewerDisplayAreaTag(post) {
             const variant = String((post && (post.viewerAreaTagVariant || post.viewerAreaTag)) || '').trim();
-            if (variant) return variant;
+            if (variant && !/^local area$/i.test(variant)) return variant;
 
             const stable = getStablePostAreaTag(post);
             if (!stable) return null;
@@ -703,6 +718,7 @@
             const stableNorm = String(stable).trim();
             if (!/^local area$/i.test(stableNorm)) return stable;
             const viewerCommitted = isViewerInCommittedLocationMode();
+            const viewerOutsideLocal = isPostOutsideViewerLocalZone(post);
 
             let isOwner = false;
             try {
@@ -718,7 +734,7 @@
                 }
             } catch (e) { /* keep default false */ }
 
-            if (isOwner && !viewerCommitted) return stable;
+            if (isOwner && !viewerCommitted && !viewerOutsideLocal) return stable;
 
             const publicTag = (post && (
                 (post.publicAreaTag && String(post.publicAreaTag).trim()) ||
@@ -733,7 +749,7 @@
 
             // Critical rule: users who committed to a different location should
             // never see generic "Local area" tags on viewed posts.
-            if (viewerCommitted) return 'Nearby Area';
+            if (viewerCommitted || viewerOutsideLocal) return 'Nearby Area';
             return stable;
         }
 
