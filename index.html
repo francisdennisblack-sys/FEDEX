@@ -12816,9 +12816,8 @@
                 const dislikes = Number(post.dislikes || 0);
                 const netLikes = likes - dislikes;
 
-                const originalTag = (typeof getStablePostAreaTag === 'function')
+                const stableOriginalTag = (typeof getStablePostAreaTag === 'function')
                     ? getStablePostAreaTag(post) : null;
-                if (!originalTag || /^local area$/i.test(originalTag.trim())) return null;
 
                 // Post origin coords (routing location set by author at post time)
                 const postLat = Number(
@@ -12832,6 +12831,48 @@
                     post.lon || 0
                 );
 
+                // Resolve a concrete origin label even when the author used
+                // neutral labels like "Local area".
+                let originalTag = '';
+                const stableNorm = String(stableOriginalTag || '').trim();
+                if (stableNorm && !/^local area$/i.test(stableNorm)) {
+                    originalTag = stableNorm;
+                } else {
+                    const fallbackLabel =
+                        (post.publicAreaTag && String(post.publicAreaTag).trim()) ||
+                        (post.routedAreaTag && String(post.routedAreaTag).trim()) ||
+                        (post.routeAreaTag && String(post.routeAreaTag).trim()) ||
+                        (post.county && String(post.county).trim()) ||
+                        (post.zoneTag && String(post.zoneTag).trim()) ||
+                        (post.area && String(post.area).trim()) ||
+                        (post.neighborhood && String(post.neighborhood).trim()) ||
+                        (post.city && String(post.city).trim()) ||
+                        (post.district && String(post.district).trim()) ||
+                        (post.poiName && String(post.poiName).trim()) ||
+                        (post.state && String(post.state).trim()) ||
+                        (post.region && String(post.region).trim()) ||
+                        (post.country && String(post.country).trim()) ||
+                        '';
+
+                    if (fallbackLabel && !/^local area$/i.test(fallbackLabel)) {
+                        originalTag = fallbackLabel;
+                    } else if (postLat && postLon) {
+                        try {
+                            if (typeof getLocationName === 'function') {
+                                const derived = String(getLocationName(postLat, postLon) || '').trim();
+                                if (derived && !/^local area$/i.test(derived)) originalTag = derived;
+                            }
+                            if (!originalTag && typeof findClosestLocation === 'function') {
+                                const hit = findClosestLocation(postLat, postLon);
+                                const derived = (hit && hit.location && hit.location.name) ? String(hit.location.name).trim() : '';
+                                if (derived && !/^local area$/i.test(derived)) originalTag = derived;
+                            }
+                        } catch (e) { /* ignore label derivation failures */ }
+                    }
+                }
+
+                if (!originalTag) return null;
+
                 // Viewer-to-post distance in metres
                 let distanceM = Infinity;
                 if (postLat && postLon && viewerLat && viewerLon &&
@@ -12843,6 +12884,13 @@
 
                 // Density-adjusted local zone for this post's origin
                 const localRadiusM = getLocalZoneRadiusM(postLat, postLon);
+                const densityFactor = Math.max(0.2, Math.min(1.0, Number(localRadiusM || LOCAL_ZONE_BASE_RADIUS_M) / Number(LOCAL_ZONE_BASE_RADIUS_M || 1)));
+
+                // Dynamic distance tiers scale with local user density.
+                // Dense areas shrink promotion radii; sparse areas expand them.
+                const tier1MaxM = Math.max(1_200, Math.min(8_000, Math.round(5_000 * densityFactor)));
+                const tier2MaxM = Math.max(25_000, Math.min(140_000, Math.round(100_000 * Math.max(0.35, densityFactor))));
+                const tier3MaxM = Math.max(180_000, Math.min(1_400_000, Math.round(1_000_000 * Math.max(0.2, densityFactor))));
 
                 // Geographic label hierarchy: most-specific → broadest
                 const hier = [{ label: originalTag, tier: 0 }];
@@ -12872,8 +12920,9 @@
                 //   the platform's actual top posts (≥500 net likes), not viewer proximity.
                 let distLevel;
                 if      (distanceM <= localRadiusM) distLevel = 0;
-                else if (distanceM < 5_000)         distLevel = 1;
-                else if (distanceM < 100_000)       distLevel = 2;
+                else if (distanceM < tier1MaxM)     distLevel = 1;
+                else if (distanceM < tier2MaxM)     distLevel = 2;
+                else if (distanceM < tier3MaxM)     distLevel = 3;
                 else                                distLevel = 3; // capped — distance alone never reaches Worldwide
 
                 // Engagement-based escalation. Only ≥500 net likes unlocks Worldwide (tier 4).
@@ -12893,7 +12942,8 @@
 
                 return {
                     label: chosen.label, tier: chosen.tier,
-                    distanceM, localRadiusM, netLikes, original: originalTag
+                    distanceM, localRadiusM, tier1MaxM, tier2MaxM, tier3MaxM,
+                    netLikes, original: originalTag
                 };
             } catch (e) { return null; }
         }
