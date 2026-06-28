@@ -629,6 +629,23 @@
             }
         }
 
+        function isViewerInCommittedLocationMode() {
+            try {
+                if (String(window.__fsLocationMode || '').trim().toLowerCase() === 'committed') return true;
+            } catch (e) { /* ignore */ }
+            try {
+                if (localStorage.getItem('manualLocationActive') === '1') return true;
+            } catch (e) { /* ignore */ }
+            try {
+                const raw = localStorage.getItem('lastChosenLocation');
+                if (!raw) return false;
+                const parsed = JSON.parse(raw);
+                const lat = Number(parsed && parsed.lat);
+                const lon = Number(parsed && parsed.lon);
+                return Number.isFinite(lat) && Number.isFinite(lon);
+            } catch (e) { return false; }
+        }
+
         // Keep Firebase's canonical author tag untouched while allowing non-owners
         // to see a concrete nearby area when the author used the neutral "Local area" tag.
         function getViewerDisplayAreaTag(post) {
@@ -640,6 +657,7 @@
 
             const stableNorm = String(stable).trim();
             if (!/^local area$/i.test(stableNorm)) return stable;
+            const viewerCommitted = isViewerInCommittedLocationMode();
 
             let isOwner = false;
             try {
@@ -655,7 +673,7 @@
                 }
             } catch (e) { /* keep default false */ }
 
-            if (isOwner) return stable;
+            if (isOwner && !viewerCommitted) return stable;
 
             const publicTag = (post && (
                 (post.publicAreaTag && String(post.publicAreaTag).trim()) ||
@@ -664,6 +682,20 @@
             )) || '';
 
             if (publicTag && !/^local area$/i.test(publicTag)) return publicTag;
+
+            const nonLocalFallbackTag = (post && (
+                (post.county && String(post.county).trim()) ||
+                (post.zoneTag && String(post.zoneTag).trim()) ||
+                (post.area && String(post.area).trim()) ||
+                (post.neighborhood && String(post.neighborhood).trim()) ||
+                (post.city && String(post.city).trim()) ||
+                (post.district && String(post.district).trim()) ||
+                (post.state && String(post.state).trim()) ||
+                (post.region && String(post.region).trim()) ||
+                (post.poiName && String(post.poiName).trim())
+            )) || '';
+
+            if (nonLocalFallbackTag && !/^local area$/i.test(nonLocalFallbackTag)) return nonLocalFallbackTag;
 
             try {
                 const lat = Number((post && post.geolocation && post.geolocation.lat) || (post && post.postOrigin && post.postOrigin.lat));
@@ -681,6 +713,9 @@
                 }
             } catch (e) { /* keep stable fallback */ }
 
+            // Critical rule: users who committed to a different location should
+            // never see generic "Local area" tags on viewed posts.
+            if (viewerCommitted) return 'Nearby Area';
             return stable;
         }
 
