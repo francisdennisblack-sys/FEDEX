@@ -15320,6 +15320,13 @@
                 // Strict adjacent swap (never multi-slot drift).
                 working[fromIdx] = adjacent;
                 working[toIdx] = moving;
+                logPostPositionMove('vote-adjacent-swap', {
+                    postId,
+                    fromIdx,
+                    toIdx,
+                    cause: dir,
+                    extra: 'authoritative one-slot vote rule'
+                });
 
                 // Short no-backtrack lock: after a vote move, don't allow this
                 // post to be placed back toward its old index while snapshots settle.
@@ -15355,10 +15362,30 @@
                         return out;
                     };
                     if (Array.isArray(window.pendingSortedPosts)) {
+                        const beforePending = getIndexOfPostInList(window.pendingSortedPosts, postId);
                         window.pendingSortedPosts = compactPostListForSlots(swapInList(window.pendingSortedPosts));
+                        const afterPending = getIndexOfPostInList(window.pendingSortedPosts, postId);
+                        if (beforePending >= 0 && afterPending >= 0 && beforePending !== afterPending) {
+                            logPostPositionMove('vote-sync-pendingSortedPosts', {
+                                postId,
+                                fromIdx: beforePending,
+                                toIdx: afterPending,
+                                cause: dir
+                            });
+                        }
                     }
                     if (Array.isArray(window.latestSortedPosts)) {
+                        const beforeLatest = getIndexOfPostInList(window.latestSortedPosts, postId);
                         window.latestSortedPosts = compactPostListForSlots(swapInList(window.latestSortedPosts));
+                        const afterLatest = getIndexOfPostInList(window.latestSortedPosts, postId);
+                        if (beforeLatest >= 0 && afterLatest >= 0 && beforeLatest !== afterLatest) {
+                            logPostPositionMove('vote-sync-latestSortedPosts', {
+                                postId,
+                                fromIdx: beforeLatest,
+                                toIdx: afterLatest,
+                                cause: dir
+                            });
+                        }
                     }
                 } catch (e) { /* ignore snapshot sync failures */ }
 
@@ -37444,6 +37471,28 @@ function setUploadModalHeader(title, subtitle) {
         let pendingSortedPosts = null;
         let gridTargetIndexById = new Map();
 
+        function logPostPositionMove(reason, details = {}) {
+            try {
+                if (window.__postMoveAuditEnabled === false) return;
+                const postId = details.postId ? String(details.postId) : 'unknown';
+                const fromIdx = Number.isFinite(Number(details.fromIdx)) ? Number(details.fromIdx) : '-';
+                const toIdx = Number.isFinite(Number(details.toIdx)) ? Number(details.toIdx) : '-';
+                const cause = details.cause ? String(details.cause) : '-';
+                const extra = details.extra ? ` | ${String(details.extra)}` : '';
+                console.log(`📍 MOVE AUDIT [${reason}] post=${postId} from=${fromIdx} to=${toIdx} cause=${cause}${extra}`);
+            } catch (e) { /* ignore */ }
+        }
+
+        function getIndexOfPostInList(list, postId) {
+            try {
+                if (!Array.isArray(list) || !postId) return -1;
+                const pid = String(postId);
+                return list.findIndex(p => p && String(p.id) === pid);
+            } catch (e) {
+                return -1;
+            }
+        }
+
         function compactPostListForSlots(items) {
             const out = [];
             try {
@@ -37836,6 +37885,12 @@ function setUploadModalHeader(title, subtitle) {
                     try {
                         const lock = window.__voteOneStepEventState;
                         if (lock && String(lock.postId || '') === vid && lock.moved === true) {
+                            logPostPositionMove('vote-smart-move-skipped', {
+                                postId: vid,
+                                fromIdx: curIdx,
+                                toIdx: tgtIdx,
+                                cause: 'event already consumed one-step move'
+                            });
                             return true;
                         }
                     } catch (e) { /* ignore */ }
@@ -37919,6 +37974,12 @@ function setUploadModalHeader(title, subtitle) {
                         }
                     } catch (e) { /* ignore */ }
                     console.log(`🧠 Smart vote move applied for ${vid}: ${fromIdx}→${toIdx}`);
+                    logPostPositionMove('vote-smart-move-applied', {
+                        postId: vid,
+                        fromIdx,
+                        toIdx,
+                        cause: 'reconcile vote stabilization'
+                    });
                     return true;
                 } catch (e) { console.warn('applySmartVoteMove failed', e); return false; }
             }
@@ -38097,6 +38158,8 @@ function setUploadModalHeader(title, subtitle) {
                     const isRemoveChange = diffIdx >= target.length;
                     const isAddChange = diffIdx >= currentLenBefore;
                     let opKind = 'replace';
+                    const curDiffIdForLog = current[diffIdx] && current[diffIdx].id ? String(current[diffIdx].id) : '';
+                    const tgtDiffIdForLog = target[diffIdx] && target[diffIdx].id ? String(target[diffIdx].id) : '';
 
                     if (isRemoveChange) {
                         // Target shorter: remove the mismatched item at this index.
@@ -38117,10 +38180,22 @@ function setUploadModalHeader(title, subtitle) {
                         }
                         current.splice(diffIdx, 1);
                         opKind = 'remove';
+                        logPostPositionMove('reconcile-remove', {
+                            postId: curDiffIdForLog,
+                            fromIdx: diffIdx,
+                            toIdx: -1,
+                            cause: 'target shorter at diff index'
+                        });
                     } else if (isAddChange) {
                         // Target longer: add one item
                         current.splice(diffIdx, 0, hydratePostForRender(target[diffIdx]));
                         opKind = 'add';
+                        logPostPositionMove('reconcile-add', {
+                            postId: tgtDiffIdForLog,
+                            fromIdx: -1,
+                            toIdx: diffIdx,
+                            cause: 'target longer at diff index'
+                        });
                         // Track when this post was added so the grace period can protect it
                         const addedPost = target[diffIdx];
                         if (addedPost && addedPost.id) {
@@ -38148,10 +38223,22 @@ function setUploadModalHeader(title, subtitle) {
                             current.splice(diffIdx, 0, hydratePostForRender(movedPost || targetAtDiff));
                             movedFromIdx = movedIdx;
                             opKind = 'move';
+                            logPostPositionMove('reconcile-move', {
+                                postId: targetIdAtDiff,
+                                fromIdx: movedIdx,
+                                toIdx: diffIdx,
+                                cause: 'deterministic move-to-target'
+                            });
                         } else {
                             // Fallback when target post is not present in current list yet.
                             current[diffIdx] = hydratePostForRender(targetAtDiff);
                             opKind = 'replace';
+                            logPostPositionMove('reconcile-replace', {
+                                postId: tgtDiffIdForLog,
+                                fromIdx: diffIdx,
+                                toIdx: diffIdx,
+                                cause: 'target post missing in current list'
+                            });
                         }
                     }
 
