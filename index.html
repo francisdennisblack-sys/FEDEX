@@ -6887,7 +6887,7 @@
             try {
                 if (!post || !post.id) return false;
                 const persistentBadgeState = getPersistentBadgeState(post.id);
-                return !!(
+                const hasBoost = !!(
                     hasVerifiedBoostPurchase(post) ||
                     hasBadgeKind(post, 'boost') ||
                     !!post.boostBadge ||
@@ -6895,6 +6895,43 @@
                     persistentBadgeState.boost ||
                     hasQueuedBoostForPost(post.id)
                 );
+                // Once seen, lock in local ledger so rerenders / partial snapshots
+                // never drop the purchased badge from this post.
+                if (hasBoost && !persistentBadgeState.boost) {
+                    try {
+                        markPostBadgePersistent(post.id, 'boost', {
+                            paymentIntentId: (post.boostBadge && (post.boostBadge.paymentIntentId || post.boostBadge.paymentId)) || null,
+                            badgeLabel: (post.boostBadge && post.boostBadge.label) || 'Boost'
+                        });
+                    } catch (e) { /* ignore persistence failures */ }
+                }
+                return hasBoost;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function getCanonicalSellState(post) {
+            try {
+                if (!post || !post.id) return false;
+                const persistentBadgeState = getPersistentBadgeState(post.id);
+                const hasSell = !!(
+                    hasBadgeKind(post, 'sell') ||
+                    !!(post.sellBadge || post.forSale || post.buyBadge || post.sellPaidAt) ||
+                    String(post.primaryBadge || '').toLowerCase() === 'sell' ||
+                    persistentBadgeState.sell
+                );
+                // Once seen, lock in local ledger so rerenders / partial snapshots
+                // never drop the purchased badge from this post.
+                if (hasSell && !persistentBadgeState.sell) {
+                    try {
+                        markPostBadgePersistent(post.id, 'sell', {
+                            paymentIntentId: (post.sellBadge && (post.sellBadge.paymentIntentId || post.sellBadge.paymentId)) || null,
+                            badgeLabel: (post.sellBadge && post.sellBadge.label) || 'Buy'
+                        });
+                    } catch (e) { /* ignore persistence failures */ }
+                }
+                return hasSell;
             } catch (e) {
                 return false;
             }
@@ -12122,7 +12159,7 @@
                         // Boost / Buy badges (persisted flags)
                         const persistentBadgeState = getPersistentBadgeState(post.id);
                         const hasBoostFlag = getCanonicalBoostState(post) || hasBadgeKind(post, 'boost') || persistentBadgeState.boost;
-                        const hasSellFlag = hasBadgeKind(post, 'sell') || !!(post.sellBadge || post.forSale || post.buyBadge || post.sellPaidAt) || persistentBadgeState.sell;
+                        const hasSellFlag = getCanonicalSellState(post) || persistentBadgeState.sell;
                         // We render the BOOST badge as a dedicated prominent element (top-left)
                         // but also include a compact BOOST indicator on the right-side badge
                         // container so users see both cues. Sell/buy stays in the top-right
@@ -37381,7 +37418,9 @@ function setUploadModalHeader(title, subtitle) {
                 // Preserve the boost-badge-prominent element so its animation does not
                 // restart on every renderGridItemFull call (position rotation etc.).
                 let _isBoostPost = false;
+                let _isSellPost = false;
                 let _savedBoostProm = null;
+                let _savedSellProm = null;
                 // Clear any stale badge/border/glow state on this slot so when posts
                 // move between slots they don't inherit visual state from the
                 // previous occupant. Remove badge-* and border-* classes and any
@@ -37397,9 +37436,12 @@ function setUploadModalHeader(title, subtitle) {
                     const staleBoost = box.querySelector && box.querySelector('.boost-badge'); if (staleBoost) staleBoost.remove();
                     const stalePostBadges = box.querySelector && box.querySelector('.post-badges'); if (stalePostBadges) stalePostBadges.remove();
                     _isBoostPost = getCanonicalBoostState(post);
+                    _isSellPost = getCanonicalSellState(post);
                     // Prefer any pre-saved element captured before we cleared the slot
                     _savedBoostProm = _preSavedBoostProm || (box.querySelector && box.querySelector('.boost-badge-prominent'));
+                    _savedSellProm = box.querySelector && box.querySelector('.sell-badge-prominent');
                     if (_savedBoostProm) try { _savedBoostProm.remove(); } catch(e) {}
+                    if (_savedSellProm) try { _savedSellProm.remove(); } catch(e) {}
                 } catch(e) { /* ignore badge cleanup errors */ }
                 
                 // Get vote counts
@@ -37589,29 +37631,43 @@ function setUploadModalHeader(title, subtitle) {
                     } catch (e) {}
                 }
 
-                // Ensure boost-badge-prominent pill is always present for boost posts.
-                // If the post moved to a new slot the saved element is null — we create
-                // the pill inline so the 🚀 BOOST label is never missing on first paint.
-                // If a saved element from the previous render exists we reuse it so the
-                // CSS animation does not restart (avoids the flash/pop on position-1 rotation).
+                // Ensure purchased badges are always present on first paint.
+                // If posts move between slots, reuse any saved elements to avoid
+                // visible badge pop/flicker during reconcile renders.
                 try {
-                    if (_isBoostPost) {
+                    if (_isBoostPost || _isSellPost) {
                         let _lb = box.querySelector('.left-badges');
                         if (!_lb) { _lb = document.createElement('div'); _lb.className = 'left-badges'; box.appendChild(_lb); }
-                        const _existingProm = _lb.querySelector('.boost-badge-prominent');
-                        if (!_existingProm) {
-                            if (_savedBoostProm) {
-                                // Reuse saved element to preserve animation state
-                                _lb.insertBefore(_savedBoostProm, _lb.firstChild);
-                            } else {
-                                // First render for this slot — build the pill from scratch
-                                const _bp = document.createElement('div');
-                                _bp.className = 'boost-badge-prominent glow-boost';
-                                const _bpInner = document.createElement('div'); _bpInner.className = 'boost-inner';
-                                const _bpIcon  = document.createElement('span'); _bpIcon.className  = 'boost-icon';  _bpIcon.textContent  = '🚀';
-                                const _bpLabel = document.createElement('span'); _bpLabel.className = 'boost-label'; _bpLabel.textContent = 'BOOST';
-                                _bpInner.appendChild(_bpIcon); _bpInner.appendChild(_bpLabel); _bp.appendChild(_bpInner);
-                                _lb.insertBefore(_bp, _lb.firstChild);
+                        if (_isBoostPost) {
+                            const _existingProm = _lb.querySelector('.boost-badge-prominent');
+                            if (!_existingProm) {
+                                if (_savedBoostProm) {
+                                    _lb.insertBefore(_savedBoostProm, _lb.firstChild);
+                                } else {
+                                    const _bp = document.createElement('div');
+                                    _bp.className = 'boost-badge-prominent glow-boost';
+                                    const _bpInner = document.createElement('div'); _bpInner.className = 'boost-inner';
+                                    const _bpIcon  = document.createElement('span'); _bpIcon.className  = 'boost-icon';  _bpIcon.textContent  = '🚀';
+                                    const _bpLabel = document.createElement('span'); _bpLabel.className = 'boost-label'; _bpLabel.textContent = 'BOOST';
+                                    _bpInner.appendChild(_bpIcon); _bpInner.appendChild(_bpLabel); _bp.appendChild(_bpInner);
+                                    _lb.insertBefore(_bp, _lb.firstChild);
+                                }
+                            }
+                        }
+                        if (_isSellPost) {
+                            const _existingSell = _lb.querySelector('.sell-badge-prominent');
+                            if (!_existingSell) {
+                                if (_savedSellProm) {
+                                    _lb.appendChild(_savedSellProm);
+                                } else {
+                                    const _sp = document.createElement('div');
+                                    _sp.className = 'sell-badge-prominent';
+                                    const _sInner = document.createElement('div'); _sInner.className = 'sell-inner';
+                                    const _sIcon = document.createElement('span'); _sIcon.className = 'sell-icon'; _sIcon.textContent = '💠';
+                                    const _sLabel = document.createElement('span'); _sLabel.className = 'sell-label'; _sLabel.textContent = 'BUY';
+                                    _sInner.appendChild(_sIcon); _sInner.appendChild(_sLabel); _sp.appendChild(_sInner);
+                                    _lb.appendChild(_sp);
+                                }
                             }
                         }
                     }
