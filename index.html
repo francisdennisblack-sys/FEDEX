@@ -5598,7 +5598,86 @@
     </style>
 
     <script type="module">
-        console.log('📦 Firebase module loading...');
+        // Console policy: suppress noisy runtime logs and keep one summary block.
+        (function setupSingleConsoleSummaryBlock(){
+            try {
+                if (window.__consoleSummaryGateInstalled) return;
+                window.__consoleSummaryGateInstalled = true;
+
+                const nativeConsole = {
+                    log: console.log ? console.log.bind(console) : function(){},
+                    info: console.info ? console.info.bind(console) : function(){},
+                    warn: console.warn ? console.warn.bind(console) : function(){},
+                    error: console.error ? console.error.bind(console) : function(){},
+                    debug: console.debug ? console.debug.bind(console) : function(){},
+                    clear: console.clear ? console.clear.bind(console) : function(){}
+                };
+                window.__nativeConsole = nativeConsole;
+
+                const computeTotalPosts = () => {
+                    try {
+                        const gc = window.gridContent || {};
+                        const seen = new Set();
+                        for (const key of Object.keys(gc)) {
+                            const arr = gc[key];
+                            if (!Array.isArray(arr)) continue;
+                            for (const p of arr) {
+                                if (!p || !p.id) continue;
+                                seen.add(String(p.id));
+                            }
+                        }
+                        return seen.size;
+                    } catch (e) {
+                        return 0;
+                    }
+                };
+
+                window.__emitConsoleSummaryBlock = function(reason = 'snapshot') {
+                    try {
+                        const activeUsers = Number(window.__consoleSummaryActiveUsers);
+                        const totalPosts = Number(window.__consoleSummaryTotalPosts);
+                        const active = Number.isFinite(activeUsers) ? activeUsers : Number(window.onlineUserCount || 0);
+                        const posts = Number.isFinite(totalPosts) ? totalPosts : computeTotalPosts();
+
+                        nativeConsole.clear();
+                        nativeConsole.log([
+                            '========================================',
+                            'FEDEx Console Summary',
+                            '========================================',
+                            `Reason: ${reason}`,
+                            `Active Online Users: ${active}`,
+                            `Total Posts On Website: ${posts}`,
+                            '========================================'
+                        ].join('\n'));
+                    } catch (e) { /* ignore */ }
+                };
+
+                window.__setConsoleSummaryMetrics = function(metrics = {}) {
+                    try {
+                        if (Object.prototype.hasOwnProperty.call(metrics, 'activeUsers')) {
+                            const v = Number(metrics.activeUsers);
+                            if (Number.isFinite(v)) window.__consoleSummaryActiveUsers = v;
+                        }
+                        if (Object.prototype.hasOwnProperty.call(metrics, 'totalPosts')) {
+                            const v = Number(metrics.totalPosts);
+                            if (Number.isFinite(v)) window.__consoleSummaryTotalPosts = v;
+                        }
+                        window.__emitConsoleSummaryBlock(metrics.reason || 'update');
+                    } catch (e) { /* ignore */ }
+                };
+
+                // Suppress all ad-hoc console output from existing code paths.
+                const noop = function(){};
+                console.log = noop;
+                console.info = noop;
+                console.warn = noop;
+                console.error = noop;
+                console.debug = noop;
+
+                // Initial one-block output.
+                window.__emitConsoleSummaryBlock('startup');
+            } catch (e) { /* ignore */ }
+        })();
         // Import Firebase functions
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
         import { getDatabase, ref, set, get, update, remove, onValue, onChildAdded, onChildChanged, onChildRemoved, runTransaction } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js';
@@ -24079,11 +24158,17 @@ function setUploadModalHeader(title, subtitle) {
                     
                                 // Only show active users (recently seen); do not display total tracked users
                                 onlineUserCount = count;
+                                try { window.onlineUserCount = count; } catch (e) {}
                                 const countElement = document.getElementById('onlineUserCount');
                                 if (countElement) {
                                     countElement.textContent = `${count} active`;
                                     console.log(`👥 ONLINE COUNT UPDATE: active=${count} (${activeUsers.slice(0,3).join(', ')}${activeUsers.length > 3 ? '...' : ''})`);
                                 }
+                                try {
+                                    if (typeof window.__setConsoleSummaryMetrics === 'function') {
+                                        window.__setConsoleSummaryMetrics({ activeUsers: count, reason: 'online-users-update' });
+                                    }
+                                } catch (e) { /* ignore */ }
 
                         // 🌍 Canvas globe engine — spin while connected. Online-user count
                         // is still shown separately, but the logo is the connectivity cue.
@@ -24099,8 +24184,14 @@ function setUploadModalHeader(title, subtitle) {
                     if (error && (error.code === 'database/permission-denied' || (error.message && error.message.toLowerCase().includes('permission')))) {
                         console.warn('⚠️ Permission denied reading onlineUsers — falling back to safe default');
                         onlineUserCount = 1;
+                        try { window.onlineUserCount = 1; } catch (e) {}
                         const countElement = document.getElementById('onlineUserCount');
                         if (countElement) countElement.textContent = '1 online';
+                        try {
+                            if (typeof window.__setConsoleSummaryMetrics === 'function') {
+                                window.__setConsoleSummaryMetrics({ activeUsers: 1, reason: 'online-users-fallback' });
+                            }
+                        } catch (e) { /* ignore */ }
                         try { setBrandGlobeConnection(true, 'online-count-permission-fallback'); } catch (_) {}
                         // Also attempt a one-time fetch (may succeed even when listener fails)
                         fetchOnlineUserCountOnce().catch(() => {});
@@ -31053,6 +31144,16 @@ function setUploadModalHeader(title, subtitle) {
                 firebaseUnsubscribe = subscribeToFirebasePosts((posts) => {
                     console.log('\n📬 Firebase snapshot received for shared posts');
                     console.log('  snapshot length:', posts.length);
+                    try {
+                        if (typeof window.__setConsoleSummaryMetrics === 'function') {
+                            const activeUsersMetric = Number(window.onlineUserCount || onlineUserCount || 0);
+                            window.__setConsoleSummaryMetrics({
+                                totalPosts: Number(posts && posts.length ? posts.length : 0),
+                                activeUsers: Number.isFinite(activeUsersMetric) ? activeUsersMetric : 0,
+                                reason: 'firebase-posts-snapshot'
+                            });
+                        }
+                    } catch (e) { /* ignore */ }
                     try {
                         // Show a concise list of incoming post IDs for quick inspection
                         const incomingIds = posts.map(p => p && p.id ? p.id : '(no-id)');
