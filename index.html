@@ -16930,7 +16930,14 @@
                     fetch('/version.json', {cache: 'no-store'}).then(r => r.json()).then(ver => {
                         try {
                             window.__APP_VERSION__ = ver && ver.version ? String(ver.version) : String(Date.now());
-                        } catch (e) { window.__APP_VERSION__ = String(Date.now()); }
+                            window.__BUILD_DATE__ = ver && ver.buildDate ? String(ver.buildDate) : 'unknown';
+                        } catch (e) { 
+                            window.__APP_VERSION__ = String(Date.now()); 
+                            window.__BUILD_DATE__ = 'error';
+                        }
+                        
+                        // Log version info to console with styling
+                        console.log('%c🎯 WiFiContent v' + window.__APP_VERSION__ + ' (' + window.__BUILD_DATE__ + ')', 'font-size:13px;font-weight:bold;color:#ffffff;background:#0066cc;padding:6px 10px;border-radius:3px');
 
                         navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(window.__APP_VERSION__)).then(reg => {
                             console.log('✅ Service Worker registered (version=' + window.__APP_VERSION__ + ') - offline mode active');
@@ -48903,6 +48910,149 @@ function setUploadModalHeader(title, subtitle) {
                     } catch (err) { console.error('getLastLocationSetStatus error', err); return null; }
                 };
             } catch (e) { console.warn('changeGrid modal init failed', e); }
+        })();
+    </script>
+
+    <!-- Version Info Display & Diagnostics -->
+    <div id="app-version-info" style="position:fixed; bottom:0; right:0; background:rgba(0,0,0,0.8); color:#0f0; font-family:monospace; font-size:11px; padding:8px 12px; z-index:999999; max-width:300px; text-align:right; border-top:1px solid #0f0; border-left:1px solid #0f0; max-height:80px; overflow:auto;">
+        <div style="line-height:1.4;">
+            <div id="version-display" style="font-weight:bold; color:#00ff00; margin-bottom:4px;">WiFiContent</div>
+            <div id="sw-status" style="color:#ffff00;">SW: loading...</div>
+            <div id="cache-status" style="color:#ff6600;">Cache: checking...</div>
+        </div>
+    </div>
+
+    <script>
+        // 📊 DIAGNOSTIC & VERSION DISPLAY SYSTEM
+        (function initVersionDisplay() {
+            // Get current version
+            const versionEl = document.getElementById('version-display');
+            const swStatusEl = document.getElementById('sw-status');
+            const cacheStatusEl = document.getElementById('cache-status');
+            
+            if (!versionEl || !swStatusEl || !cacheStatusEl) return;
+            
+            // Display app version
+            const appVer = window.__APP_VERSION__ || 'unknown';
+            versionEl.textContent = `WiFiContent v${appVer}`;
+            
+            // Check service worker
+            try {
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.getRegistrations().then(regs => {
+                        if (regs.length > 0) {
+                            const controllers = regs.map(r => {
+                                const state = r.active ? 'active' : (r.installing ? 'installing' : (r.waiting ? 'waiting' : 'unknown'));
+                                const url = r.scope;
+                                return `${state}`;
+                            }).join(', ');
+                            swStatusEl.textContent = `SW: ${controllers}`;
+                            swStatusEl.style.color = '#00ff00';
+                        } else {
+                            swStatusEl.textContent = `SW: none`;
+                            swStatusEl.style.color = '#ff9900';
+                        }
+                    }).catch(e => {
+                        swStatusEl.textContent = `SW: error`;
+                        swStatusEl.style.color = '#ff0000';
+                    });
+                } else {
+                    swStatusEl.textContent = `SW: not supported`;
+                    swStatusEl.style.color = '#ff6600';
+                }
+            } catch (e) {
+                swStatusEl.textContent = `SW: error`;
+                swStatusEl.style.color = '#ff0000';
+            }
+            
+            // Check caches
+            try {
+                if ('caches' in window) {
+                    caches.keys().then(names => {
+                        const active = names.filter(n => n.includes('wifi-content') || n.includes('posts')).length;
+                        cacheStatusEl.textContent = `Cache: ${active} active`;
+                        cacheStatusEl.style.color = active > 0 ? '#00ff00' : '#ff9900';
+                    }).catch(e => {
+                        cacheStatusEl.textContent = `Cache: error`;
+                        cacheStatusEl.style.color = '#ff0000';
+                    });
+                } else {
+                    cacheStatusEl.textContent = `Cache: not supported`;
+                    cacheStatusEl.style.color = '#ff6600';
+                }
+            } catch (e) {
+                cacheStatusEl.textContent = `Cache: error`;
+                cacheStatusEl.style.color = '#ff0000';
+            }
+            
+            // Expose diagnostic functions on window
+            window.__diagnostics = {
+                version: () => ({
+                    appVersion: window.__APP_VERSION__,
+                    buildDate: window.__BUILD_DATE__,
+                    userAgent: navigator.userAgent,
+                    url: window.location.href
+                }),
+                caches: async () => {
+                    try {
+                        const names = await caches.keys();
+                        const details = {};
+                        for (const name of names) {
+                            const cache = await caches.open(name);
+                            const keys = await cache.keys();
+                            details[name] = keys.length;
+                        }
+                        return details;
+                    } catch (e) {
+                        return { error: String(e) };
+                    }
+                },
+                serviceWorkers: async () => {
+                    try {
+                        const regs = await navigator.serviceWorker.getRegistrations();
+                        return regs.map(r => ({
+                            scope: r.scope,
+                            active: r.active ? 'yes' : 'no',
+                            waiting: r.waiting ? 'yes' : 'no',
+                            installing: r.installing ? 'yes' : 'no'
+                        }));
+                    } catch (e) {
+                        return { error: String(e) };
+                    }
+                },
+                storage: () => ({
+                    localStorage: {
+                        keys: Object.keys(localStorage).length,
+                        size: Object.keys(localStorage).reduce((t, k) => t + (localStorage[k] || '').length, 0)
+                    },
+                    sessionStorage: {
+                        keys: Object.keys(sessionStorage).length,
+                        size: Object.keys(sessionStorage).reduce((t, k) => t + (sessionStorage[k] || '').length, 0)
+                    }
+                }),
+                report: async function() {
+                    console.clear();
+                    console.log('%c=== 📊 WiFiContent Diagnostics Report ===', 'font-size:16px;font-weight:bold;color:#00ff00');
+                    console.log('%cVersion & Build:', 'font-weight:bold;color:#ffff00');
+                    console.table(this.version());
+                    console.log('%cService Workers:', 'font-weight:bold;color:#ffff00');
+                    console.table(await this.serviceWorkers());
+                    console.log('%cCaches:', 'font-weight:bold;color:#ffff00');
+                    console.table(await this.caches());
+                    console.log('%cStorage:', 'font-weight:bold;color:#ffff00');
+                    console.table(this.storage());
+                    console.log('%cBrowser Info:', 'font-weight:bold;color:#ffff00');
+                    console.log('User Agent:', navigator.userAgent);
+                    console.log('Platform:', navigator.platform);
+                    console.log('Language:', navigator.language);
+                    console.log('Online:', navigator.onLine);
+                    console.log('%cTo run diagnostics in any browser, execute:', 'color:#ff6600;font-weight:bold');
+                    console.log('window.__diagnostics.report()');
+                }
+            };
+            
+            // Log version info on load
+            console.log('%c✅ WiFiContent v' + (window.__APP_VERSION__ || 'unknown'), 'font-size:14px;font-weight:bold;color:#00ff00;background:#001a00;padding:8px');
         })();
     </script>
 </html>
