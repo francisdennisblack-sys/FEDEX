@@ -139,8 +139,10 @@
         })();
     </script>
     <script>
-        // 🔄 AGGRESSIVE CACHE-BUSTING: Periodic version checks for auto-update on mobile
+        // 🔄 AGGRESSIVE CACHE-BUSTING: Force updates on ALL devices
         (function initVersionCheck() {
+            let isFirstCheck = true;
+            
             const checkVersion = () => {
                 const now = Date.now();
                 
@@ -154,26 +156,38 @@
                 .catch(() => null)
                 .then(remoteVersion => {
                     try {
-                        // Get last known version from sessionStorage (this browser tab)
-                        const lastVersion = sessionStorage.getItem('__wificontent_last_version');
+                        // Get versions from BOTH sessionStorage and localStorage
+                        const sessionVersion = sessionStorage.getItem('__wificontent_version');
+                        const localVersion = localStorage.getItem('__wificontent_version_persist');
                         const currentVersion = remoteVersion?.version || 'unknown';
                         
                         // Log version info
                         console.log('🔄 VERSION CHECK:', {
                             remote: currentVersion,
-                            previous: lastVersion,
-                            buildDate: remoteVersion?.buildDate,
-                            userAgent: navigator.userAgent.substring(0, 50),
+                            sessionStorage: sessionVersion,
+                            localStorage: localVersion,
+                            isFirstCheck: isFirstCheck,
                             timestamp: new Date(now).toLocaleTimeString()
                         });
                         
-                        // If version changed, clear caches and reload
-                        if (lastVersion && lastVersion !== currentVersion) {
-                            console.warn('⚠️ VERSION MISMATCH: Site updated, reloading with fresh cache');
+                        // FORCE RELOAD if:
+                        // 1. Version mismatch detected in sessionStorage OR
+                        // 2. Version mismatch detected in localStorage OR
+                        // 3. First check and remote version differs from stored
+                        const needsReload = 
+                            (sessionVersion && sessionVersion !== currentVersion) ||
+                            (localVersion && localVersion !== currentVersion) ||
+                            (isFirstCheck && (sessionVersion || localVersion) && (sessionVersion || localVersion) !== currentVersion);
+                        
+                        if (needsReload) {
+                            console.warn('⚠️ VERSION MISMATCH: Reloading with fresh cache', {
+                                stored: sessionVersion || localVersion,
+                                remote: currentVersion
+                            });
                             
                             // Clear key storage items that might be stale
                             try {
-                                const stalePrefixes = ['cachedAllPosts', 'gridContent', '__', 'userLocation'];
+                                const stalePrefixes = ['cachedAllPosts', 'gridContent', 'userLocation'];
                                 Object.keys(localStorage).forEach(key => {
                                     if (stalePrefixes.some(p => key.startsWith(p))) {
                                         localStorage.removeItem(key);
@@ -185,27 +199,34 @@
                             if ('caches' in window) {
                                 caches.keys().then(names => {
                                     names.forEach(name => caches.delete(name));
-                                }).catch(e => console.log('Cache clear:', e));
+                                }).catch(e => {});
                             }
                             
-                            // Hard reload after short delay
-                            setTimeout(() => window.location.reload(true), 300);
+                            // Hard reload
+                            setTimeout(() => window.location.reload(true), 200);
+                            isFirstCheck = false;
                             return;
                         }
                         
-                        // Store current version for next check
-                        sessionStorage.setItem('__wificontent_last_version', currentVersion);
+                        // Store current version in BOTH storages
+                        sessionStorage.setItem('__wificontent_version', currentVersion);
+                        localStorage.setItem('__wificontent_version_persist', currentVersion);
                         sessionStorage.setItem('__wificontent_load_time', String(now));
+                        
+                        if (isFirstCheck) {
+                            console.log('✅ Version check complete - at latest version:', currentVersion);
+                            isFirstCheck = false;
+                        }
                         
                     } catch(e) { console.warn('Version check error:', e); }
                 });
             };
             
-            // Check on load
+            // Check on load - immediately and aggressively
             checkVersion();
             
-            // PERIODIC CHECK: Every 30 seconds
-            setInterval(checkVersion, 30000);
+            // AGGRESSIVE PERIODIC CHECK: Every 10 seconds (down from 30)
+            setInterval(checkVersion, 10000);
             
             // CHECK ON TAB VISIBILITY CHANGE (mobile focus)
             document.addEventListener('visibilitychange', () => {
@@ -213,6 +234,12 @@
                     console.log('📱 Tab became visible, checking for updates');
                     checkVersion();
                 }
+            });
+            
+            // CHECK ON PAGE SHOW (back button)
+            window.addEventListener('pageshow', () => {
+                console.log('📄 Page shown, checking for updates');
+                checkVersion();
             });
         })();
     </script>
@@ -343,7 +370,7 @@
                 // Register service worker to handle background location updates
                 try {
                     if ('serviceWorker' in navigator) {
-                        navigator.serviceWorker.register('/sw.js?v=20260629T224133Z').then(reg => {
+                        navigator.serviceWorker.register('/sw.js?v=20260629T224459Z').then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
                         }).catch(err => console.warn('ServiceWorker register failed', err));
 
@@ -1022,7 +1049,7 @@
     <link rel="preconnect" href="https://firebaseapp.com" crossorigin>
     <link rel="preconnect" href="https://js.stripe.com" crossorigin>
     <link rel="dns-prefetch" href="https://firebaseio.com">
-    <link rel="stylesheet" href="style.css?v=20260629T224133Z">
+    <link rel="stylesheet" href="style.css?v=20260629T224459Z">
     <!-- 🚀 Stripe.js v3 — defer so it doesn't block first paint -->
     <script src="https://js.stripe.com/v3/" defer></script>
     <style>
