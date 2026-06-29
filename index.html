@@ -21882,20 +21882,37 @@ function setUploadModalHeader(title, subtitle) {
         async function getPostsFromFirebase() {
             try {
                 const postsRef = ref(database, `posts`);
+                const isMobileLowBandwidth = /iPhone|iPad|Android/i.test(navigator.userAgent) && window.innerWidth < 600;
+                
+                console.log(`📥 Firebase fetch (${isMobileLowBandwidth ? 'MOBILE' : 'DESKTOP'} mode)`);
+                const startTime = Date.now();
                 const snapshot = await get(postsRef);
+                const fetchTime = Date.now() - startTime;
+                console.log(`⏱️ Firebase fetch took ${fetchTime}ms`);
                 
                 if (snapshot.exists()) {
                     const postsObj = snapshot.val();
                     const now = Date.now();
                     const MAX_AGE = 24 * 60 * 60 * 1000;
-                    return Object.keys(postsObj)
+                    
+                    // 🚀 MOBILE OPTIMIZATION: Limit initial posts and prioritize by recency
+                    const MAX_POSTS_MOBILE = 300;  // Cap at 300 for mobile
+                    const MAX_POSTS_DESKTOP = 5000;
+                    const maxPostsAllowed = isMobileLowBandwidth ? MAX_POSTS_MOBILE : MAX_POSTS_DESKTOP;
+                    
+                    let filtered = Object.keys(postsObj)
                         .filter(key => {
                             const p = postsObj[key] || {};
                             const ts = p.timestamp || p.createdAt || p.created_at || p.time || p.postedAt || p.ts || 0;
-                            if (!ts) return true; // no timestamp — let TTL purge handle it
+                            if (!ts) return true;
                             return (now - Number(ts)) <= MAX_AGE;
                         })
-                        .map(key => ({ id: key, ...postsObj[key] }));
+                        .map(key => ({ id: key, ts: (postsObj[key] || {}).timestamp || (postsObj[key] || {}).createdAt || 0, ...postsObj[key] }))
+                        .sort((a, b) => (b.ts || 0) - (a.ts || 0))  // Sort by recency
+                        .slice(0, maxPostsAllowed);  // Limit to max
+                    
+                    console.log(`✅ Loaded ${filtered.length}/${Object.keys(postsObj).length} posts (max: ${maxPostsAllowed})`);
+                    return filtered;
                 }
                 return [];
             } catch (error) {
@@ -38889,9 +38906,9 @@ function setUploadModalHeader(title, subtitle) {
                     const isMobileDevice = /iPhone|iPad|Android|Mobile/i.test(navigator.userAgent) || window.innerWidth < 600;
                     const itemsPerRowMobile = 2; // Smaller grid on mobile for bigger touch targets
                     const itemsPerRowDesktop = 3;
-                    const bufferMobile = 3; // Reduced buffer to save RAM on mobile
+                    const bufferMobile = 2; // Further reduced buffer (was 3)
                     const bufferDesktop = 2;
-                    const maxPoolMobile = 30; // Fewer DOM nodes on mobile
+                    const maxPoolMobile = 20; // Further reduced pool (was 30)
                     const maxPoolDesktop = 50;
                     
                     console.log(`📱 Device detected: ${isMobileDevice ? 'MOBILE' : 'DESKTOP'}, viewport: ${window.innerWidth}x${window.innerHeight}`);
@@ -38901,7 +38918,7 @@ function setUploadModalHeader(title, subtitle) {
                         itemHeight: 200,
                         renderBuffer: isMobileDevice ? bufferMobile : bufferDesktop,
                         maxPoolSize: isMobileDevice ? maxPoolMobile : maxPoolDesktop,
-                        batchSize: isMobileDevice ? 30 : 50, // Smaller batches on mobile
+                        batchSize: isMobileDevice ? 20 : 50, // Further reduced mobile batch (was 30)
                         onLoadMore: () => {
                             console.log('📥 onLoadMore callback fired from VirtualGridScroller');
                             // Trigger loading next batch from database
@@ -38984,7 +39001,9 @@ function setUploadModalHeader(title, subtitle) {
          */
         let isLoadingMore = false;
         let postBatchOffset = 0; // Track how many posts we've already loaded
-        const POST_BATCH_SIZE = 200; // Load 200 posts at a time to prefetch aggressively
+        // 🚀 MOBILE OPTIMIZATION: Dynamic batch sizing
+        const isMobileLowBandwidth = /iPhone|iPad|Android/i.test(navigator.userAgent) && window.innerWidth < 600;
+        const POST_BATCH_SIZE = isMobileLowBandwidth ? 30 : 200; // Mobile: 30 posts, Desktop: 200
         let allFirebasePosts = []; // Cache of all posts from Firebase
         
         async function loadMorePostsFromDatabase() {
@@ -38992,6 +39011,15 @@ function setUploadModalHeader(title, subtitle) {
                 console.log(`⏳ Already loading, skipping duplicate request`);
                 return;
             }
+            
+            // 🚀 MOBILE OPTIMIZATION: Debounce load requests on slow networks
+            const isMobileLowBandwidth = /iPhone|iPad|Android/i.test(navigator.userAgent) && window.innerWidth < 600;
+            if (isMobileLowBandwidth && window.__lastLoadMoreTime && (Date.now() - window.__lastLoadMoreTime) < 300) {
+                console.log(`⏳ Mobile debounce: skipping load (${Date.now() - window.__lastLoadMoreTime}ms since last)`);
+                return;
+            }
+            window.__lastLoadMoreTime = Date.now();
+            
             isLoadingMore = true;
             
             try {
@@ -39151,9 +39179,13 @@ function setUploadModalHeader(title, subtitle) {
             }
             
             try {
-                // This calls the same full rendering logic as before
-                // But only for visible items in the viewport
-                renderGridItemFull(box, item);
+                // 🚀 MOBILE OPTIMIZATION: Use lighter rendering on mobile
+                const isMobileLowBandwidth = /iPhone|iPad|Android/i.test(navigator.userAgent) && window.innerWidth < 600;
+                if (isMobileLowBandwidth && typeof renderGridItemLite === 'function') {
+                    renderGridItemLite(box, item);  // Lite version with deferred badge/detail loading
+                } else {
+                    renderGridItemFull(box, item);
+                }
             } catch (e) {
                 console.warn('Error rendering grid item:', e);
                 // Fallback to simple render
@@ -39162,6 +39194,36 @@ function setUploadModalHeader(title, subtitle) {
                 box.innerHTML = `<div style="padding: 12px; font-size: 14px;">${content}<br/><small>${likes}</small></div>`;
                 box.setAttribute('data-post-id', item.id);
                 box.classList.add('filled');
+            }
+        }
+        
+        // 🚀 Lightweight rendering for mobile - defers expensive operations
+        function renderGridItemLite(box, item) {
+            if (!item || !item.id) return;
+            try {
+                box.setAttribute('data-post-id', item.id);
+                box.classList.add('filled');
+                
+                // Quick render with minimal processing
+                const content = String(item.content || item.text || item.description || '').substring(0, 100);
+                const likes = item.likes || 0;
+                const dislikes = item.dislikes || 0;
+                const net = likes - dislikes;
+                
+                let html = `<div style="padding: 8px; font-size: 13px; display: flex; flex-direction: column; height: 100%; justify-content: space-between;">`;
+                html += `<div style="flex: 1; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;">${content}</div>`;
+                html += `<div style="font-size: 11px; color: #666; margin-top: 4px;">👍 ${likes} 👎 ${dislikes}</div>`;
+                html += `</div>`;
+                box.innerHTML = html;
+                
+                // Deferred: load full rendering after 300ms (doesn't block initial render)
+                if (typeof renderGridItemFull === 'function') {
+                    setTimeout(() => {
+                        try { if (box.getAttribute('data-post-id') === String(item.id)) renderGridItemFull(box, item); } catch(e) { /* ignore */ }
+                    }, 300);
+                }
+            } catch (e) {
+                console.warn('Error in renderGridItemLite:', e);
             }
         }
         
