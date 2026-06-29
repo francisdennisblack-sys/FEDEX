@@ -8848,20 +8848,25 @@
 
                 // 🎯 PRIORITY 1: If user has manually changed location, USE THAT FIRST
                 // This ensures the grid shows posts from the chosen location, not real GPS
-                const manualLocationActive = localStorage.getItem('manualLocationActive') === '1';
-                if (manualLocationActive) {
-                    try {
-                        const raw = localStorage.getItem('lastChosenLocation');
-                        if (raw) {
-                            const saved = JSON.parse(raw);
-                            if (saved && Number.isFinite(Number(saved.lat)) && Number.isFinite(Number(saved.lon))) {
-                                coords = { lat: Number(saved.lat), lon: Number(saved.lon) };
-                                sourceLabel = 'manual-location';
-                                console.log(`📍 Using manual location: ${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)}`);
+                try {
+                    const manualLocationActive = localStorage.getItem('manualLocationActive') === '1';
+                    if (manualLocationActive) {
+                        try {
+                            const raw = localStorage.getItem('lastChosenLocation');
+                            if (raw && String(raw).trim()) {
+                                const saved = JSON.parse(raw);
+                                if (saved && Number.isFinite(Number(saved.lat)) && Number.isFinite(Number(saved.lon))) {
+                                    coords = { lat: Number(saved.lat), lon: Number(saved.lon) };
+                                    sourceLabel = 'manual-location';
+                                    console.log(`📍 Using manual location: ${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)}`);
+                                }
                             }
+                        } catch (parseErr) { 
+                            console.warn('Failed to parse manual location', parseErr);
+                            try { localStorage.removeItem('lastChosenLocation'); } catch(e) {}
                         }
-                    } catch (e) { console.warn('Failed to read manual location', e); }
-                }
+                    }
+                } catch (e) { console.warn('Manual location check failed', e); }
 
                 // 🎯 PRIORITY 2: Real GPS location (if manual not active)
                 if (!coords) {
@@ -8882,14 +8887,14 @@
                 if (!coords) {
                     try {
                         const raw = localStorage.getItem('lastChosenLocation');
-                        if (raw) {
+                        if (raw && String(raw).trim()) {
                             const saved = JSON.parse(raw);
                             if (saved && Number.isFinite(Number(saved.lat)) && Number.isFinite(Number(saved.lon))) {
                                 coords = { lat: Number(saved.lat), lon: Number(saved.lon) };
                                 sourceLabel = 'fallback-manual';
                             }
                         }
-                    } catch (e) {}
+                    } catch (e) { /* ignore fallback errors */ }
                 }
 
                 if (!coords || !Number.isFinite(Number(coords.lat)) || !Number.isFinite(Number(coords.lon))) {
@@ -8897,18 +8902,22 @@
                 }
 
                 if (typeof getGridForUser === 'function') {
-                    const nextGrid = getGridForUser(Number(coords.lat), Number(coords.lon));
-                    if (nextGrid) {
-                        currentGrid = nextGrid;
-                        currentNearestPOI = nextGrid.poiData || null;
-                        if (Number.isFinite(Number(nextGrid.gridRadius))) currentGridRadius = Number(nextGrid.gridRadius);
-                        if (nextGrid.contentScope) currentContentScope = nextGrid.contentScope;
-                        if (!userSelectedZone && nextGrid.displayName) {
-                            maybeSetAutoZoneTag(nextGrid.displayName);
-                            currentAreaName = nextGrid.displayName;
+                    try {
+                        const nextGrid = getGridForUser(Number(coords.lat), Number(coords.lon));
+                        if (nextGrid) {
+                            currentGrid = nextGrid;
+                            currentNearestPOI = nextGrid.poiData || null;
+                            if (Number.isFinite(Number(nextGrid.gridRadius))) currentGridRadius = Number(nextGrid.gridRadius);
+                            if (nextGrid.contentScope) currentContentScope = nextGrid.contentScope;
+                            if (!userSelectedZone && nextGrid.displayName) {
+                                maybeSetAutoZoneTag(nextGrid.displayName);
+                                currentAreaName = nextGrid.displayName;
+                            }
+                            console.log(`📍 refreshCurrentGridContext(${reason}): ${nextGrid.displayName || 'unknown'} radius=${Number(currentGridRadius || 0).toFixed(3)} source=${sourceLabel}`);
+                            return true;
                         }
-                        console.log(`📍 refreshCurrentGridContext(${reason}): ${nextGrid.displayName || 'unknown'} radius=${Number(currentGridRadius || 0).toFixed(3)} source=${sourceLabel}`);
-                        return true;
+                    } catch (gridErr) {
+                        console.warn('getGridForUser failed', gridErr);
                     }
                 }
 
