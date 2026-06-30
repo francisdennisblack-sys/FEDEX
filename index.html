@@ -1949,7 +1949,7 @@
         // Guarded logger: use cLog(...) instead of console.log for verbose output.
         window.cLog = function(...args){ if (window.CLEANUP_FLAGS.ENABLE_DEBUG_LOGS) console.log(...args); };
 
-        // 🔒 SCROLLBAR COMPENSATION: Prevent layout shift when modal opens by reserving scrollbar space
+        // 🔒 SCROLLBAR COMPENSATION & SCROLL LOCK: Prevent layout shift + prevent scroll when modal opens
         // Calculate scrollbar width once and use it to add padding when hiding overflow
         window._scrollbarWidth = (() => {
             const outer = document.createElement('div');
@@ -1963,7 +1963,35 @@
             return scrollbarWidth || 0;
         })();
 
-        // Override document.body.style.overflow setter to automatically add/remove padding
+        // Track scroll lock state
+        window._scrollLockedY = 0;
+        
+        // Prevent scroll when modal is open
+        function lockScroll() {
+            window._scrollLockedY = window.scrollY;
+            document.addEventListener('scroll', preventScroll, { passive: false });
+            document.addEventListener('touchmove', preventScroll, { passive: false });
+        }
+        
+        function unlockScroll() {
+            document.removeEventListener('scroll', preventScroll);
+            document.removeEventListener('touchmove', preventScroll);
+            // Restore scroll position
+            if (window._scrollLockedY > 0) {
+                window.scrollTo(0, window._scrollLockedY);
+            }
+        }
+        
+        function preventScroll(e) {
+            if (e.type === 'scroll') {
+                e.preventDefault();
+                window.scrollTo(0, window._scrollLockedY);
+            } else if (e.type === 'touchmove') {
+                e.preventDefault();
+            }
+        }
+
+        // Override document.body.style.overflow setter to automatically add/remove padding + lock scroll
         const originalBodyStyle = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'style');
         const originalOverflowSetter = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'overflow');
         
@@ -1976,15 +2004,17 @@
                     
                     if (isBody || isHtml) {
                         if (value === 'hidden' && !document.body.style.paddingRight) {
-                            // Modal opening: reserve scrollbar space
+                            // Modal opening: reserve scrollbar space AND lock scroll
                             if (window._scrollbarWidth > 0) {
                                 document.body.style.paddingRight = window._scrollbarWidth + 'px';
                             }
+                            lockScroll();
                         } else if (value === '' || value === 'visible' || value === 'auto') {
-                            // Modal closing: remove padding
+                            // Modal closing: remove padding AND unlock scroll
                             if (document.body.style.paddingRight === (window._scrollbarWidth + 'px')) {
                                 document.body.style.paddingRight = '';
                             }
+                            unlockScroll();
                         }
                     }
                     return originalSet.call(this, value);
