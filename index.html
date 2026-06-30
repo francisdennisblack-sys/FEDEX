@@ -41611,12 +41611,41 @@ function setUploadModalHeader(title, subtitle) {
             const seenPostIds = new Set(); // Track unique post IDs to prevent DUPLICATES
             let allPosts = [];
             
+            // 🔍 DIAGNOSTIC: Log pending posts from postCache BEFORE allPosts assembly
+            try {
+                const pendingFromCache = [];
+                if (postCache && typeof postCache === 'object') {
+                    for (const pid in postCache) {
+                        const p = postCache[pid];
+                        if (p && p._pending) {
+                            pendingFromCache.push({
+                                id: pid.substring(0, 8),
+                                _newPostOrder: typeof p._newPostOrder === 'number' ? p._newPostOrder : 'none',
+                                area: p.zoneTag || p.county || 'unknown'
+                            });
+                        }
+                    }
+                }
+                if (pendingFromCache.length > 0) {
+                    console.log(`🔍 STEP 1 - POSTACHE: Found ${pendingFromCache.length} PENDING posts in postCache:`, pendingFromCache);
+                }
+            } catch (e) { console.warn('Pending post diagnostic failed', e); }
+            
             // First add posts from the user's own key (highest priority)
             if (gridContent[contentKey]) {
-                console.log(`✅ FOUND POSTS AT gridContent["${contentKey}"]: ${gridContent[contentKey].length} posts`);
+                console.log(`✅ STEP 2 - GRIDCONTENT: FOUND POSTS AT gridContent["${contentKey}"]: ${gridContent[contentKey].length} posts`);
+                // 🔍 Log posts from contentKey with _newPostOrder
+                const newOrderPostsInGrid = gridContent[contentKey].filter(p => typeof p._newPostOrder === 'number');
+                if (newOrderPostsInGrid.length > 0) {
+                    console.log(`    💫 Found ${newOrderPostsInGrid.length} posts with _newPostOrder in gridContent[${contentKey}]`, newOrderPostsInGrid.map(p => ({ id: p.id.substring(0,8), order: p._newPostOrder })));
+                }
+                
                 gridContent[contentKey].forEach(post => {
                     if (!seenPostIds.has(post.id)) {
-                        if (isPostHiddenForViewer(post, currentUserId)) return;
+                        if (isPostHiddenForViewer(post, currentUserId)) {
+                            console.log(`    ⚠️ FILTERED: ${post.id.substring(0,8)} hidden for viewer`);
+                            return;
+                        }
                         seenPostIds.add(post.id);
                         allPosts.push(post);
                     } else {
@@ -41628,6 +41657,8 @@ function setUploadModalHeader(title, subtitle) {
                 console.log(`   This is why your posts disappeared on refresh!`);
                 console.log(`   Check if currentUserId changed or gridContent was cleared`);
             }
+            
+            console.log(`✅ STEP 3 - ASSEMBLED: allPosts now has ${allPosts.length} posts after reading from contentKey`);
             
             // Then add posts from other keys (backfilled content)
             // ALWAYS MERGE shared-posts next so global feed is visible to every viewer
@@ -41937,7 +41968,18 @@ function setUploadModalHeader(title, subtitle) {
                 allPosts = [...newPosts, ...regularPosts];
                 
                 if (newPosts.length > 0) {
-                    console.log(`📌 NEW POST PRIORITY: Sorted ${newPosts.length} new posts to top (order 0-${Math.max(...newPosts.map(p => p._newPostOrder || 0))})`);
+                    console.log(`📌 STEP 4 - SORTED: Found ${newPosts.length} new posts (order 0-${Math.max(...newPosts.map(p => p._newPostOrder || 0))}), placed at top`);
+                    console.log(`    New post order: `, newPosts.map(p => ({ id: p.id.substring(0,8), order: p._newPostOrder })));
+                    
+                    // 🔥 CRITICAL FIX: RE-INJECT sorted posts back into gridContent
+                    // This ensures new posts stay at the top even after Firebase listeners overwrite gridContent
+                    try {
+                        // Rebuild gridContent[contentKey] with sorted order: new posts first, then regular posts
+                        gridContent[contentKey] = [...newPosts, ...regularPosts];
+                        console.log(`✅ STEP 4B - PERSISTED: Re-injected sorted posts back into gridContent[${contentKey}]`);
+                    } catch (e) {
+                        console.warn('Failed to re-inject sorted posts into gridContent', e);
+                    }
                 }
             } catch (e) {
                 console.warn('⚠️ New post ordering failed:', e);
