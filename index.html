@@ -33509,6 +33509,135 @@ function setUploadModalHeader(title, subtitle) {
             return 'Unknown';
         }
 
+        /**
+         * 🎯 PER-USER POST FILTERING (NEW)
+         * Filters all network posts to return 100-140 most relevant posts for current user
+         * using 60/20/10/10 distribution:
+         * - 60% Local area (posts within user's zone or matching area tag)
+         * - 20% Surrounding (nearby posts outside user's zone but close distance)
+         * - 10% Global (highest scored posts from anywhere)
+         * - 10% Boosted (promoted posts)
+         */
+        function filterPostsForUserLocation(allPosts, userLocation, targetLimit = 120) {
+            try {
+                if (!Array.isArray(allPosts) || allPosts.length === 0) {
+                    console.log('⚠️  No posts to filter');
+                    return [];
+                }
+
+                if (!userLocation || userLocation.lat == null || userLocation.lon == null) {
+                    console.log('⚠️  No user location - returning all posts');
+                    return allPosts.slice(0, targetLimit);
+                }
+
+                const userLat = parseFloat(userLocation.lat);
+                const userLon = parseFloat(userLocation.lon);
+                const userArea = getCurrentUserArea();
+
+                console.log(`\n🎯 FILTERING POSTS FOR USER`);
+                console.log(`   Location: ${userLat.toFixed(4)}, ${userLon.toFixed(4)}`);
+                console.log(`   Area Tag: ${userArea}`);
+                console.log(`   Target: ${targetLimit} posts (60/20/10/10)`);
+
+                // Helper: calculate distance in km
+                const distKm = (lat, lon) => {
+                    if (typeof calculateDistance === 'function') {
+                        return calculateDistance(userLat, userLon, lat, lon);
+                    }
+                    // Fallback Haversine
+                    const R = 6371;
+                    const dLat = (lat - userLat) * Math.PI / 180;
+                    const dLon = (lon - userLon) * Math.PI / 180;
+                    const a = Math.sin(dLat/2) * Math.sin(dLat/2) + 
+                              Math.cos(userLat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) *
+                              Math.sin(dLon/2) * Math.sin(dLon/2);
+                    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                };
+
+                // Categorize posts
+                const local = [];      // same area + close distance
+                const surrounding = []; // different area + medium distance  
+                const global = [];      // anywhere, high score
+                const boosted = [];     // promoted posts
+
+                allPosts.forEach(post => {
+                    if (!post || !post.id) return;
+
+                    const postArea = post.county || post.areaTag || post.displayAreaTag || '';
+                    const postLat = parseFloat(post.lat);
+                    const postLon = parseFloat(post.lon);
+
+                    if (!isFinite(postLat) || !isFinite(postLon)) return;
+
+                    const dist = distKm(postLat, postLon);
+                    const netScore = (Number(post.likes || 0)) - (Number(post.dislikes || 0));
+                    const isBoost = post.isBoost || post.boostActive || post.boosted;
+                    const isTopGlobal = netScore > 50;
+
+                    // Categorize
+                    if (isBoost) {
+                        boosted.push({ post, dist, netScore });
+                    } else if (postArea === userArea && dist <= 5) {
+                        local.push({ post, dist, netScore });
+                    } else if (dist <= 30) {
+                        surrounding.push({ post, dist, netScore });
+                    } else if (isTopGlobal || netScore > 100) {
+                        global.push({ post, dist, netScore });
+                    }
+                });
+
+                // Sort each category (local by distance, others by score)
+                local.sort((a, b) => a.dist - b.dist);
+                surrounding.sort((a, b) => b.netScore - a.netScore);
+                global.sort((a, b) => b.netScore - a.netScore);
+                boosted.sort((a, b) => b.netScore - a.netScore);
+
+                // Apply 60/20/10/10 distribution
+                const localTarget = Math.floor(targetLimit * 0.60);
+                const surroundingTarget = Math.floor(targetLimit * 0.20);
+                const globalTarget = Math.floor(targetLimit * 0.10);
+                const boostTarget = Math.floor(targetLimit * 0.10);
+
+                const result = [];
+
+                // Add local posts (60%)
+                result.push(...local.slice(0, localTarget).map(x => x.post));
+
+                // Add surrounding posts (20%)
+                result.push(...surrounding.slice(0, surroundingTarget).map(x => x.post));
+
+                // Add global posts (10%)
+                result.push(...global.slice(0, globalTarget).map(x => x.post));
+
+                // Add boosted posts (10%)
+                result.push(...boosted.slice(0, boostTarget).map(x => x.post));
+
+                // Fill remaining slots with best of any category
+                if (result.length < targetLimit) {
+                    const remaining = []
+                        .concat(local.slice(localTarget).map(x => x.post))
+                        .concat(surrounding.slice(surroundingTarget).map(x => x.post))
+                        .concat(global.slice(globalTarget).map(x => x.post))
+                        .concat(boosted.slice(boostTarget).map(x => x.post));
+                    
+                    result.push(...remaining.slice(0, targetLimit - result.length));
+                }
+
+                console.log(`✅ FILTERED RESULTS:`);
+                console.log(`   Local (60%):      ${Math.min(local.length, localTarget)} posts`);
+                console.log(`   Surrounding (20%): ${Math.min(surrounding.length, surroundingTarget)} posts`);
+                console.log(`   Global (10%):     ${Math.min(global.length, globalTarget)} posts`);
+                console.log(`   Boosted (10%):    ${Math.min(boosted.length, boostTarget)} posts`);
+                console.log(`   TOTAL:             ${result.length} posts`);
+
+                return result.slice(0, targetLimit);
+
+            } catch (e) {
+                console.error('Error filtering posts:', e);
+                return allPosts.slice(0, targetLimit);
+            }
+        }
+
         function getActiveViewerFeedKey() {
             try {
                 const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
@@ -33526,9 +33655,20 @@ function setUploadModalHeader(title, subtitle) {
 
         function getActiveViewerFeedPosts() {
             try {
+                // Get all posts from shared network
                 const key = getActiveViewerFeedKey();
-                return Array.isArray(gridContent[key]) ? gridContent[key] : [];
+                const allPosts = Array.isArray(gridContent[key]) ? gridContent[key] : [];
+
+                // Apply per-user filtering based on location
+                if (userLocation && userLocation.lat != null && userLocation.lon != null) {
+                    const filtered = filterPostsForUserLocation(allPosts, userLocation, 140);
+                    return filtered;
+                }
+
+                // Fallback: return all posts if no location
+                return allPosts;
             } catch (e) {
+                console.error('Error in getActiveViewerFeedPosts:', e);
                 return [];
             }
         }
