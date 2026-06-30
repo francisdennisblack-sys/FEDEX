@@ -324,7 +324,7 @@
                 // Register service worker to handle background location updates
                 try {
                     if ('serviceWorker' in navigator) {
-                        navigator.serviceWorker.register('/sw.js?v=20260630T030207Z').then(reg => {
+                        navigator.serviceWorker.register('/sw.js?v=20260630T030734Z').then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
                         }).catch(err => console.warn('ServiceWorker register failed', err));
 
@@ -1003,7 +1003,7 @@
     <link rel="preconnect" href="https://firebaseapp.com" crossorigin>
     <link rel="preconnect" href="https://js.stripe.com" crossorigin>
     <link rel="dns-prefetch" href="https://firebaseio.com">
-    <link rel="stylesheet" href="style.css?v=20260630T030207Z">
+    <link rel="stylesheet" href="style.css?v=20260630T030734Z">
     <!-- 🚀 Stripe.js v3 — defer so it doesn't block first paint -->
     <script src="https://js.stripe.com/v3/" defer></script>
     <style>
@@ -41838,6 +41838,19 @@ function setUploadModalHeader(title, subtitle) {
             // This preserves vote updates for posts in the user's array
             const preservedUserContent = gridContent[currentUserId] ? [...gridContent[currentUserId]] : [];
             
+            // ALSO: Preserve any newly created posts from postCache that haven't synced yet
+            const newPostsNotYetSynced = [];
+            try {
+                if (postCache && typeof postCache === 'object') {
+                    for (const postId in postCache) {
+                        const postData = postCache[postId];
+                        if (postData && postData._pending && !allPosts.some(p => p && p.id === postId)) {
+                            newPostsNotYetSynced.push(postData);
+                        }
+                    }
+                }
+            } catch (e) { console.warn('Failed to extract pending posts from cache:', e); }
+            
             // Organize posts by area for the algorithm
             gridContent = {};
             allPosts.forEach(post => {
@@ -41847,6 +41860,18 @@ function setUploadModalHeader(title, subtitle) {
                 }
                 gridContent[area].push(post);
             });
+            
+            // 🔥 RE-INJECT PENDING POSTS: Add newly created posts that haven't synced to Firebase yet
+            // This ensures posts don't disappear when gridContent is reorganized
+            if (newPostsNotYetSynced.length > 0) {
+                const userArea = newPostsNotYetSynced[0].zoneTag || newPostsNotYetSynced[0].county || 'Unknown Area';
+                if (!gridContent[userArea]) {
+                    gridContent[userArea] = [];
+                }
+                // Add pending posts to the front of their area
+                gridContent[userArea] = [...newPostsNotYetSynced, ...gridContent[userArea]];
+                console.log(`✅ Re-injected ${newPostsNotYetSynced.length} pending posts into gridContent[${userArea}]`);
+            }
             
             // Do not preserve a special user bucket of owned posts. All posts
             // should flow through the same area and ranking logic.
