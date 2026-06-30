@@ -268,6 +268,33 @@
     <style>
         /* Reset page margins so the top has no unexpected spacer */
         html, body { margin: 0; padding: 0; overscroll-behavior-y: none; scrollbar-gutter: stable; }
+        
+        /* 🍎 SAFARI COMPATIBILITY: Ensure all interactive elements are responsive */
+        * { -webkit-user-select: none; -webkit-user-drag: none; }
+        button, input, textarea, select, [role="button"], [onclick], .cursiveBtn {
+            -webkit-user-select: none !important;
+            -webkit-appearance: none !important;
+            -webkit-touch-callout: none !important;
+            pointer-events: auto !important;
+            -webkit-tap-highlight-color: transparent !important;
+            touch-action: manipulation !important;
+            -webkit-user-drag: none !important;
+        }
+        
+        /* Ensure Modals don't block button clicks in Safari */
+        #changeGridModalBackdrop, #viewModal, .modal {
+            -webkit-user-select: none !important;
+            -webkit-touch-callout: none !important;
+        }
+        
+        /* Ensure the pill and action buttons stay clickable */
+        #changeGridLocationPill, #addContentCTA, #uploadBtn, #changeLocationBtn, #comeHomeBtn {
+            pointer-events: auto !important;
+            -webkit-appearance: none !important;
+            -webkit-tap-highlight-color: transparent !important;
+            touch-action: manipulation !important;
+        }
+        
         /* Ensure the dynamic absolute overlay cannot visually override the in-place globe */
         #brandGlobeAbsoluteOverlay { display: none !important; pointer-events: none !important; }
         /* When posting modal is active, disable floating pills to prevent clicks */
@@ -1966,33 +1993,29 @@
         // Track scroll lock state
         window._scrollLockedY = 0;
         
-        // Prevent scroll when modal is open
+        // Prevent scroll when modal is open (Safari-compatible version)
         function lockScroll() {
             window._scrollLockedY = window.scrollY;
-            document.addEventListener('scroll', preventScroll, { passive: false });
-            document.addEventListener('touchmove', preventScroll, { passive: false });
+            // Add padding to compensate for hidden scrollbar
+            if (window._scrollbarWidth > 0) {
+                document.body.style.paddingRight = window._scrollbarWidth + 'px';
+            }
         }
         
         function unlockScroll() {
-            document.removeEventListener('scroll', preventScroll);
-            document.removeEventListener('touchmove', preventScroll);
-            // Restore scroll position
-            if (window._scrollLockedY > 0) {
-                window.scrollTo(0, window._scrollLockedY);
+            // Remove padding
+            if (document.body.style.paddingRight === (window._scrollbarWidth + 'px')) {
+                document.body.style.paddingRight = '';
             }
-        }
-        
-        function preventScroll(e) {
-            if (e.type === 'scroll') {
-                e.preventDefault();
-                window.scrollTo(0, window._scrollLockedY);
-            } else if (e.type === 'touchmove') {
-                e.preventDefault();
+            // Restore scroll position if needed
+            if (window._scrollLockedY > 0) {
+                try {
+                    window.scrollTo(0, window._scrollLockedY);
+                } catch (e) { /* ignore */ }
             }
         }
 
-        // Override document.body.style.overflow setter to automatically add/remove padding + lock scroll
-        const originalBodyStyle = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'style');
+        // Override document.body.style.overflow setter to automatically add/remove padding
         const originalOverflowSetter = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'overflow');
         
         if (originalOverflowSetter && originalOverflowSetter.set) {
@@ -2003,17 +2026,11 @@
                     const isHtml = this === document.documentElement.style;
                     
                     if (isBody || isHtml) {
-                        if (value === 'hidden' && !document.body.style.paddingRight) {
+                        if (value === 'hidden') {
                             // Modal opening: reserve scrollbar space AND lock scroll
-                            if (window._scrollbarWidth > 0) {
-                                document.body.style.paddingRight = window._scrollbarWidth + 'px';
-                            }
                             lockScroll();
                         } else if (value === '' || value === 'visible' || value === 'auto') {
                             // Modal closing: remove padding AND unlock scroll
-                            if (document.body.style.paddingRight === (window._scrollbarWidth + 'px')) {
-                                document.body.style.paddingRight = '';
-                            }
                             unlockScroll();
                         }
                     }
@@ -2024,6 +2041,37 @@
                 configurable: true
             });
         }
+
+        // 🍎 SAFARI BUTTON RESPONSIVENESS: Add touch and click event fixes for Safari
+        (function initSafariButtonFixes() {
+            // Ensure all buttons have proper touch handling
+            document.addEventListener('DOMContentLoaded', function() {
+                const buttons = document.querySelectorAll('button, [role="button"], [onclick], .cursiveBtn, #uploadBtn, #changeLocationBtn, #comeHomeBtn');
+                buttons.forEach(btn => {
+                    if (btn) {
+                        // Ensure pointer events are enabled
+                        btn.style.pointerEvents = 'auto';
+                        // Add webkit touch highlight color
+                        btn.style.webkitTapHighlightColor = 'transparent';
+                        // Ensure buttons respond to touches
+                        btn.addEventListener('touchstart', function(e) {
+                            this.style.opacity = '0.8';
+                        }, { passive: true });
+                        btn.addEventListener('touchend', function(e) {
+                            this.style.opacity = '';
+                        }, { passive: true });
+                    }
+                });
+            }, false);
+            
+            // Prevent body touch scrolling from blocking button interactions
+            document.addEventListener('touchstart', function(e) {
+                // Allow touch events to propagate to buttons
+                if (e.target.closest('button, [role="button"], input, textarea, [onclick]')) {
+                    return true;
+                }
+            }, { passive: true });
+        })();
 
         // Media lazy-load helpers: assign `src` from `data-src` when a node becomes visible
         function loadMediaForNode(node) {
