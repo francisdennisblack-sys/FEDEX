@@ -33510,42 +33510,52 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         /**
-         * 🎯 PER-USER POST FILTERING (NEW)
+         * 🎯 ADAPTIVE 60/20/10/10 POST FILTERING SYSTEM (COMPLETE)
          * Filters all network posts to return 100-140 most relevant posts for current user
-         * using 60/20/10/10 distribution:
-         * - 60% Local area (posts within user's zone or matching area tag)
-         * - 20% Surrounding (nearby posts outside user's zone but close distance)
-         * - 10% Global (highest scored posts from anywhere)
-         * - 10% Boosted (promoted posts)
+         * - 60% Local (adaptive density - posts in user's area within adaptive distance)
+         * - 20% Quality (higher net score than 60%, from as far away as possible, ≤50km)
+         * - 10% Viral (top trending posts globally, scaled to grid size)
+         * - 10% Boost (ML-pre-filtered promoted posts, hard cap 10%)
+         * 
+         * Criteria: LIVE posts only (24hrs, not deleted)
+         * Boost posts tagged: boostStatus='active' + boostExpiresAt > now
          */
         function filterPostsForUserLocation(allPosts, userLocation, targetLimit = 120) {
             try {
                 if (!Array.isArray(allPosts) || allPosts.length === 0) {
-                    console.log('⚠️  No posts to filter');
+                    console.log('⚠️  filterPostsForUserLocation: No posts to filter');
                     return [];
                 }
 
                 if (!userLocation || userLocation.lat == null || userLocation.lon == null) {
-                    console.log('⚠️  No user location - returning all posts');
-                    return allPosts.slice(0, targetLimit);
+                    console.log('⚠️  filterPostsForUserLocation: No user location');
+                    return [];
                 }
 
                 const userLat = parseFloat(userLocation.lat);
                 const userLon = parseFloat(userLocation.lon);
                 const userArea = getCurrentUserArea();
 
-                console.log(`\n🎯 FILTERING POSTS FOR USER`);
-                console.log(`   Location: ${userLat.toFixed(4)}, ${userLon.toFixed(4)}`);
-                console.log(`   Area Tag: ${userArea}`);
-                console.log(`   Target: ${targetLimit} posts (60/20/10/10)`);
+                // STEP 1: Filter to LIVE posts only (24hrs, not deleted)
+                const livePosts = allPosts.filter(post => {
+                    if (!post || post.deleted) return false;
+                    const createdAt = Number(post.timestamp || post.createdAt || 0);
+                    const ageMs = Date.now() - createdAt;
+                    return ageMs >= 0 && ageMs <= 86400000; // 24 hours max
+                });
 
-                // Helper: calculate distance in km
-                const distKm = (lat, lon) => {
-                    if (typeof calculateDistance === 'function') {
-                        return calculateDistance(userLat, userLon, lat, lon);
-                    }
-                    // Fallback Haversine
-                    const R = 6371;
+                console.log(`\n🎯 ADAPTIVE 60/20/10/10 FILTER`);
+                console.log(`   Location: ${userLat.toFixed(4)}, ${userLon.toFixed(4)} | Area: "${userArea}"`);
+                console.log(`   Live posts: ${livePosts.length}/${allPosts.length} | Target: ${targetLimit}`);
+
+                if (livePosts.length === 0) {
+                    console.warn('⚠️  No live posts available');
+                    return [];
+                }
+
+                // Helper: calculate distance in METERS
+                const distMeters = (lat, lon) => {
+                    const R = 6371000; // Earth radius in meters
                     const dLat = (lat - userLat) * Math.PI / 180;
                     const dLon = (lon - userLon) * Math.PI / 180;
                     const a = Math.sin(dLat/2) * Math.sin(dLat/2) + 
@@ -33554,87 +33564,134 @@ function setUploadModalHeader(title, subtitle) {
                     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
                 };
 
-                // Categorize posts
-                const local = [];      // same area + close distance
-                const surrounding = []; // different area + medium distance  
-                const global = [];      // anywhere, high score
-                const boosted = [];     // promoted posts
+                // Helper: get post net engagement score
+                const getNetScore = (post) => (Number(post.likes || 0)) - (Number(post.dislikes || 0));
 
-                allPosts.forEach(post => {
-                    if (!post || !post.id) return;
+                // STEP 2: Determine adaptive distance threshold based on area post density
+                const areaPostCount = livePosts.filter(p => {
+                    const pArea = p.county || p.areaTag || p.displayAreaTag || '';
+                    return pArea.toLowerCase() === userArea.toLowerCase();
+                }).length;
+                
+                const adaptiveDistThreshold = areaPostCount > 200 ? 2000 :
+                                              areaPostCount > 50 ? 5000 : 10000;
+                console.log(`   Area density: ${areaPostCount} posts → ${(adaptiveDistThreshold/1000).toFixed(1)}km threshold`);
 
+                // STEP 3: Categorize posts
+                const local = [];      // 60% - same area + within adaptive distance
+                const quality = [];    // 20% - higher net than local max, ≤50km, farther first
+                const viral = [];      // 10% - top global posts (scaled to grid)
+                const boost = [];      // 10% - boostStatus='active' + not expired
+                const categorized = new Set();
+
+                // STEP 3A: 60% LOCAL (adaptive distance, area-matched)
+                for (const post of livePosts) {
                     const postArea = post.county || post.areaTag || post.displayAreaTag || '';
+                    const isAreaMatch = postArea.toLowerCase() === userArea.toLowerCase();
+                    
+                    if (!isAreaMatch) continue;
+                    
                     const postLat = parseFloat(post.lat);
                     const postLon = parseFloat(post.lon);
-
-                    if (!isFinite(postLat) || !isFinite(postLon)) return;
-
-                    const dist = distKm(postLat, postLon);
-                    const netScore = (Number(post.likes || 0)) - (Number(post.dislikes || 0));
-                    const isBoost = post.isBoost || post.boostActive || post.boosted;
-                    const isTopGlobal = netScore > 50;
-
-                    // Categorize
-                    if (isBoost) {
-                        boosted.push({ post, dist, netScore });
-                    } else if (postArea === userArea && dist <= 5) {
-                        local.push({ post, dist, netScore });
-                    } else if (dist <= 30) {
-                        surrounding.push({ post, dist, netScore });
-                    } else if (isTopGlobal || netScore > 100) {
-                        global.push({ post, dist, netScore });
-                    }
-                });
-
-                // Sort each category (local by distance, others by score)
-                local.sort((a, b) => a.dist - b.dist);
-                surrounding.sort((a, b) => b.netScore - a.netScore);
-                global.sort((a, b) => b.netScore - a.netScore);
-                boosted.sort((a, b) => b.netScore - a.netScore);
-
-                // Apply 60/20/10/10 distribution
-                const localTarget = Math.floor(targetLimit * 0.60);
-                const surroundingTarget = Math.floor(targetLimit * 0.20);
-                const globalTarget = Math.floor(targetLimit * 0.10);
-                const boostTarget = Math.floor(targetLimit * 0.10);
-
-                const result = [];
-
-                // Add local posts (60%)
-                result.push(...local.slice(0, localTarget).map(x => x.post));
-
-                // Add surrounding posts (20%)
-                result.push(...surrounding.slice(0, surroundingTarget).map(x => x.post));
-
-                // Add global posts (10%)
-                result.push(...global.slice(0, globalTarget).map(x => x.post));
-
-                // Add boosted posts (10%)
-                result.push(...boosted.slice(0, boostTarget).map(x => x.post));
-
-                // Fill remaining slots with best of any category
-                if (result.length < targetLimit) {
-                    const remaining = []
-                        .concat(local.slice(localTarget).map(x => x.post))
-                        .concat(surrounding.slice(surroundingTarget).map(x => x.post))
-                        .concat(global.slice(globalTarget).map(x => x.post))
-                        .concat(boosted.slice(boostTarget).map(x => x.post));
+                    if (!isFinite(postLat) || !isFinite(postLon)) continue;
                     
-                    result.push(...remaining.slice(0, targetLimit - result.length));
+                    const dist = distMeters(postLat, postLon);
+                    if (dist > adaptiveDistThreshold) continue;
+                    
+                    local.push({ post, dist, netScore: getNetScore(post) });
+                    categorized.add(post.id);
                 }
 
-                console.log(`✅ FILTERED RESULTS:`);
-                console.log(`   Local (60%):      ${Math.min(local.length, localTarget)} posts`);
-                console.log(`   Surrounding (20%): ${Math.min(surrounding.length, surroundingTarget)} posts`);
-                console.log(`   Global (10%):     ${Math.min(global.length, globalTarget)} posts`);
-                console.log(`   Boosted (10%):    ${Math.min(boosted.length, boostTarget)} posts`);
-                console.log(`   TOTAL:             ${result.length} posts`);
+                local.sort((a, b) => a.dist - b.dist); // Closest first
+                const localTarget = Math.ceil(targetLimit * 0.60);
+                const localFinal = local.slice(0, localTarget);
+                console.log(`   60% LOCAL: ${localFinal.length}/${localTarget}`);
 
+                // STEP 3B: 20% QUALITY (higher net than local max, as far as possible)
+                if (localFinal.length > 0) {
+                    const maxLocalNet = Math.max(...localFinal.map(l => l.netScore));
+                    const qualityTarget = Math.ceil(targetLimit * 0.20);
+                    
+                    for (const post of livePosts) {
+                        if (categorized.has(post.id)) continue;
+                        
+                        const netScore = getNetScore(post);
+                        if (netScore <= maxLocalNet) continue; // MUST be higher quality than 60%
+                        
+                        const postLat = parseFloat(post.lat);
+                        const postLon = parseFloat(post.lon);
+                        if (!isFinite(postLat) || !isFinite(postLon)) continue;
+                        
+                        const dist = distMeters(postLat, postLon);
+                        if (dist > 50000) continue; // 50km max for surrounding
+                        
+                        quality.push({ post, dist, netScore });
+                        categorized.add(post.id);
+                    }
+                    
+                    // Sort: FARTHER first (distance DESC), then by netScore DESC (tie-breaker)
+                    quality.sort((a, b) => (b.dist - a.dist) || (b.netScore - a.netScore));
+                    const qualityFinal = quality.slice(0, qualityTarget);
+                    console.log(`   20% QUALITY: ${qualityFinal.length}/${qualityTarget} (farther=better)`);
+                }
+
+                // STEP 3C: 10% VIRAL (top posts globally, scaled to grid size)
+                const viralTarget = Math.ceil(targetLimit * 0.10);
+                for (const post of livePosts) {
+                    if (categorized.has(post.id)) continue;
+                    const netScore = getNetScore(post);
+                    if (netScore > 50) { // Top engagement threshold
+                        viral.push({ post, netScore });
+                        categorized.add(post.id);
+                    }
+                }
+                viral.sort((a, b) => b.netScore - a.netScore);
+                const viralFinal = viral.slice(0, viralTarget);
+                console.log(`   10% VIRAL: ${viralFinal.length}/${viralTarget}`);
+
+                // STEP 3D: 10% BOOST (ML-pre-filtered, hard cap 10%)
+                const boostTarget = Math.ceil(targetLimit * 0.10);
+                for (const post of livePosts) {
+                    if (categorized.has(post.id)) continue;
+                    // Check boost status: active + not expired
+                    if (post.boostStatus === 'active' && post.boostExpiresAt && post.boostExpiresAt > Date.now()) {
+                        boost.push({ post, netScore: getNetScore(post) });
+                        categorized.add(post.id);
+                    }
+                }
+                boost.sort((a, b) => b.netScore - a.netScore);
+                const boostFinal = boost.slice(0, boostTarget);
+                console.log(`   10% BOOST: ${boostFinal.length}/${boostTarget}`);
+
+                // STEP 4: Merge results and fill to target
+                const result = [];
+                result.push(...localFinal.map(x => x.post));
+                result.push(...quality.slice(0, Math.ceil(targetLimit * 0.20)).map(x => x.post));
+                result.push(...viralFinal.map(x => x.post));
+                result.push(...boostFinal.map(x => x.post));
+
+                // Fill remaining slots from uncategorized live posts (by distance)
+                if (result.length < targetLimit) {
+                    const fillPosts = livePosts
+                        .filter(p => !categorized.has(p.id))
+                        .map(p => {
+                            const postLat = parseFloat(p.lat);
+                            const postLon = parseFloat(p.lon);
+                            const dist = isFinite(postLat) && isFinite(postLon) ? distMeters(postLat, postLon) : 999999;
+                            return { post: p, dist, netScore: getNetScore(p) };
+                        })
+                        .sort((a, b) => (a.dist - b.dist) || (b.netScore - a.netScore))
+                        .slice(0, targetLimit - result.length);
+                    
+                    result.push(...fillPosts.map(x => x.post));
+                }
+
+                console.log(`   ✅ FINAL: ${result.length}/${targetLimit} posts`);
                 return result.slice(0, targetLimit);
 
             } catch (e) {
-                console.error('Error filtering posts:', e);
-                return allPosts.slice(0, targetLimit);
+                console.error('❌ filterPostsForUserLocation error:', e);
+                return [];
             }
         }
 
