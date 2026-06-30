@@ -16599,19 +16599,27 @@
         // When a new post arrives, shift existing new posts down by incrementing their _newPostOrder
         function shiftNewPostOrderAndInsert(contentKey, post) {
             try {
-                // Mark incoming post as newest (order 0)
+                // Mark incoming post as newest (order 0) and LOCK IT IN PLACE
                 post._newPostOrder = 0;
                 post._newPostAddedAt = Date.now();
+                post._positionLocked = true;  // 🔒 Cannot be re-sorted
+                post._lockedUntilMs = Date.now() + (5 * 60 * 1000);  // Lock for 5 minutes
                 
                 // Shift existing posts with _newPostOrder down by 1
                 if (gridContent[contentKey] && Array.isArray(gridContent[contentKey])) {
                     gridContent[contentKey].forEach(existingPost => {
                         if (existingPost && typeof existingPost._newPostOrder === 'number') {
                             existingPost._newPostOrder++;
+                            // Keep lock on existing locked posts
+                            if (existingPost._positionLocked) {
+                                existingPost._lockedUntilMs = Math.max(existingPost._lockedUntilMs || 0, Date.now() + (5 * 60 * 1000));
+                            }
                             // Stop tracking after 20 positions to prevent memory bloat
                             if (existingPost._newPostOrder > 20) {
                                 delete existingPost._newPostOrder;
                                 delete existingPost._newPostAddedAt;
+                                delete existingPost._positionLocked;
+                                delete existingPost._lockedUntilMs;
                             }
                         }
                     });
@@ -16620,7 +16628,7 @@
                 // Now call the standard insert which adds to position 0
                 ensureUniqueAndInsert(contentKey, post);
                 
-                console.log(`✅ NEW POST QUEUE: Inserted post ${post.id} at order 0, shifted existing posts down`);
+                console.log(`✅ NEW POST LOCKED: post ${post.id.substring(0,8)} at order 0 for 5 minutes, cannot move`);
             } catch (e) {
                 console.warn('shiftNewPostOrderAndInsert failed:', e);
                 // Fallback to normal insert
@@ -32248,18 +32256,26 @@ function setUploadModalHeader(title, subtitle) {
                         console.warn('Failed to preserve pending posts before renderGrid:', e);
                     }
                     
-                    // 🔥 SORT NEW POSTS TO TOP after Firebase sync
+                    // 🔥 SORT NEW POSTS TO TOP after Firebase sync (RESPECT LOCKS)
                     // This ensures new posts with _newPostOrder stay pinned to the top even after Firebase updates
+                    // LOCKED posts are NEVER moved - they stay immovable
                     try {
-                        // Sort each area's gridContent to keep _newPostOrder posts first
+                        const now = Date.now();
+                        // Sort each area's gridContent to keep locked posts first, then new posts
                         for (const area in gridContent) {
                             if (!Array.isArray(gridContent[area])) continue;
                             
+                            const lockedPosts = [];
                             const newPosts = [];
                             const regularPosts = [];
                             
                             gridContent[area].forEach(post => {
-                                if (post && typeof post._newPostOrder === 'number') {
+                                // Check if lock is still valid
+                                const isLocked = post._positionLocked && (post._lockedUntilMs || 0) > now;
+                                
+                                if (isLocked) {
+                                    lockedPosts.push(post);
+                                } else if (post && typeof post._newPostOrder === 'number') {
                                     newPosts.push(post);
                                 } else {
                                     regularPosts.push(post);
@@ -32269,11 +32285,15 @@ function setUploadModalHeader(title, subtitle) {
                             // Sort new posts by _newPostOrder (ascending)
                             newPosts.sort((a, b) => (a._newPostOrder || 0) - (b._newPostOrder || 0));
                             
-                            // Reassemble with new posts first
-                            gridContent[area] = [...newPosts, ...regularPosts];
+                            // Reassemble with locked posts first (IMMOVABLE), then new posts, then regular
+                            gridContent[area] = [...lockedPosts, ...newPosts, ...regularPosts];
+                            
+                            if (lockedPosts.length > 0) {
+                                console.log(`🔒 FIREBASE SYNC: ${lockedPosts.length} LOCKED posts pinned to top of ${area}`);
+                            }
                         }
                     } catch (e) {
-                        console.warn('Failed to sort new posts after Firebase sync:', e);
+                        console.warn('Failed to sort locked/new posts after Firebase sync:', e);
                     }
 
                     // Fresh Firebase data arrived: force immediate paint.
@@ -41950,13 +41970,24 @@ function setUploadModalHeader(title, subtitle) {
             // Sort by _newPostOrder so new posts always appear first
             // ========================================================================
             try {
+                // RESPECT POSITION LOCKS: locked posts are IMMOVABLE
+                const lockedPosts = [];
                 const newPosts = [];
                 const regularPosts = [];
+                const now = Date.now();
                 
                 allPosts.forEach(post => {
-                    if (post && typeof post._newPostOrder === 'number') {
+                    // Check if lock is still valid
+                    const isLocked = post._positionLocked && (post._lockedUntilMs || 0) > now;
+                    
+                    if (isLocked) {
+                        // Locked posts go first, NEVER TOUCHED
+                        lockedPosts.push(post);
+                    } else if (post && typeof post._newPostOrder === 'number') {
+                        // New posts (not locked) go second
                         newPosts.push(post);
                     } else {
+                        // Regular posts go last
                         regularPosts.push(post);
                     }
                 });
@@ -41964,25 +41995,24 @@ function setUploadModalHeader(title, subtitle) {
                 // Sort new posts by _newPostOrder (ascending: 0 is newest)
                 newPosts.sort((a, b) => (a._newPostOrder || 0) - (b._newPostOrder || 0));
                 
-                // Concatenate: new posts first, then regular posts
-                allPosts = [...newPosts, ...regularPosts];
+                // Concatenate: LOCKED posts first, then new posts, then regular posts
+                allPosts = [...lockedPosts, ...newPosts, ...regularPosts];
                 
-                if (newPosts.length > 0) {
-                    console.log(`📌 STEP 4 - SORTED: Found ${newPosts.length} new posts (order 0-${Math.max(...newPosts.map(p => p._newPostOrder || 0))}), placed at top`);
-                    console.log(`    New post order: `, newPosts.map(p => ({ id: p.id.substring(0,8), order: p._newPostOrder })));
-                    
-                    // 🔥 CRITICAL FIX: RE-INJECT sorted posts back into gridContent
-                    // This ensures new posts stay at the top even after Firebase listeners overwrite gridContent
-                    try {
-                        // Rebuild gridContent[contentKey] with sorted order: new posts first, then regular posts
-                        gridContent[contentKey] = [...newPosts, ...regularPosts];
-                        console.log(`✅ STEP 4B - PERSISTED: Re-injected sorted posts back into gridContent[${contentKey}]`);
-                    } catch (e) {
-                        console.warn('Failed to re-inject sorted posts into gridContent', e);
-                    }
+                if (lockedPosts.length > 0 || newPosts.length > 0) {
+                    console.log(`🔒 STEP 4 - SORTED & LOCKED: ${lockedPosts.length} LOCKED (immovable), ${newPosts.length} new posts at top`);
                 }
             } catch (e) {
                 console.warn('⚠️ New post ordering failed:', e);
+            }
+            
+            // 🔥 CRITICAL FIX: RE-INJECT sorted posts back into gridContent
+            // This ensures new posts stay at the top even after Firebase listeners overwrite gridContent
+            try {
+                // Rebuild gridContent[contentKey] with sorted order: locked first, new posts, then regular posts
+                gridContent[contentKey] = allPosts.slice();
+                console.log(`✅ STEP 4B - PERSISTED: Re-injected sorted posts back into gridContent[${contentKey}]`);
+            } catch (e) {
+                console.warn('Failed to re-inject sorted posts into gridContent', e);
             }
             
             // ========================================================================
@@ -42031,7 +42061,7 @@ function setUploadModalHeader(title, subtitle) {
             
             // 🔥 RE-INJECT PENDING POSTS: Add newly created posts that haven't synced to Firebase yet
             // This ensures posts don't disappear when gridContent is reorganized
-            // PRESERVE: Keep _newPostOrder so new posts stay pinned to top
+            // PRESERVE: Keep _newPostOrder and POSITION LOCKS so posts stay immovable
             if (newPostsNotYetSynced.length > 0) {
                 // Find the target area - prefer zoneTag first as it's most specific
                 let userArea = null;
@@ -42049,16 +42079,30 @@ function setUploadModalHeader(title, subtitle) {
                     gridContent[userArea] = [];
                 }
                 
+                // Separate locked posts from regular pending posts
+                const lockedPending = [];
+                const unlockedPending = [];
+                const now = Date.now();
+                
+                newPostsNotYetSynced.forEach(p => {
+                    const isLocked = p._positionLocked && (p._lockedUntilMs || 0) > now;
+                    if (isLocked) {
+                        lockedPending.push(p);
+                    } else {
+                        unlockedPending.push(p);
+                    }
+                });
+                
                 // Sort pending posts by _newPostOrder to maintain priority order
-                newPostsNotYetSynced.sort((a, b) => {
+                unlockedPending.sort((a, b) => {
                     const orderA = typeof a._newPostOrder === 'number' ? a._newPostOrder : Infinity;
                     const orderB = typeof b._newPostOrder === 'number' ? b._newPostOrder : Infinity;
                     return orderA - orderB;
                 });
                 
-                // Add pending posts to the front of their area, preserving their order
-                gridContent[userArea] = [...newPostsNotYetSynced, ...gridContent[userArea]];
-                console.log(`✅ RE-INJECTED: ${newPostsNotYetSynced.length} pending posts into gridContent[${userArea}] with _newPostOrder preserved`);
+                // Add pending posts to the front of their area: LOCKED FIRST (immovable), then others
+                gridContent[userArea] = [...lockedPending, ...unlockedPending, ...gridContent[userArea]];
+                console.log(`✅ RE-INJECTED: ${lockedPending.length} LOCKED + ${unlockedPending.length} pending posts into gridContent[${userArea}]`);
             }
             
             // Do not preserve a special user bucket of owned posts. All posts
