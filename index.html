@@ -1949,6 +1949,52 @@
         // Guarded logger: use cLog(...) instead of console.log for verbose output.
         window.cLog = function(...args){ if (window.CLEANUP_FLAGS.ENABLE_DEBUG_LOGS) console.log(...args); };
 
+        // 🔒 SCROLLBAR COMPENSATION: Prevent layout shift when modal opens by reserving scrollbar space
+        // Calculate scrollbar width once and use it to add padding when hiding overflow
+        window._scrollbarWidth = (() => {
+            const outer = document.createElement('div');
+            outer.style.visibility = 'hidden';
+            outer.style.overflow = 'scroll';
+            document.body.appendChild(outer);
+            const inner = document.createElement('div');
+            outer.appendChild(inner);
+            const scrollbarWidth = outer.offsetWidth - inner.offsetWidth;
+            outer.parentNode.removeChild(outer);
+            return scrollbarWidth || 0;
+        })();
+
+        // Override document.body.style.overflow setter to automatically add/remove padding
+        const originalBodyStyle = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'style');
+        const originalOverflowSetter = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'overflow');
+        
+        if (originalOverflowSetter && originalOverflowSetter.set) {
+            const originalSet = originalOverflowSetter.set;
+            Object.defineProperty(CSSStyleDeclaration.prototype, 'overflow', {
+                set: function(value) {
+                    const isBody = this === document.body.style;
+                    const isHtml = this === document.documentElement.style;
+                    
+                    if (isBody || isHtml) {
+                        if (value === 'hidden' && !document.body.style.paddingRight) {
+                            // Modal opening: reserve scrollbar space
+                            if (window._scrollbarWidth > 0) {
+                                document.body.style.paddingRight = window._scrollbarWidth + 'px';
+                            }
+                        } else if (value === '' || value === 'visible' || value === 'auto') {
+                            // Modal closing: remove padding
+                            if (document.body.style.paddingRight === (window._scrollbarWidth + 'px')) {
+                                document.body.style.paddingRight = '';
+                            }
+                        }
+                    }
+                    return originalSet.call(this, value);
+                },
+                get: originalOverflowSetter.get,
+                enumerable: originalOverflowSetter.enumerable,
+                configurable: true
+            });
+        }
+
         // Media lazy-load helpers: assign `src` from `data-src` when a node becomes visible
         function loadMediaForNode(node) {
             if (!node || !(node instanceof Element)) return;
