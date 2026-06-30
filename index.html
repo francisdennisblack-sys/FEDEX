@@ -324,7 +324,7 @@
                 // Register service worker to handle background location updates
                 try {
                     if ('serviceWorker' in navigator) {
-                        navigator.serviceWorker.register('/sw.js?v=20260630T030734Z').then(reg => {
+                        navigator.serviceWorker.register('/sw.js?v=20260630T031210Z').then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
                         }).catch(err => console.warn('ServiceWorker register failed', err));
 
@@ -1003,7 +1003,7 @@
     <link rel="preconnect" href="https://firebaseapp.com" crossorigin>
     <link rel="preconnect" href="https://js.stripe.com" crossorigin>
     <link rel="dns-prefetch" href="https://firebaseio.com">
-    <link rel="stylesheet" href="style.css?v=20260630T030734Z">
+    <link rel="stylesheet" href="style.css?v=20260630T031210Z">
     <!-- 🚀 Stripe.js v3 — defer so it doesn't block first paint -->
     <script src="https://js.stripe.com/v3/" defer></script>
     <style>
@@ -45427,11 +45427,18 @@ function setUploadModalHeader(title, subtitle) {
                 if (_alreadyPresent) {
                     console.log(`  ↩️ Skipping duplicate push to gridContent[${contentKey}] - id already present: ${postData.id}`);
                 } else {
+                    // 🔥 CRITICAL: Mark post as _pending BEFORE adding to gridContent
+                    // This ensures it will be re-injected when grid reorganizes, preventing disappearing posts
+                    postData._pending = true;
+                    postData._createdAt = Date.now();
+                    
                     try {
                         if (typeof routeNewPostToLoadedGrids === 'function') routeNewPostToLoadedGrids(postData, contentKey);
                         else if (typeof ensureUniqueAndInsert === 'function') ensureUniqueAndInsert(contentKey, postData);
                         else gridContent[contentKey].push(postData);
                     } catch(e) { gridContent[contentKey].push(postData); }
+                    
+                    console.log(`✅ POST MARKED AS PENDING (will survive grid reorganization): ${postId}`);
                     
                     // 🔥 CRITICAL: Persist to localStorage IMMEDIATELY after adding to gridContent
                     // This prevents the post from disappearing if a grid refresh/resync happens before Firebase fires
@@ -45550,6 +45557,12 @@ function setUploadModalHeader(title, subtitle) {
                         console.warn('⚠️ Failed to persist to localStorage (non-critical):', persistErr);
                     }
                     
+                    // 🔥 CLEAR PENDING FLAG: Post is now successfully in Firebase
+                    // This tells renderGrid to stop re-injecting it and let normal flow handle it
+                    postData._pending = false;
+                    postCache[postId] = postData;
+                    console.log(`✅ CLEARED _pending flag - post now safely in Firebase`);
+                    
                 } catch (firstErr) {
                     console.warn('⚠️ savePostToFirebaseShared failed, retrying once...', firstErr);
                     try {
@@ -45574,6 +45587,12 @@ function setUploadModalHeader(title, subtitle) {
                         } catch (persistErr) {
                             console.warn('⚠️ Failed to persist to localStorage after retry:', persistErr);
                         }
+                        
+                        // 🔥 CLEAR PENDING FLAG after retry succeeds
+                        postData._pending = false;
+                        postCache[postId] = postData;
+                        console.log(`✅ CLEARED _pending flag after retry - post now in Firebase`);
+                        
                     } catch (secondErr) {
                         console.error('❌ savePostToFirebaseShared retry failed:', secondErr);
                         throw secondErr;
