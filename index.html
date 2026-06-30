@@ -9654,6 +9654,11 @@
 
                             // Trigger POI update when location changes
                             updateNearbyPOIsFromPolling();
+
+                            // 🎯 TRIGGER LOCATION-AWARE REFILTER (device moved)
+                            if (typeof triggerLocationChangeRefilter === 'function') {
+                                triggerLocationChangeRefilter(userLocation, 'device_move');
+                            }
                         }
                     },
                     (error) => {
@@ -33695,6 +33700,75 @@ function setUploadModalHeader(title, subtitle) {
             }
         }
 
+        // ===========================================================================
+        // 📍 LOCATION CHANGE DETECTION & AUTO-REFILTER SYSTEM
+        // Automatically refilters posts when user's device moves significantly
+        // or when they commit a new location via Change Location
+        // ===========================================================================
+
+        let __lastFilteredLocation = null;
+        let __lastRefilterTime = 0;
+        const LOCATION_CHANGE_THRESHOLD = 100; // meters - refilter when moved >100m
+        const REFILTER_COOLDOWN = 5000; // milliseconds - min time between refilters
+
+        function locationHasChanged(oldLoc, newLoc, thresholdMeters = LOCATION_CHANGE_THRESHOLD) {
+            if (!oldLoc || !newLoc) return true; // First time or missing data
+            if (!oldLoc.lat || !oldLoc.lon || !newLoc.lat || !newLoc.lon) return false;
+            
+            const dist = haversineMeters(oldLoc.lat, oldLoc.lon, newLoc.lat, newLoc.lon);
+            return dist >= thresholdMeters;
+        }
+
+        function shouldRefilterNow(newLocation) {
+            // Check if location has changed significantly
+            if (!locationHasChanged(__lastFilteredLocation, newLocation)) {
+                return false;
+            }
+
+            // Check cooldown to avoid spamming refilters
+            const now = Date.now();
+            if (now - __lastRefilterTime < REFILTER_COOLDOWN) {
+                return false;
+            }
+
+            return true;
+        }
+
+        function triggerLocationChangeRefilter(location, reason = 'device_move') {
+            if (!location || !location.lat || !location.lon) return;
+
+            if (!shouldRefilterNow(location)) {
+                return;
+            }
+
+            const now = Date.now();
+            const distance = __lastFilteredLocation ? 
+                haversineMeters(__lastFilteredLocation.lat, __lastFilteredLocation.lon, location.lat, location.lon).toFixed(0) :
+                '—';
+
+            console.log(`📍 LOCATION CHANGED: ${reason === 'device_move' ? 'GPS' : 'Manual commit'}`);
+            console.log(`   From: ${__lastFilteredLocation ? `${__lastFilteredLocation.lat.toFixed(4)}, ${__lastFilteredLocation.lon.toFixed(4)}` : '(initial)'}`);
+            console.log(`   To: ${location.lat.toFixed(4)}, ${location.lon.toFixed(4)}`);
+            console.log(`   Distance: ${distance}m`);
+            console.log(`   🔄 Refiltering posts...`);
+
+            // Update tracked location
+            __lastFilteredLocation = { lat: location.lat, lon: location.lon };
+            __lastRefilterTime = now;
+
+            // Trigger grid rerender which will call filterPostsForUserLocation with new location
+            try {
+                window.lastRenderGridTime = 0; // Force immediate rerender
+                if (typeof renderGrid === 'function') {
+                    renderGrid();
+                }
+            } catch (e) {
+                console.error('❌ Error refiltering after location change:', e);
+            }
+        }
+
+        window.triggerLocationChangeRefilter = triggerLocationChangeRefilter;
+
         function getActiveViewerFeedKey() {
             try {
                 const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
@@ -49885,7 +49959,13 @@ function setUploadModalHeader(title, subtitle) {
                                 }
                             } catch (e) { console.warn('Failed to message service worker', e); }
 
-                            try { applySavedLocationAndRefreshUI(null, { keepOpen: false }); return; } catch (e) { console.warn('applySavedLocationAndRefreshUI failed', e); }
+                            try { applySavedLocationAndRefreshUI(null, { keepOpen: false }); 
+                                // 🎯 TRIGGER LOCATION-AWARE REFILTER (user committed new location)
+                                if (typeof triggerLocationChangeRefilter === 'function' && window.__tempLocationOverride) {
+                                    triggerLocationChangeRefilter(window.__tempLocationOverride, 'user_commit');
+                                }
+                                return; 
+                            } catch (e) { console.warn('applySavedLocationAndRefreshUI failed', e); }
                         } else {
                             console.log('Change location (manual):', { primary });
                         }
@@ -50006,7 +50086,14 @@ function setUploadModalHeader(title, subtitle) {
                                 try { if (typeof window.trackUserLocation === 'function') window.trackUserLocation(uid, rlat, rlon); } catch (e) {}
                             }
                         } catch (e) { console.warn('Failed to sync restored location to Firebase', e); }
-                        try { applyRestoredLocationAndRefreshUI(cacheObj); return; } catch(e) { console.warn('applyRestoredLocationAndRefreshUI failed', e); }
+                        try { 
+                            applyRestoredLocationAndRefreshUI(cacheObj); 
+                            // 🎯 TRIGGER LOCATION-AWARE REFILTER (user returned home)
+                            if (typeof triggerLocationChangeRefilter === 'function' && cacheObj && cacheObj.lat && cacheObj.lon) {
+                                triggerLocationChangeRefilter(cacheObj, 'return_home');
+                            }
+                            return; 
+                        } catch(e) { console.warn('applyRestoredLocationAndRefreshUI failed', e); }
                     } catch (e) {
                         try { programmaticReload(); return; } catch (e2) { try { location.reload(); } catch(e3){} }
                     }
