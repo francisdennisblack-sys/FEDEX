@@ -32179,6 +32179,42 @@ function setUploadModalHeader(title, subtitle) {
                         console.warn('Live badge sync failed:', e);
                     }
 
+                    // 🔥 PRESERVE PENDING POSTS: Before renderGrid reorganizes gridContent,
+                    // ensure all _pending posts from postCache are added to their areas
+                    // This prevents newly created posts from disappearing when Firebase snapshot arrives
+                    try {
+                        if (postCache && typeof postCache === 'object') {
+                            const pendingPostsByArea = {};
+                            for (const postId in postCache) {
+                                const postData = postCache[postId];
+                                if (postData && postData._pending) {
+                                    const area = postData.zoneTag || postData.county || 'Unknown Area';
+                                    if (!pendingPostsByArea[area]) {
+                                        pendingPostsByArea[area] = [];
+                                    }
+                                    pendingPostsByArea[area].push(postData);
+                                }
+                            }
+                            
+                            // Re-inject pending posts into their areas before renderGrid reorganizes
+                            for (const area in pendingPostsByArea) {
+                                if (!gridContent[area]) {
+                                    gridContent[area] = [];
+                                }
+                                // Add pending posts to the front so they appear first
+                                const pendingNotInArea = pendingPostsByArea[area].filter(p => 
+                                    !gridContent[area].some(existing => existing && existing.id === p.id)
+                                );
+                                if (pendingNotInArea.length > 0) {
+                                    gridContent[area] = [...pendingNotInArea, ...gridContent[area]];
+                                    console.log(`✅ FIREBASE PRESERVE: Re-injected ${pendingNotInArea.length} pending posts into gridContent['${area}']`);
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Failed to preserve pending posts before renderGrid:', e);
+                    }
+
                     // Fresh Firebase data arrived: force immediate paint.
                     // Otherwise the global 30s render throttle can delay first visible posts.
                     try { window.lastRenderGridTime = 0; } catch (e) {}
