@@ -699,14 +699,29 @@
                 // Update postCache
                 try { postCache = postCache || {}; postCache[post.id] = post; } catch(e){}
 
-                // Force scroller items to include this post at a random slot.
+                // 🔒 Ensure the post has position-lock flags so every sort in renderGrid
+                // and recomputeFeedSnapshot keeps it pinned to the front for 5 minutes.
+                // The post may already have these from shiftNewPostOrderAndInsert(), but
+                // set them here as a safety net for any code path that bypasses that function.
+                try {
+                    if (!post._positionLocked) {
+                        post._positionLocked = true;
+                        post._lockedUntilMs = Date.now() + (5 * 60 * 1000);
+                        post._newPostOrder = post._newPostOrder || 0;
+                    }
+                } catch(e) { /* ignore lock assignment failure */ }
+
+                // Force scroller items to include this post at the TOP (position 0).
+                // Must match where we unshift() into pendingSortedPosts below so the
+                // reconciler sees no positional diff and does not try to move the post.
                 if (window.gridScroller && Array.isArray(gridScroller.items)) {
                     const items = Array.isArray(gridScroller.items) ? gridScroller.items.slice() : [];
                     const foundIdx = items.findIndex(i => i && i.id === post.id);
                     if (foundIdx === -1) {
-                        const insertAt = getRandomNewPostInsertIndex(items.length);
-                        const newItems = items.slice();
-                        newItems.splice(insertAt, 0, post);
+                        // Insert at position 0 so it matches pendingSortedPosts[0] below.
+                        // Using a random mid-feed slot previously caused the reconciler to
+                        // see a position mismatch and move the post every second (flickering).
+                        const newItems = [post, ...items];
                         try { if (typeof gridScroller.setItems === 'function') gridScroller.setItems(newItems); else gridScroller.items = newItems; } catch(e) { gridScroller.items = newItems; }
                     }
                     // 🔒 CRITICAL: Also inject into pendingSortedPosts so the 1/sec reconciler
@@ -40948,10 +40963,19 @@ function setUploadModalHeader(title, subtitle) {
                     console.warn('scroll-aware stabilization failed', e);
                 }
 
+                // 🔒 POSITION-LOCK AWARE SORT: keep locked/pending posts at the front.
                 try {
-                    rankedSnapshot = (Array.isArray(rankedSnapshot) ? rankedSnapshot : [])
-                        .slice()
-                        .sort((a, b) => compareFeedPriority(a, b));
+                    const _snapNow = Date.now();
+                    const _snapLocked = [];
+                    const _snapSortable = [];
+                    for (const _rp of (Array.isArray(rankedSnapshot) ? rankedSnapshot : [])) {
+                        const _rpLk = _rp && _rp._positionLocked && (Number(_rp._lockedUntilMs) || 0) > _snapNow;
+                        const _rpPd = _rp && !!_rp._pending;
+                        if (_rpLk || _rpPd) _snapLocked.push(_rp);
+                        else _snapSortable.push(_rp);
+                    }
+                    _snapSortable.sort((a, b) => compareFeedPriority(a, b));
+                    rankedSnapshot = [..._snapLocked, ..._snapSortable];
                 } catch (e) { /* keep existing order on sort failure */ }
                 rankedSnapshot = applyVoteForcedSlotPins(rankedSnapshot);
                 pendingSortedPosts = compactPostListForSlots(rankedSnapshot);
@@ -43480,10 +43504,22 @@ function setUploadModalHeader(title, subtitle) {
 
                 // Save latest target snapshot and reconcile gradually (1 post per second).
                 // Final pre-paint enforcement: rank by net likes (highest first).
+                // 🔒 POSITION-LOCK AWARE SORT: locked/pending posts (new user posts) are
+                // extracted first, then only regular posts are sorted by engagement.
+                // This ensures a freshly created post stays at slot 1 and only moves
+                // when another new post arrives or when it receives a vote.
                 try {
-                    sortedPosts = (Array.isArray(sortedPosts) ? sortedPosts : [])
-                        .slice()
-                        .sort((a, b) => compareFeedPriority(a, b));
+                    const _sortNow = Date.now();
+                    const _lockedFront = [];
+                    const _sortable = [];
+                    for (const _sp of (Array.isArray(sortedPosts) ? sortedPosts : [])) {
+                        const _isLk = _sp && _sp._positionLocked && (Number(_sp._lockedUntilMs) || 0) > _sortNow;
+                        const _isPd = _sp && !!_sp._pending;
+                        if (_isLk || _isPd) _lockedFront.push(_sp);
+                        else _sortable.push(_sp);
+                    }
+                    _sortable.sort((a, b) => compareFeedPriority(a, b));
+                    sortedPosts = [..._lockedFront, ..._sortable];
                 } catch (e) { /* keep existing order on sort failure */ }
                 sortedPosts = applyVoteForcedSlotPins(sortedPosts);
                 pendingSortedPosts = compactPostListForSlots(Array.isArray(sortedPosts) ? sortedPosts : []);
