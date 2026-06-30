@@ -38990,6 +38990,21 @@ function setUploadModalHeader(title, subtitle) {
                                 console.log('⏸️ Reconcile: deferring remove of freshly published post during settle window');
                                 return;
                             }
+                            // 🔒 LOCK GUARD: Never remove a position-locked post (new user-created posts
+                            // are locked for 5 minutes via _positionLocked + _lockedUntilMs).
+                            const now = Date.now();
+                            const isLocked = !!(removedPost._positionLocked && (Number(removedPost._lockedUntilMs) || 0) > now);
+                            const isPending = !!removedPost._pending;
+                            if (isLocked || isPending) {
+                                console.log(`🔒 Reconcile: blocking REMOVAL of ${isLocked ? 'locked' : 'pending'} post ${removedPost.id} — adding it back to target`);
+                                // Re-insert into pendingSortedPosts so future reconcile ticks keep it
+                                try {
+                                    if (Array.isArray(pendingSortedPosts) && !pendingSortedPosts.some(p => p && p.id === removedPost.id)) {
+                                        pendingSortedPosts.unshift(removedPost);
+                                    }
+                                } catch(e) { /* ignore */ }
+                                return; // skip this tick
+                            }
                         }
                         current.splice(diffIdx, 1);
                         opKind = 'remove';
@@ -43428,6 +43443,30 @@ function setUploadModalHeader(title, subtitle) {
                     }
                     sortedPosts = _deduped;
                 } catch (e) { console.warn('Final dedupe before scroller failed', e); }
+
+                // 🔒 LOCKED/PENDING POST PRESERVATION:
+                // If the waterfall or composition pass dropped any locked/pending posts
+                // from the current scroller, re-inject them at the front so the reconciler
+                // never sees them as "to be removed".
+                try {
+                    const now = Date.now();
+                    const sortedIds = new Set(sortedPosts.map(p => p && p.id).filter(Boolean));
+                    const currentItems = (gridScroller && Array.isArray(gridScroller.items)) ? gridScroller.items : [];
+                    const toReinject = [];
+                    for (const p of currentItems) {
+                        if (!p || !p.id) continue;
+                        if (sortedIds.has(p.id)) continue;
+                        const isLocked = p._positionLocked && (Number(p._lockedUntilMs) || 0) > now;
+                        const isPending = !!p._pending;
+                        if (isLocked || isPending) {
+                            toReinject.push(p);
+                            console.log(`🔒 renderGrid: preserving ${isPending ? 'pending' : 'locked'} post ${p.id} dropped by waterfall`);
+                        }
+                    }
+                    if (toReinject.length > 0) {
+                        sortedPosts = [...toReinject, ...sortedPosts];
+                    }
+                } catch (e) { console.warn('Locked post preservation failed', e); }
 
                 // Save latest target snapshot and reconcile gradually (1 post per second).
                 // Final pre-paint enforcement: rank by net likes (highest first).
