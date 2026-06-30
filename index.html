@@ -33569,6 +33569,17 @@ function setUploadModalHeader(title, subtitle) {
                     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
                 };
 
+                // Helper: extract lat/lon from a post (handles multiple storage formats)
+                const getPostCoords = (post) => {
+                    const lat = Number(post.lat || post.latitude ||
+                        (post.geolocation && (post.geolocation.lat || post.geolocation.latitude)) ||
+                        (post.postOrigin && (post.postOrigin.lat || post.postOrigin.latitude)) || NaN);
+                    const lon = Number(post.lon || post.longitude || post.lng ||
+                        (post.geolocation && (post.geolocation.lon || post.geolocation.longitude || post.geolocation.lng)) ||
+                        (post.postOrigin && (post.postOrigin.lon || post.postOrigin.longitude || post.postOrigin.lng)) || NaN);
+                    return { lat, lon };
+                };
+
                 // Helper: get post net engagement score
                 const getNetScore = (post) => (Number(post.likes || 0)) - (Number(post.dislikes || 0));
 
@@ -33591,13 +33602,12 @@ function setUploadModalHeader(title, subtitle) {
 
                 // STEP 3A: 60% LOCAL (adaptive distance, area-matched)
                 for (const post of livePosts) {
-                    const postArea = post.county || post.areaTag || post.displayAreaTag || '';
+                    const postArea = post.county || post.areaTag || post.displayAreaTag || post.zoneTag || post.area || '';
                     const isAreaMatch = postArea.toLowerCase() === userArea.toLowerCase();
                     
                     if (!isAreaMatch) continue;
                     
-                    const postLat = parseFloat(post.lat);
-                    const postLon = parseFloat(post.lon);
+                    const { lat: postLat, lon: postLon } = getPostCoords(post);
                     if (!isFinite(postLat) || !isFinite(postLon)) continue;
                     
                     const dist = distMeters(postLat, postLon);
@@ -33612,19 +33622,20 @@ function setUploadModalHeader(title, subtitle) {
                 const localFinal = local.slice(0, localTarget);
                 console.log(`   60% LOCAL: ${localFinal.length}/${localTarget}`);
 
-                // STEP 3B: 20% QUALITY (higher net than local max, as far as possible)
-                if (localFinal.length > 0) {
-                    const maxLocalNet = Math.max(...localFinal.map(l => l.netScore));
+                // STEP 3B: 20% QUALITY (higher net than local max, or any net>0 if no local, as far as possible)
+                {
+                    const maxLocalNet = localFinal.length > 0 ? Math.max(...localFinal.map(l => l.netScore)) : -Infinity;
                     const qualityTarget = Math.ceil(targetLimit * 0.20);
                     
                     for (const post of livePosts) {
                         if (categorized.has(post.id)) continue;
                         
                         const netScore = getNetScore(post);
-                        if (netScore <= maxLocalNet) continue; // MUST be higher quality than 60%
+                        // If we have local content, quality must beat it; otherwise accept any net-positive post
+                        if (localFinal.length > 0 && netScore <= maxLocalNet) continue;
+                        if (localFinal.length === 0 && netScore < 0) continue;
                         
-                        const postLat = parseFloat(post.lat);
-                        const postLon = parseFloat(post.lon);
+                        const { lat: postLat, lon: postLon } = getPostCoords(post);
                         if (!isFinite(postLat) || !isFinite(postLon)) continue;
                         
                         const dist = distMeters(postLat, postLon);
@@ -33680,9 +33691,8 @@ function setUploadModalHeader(title, subtitle) {
                     const fillPosts = livePosts
                         .filter(p => !categorized.has(p.id))
                         .map(p => {
-                            const postLat = parseFloat(p.lat);
-                            const postLon = parseFloat(p.lon);
-                            const dist = isFinite(postLat) && isFinite(postLon) ? distMeters(postLat, postLon) : 999999;
+                            const { lat: pLat, lon: pLon } = getPostCoords(p);
+                            const dist = isFinite(pLat) && isFinite(pLon) ? distMeters(pLat, pLon) : 999999;
                             return { post: p, dist, netScore: getNetScore(p) };
                         })
                         .sort((a, b) => (a.dist - b.dist) || (b.netScore - a.netScore))
@@ -33691,7 +33701,22 @@ function setUploadModalHeader(title, subtitle) {
                     result.push(...fillPosts.map(x => x.post));
                 }
 
-                console.log(`   ✅ FINAL: ${result.length}/${targetLimit} posts`);
+                // Show a brief toast when this filter ran from a location commit
+                // so the user can see if local content exists for the new area
+                try {
+                    const localCount = localFinal.length;
+                    const isManualCommit = window.__lastLocationChangeReason === 'user_commit' || window.__lastLocationChangeReason === 'return_home';
+                    if (isManualCommit) {
+                        window.__lastLocationChangeReason = null; // consume it
+                        const areaLabel = userArea && userArea !== 'Local area' ? userArea : `${userLat.toFixed(3)}, ${userLon.toFixed(3)}`;
+                        const msg = localCount > 0
+                            ? `📍 ${localCount} local post${localCount > 1 ? 's' : ''} found near ${areaLabel}`
+                            : `📍 No local posts yet near ${areaLabel} — showing best content from nearby`;
+                        if (typeof showNotification === 'function') showNotification(msg);
+                    }
+                } catch (e) { /* ignore toast errors */ }
+
+                console.log(`   ✅ FINAL: ${result.length}/${targetLimit} posts (${localFinal.length} local)`);
                 return result.slice(0, targetLimit);
 
             } catch (e) {
@@ -33755,6 +33780,11 @@ function setUploadModalHeader(title, subtitle) {
             // Update tracked location
             __lastFilteredLocation = { lat: location.lat, lon: location.lon };
             __lastRefilterTime = now;
+
+            // Store reason so filterPostsForUserLocation can show appropriate toast
+            if (reason === 'user_commit' || reason === 'return_home') {
+                window.__lastLocationChangeReason = reason;
+            }
 
             // Trigger grid rerender which will call filterPostsForUserLocation with new location
             try {
