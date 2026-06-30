@@ -16595,6 +16595,39 @@
         }
 
         // Ensure a post is unique across all gridContent keys, then insert into the given key.
+        // 🔥 NEW POST ORDERING SYSTEM: Keep new posts pinned to top with priority queue
+        // When a new post arrives, shift existing new posts down by incrementing their _newPostOrder
+        function shiftNewPostOrderAndInsert(contentKey, post) {
+            try {
+                // Mark incoming post as newest (order 0)
+                post._newPostOrder = 0;
+                post._newPostAddedAt = Date.now();
+                
+                // Shift existing posts with _newPostOrder down by 1
+                if (gridContent[contentKey] && Array.isArray(gridContent[contentKey])) {
+                    gridContent[contentKey].forEach(existingPost => {
+                        if (existingPost && typeof existingPost._newPostOrder === 'number') {
+                            existingPost._newPostOrder++;
+                            // Stop tracking after 20 positions to prevent memory bloat
+                            if (existingPost._newPostOrder > 20) {
+                                delete existingPost._newPostOrder;
+                                delete existingPost._newPostAddedAt;
+                            }
+                        }
+                    });
+                }
+                
+                // Now call the standard insert which adds to position 0
+                ensureUniqueAndInsert(contentKey, post);
+                
+                console.log(`✅ NEW POST QUEUE: Inserted post ${post.id} at order 0, shifted existing posts down`);
+            } catch (e) {
+                console.warn('shiftNewPostOrderAndInsert failed:', e);
+                // Fallback to normal insert
+                ensureUniqueAndInsert(contentKey, post);
+            }
+        }
+
         function ensureUniqueAndInsert(contentKey, post) {
             try {
                 try { console.log('ensureUniqueAndInsert:', { contentKey: contentKey, postId: post && post.id, currentUserId: currentUserId }); } catch(e) {}
@@ -32214,6 +32247,34 @@ function setUploadModalHeader(title, subtitle) {
                     } catch (e) {
                         console.warn('Failed to preserve pending posts before renderGrid:', e);
                     }
+                    
+                    // 🔥 SORT NEW POSTS TO TOP after Firebase sync
+                    // This ensures new posts with _newPostOrder stay pinned to the top even after Firebase updates
+                    try {
+                        // Sort each area's gridContent to keep _newPostOrder posts first
+                        for (const area in gridContent) {
+                            if (!Array.isArray(gridContent[area])) continue;
+                            
+                            const newPosts = [];
+                            const regularPosts = [];
+                            
+                            gridContent[area].forEach(post => {
+                                if (post && typeof post._newPostOrder === 'number') {
+                                    newPosts.push(post);
+                                } else {
+                                    regularPosts.push(post);
+                                }
+                            });
+                            
+                            // Sort new posts by _newPostOrder (ascending)
+                            newPosts.sort((a, b) => (a._newPostOrder || 0) - (b._newPostOrder || 0));
+                            
+                            // Reassemble with new posts first
+                            gridContent[area] = [...newPosts, ...regularPosts];
+                        }
+                    } catch (e) {
+                        console.warn('Failed to sort new posts after Firebase sync:', e);
+                    }
 
                     // Fresh Firebase data arrived: force immediate paint.
                     // Otherwise the global 30s render throttle can delay first visible posts.
@@ -41854,6 +41915,35 @@ function setUploadModalHeader(title, subtitle) {
             }
             
             // ========================================================================
+            // NEW POST ORDERING: Keep recently created posts pinned to top
+            // Sort by _newPostOrder so new posts always appear first
+            // ========================================================================
+            try {
+                const newPosts = [];
+                const regularPosts = [];
+                
+                allPosts.forEach(post => {
+                    if (post && typeof post._newPostOrder === 'number') {
+                        newPosts.push(post);
+                    } else {
+                        regularPosts.push(post);
+                    }
+                });
+                
+                // Sort new posts by _newPostOrder (ascending: 0 is newest)
+                newPosts.sort((a, b) => (a._newPostOrder || 0) - (b._newPostOrder || 0));
+                
+                // Concatenate: new posts first, then regular posts
+                allPosts = [...newPosts, ...regularPosts];
+                
+                if (newPosts.length > 0) {
+                    console.log(`📌 NEW POST PRIORITY: Sorted ${newPosts.length} new posts to top (order 0-${Math.max(...newPosts.map(p => p._newPostOrder || 0))})`);
+                }
+            } catch (e) {
+                console.warn('⚠️ New post ordering failed:', e);
+            }
+            
+            // ========================================================================
             // POST VALIDATION: Filter out phantom/corrupted posts
             // ========================================================================
             // DISABLED FOR NOW - Validation was too strict and removed legitimate posts
@@ -41899,14 +41989,34 @@ function setUploadModalHeader(title, subtitle) {
             
             // 🔥 RE-INJECT PENDING POSTS: Add newly created posts that haven't synced to Firebase yet
             // This ensures posts don't disappear when gridContent is reorganized
+            // PRESERVE: Keep _newPostOrder so new posts stay pinned to top
             if (newPostsNotYetSynced.length > 0) {
-                const userArea = newPostsNotYetSynced[0].zoneTag || newPostsNotYetSynced[0].county || 'Unknown Area';
+                // Find the target area - prefer zoneTag first as it's most specific
+                let userArea = null;
+                for (const p of newPostsNotYetSynced) {
+                    if (p && p.zoneTag) {
+                        userArea = p.zoneTag;
+                        break;
+                    }
+                }
+                if (!userArea && newPostsNotYetSynced[0]) {
+                    userArea = newPostsNotYetSynced[0].county || 'Unknown Area';
+                }
+                
                 if (!gridContent[userArea]) {
                     gridContent[userArea] = [];
                 }
-                // Add pending posts to the front of their area
+                
+                // Sort pending posts by _newPostOrder to maintain priority order
+                newPostsNotYetSynced.sort((a, b) => {
+                    const orderA = typeof a._newPostOrder === 'number' ? a._newPostOrder : Infinity;
+                    const orderB = typeof b._newPostOrder === 'number' ? b._newPostOrder : Infinity;
+                    return orderA - orderB;
+                });
+                
+                // Add pending posts to the front of their area, preserving their order
                 gridContent[userArea] = [...newPostsNotYetSynced, ...gridContent[userArea]];
-                console.log(`✅ Re-injected ${newPostsNotYetSynced.length} pending posts into gridContent[${userArea}]`);
+                console.log(`✅ RE-INJECTED: ${newPostsNotYetSynced.length} pending posts into gridContent[${userArea}] with _newPostOrder preserved`);
             }
             
             // Do not preserve a special user bucket of owned posts. All posts
@@ -45469,10 +45579,20 @@ function setUploadModalHeader(title, subtitle) {
                     postData._createdAt = Date.now();
                     
                     try {
-                        if (typeof routeNewPostToLoadedGrids === 'function') routeNewPostToLoadedGrids(postData, contentKey);
-                        else if (typeof ensureUniqueAndInsert === 'function') ensureUniqueAndInsert(contentKey, postData);
-                        else gridContent[contentKey].push(postData);
-                    } catch(e) { gridContent[contentKey].push(postData); }
+                        // 🔥 NEW: Use new post ordering system to pin to top and shift others down
+                        if (typeof shiftNewPostOrderAndInsert === 'function') {
+                            shiftNewPostOrderAndInsert(contentKey, postData);
+                        } else if (typeof routeNewPostToLoadedGrids === 'function') {
+                            routeNewPostToLoadedGrids(postData, contentKey);
+                        } else if (typeof ensureUniqueAndInsert === 'function') {
+                            ensureUniqueAndInsert(contentKey, postData);
+                        } else {
+                            gridContent[contentKey].push(postData);
+                        }
+                    } catch(e) { 
+                        console.warn('Post insertion failed, using fallback:', e);
+                        gridContent[contentKey].push(postData); 
+                    }
                     
                     console.log(`✅ POST MARKED AS PENDING (will survive grid reorganization): ${postId}`);
                     
