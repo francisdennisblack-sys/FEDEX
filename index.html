@@ -324,7 +324,7 @@
                 // Register service worker to handle background location updates
                 try {
                     if ('serviceWorker' in navigator) {
-                        navigator.serviceWorker.register('/sw.js?v=20260630T024133Z').then(reg => {
+                        navigator.serviceWorker.register('/sw.js?v=20260630T030207Z').then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
                         }).catch(err => console.warn('ServiceWorker register failed', err));
 
@@ -1003,7 +1003,7 @@
     <link rel="preconnect" href="https://firebaseapp.com" crossorigin>
     <link rel="preconnect" href="https://js.stripe.com" crossorigin>
     <link rel="dns-prefetch" href="https://firebaseio.com">
-    <link rel="stylesheet" href="style.css?v=20260630T024133Z">
+    <link rel="stylesheet" href="style.css?v=20260630T030207Z">
     <!-- 🚀 Stripe.js v3 — defer so it doesn't block first paint -->
     <script src="https://js.stripe.com/v3/" defer></script>
     <style>
@@ -17409,6 +17409,28 @@
         let maxGridSize = 2000; // Pre-create 2000 boxes total for virtually unlimited scrolling
         let isConnected = false;
         let gridContent = {}; // Store posts by user ID instead of POI
+        
+        // 🔄 RESTORE GRIDCONTENT FROM LOCALSTORAGE ON PAGE LOAD
+        // This ensures posts from previous sessions stick around until Firebase syncs
+        (function() {
+            try {
+                setTimeout(() => {
+                    try {
+                        const gridKey = `gridContent_${currentUserId || 'default'}`;
+                        const cached = localStorage.getItem(gridKey);
+                        if (cached) {
+                            const restoredGrid = JSON.parse(cached);
+                            if (Array.isArray(restoredGrid) && restoredGrid.length > 0) {
+                                gridContent[currentUserId || 'default'] = restoredGrid;
+                                console.log(`✅ Restored ${restoredGrid.length} posts from localStorage (${gridKey})`);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ Failed to restore gridContent from localStorage:', e);
+                    }
+                }, 100);  // Defer slightly to ensure currentUserId is set
+            } catch (e) { /* ignore */ }
+        })();
         let postCache = {}; // BACKUP CACHE: Keep posts safe from gridContent clears, indexed by post.id
         let gridScroller = null; // 🚀 VIRTUAL GRID SCROLLER for main feed
         let selectedFile = null;
@@ -45385,6 +45407,19 @@ function setUploadModalHeader(title, subtitle) {
                         else if (typeof ensureUniqueAndInsert === 'function') ensureUniqueAndInsert(contentKey, postData);
                         else gridContent[contentKey].push(postData);
                     } catch(e) { gridContent[contentKey].push(postData); }
+                    
+                    // 🔥 CRITICAL: Persist to localStorage IMMEDIATELY after adding to gridContent
+                    // This prevents the post from disappearing if a grid refresh/resync happens before Firebase fires
+                    try {
+                        const gridKey = `gridContent_${authUserId}`;
+                        let cachedGrid = gridContent[contentKey] ? Array.from(gridContent[contentKey]) : [];
+                        // Limit cache size
+                        cachedGrid = cachedGrid.slice(0, 300);
+                        localStorage.setItem(gridKey, JSON.stringify(cachedGrid));
+                        console.log(`✅ Post IMMEDIATELY persisted to localStorage (${gridKey})`);
+                    } catch (persistErr) {
+                        console.warn('⚠️ Failed to immediately persist to localStorage:', persistErr);
+                    }
                 }
                 // Hard guarantee: inject into active scroller path so the post appears
                 // immediately even before async realtime merges settle.
@@ -45468,11 +45503,52 @@ function setUploadModalHeader(title, subtitle) {
                 try {
                     await savePostToFirebaseShared(postId, postData);
                     console.log(`✅ Post saved to shared collection - all users will see it`);
+                    
+                    // 🔥 PERSIST TO LOCALSTORAGE IMMEDIATELY after Firebase save
+                    // This ensures post sticks even if user refreshes before Firebase listener fires
+                    try {
+                        const gridKey = `gridContent_${authUserId}`;
+                        let cachedGrid = [];
+                        try {
+                            const cached = localStorage.getItem(gridKey);
+                            if (cached) cachedGrid = JSON.parse(cached);
+                        } catch (e) { cachedGrid = []; }
+                        
+                        // Add new post to cached grid if not already there
+                        if (!cachedGrid.some(p => p && p.id === postId)) {
+                            cachedGrid.unshift(postData);  // Add to front
+                            cachedGrid = cachedGrid.slice(0, 300);  // Keep last 300
+                            localStorage.setItem(gridKey, JSON.stringify(cachedGrid));
+                            console.log(`✅ Post persisted to localStorage - will survive page refresh`);
+                        }
+                    } catch (persistErr) {
+                        console.warn('⚠️ Failed to persist to localStorage (non-critical):', persistErr);
+                    }
+                    
                 } catch (firstErr) {
                     console.warn('⚠️ savePostToFirebaseShared failed, retrying once...', firstErr);
                     try {
                         await savePostToFirebaseShared(postId, postData);
                         console.log(`✅ Post saved on retry to shared collection`);
+                        
+                        // 🔥 PERSIST TO LOCALSTORAGE AFTER RETRY
+                        try {
+                            const gridKey = `gridContent_${authUserId}`;
+                            let cachedGrid = [];
+                            try {
+                                const cached = localStorage.getItem(gridKey);
+                                if (cached) cachedGrid = JSON.parse(cached);
+                            } catch (e) { cachedGrid = []; }
+                            
+                            if (!cachedGrid.some(p => p && p.id === postId)) {
+                                cachedGrid.unshift(postData);
+                                cachedGrid = cachedGrid.slice(0, 300);
+                                localStorage.setItem(gridKey, JSON.stringify(cachedGrid));
+                                console.log(`✅ Post persisted to localStorage after retry`);
+                            }
+                        } catch (persistErr) {
+                            console.warn('⚠️ Failed to persist to localStorage after retry:', persistErr);
+                        }
                     } catch (secondErr) {
                         console.error('❌ savePostToFirebaseShared retry failed:', secondErr);
                         throw secondErr;
