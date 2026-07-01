@@ -95,6 +95,331 @@
         try { document.documentElement.classList.add('app-startup-loading'); } catch (e) {}
     </script>
     <script>
+        (function initStartupDiagnostics() {
+            try {
+                if (window.__startupDiagInstalled) return;
+                window.__startupDiagInstalled = true;
+
+                var baseConsole = {
+                    log: console.log ? console.log.bind(console) : function(){},
+                    info: console.info ? console.info.bind(console) : function(){},
+                    warn: console.warn ? console.warn.bind(console) : function(){},
+                    error: console.error ? console.error.bind(console) : function(){}
+                };
+
+                var diag = {
+                    startedAt: Date.now(),
+                    events: [],
+                    stages: [],
+                    activeStages: {},
+                    buttonEvents: {},
+                    buttonProbeTotal: 0
+                };
+                window.__startupDiag = diag;
+                window.__baseConsole = baseConsole;
+
+                function pushEvent(level, message, data) {
+                    var entry = { ts: Date.now(), level: level, message: String(message || ''), data: data || null };
+                    diag.events.push(entry);
+                    try {
+                        if (level === 'error') baseConsole.error('[STARTUP]', entry.message, entry.data || '');
+                        else if (level === 'warn') baseConsole.warn('[STARTUP]', entry.message, entry.data || '');
+                        else baseConsole.log('[STARTUP]', entry.message, entry.data || '');
+                    } catch (e) {}
+                    return entry;
+                }
+
+                function stageStart(name, data) {
+                    var now = Date.now();
+                    var key = String(name || 'unknown');
+                    diag.activeStages[key] = now;
+                    diag.stages.push({ name: key, status: 'start', ts: now, data: data || null });
+                    pushEvent('info', 'stage start: ' + key, data || null);
+                }
+
+                function stageSuccess(name, data) {
+                    var now = Date.now();
+                    var key = String(name || 'unknown');
+                    var startedAt = diag.activeStages[key] || now;
+                    delete diag.activeStages[key];
+                    diag.stages.push({ name: key, status: 'success', ts: now, elapsedMs: Math.max(0, now - startedAt), data: data || null });
+                    pushEvent('info', 'stage success: ' + key, { elapsedMs: Math.max(0, now - startedAt), data: data || null });
+                }
+
+                function stageFail(name, error, data) {
+                    var now = Date.now();
+                    var key = String(name || 'unknown');
+                    var startedAt = diag.activeStages[key] || now;
+                    delete diag.activeStages[key];
+                    var errObj = null;
+                    try {
+                        errObj = error ? {
+                            name: error.name || 'Error',
+                            message: error.message || String(error),
+                            stack: error.stack ? String(error.stack) : null
+                        } : null;
+                    } catch (e) {
+                        errObj = { name: 'Error', message: String(error || 'unknown'), stack: null };
+                    }
+                    diag.stages.push({ name: key, status: 'fail', ts: now, elapsedMs: Math.max(0, now - startedAt), error: errObj, data: data || null });
+                    pushEvent('error', 'stage fail: ' + key, { elapsedMs: Math.max(0, now - startedAt), error: errObj, data: data || null });
+                }
+
+                function trackPromise(name, promise, timeoutMs) {
+                    var toMs = Number(timeoutMs || 12000);
+                    stageStart(name);
+                    var settled = false;
+                    var timeoutId = setTimeout(function() {
+                        if (settled) return;
+                        stageFail(name, new Error('Promise timeout after ' + toMs + 'ms'));
+                    }, toMs);
+                    return Promise.resolve(promise).then(function(result) {
+                        if (!settled) {
+                            settled = true;
+                            clearTimeout(timeoutId);
+                            stageSuccess(name);
+                        }
+                        return result;
+                    }).catch(function(err) {
+                        if (!settled) {
+                            settled = true;
+                            clearTimeout(timeoutId);
+                            stageFail(name, err);
+                        }
+                        throw err;
+                    });
+                }
+
+                window.__startupStageStart = stageStart;
+                window.__startupStageSuccess = stageSuccess;
+                window.__startupStageFail = stageFail;
+                window.__startupTrackPromise = trackPromise;
+
+                window.addEventListener('error', function(event) {
+                    try {
+                        stageFail('window.error', event && event.error ? event.error : new Error((event && event.message) || 'Unknown window error'), {
+                            source: event && event.filename ? event.filename : null,
+                            line: event && event.lineno ? event.lineno : null,
+                            col: event && event.colno ? event.colno : null
+                        });
+                    } catch (e) {}
+                }, true);
+
+                window.addEventListener('unhandledrejection', function(event) {
+                    try {
+                        var reason = event && event.reason ? event.reason : new Error('Unhandled promise rejection');
+                        stageFail('window.unhandledrejection', reason);
+                    } catch (e) {}
+                });
+
+                function detectSafari() {
+                    try {
+                        var ua = navigator.userAgent || '';
+                        var isWebKit = /WebKit/i.test(ua);
+                        var isSafariLike = /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|Chrome|Firefox|OPR|SamsungBrowser/i.test(ua);
+                        var isIOS = /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                        return { isSafariLike: !!(isWebKit && isSafariLike), isIOS: !!isIOS, ua: ua };
+                    } catch (e) {
+                        return { isSafariLike: false, isIOS: false, ua: '' };
+                    }
+                }
+
+                function runCompatibilityAudit() {
+                    stageStart('compatibility-audit');
+                    var report = {
+                        features: {},
+                        safari: detectSafari()
+                    };
+                    try {
+                        report.features.promise = typeof Promise !== 'undefined';
+                        report.features.fetch = typeof fetch === 'function';
+                        report.features.serviceWorker = !!(navigator && navigator.serviceWorker);
+                        report.features.indexedDB = !!window.indexedDB;
+                        report.features.localStorage = !!window.localStorage;
+                        report.features.sessionStorage = !!window.sessionStorage;
+                        report.features.mutationObserver = typeof MutationObserver !== 'undefined';
+                        report.features.pointerEvents = !!window.PointerEvent;
+                        report.features.touchEvents = ('ontouchstart' in window) || !!(navigator && navigator.maxTouchPoints > 0);
+                        report.features.requestIdleCallback = typeof window.requestIdleCallback === 'function';
+                        report.features.optionalChainingRuntime = true;
+                    } catch (e) {
+                        stageFail('compatibility-audit', e);
+                        return;
+                    }
+
+                    if (window.indexedDB && typeof indexedDB.open === 'function') {
+                        stageStart('compatibility-audit.indexeddb-open');
+                        try {
+                            var idbDone = false;
+                            var req = indexedDB.open('startup-diag-probe', 1);
+                            var timeoutId = setTimeout(function() {
+                                if (idbDone) return;
+                                idbDone = true;
+                                stageFail('compatibility-audit.indexeddb-open', new Error('IndexedDB open timeout'));
+                            }, 7000);
+                            req.onupgradeneeded = function() {
+                                try { req.result.close(); } catch (e) {}
+                            };
+                            req.onsuccess = function() {
+                                if (idbDone) return;
+                                idbDone = true;
+                                clearTimeout(timeoutId);
+                                try { req.result.close(); } catch (e) {}
+                                stageSuccess('compatibility-audit.indexeddb-open');
+                            };
+                            req.onerror = function() {
+                                if (idbDone) return;
+                                idbDone = true;
+                                clearTimeout(timeoutId);
+                                stageFail('compatibility-audit.indexeddb-open', req.error || new Error('IndexedDB open failed'));
+                            };
+                            req.onblocked = function() {
+                                stageFail('compatibility-audit.indexeddb-open', new Error('IndexedDB open blocked'));
+                            };
+                        } catch (e) {
+                            stageFail('compatibility-audit.indexeddb-open', e);
+                        }
+                    }
+
+                    stageSuccess('compatibility-audit', report);
+                }
+
+                function setupButtonEventProbe() {
+                    stageStart('button-event-probe.setup');
+                    var selector = 'button, [role="button"], [onclick], a[href], input[type="button"], input[type="submit"]';
+
+                    function getButtonKey(node) {
+                        try {
+                            var id = node.id ? ('#' + node.id) : '';
+                            var cls = node.className ? ('.' + String(node.className).trim().split(/\s+/).slice(0, 2).join('.')) : '';
+                            var tag = node.tagName ? String(node.tagName).toLowerCase() : 'node';
+                            var text = node.textContent ? String(node.textContent).trim().slice(0, 40) : '';
+                            return tag + id + cls + (text ? ('::' + text) : '');
+                        } catch (e) {
+                            return 'node-' + Math.random().toString(36).slice(2);
+                        }
+                    }
+
+                    function markButtonEvent(node, type, evt) {
+                        try {
+                            var key = getButtonKey(node);
+                            if (!diag.buttonEvents[key]) {
+                                diag.buttonEvents[key] = { pointerdown: 0, touchstart: 0, click: 0, firstSeenAt: Date.now(), target: key };
+                            }
+                            if (!diag.buttonEvents[key][type]) diag.buttonEvents[key][type] = 0;
+                            diag.buttonEvents[key][type] += 1;
+                            pushEvent('info', 'button event ' + type, {
+                                target: key,
+                                pointerType: evt && evt.pointerType ? evt.pointerType : null
+                            });
+                        } catch (e) {}
+                    }
+
+                    function attachPerButtonListeners() {
+                        try {
+                            var nodes = document.querySelectorAll(selector);
+                            diag.buttonProbeTotal = nodes.length;
+                            for (var i = 0; i < nodes.length; i++) {
+                                var node = nodes[i];
+                                if (!node || node.__startupProbeBound) continue;
+                                node.__startupProbeBound = true;
+                                node.addEventListener('pointerdown', function(evt) { markButtonEvent(this, 'pointerdown', evt); }, { capture: true, passive: true });
+                                node.addEventListener('touchstart', function(evt) { markButtonEvent(this, 'touchstart', evt); }, { capture: true, passive: true });
+                                node.addEventListener('click', function(evt) { markButtonEvent(this, 'click', evt); }, { capture: true });
+                            }
+                            stageSuccess('button-event-probe.setup', { total: nodes.length });
+                        } catch (e) {
+                            stageFail('button-event-probe.setup', e);
+                        }
+                    }
+
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', attachPerButtonListeners, { once: true });
+                    } else {
+                        attachPerButtonListeners();
+                    }
+
+                    try {
+                        var mo = new MutationObserver(function() { attachPerButtonListeners(); });
+                        mo.observe(document.documentElement, { childList: true, subtree: true });
+                    } catch (e) {
+                        stageFail('button-event-probe.mutation-observer', e);
+                    }
+
+                    ['pointerdown', 'touchstart', 'click'].forEach(function(type) {
+                        document.addEventListener(type, function(evt) {
+                            try {
+                                var t = evt && evt.target && evt.target.closest ? evt.target.closest(selector) : null;
+                                if (t) markButtonEvent(t, type, evt);
+                            } catch (e) {}
+                        }, { capture: true, passive: type !== 'click' });
+                    });
+
+                    setTimeout(function() {
+                        try {
+                            var nodes = document.querySelectorAll(selector);
+                            var missing = [];
+                            for (var i = 0; i < nodes.length; i++) {
+                                var key = getButtonKey(nodes[i]);
+                                var rec = diag.buttonEvents[key];
+                                var hasPointer = rec && ((rec.pointerdown || 0) > 0 || (rec.touchstart || 0) > 0);
+                                var hasClick = rec && ((rec.click || 0) > 0);
+                                if (!hasPointer || !hasClick) {
+                                    missing.push({ target: key, hasPointer: !!hasPointer, hasClick: !!hasClick });
+                                }
+                            }
+                            pushEvent('warn', 'button coverage snapshot', {
+                                total: nodes.length,
+                                missingCount: missing.length,
+                                missingSample: missing.slice(0, 60)
+                            });
+                            stageSuccess('button-event-probe.coverage-snapshot', { total: nodes.length, missingCount: missing.length });
+                        } catch (e) {
+                            stageFail('button-event-probe.coverage-snapshot', e);
+                        }
+                    }, 12000);
+                }
+
+                window.reportStartupDiagnostics = function() {
+                    var report = {
+                        startedAt: diag.startedAt,
+                        elapsedMs: Date.now() - diag.startedAt,
+                        stageCount: diag.stages.length,
+                        activeStageNames: Object.keys(diag.activeStages || {}),
+                        buttonProbeTotal: diag.buttonProbeTotal,
+                        buttonTargetsSeen: Object.keys(diag.buttonEvents || {}).length,
+                        lastStages: diag.stages.slice(-25),
+                        lastEvents: diag.events.slice(-50)
+                    };
+                    try { baseConsole.log('[STARTUP] diagnostics report', report); } catch (e) {}
+                    return report;
+                };
+
+                stageStart('startup-diagnostics.bootstrap');
+                runCompatibilityAudit();
+                setupButtonEventProbe();
+
+                setTimeout(function() {
+                    try {
+                        if (document.documentElement && document.documentElement.classList.contains('app-startup-loading')) {
+                            stageFail('startup-loading-lock', new Error('app-startup-loading class still present after watchdog timeout'), {
+                                elapsedMs: Date.now() - diag.startedAt
+                            });
+                        } else {
+                            stageSuccess('startup-loading-lock');
+                        }
+                    } catch (e) {
+                        stageFail('startup-loading-lock', e);
+                    }
+                }, 12000);
+
+                stageSuccess('startup-diagnostics.bootstrap');
+            } catch (e) {
+                try { console.error('Startup diagnostics bootstrap failed', e); } catch (_) {}
+            }
+        })();
+    </script>
+    <script>
         // 🎯 ENSURE CHANGE LOCATION PILL IS VISIBLE ON ALL DEVICES (Fallback for :has() support)
         (function ensureChangeLocationPillVisible() {
             const ensureAddContentCtaVisible = () => {
@@ -160,6 +485,7 @@
     <script>
         // 🔄 AGGRESSIVE CACHE-BUSTING: Force consistency across all browsers/devices
         (function initVersionCheck() {
+            try { if (window.__startupStageStart) window.__startupStageStart('initVersionCheck'); } catch (e) {}
             const isIOSSafari = (function () {
                 try {
                     const ua = navigator.userAgent || '';
@@ -182,7 +508,10 @@
                 headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' }
             })
             .then(r => r.json())
-            .catch(() => null)
+            .catch((err) => {
+                try { if (window.__startupStageFail) window.__startupStageFail('initVersionCheck.fetch', err || new Error('version fetch failed')); } catch (e) {}
+                return null;
+            })
             .then(remoteVersion => {
                 try {
                     // Get last known version from sessionStorage (this browser tab)
@@ -207,6 +536,7 @@
                             sessionStorage.setItem('__wificontent_last_version', currentVersion);
                         }
                         sessionStorage.setItem('__wificontent_load_time', String(now));
+                        try { if (window.__startupStageSuccess) window.__startupStageSuccess('initVersionCheck', { isIOSSafari: true, hasReliableRemoteVersion: hasReliableRemoteVersion, currentVersion: currentVersion }); } catch (e) {}
                         return;
                     }
                     if (hasReliableRemoteVersion && lastVersion && lastVersion !== currentVersion) {
@@ -227,6 +557,7 @@
                         
                         // Hard reload after short delay to let assets cache-invalidate
                         setTimeout(() => window.location.reload(true), 200);
+                        try { if (window.__startupStageSuccess) window.__startupStageSuccess('initVersionCheck', { forcedReload: true, currentVersion: currentVersion, previousVersion: lastVersion }); } catch (e) {}
                         return;
                     }
                     
@@ -235,8 +566,12 @@
                         sessionStorage.setItem('__wificontent_last_version', currentVersion);
                     }
                     sessionStorage.setItem('__wificontent_load_time', String(now));
+                    try { if (window.__startupStageSuccess) window.__startupStageSuccess('initVersionCheck', { currentVersion: currentVersion, previousVersion: lastVersion, hasReliableRemoteVersion: hasReliableRemoteVersion }); } catch (e) {}
                     
-                } catch(e) { console.warn('Version check error:', e); }
+                } catch(e) {
+                    try { if (window.__startupStageFail) window.__startupStageFail('initVersionCheck', e); } catch (_) {}
+                    console.warn('Version check error:', e);
+                }
             });
         })();
     </script>
@@ -519,9 +854,14 @@
                 // Register service worker to handle background location updates
                 try {
                     if ('serviceWorker' in navigator && !window.__isIOSSafari) {
+                        try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.early'); } catch (e) {}
                         navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' }).then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
-                        }).catch(err => console.warn('ServiceWorker register failed', err));
+                            try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.early', { scope: reg && reg.scope ? reg.scope : null }); } catch (e) {}
+                        }).catch(err => {
+                            console.warn('ServiceWorker register failed', err);
+                            try { if (window.__startupStageFail) window.__startupStageFail('serviceWorker.register.early', err); } catch (e) {}
+                        });
 
                         navigator.serviceWorker.addEventListener('message', (ev) => {
                             try {
@@ -6634,11 +6974,26 @@
         };
 
         // Initialize Firebase
-        const app = initializeApp(firebaseConfig);
-        const database = getDatabase(app);
-        // Use default storage bucket from firebaseConfig (avoid manual overrides)
-        const storage = getStorage(app);
-        const auth = getAuth(app);
+        let app;
+        let database;
+        let storage;
+        let auth;
+        try {
+            try { if (window.__startupStageStart) window.__startupStageStart('firebase.initializeApp'); } catch (e) {}
+            app = initializeApp(firebaseConfig);
+            try { if (window.__startupStageSuccess) window.__startupStageSuccess('firebase.initializeApp'); } catch (e) {}
+
+            try { if (window.__startupStageStart) window.__startupStageStart('firebase.databaseAuthStorage.init'); } catch (e) {}
+            database = getDatabase(app);
+            // Use default storage bucket from firebaseConfig (avoid manual overrides)
+            storage = getStorage(app);
+            auth = getAuth(app);
+            try { if (window.__startupStageSuccess) window.__startupStageSuccess('firebase.databaseAuthStorage.init', { hasDatabase: !!database, hasStorage: !!storage, hasAuth: !!auth }); } catch (e) {}
+        } catch (e) {
+            try { if (window.__startupStageFail) window.__startupStageFail('firebase.initializeApp', e); } catch (_) {}
+            try { if (window.__startupStageFail) window.__startupStageFail('firebase.databaseAuthStorage.init', e); } catch (_) {}
+            throw e;
+        }
 
         // Debug: log configured storage bucket to help diagnose permission issues
         try { console.log('Firebase app storageBucket:', app?.options?.storageBucket || '(none)'); } catch(e) {}
@@ -17599,6 +17954,8 @@
         // STEP 1c: Check if IDs survived refresh (for diagnostics)
         const previousSessionAuthId = localStorage.getItem('lastSessionAuthId');
         
+        let __startupFirstAuthCallbackSeen = false;
+        try { if (window.__startupStageStart) window.__startupStageStart('auth.onAuthStateChanged.wait'); } catch (e) {}
         onAuthStateChanged(auth, async (user) => {
             // Mark auth as confirmed immediately so reflectProfileInHeader
             // and other guards stop treating the session as unknown.
@@ -17606,6 +17963,16 @@
             console.log('🔐 onAuthStateChanged fired');
             console.log('   user exists:', !!user);
             console.log('   user.uid:', user?.uid);
+            try {
+                if (!__startupFirstAuthCallbackSeen && window.__startupStageSuccess) {
+                    __startupFirstAuthCallbackSeen = true;
+                    window.__startupStageSuccess('auth.onAuthStateChanged.wait', {
+                        hasUser: !!user,
+                        uid: user && user.uid ? user.uid : null,
+                        isAnonymous: !!(user && user.isAnonymous)
+                    });
+                }
+            } catch (e) {}
             try { if (window.dumpAuthDiagnostics) await window.dumpAuthDiagnostics(); } catch(e){ console.warn('dumpAuthDiagnostics call failed', e); }
             
             if (user) {
@@ -17873,6 +18240,7 @@
                 }
 
                 if ('serviceWorker' in navigator && !window.__isIOSSafari) {
+                    try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.main'); } catch (e) {}
                     // Remove any legacy /sw.js registration so old mobile clients stop
                     // being pinned to the simple worker and receive the modern updater.
                     try {
@@ -17905,6 +18273,7 @@
 
                         navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(window.__APP_VERSION__), { updateViaCache: 'none' }).then(reg => {
                             console.log('✅ Service Worker registered (version=' + window.__APP_VERSION__ + ') - offline mode active');
+                            try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.main', { scope: reg && reg.scope ? reg.scope : null, version: window.__APP_VERSION__ || null }); } catch (e) {}
                         
                         // Attempt background sync if available
                         if ('sync' in reg) {
@@ -17926,13 +18295,19 @@
                         });
                         }).catch(err => {
                             console.warn('Service Worker registration failed:', err);
+                            try { if (window.__startupStageFail) window.__startupStageFail('serviceWorker.register.main', err); } catch (e) {}
                         });
                     }).catch(err => {
                         // If version check fails, fall back to standard registration
                         console.warn('Version check failed; falling back to standard SW registration:', err);
+                        try { if (window.__startupStageFail) window.__startupStageFail('serviceWorker.versionFetch.main', err); } catch (e) {}
                         navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(String(Date.now())), { updateViaCache: 'none' }).then(reg => {
                             console.log('✅ Service Worker registered (fallback) - offline mode active');
-                        }).catch(err2 => console.warn('Service Worker fallback registration failed:', err2));
+                            try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.main', { scope: reg && reg.scope ? reg.scope : null, fallback: true }); } catch (e) {}
+                        }).catch(err2 => {
+                            console.warn('Service Worker fallback registration failed:', err2);
+                            try { if (window.__startupStageFail) window.__startupStageFail('serviceWorker.register.main', err2, { fallback: true }); } catch (e) {}
+                        });
                     });
                     
                     // Listen for messages from service worker
@@ -17963,6 +18338,7 @@
                     });
                 } else if (window.__isIOSSafari) {
                     console.log('🍎 iOS Safari reliability mode: service worker disabled; using live network app');
+                    try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.main', { skippedForIOSSafari: true }); } catch (e) {}
                 }
                 
                 // Version polling: periodically check /version.json and trigger SW update/reload
