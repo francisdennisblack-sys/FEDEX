@@ -8817,6 +8817,28 @@
             } else {
                 window.__authPersistenceLikelyBroken = false;
             }
+            try {
+                const mem = Number(navigator.deviceMemory || 0);
+                const cores = Number(navigator.hardwareConcurrency || 0);
+                const lowMemory = Number.isFinite(mem) && mem > 0 && mem <= 2;
+                const lowCpu = Number.isFinite(cores) && cores > 0 && cores <= 2;
+                window.__constrainedRuntime = !!(
+                    window.__privateSafeMode ||
+                    window.__authPersistenceLikelyBroken ||
+                    lowMemory ||
+                    lowCpu
+                );
+                if (window.__constrainedRuntime) {
+                    console.warn('🪶 Constrained runtime enabled', {
+                        privateSafeMode: !!window.__privateSafeMode,
+                        authPersistenceLikelyBroken: !!window.__authPersistenceLikelyBroken,
+                        deviceMemory: mem || 'unknown',
+                        hardwareConcurrency: cores || 'unknown'
+                    });
+                }
+            } catch (e) {
+                window.__constrainedRuntime = !!(window.__privateSafeMode || window.__authPersistenceLikelyBroken);
+            }
         } catch (e) { console.warn('Storage check failed', e); }
 
         // ============================================
@@ -48192,6 +48214,10 @@ function setUploadModalHeader(title, subtitle) {
             // are not delayed. Databases are only needed when the user opens the
             // posting / search UI, so loading them 800ms after DOM ready is fine.
             const _doDbPreload = function() {
+                if (window.__constrainedRuntime) {
+                    console.log('🪶 Constrained runtime: skipping heavy DB preloads at startup');
+                    return;
+                }
                 console.log('📥 Preloading databases (POI index, locations, OSM places)...');
                 // Store preload promises so refine search/default handlers can reuse them (avoiding duplicate loads)
                 if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
@@ -48228,8 +48254,9 @@ function setUploadModalHeader(title, subtitle) {
                 if (raw) {
                     const parsed = JSON.parse(raw);
                     if (Array.isArray(parsed) && parsed.length > 0) {
-                        window.globalPOIDatabase = parsed;
-                        console.log(`⚡ Instant POI warm cache loaded: ${parsed.length} items from localStorage.lastPOIs`);
+                        const maxWarmPoi = window.__constrainedRuntime ? 600 : 2500;
+                        window.globalPOIDatabase = parsed.slice(0, maxWarmPoi);
+                        console.log(`⚡ Instant POI warm cache loaded: ${window.globalPOIDatabase.length}/${parsed.length} items from localStorage.lastPOIs`);
                     }
                 }
             } catch (e) { console.warn('Failed to restore cached POIs from localStorage', e); }
@@ -48249,7 +48276,7 @@ function setUploadModalHeader(title, subtitle) {
                     }
 
                     // kick off both the search-index preload and the lightweight POI load
-                    if (typeof window.ensureGlobalPoiSearchIndex === 'function') {
+                    if (!window.__constrainedRuntime && typeof window.ensureGlobalPoiSearchIndex === 'function') {
                         window._poiIndexPreloadPromise = window._poiIndexPreloadPromise || window.ensureGlobalPoiSearchIndex().catch(e => console.warn('POI index preload failed:', e));
                     }
                     // Start the state-optimized POI load (non-blocking)
@@ -48267,12 +48294,25 @@ function setUploadModalHeader(title, subtitle) {
                     if (document.visibilityState === 'visible') {
                         console.log('👀 Page visible again — refreshing POI data and grid');
                         try { window.ensurePOIDataReady(); } catch(e){}
+                        const now = Date.now();
+                        const last = Number(window.__lastForegroundRefreshTs || 0);
+                        const minInterval = window.__constrainedRuntime ? 60000 : 12000;
+                        if (now - last < minInterval) {
+                            return;
+                        }
+                        window.__lastForegroundRefreshTs = now;
                         // Refresh the grid content so users see fresh posts after returning.
                         // Use a small delay so the browser completes its own resume work first.
                         setTimeout(() => {
                             try {
-                                if (typeof forceGridRefresh === 'function') forceGridRefresh();
-                                else if (typeof renderGrid === 'function') renderGrid();
+                                if (window.__constrainedRuntime) {
+                                    if (typeof window.requestGridUpdate === 'function') window.requestGridUpdate('foreground-lite');
+                                    else if (typeof renderGrid === 'function') renderGrid();
+                                } else if (typeof forceGridRefresh === 'function') {
+                                    forceGridRefresh();
+                                } else if (typeof renderGrid === 'function') {
+                                    renderGrid();
+                                }
                             } catch(e){}
                         }, 300);
                     }
@@ -48380,13 +48420,13 @@ function setUploadModalHeader(title, subtitle) {
                     initializePhase0().catch(err => {
                         console.error('Phase 0 failed (non-critical):', err);
                     });
-                }, window.__iosLiteMode ? 800 : 100);
+                }, window.__constrainedRuntime ? 1200 : (window.__iosLiteMode ? 800 : 100));
 
                 // 📡 LAZY LOAD: Posts from Firebase (non-blocking)
                 setTimeout(() => {
                     console.log('⚡ LAZY LOAD: Loading posts from Firebase...');
                     subscribeToFirebasePostsWithReconnect();
-                }, window.__iosLiteMode ? 1200 : 200);
+                }, window.__constrainedRuntime ? 2200 : (window.__iosLiteMode ? 1200 : 200));
             };
 
             startHeavyBoot();
