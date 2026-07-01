@@ -177,6 +177,7 @@
                     // Get last known version from sessionStorage (this browser tab)
                     const lastVersion = sessionStorage.getItem('__wificontent_last_version');
                     const currentVersion = remoteVersion?.version || 'unknown';
+                    const hasReliableRemoteVersion = !!(remoteVersion && typeof remoteVersion.version === 'string' && remoteVersion.version.trim());
                     
                     // Log version info
                     console.log('🔄 VERSION CHECK:', {
@@ -186,8 +187,10 @@
                         userAgent: navigator.userAgent.substring(0, 50)
                     });
                     
-                    // If version changed, clear caches and mark for reload
-                    if (lastVersion && lastVersion !== currentVersion) {
+                    // If version changed, clear caches and mark for reload.
+                    // IMPORTANT: never force-reload on an unknown/failed version fetch,
+                    // otherwise Safari can get trapped in refresh loops.
+                    if (hasReliableRemoteVersion && lastVersion && lastVersion !== currentVersion) {
                         console.warn('⚠️ VERSION MISMATCH: Site updated, clearing caches');
                         
                         // Clear key storage items that might be stale
@@ -208,8 +211,10 @@
                         return;
                     }
                     
-                    // Store current version for next check
-                    sessionStorage.setItem('__wificontent_last_version', currentVersion);
+                    // Store current version for next check only when version is reliable.
+                    if (hasReliableRemoteVersion) {
+                        sessionStorage.setItem('__wificontent_last_version', currentVersion);
+                    }
                     sessionStorage.setItem('__wificontent_load_time', String(now));
                     
                 } catch(e) { console.warn('Version check error:', e); }
@@ -2260,31 +2265,8 @@
             } catch (e) {}
             if (!isIOS) return;
 
-            // Force stale iOS tabs onto the current build at least once.
-            try {
-                const BUILD_REFRESH_ID = '20260630T235500Z';
-                const buildSeenKey = 'iosBuildSeen';
-                const reloadDoneKey = 'iosBuildReloadDone:' + BUILD_REFRESH_ID;
-                const seenBuild = localStorage.getItem(buildSeenKey);
-                const reloadDone = sessionStorage.getItem(reloadDoneKey) === '1';
-                if (seenBuild !== BUILD_REFRESH_ID && !reloadDone) {
-                    localStorage.setItem(buildSeenKey, BUILD_REFRESH_ID);
-                    sessionStorage.setItem(reloadDoneKey, '1');
-                    try {
-                        if ('serviceWorker' in navigator) {
-                            navigator.serviceWorker.getRegistrations().then((regs) => {
-                                (regs || []).forEach((reg) => { try { reg.update && reg.update(); } catch (e) {} });
-                            }).catch(() => {});
-                        }
-                    } catch (e) {}
-                    try {
-                        const u = new URL(window.location.href);
-                        u.searchParams.set('v', BUILD_REFRESH_ID);
-                        window.location.replace(u.toString());
-                        return;
-                    } catch (e) {}
-                }
-            } catch (e) {}
+            // Disabled forced iOS build-refresh redirect.
+            // It can interfere with manual reload behavior and create perceived reload loops.
 
             const recover = () => {
                 try {
