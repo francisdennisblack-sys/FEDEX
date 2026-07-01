@@ -121,10 +121,12 @@
                 function pushEvent(level, message, data) {
                     var entry = { ts: Date.now(), level: level, message: String(message || ''), data: data || null };
                     diag.events.push(entry);
+                    if (diag.events.length > 500) diag.events = diag.events.slice(-500);
                     try {
+                        var noisyButtonEvent = (entry.message || '').indexOf('button event ') === 0;
                         if (level === 'error') baseConsole.error('[STARTUP]', entry.message, entry.data || '');
                         else if (level === 'warn') baseConsole.warn('[STARTUP]', entry.message, entry.data || '');
-                        else baseConsole.log('[STARTUP]', entry.message, entry.data || '');
+                        else if (!noisyButtonEvent) baseConsole.log('[STARTUP]', entry.message, entry.data || '');
                     } catch (e) {}
                     return entry;
                 }
@@ -287,6 +289,30 @@
                 function setupButtonEventProbe() {
                     stageStart('button-event-probe.setup');
                     var selector = 'button, [role="button"], [onclick], a[href], input[type="button"], input[type="submit"]';
+                    var safariInfo = detectSafari();
+
+                    // Safari-safe mode: avoid heavy per-node listeners and whole-DOM mutation observers
+                    // that can cause instability on large, dynamic pages.
+                    if (safariInfo && safariInfo.isSafariLike) {
+                        try {
+                            ['pointerdown', 'touchstart', 'click'].forEach(function(type) {
+                                document.addEventListener(type, function(evt) {
+                                    try {
+                                        var t = evt && evt.target && evt.target.closest ? evt.target.closest(selector) : null;
+                                        if (!t) return;
+                                        var key = (t.tagName ? String(t.tagName).toLowerCase() : 'node') + (t.id ? ('#' + t.id) : '');
+                                        if (!diag.buttonEvents[key]) diag.buttonEvents[key] = { pointerdown: 0, touchstart: 0, click: 0, firstSeenAt: Date.now(), target: key };
+                                        if (!diag.buttonEvents[key][type]) diag.buttonEvents[key][type] = 0;
+                                        diag.buttonEvents[key][type] += 1;
+                                    } catch (e) {}
+                                }, { capture: true, passive: type !== 'click' });
+                            });
+                            stageSuccess('button-event-probe.setup', { mode: 'safari-safe', total: 0 });
+                        } catch (e) {
+                            stageFail('button-event-probe.setup', e);
+                        }
+                        return;
+                    }
 
                     function getButtonKey(node) {
                         try {
