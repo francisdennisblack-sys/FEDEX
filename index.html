@@ -1038,11 +1038,50 @@
                     }
                 } catch (e) { /* ignore registration errors */ }
 
+                    function buildSafariReloadUrl() {
+                        try {
+                            const u = new URL(window.location.href);
+                            u.searchParams.set('__sr', String(Date.now()));
+                            return u.toString();
+                        } catch (e) {
+                            const sep = window.location.href.indexOf('?') >= 0 ? '&' : '?';
+                            return window.location.href + sep + '__sr=' + Date.now();
+                        }
+                    }
+
                     // Centralized programmatic reload helper (marks cross-tab flag)
                     function programmaticReload() {
                         try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
-                        try { location.reload(); } catch (e) { /* ignore */ }
+                        try {
+                            // Safari can occasionally ignore location.reload() under stale page states.
+                            // Use URL replace with a short cache-busting query to guarantee navigation.
+                            if (window.__isIOSSafari || window.__isSafariLikeBrowser) {
+                                const forceUrl = buildSafariReloadUrl();
+                                window.location.replace(forceUrl);
+                                return;
+                            }
+                            location.reload();
+                        } catch (e) {
+                            try { window.location.replace(buildSafariReloadUrl()); } catch (e2) {}
+                        }
                     }
+                    try { window.programmaticReload = programmaticReload; } catch (e) {}
+                    try { window.forceSafariReload = function() { try { programmaticReload(); } catch (e) {} }; } catch (e) {}
+
+                    // Safari reload fail-safe: always honor Cmd/Ctrl+R and F5.
+                    try {
+                        document.addEventListener('keydown', function(e) {
+                            try {
+                                const key = String((e && e.key) || '').toLowerCase();
+                                const isReloadShortcut = ((e.metaKey || e.ctrlKey) && key === 'r') || key === 'f5';
+                                if (!isReloadShortcut) return;
+                                if (!(window.__isIOSSafari || window.__isSafariLikeBrowser)) return;
+                                e.preventDefault();
+                                e.stopPropagation();
+                                programmaticReload();
+                            } catch (err) {}
+                        }, true);
+                    } catch (e) {}
 
                 function findCreateTextEl() {
                     const createBox = document.querySelector('.add-content-box');
