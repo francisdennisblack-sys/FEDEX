@@ -799,6 +799,64 @@
                 } catch (e) { return false; }
             })();
 
+            window.__safariHardSafeMode = !!window.__isSafariLikeBrowser;
+
+            // Emergency Safari crash guard: reduce timer pressure from many fast loops
+            // in this large runtime. This keeps critical recovery/heartbeat intervals
+            // while slowing non-critical loops that can overwhelm Safari.
+            (function initSafariCrashGuard() {
+                if (!window.__safariHardSafeMode) return;
+                if (window.__safariCrashGuardInstalled) return;
+                window.__safariCrashGuardInstalled = true;
+
+                const nativeSetInterval = window.setInterval ? window.setInterval.bind(window) : null;
+                const nativeClearInterval = window.clearInterval ? window.clearInterval.bind(window) : null;
+                if (!nativeSetInterval || !nativeClearInterval) return;
+
+                const activeIntervals = new Set();
+                const MAX_INTERVALS = 60;
+                const MIN_NONCRITICAL_INTERVAL_MS = 4000;
+
+                window.setInterval = function patchedSetInterval(handler, timeout) {
+                    try {
+                        const args = Array.prototype.slice.call(arguments, 2);
+                        let ms = Number(timeout);
+                        if (!Number.isFinite(ms) || ms < 0) ms = 0;
+
+                        let src = '';
+                        try {
+                            src = typeof handler === 'function' ? String(handler) : String(handler || '');
+                        } catch (e) {
+                            src = '';
+                        }
+
+                        const isCritical = /recover|heartbeat|location|unlock|clearStale|firebase|subscribe|online|checkLocationHealth|autorefresh|renderGrid|forceGridRefresh/i.test(src);
+
+                        if (!isCritical && ms < MIN_NONCRITICAL_INTERVAL_MS) {
+                            ms = MIN_NONCRITICAL_INTERVAL_MS;
+                        }
+
+                        if (!isCritical && activeIntervals.size >= MAX_INTERVALS) {
+                            try { console.warn('🍎 Safari crash guard dropped non-critical interval'); } catch (e) {}
+                            return 0;
+                        }
+
+                        const id = nativeSetInterval.apply(window, [handler, ms].concat(args));
+                        activeIntervals.add(id);
+                        return id;
+                    } catch (e) {
+                        return nativeSetInterval.apply(window, arguments);
+                    }
+                };
+
+                window.clearInterval = function patchedClearInterval(id) {
+                    try { activeIntervals.delete(id); } catch (e) {}
+                    return nativeClearInterval(id);
+                };
+
+                try { console.warn('🍎 Safari hard safe mode enabled: interval throttling active'); } catch (e) {}
+            })();
+
             try {
                 if (window.__isSafariLikeBrowser && document && document.documentElement) {
                     document.documentElement.classList.add('safari-emergency-mode');
