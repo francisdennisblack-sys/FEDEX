@@ -139,20 +139,22 @@
 
                 var startupUA = '';
                 var startupIsSafariLike = false;
+                var startupIsIOSWebKit = false;
                 try {
                     startupUA = navigator.userAgent || '';
                     startupIsSafariLike = /WebKit/i.test(startupUA) && /Safari/i.test(startupUA) && !/CriOS|FxiOS|EdgiOS|Chrome|Firefox|OPR|SamsungBrowser/i.test(startupUA);
+                    startupIsIOSWebKit = (/WebKit/i.test(startupUA) && (/iP(hone|ad|od)/i.test(startupUA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)));
                 } catch (e) {}
 
                 // Emergency startup mode: keep diagnostics minimal to reduce
                 // startup pressure and avoid interaction deadlocks/crashes.
-                if (startupIsSafariLike || window.__bootSafeMode) {
+                if (startupIsSafariLike || startupIsIOSWebKit || window.__bootSafeMode) {
                     window.__startupStageStart = function(){};
                     window.__startupStageSuccess = function(){};
                     window.__startupStageFail = function(){};
                     window.__startupTrackPromise = function(name, promise) { return Promise.resolve(promise); };
                     window.reportStartupDiagnostics = function() {
-                        return { safeMode: true, safariSafeMode: !!startupIsSafariLike, bootSafeMode: !!window.__bootSafeMode, skipped: 'startup-diagnostics' };
+                        return { safeMode: true, safariSafeMode: !!startupIsSafariLike, iosWebkitSafeMode: !!startupIsIOSWebKit, bootSafeMode: !!window.__bootSafeMode, skipped: 'startup-diagnostics' };
                     };
                     try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
                     return;
@@ -743,16 +745,7 @@
         // 🔄 AGGRESSIVE CACHE-BUSTING: Force consistency across all browsers/devices
         (function initVersionCheck() {
             try { if (window.__startupStageStart) window.__startupStageStart('initVersionCheck'); } catch (e) {}
-            const isIOSSafari = (function () {
-                try {
-                    const ua = navigator.userAgent || '';
-                    const iOS = /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-                    const isWebKit = /WebKit/i.test(ua);
-                    const isCriOS = /CriOS/i.test(ua);
-                    const isFxiOS = /FxiOS/i.test(ua);
-                    return !!(iOS && isWebKit && !isCriOS && !isFxiOS);
-                } catch (e) { return false; }
-            })();
+            const isIOSWebKit = !!window.__isIOSWebKitBrowser;
 
             // Store current version in sessionStorage (per tab)
             const now = Date.now();
@@ -787,13 +780,13 @@
                     // If version changed, clear caches and mark for reload.
                     // IMPORTANT: never force-reload on an unknown/failed version fetch,
                     // otherwise Safari can get trapped in refresh loops.
-                    // iOS Safari: skip forced reload entirely to preserve stable manual refresh.
-                    if (isIOSSafari) {
+                    // iOS WebKit: skip forced reload entirely to preserve stable manual refresh.
+                    if (isIOSWebKit) {
                         if (hasReliableRemoteVersion) {
                             sessionStorage.setItem('__wificontent_last_version', currentVersion);
                         }
                         sessionStorage.setItem('__wificontent_load_time', String(now));
-                        try { if (window.__startupStageSuccess) window.__startupStageSuccess('initVersionCheck', { isIOSSafari: true, hasReliableRemoteVersion: hasReliableRemoteVersion, currentVersion: currentVersion }); } catch (e) {}
+                        try { if (window.__startupStageSuccess) window.__startupStageSuccess('initVersionCheck', { isIOSWebKit: true, hasReliableRemoteVersion: hasReliableRemoteVersion, currentVersion: currentVersion }); } catch (e) {}
                         return;
                     }
                     if (hasReliableRemoteVersion && lastVersion && lastVersion !== currentVersion) {
@@ -1009,6 +1002,15 @@
         <script>
             // iOS Safari reliability mode: force network app by disabling service workers.
             // This avoids stale/offline shells that can leave the page non-interactive.
+            window.__isIOSWebKitBrowser = (function () {
+                try {
+                    const ua = navigator.userAgent || '';
+                    const iOS = /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                    const isWebKit = /WebKit/i.test(ua);
+                    return !!(iOS && isWebKit);
+                } catch (e) { return false; }
+            })();
+
             window.__isIOSSafari = (function () {
                 try {
                     const ua = navigator.userAgent || '';
@@ -1097,7 +1099,7 @@
             // Async IndexedDB probe for Safari private windows: if IDB is blocked or
             // slow to open, enable private-safe mode and avoid persistence-heavy paths.
             (function detectPrivateStorageRestrictions() {
-                if (!window.__isSafariLikeBrowser) return;
+                if (!window.__isIOSWebKitBrowser) return;
                 try {
                     if (!window.indexedDB || typeof window.indexedDB.open !== 'function') {
                         window.__privateSafeMode = true;
@@ -1135,25 +1137,30 @@
 
             // Hard-safe mode should only activate for storage-restricted sessions
             // (e.g. Safari private windows), not all Safari traffic.
-            window.__safariHardSafeMode = !!(window.__isSafariLikeBrowser && window.__privateSafeMode);
+            window.__safariHardSafeMode = !!(window.__isIOSWebKitBrowser && window.__privateSafeMode);
 
             try {
-                if (window.__isSafariLikeBrowser && document && document.documentElement) {
+                if (window.__isIOSWebKitBrowser && document && document.documentElement) {
                     document.documentElement.classList.add('safari-emergency-mode');
                 }
             } catch (e) {}
 
-            window.__iosLiteMode = !!window.__isIOSSafari;
+            window.__iosLiteMode = !!window.__isIOSWebKitBrowser;
             window.__iosFirstInteractionReady = false;
             window.__iosDeferredStartupRunner = null;
-            window.__minimalSafariRuntime = !!(window.__isIOSSafari || window.__privateSafeMode);
+            window.__minimalSafariRuntime = !!(window.__isIOSWebKitBrowser || window.__privateSafeMode);
 
             if (window.__iosLiteMode) {
                 // Emergency mode: do not gate startup behind first user interaction.
                 window.__iosFirstInteractionReady = true;
             }
 
-            if (window.__isIOSSafari && !window.__privateSafeMode && 'serviceWorker' in navigator) {
+            // Force network-only mode for all iOS WebKit browsers (Safari + iOS Chrome/Firefox/Edge).
+            if (window.__isIOSWebKitBrowser) {
+                window.__disableServiceWorkers = true;
+            }
+
+            if (window.__isIOSWebKitBrowser && !window.__privateSafeMode && 'serviceWorker' in navigator) {
                 try {
                     const iosCleanupKey = '__ios_sw_cleanup_done_session';
                     const alreadyCleaned = sessionStorage.getItem(iosCleanupKey) === '1';
@@ -1169,7 +1176,7 @@
             // Safari startup fail-open: if a stale full-screen layer/lock survives boot,
             // force-clear it so the app never looks frozen on first load.
             (function initIOSSafariStartupFailOpen() {
-                if (!window.__isIOSSafari) return;
+                if (!window.__isIOSWebKitBrowser) return;
                 const unlock = () => {
                     try {
                         const uploadActive = !!document.querySelector('#uploadModal.active');
@@ -1235,7 +1242,7 @@
                 }
                 // Register service worker to handle background location updates
                 try {
-                    if ('serviceWorker' in navigator && !window.__isIOSSafari && !window.__disableServiceWorkers) {
+                    if ('serviceWorker' in navigator && !window.__isIOSWebKitBrowser && !window.__disableServiceWorkers) {
                         try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.early'); } catch (e) {}
                         navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' }).then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
@@ -2931,32 +2938,21 @@
             }
         }
 
-        // Override document.body.style.overflow setter to automatically add/remove padding
-        const originalOverflowSetter = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'overflow');
-        
-        if (originalOverflowSetter && originalOverflowSetter.set) {
-            const originalSet = originalOverflowSetter.set;
-            Object.defineProperty(CSSStyleDeclaration.prototype, 'overflow', {
-                set: function(value) {
-                    const isBody = this === document.body.style;
-                    const isHtml = this === document.documentElement.style;
-                    
-                    if (isBody || isHtml) {
-                        if (value === 'hidden') {
-                            // Modal opening: reserve scrollbar space AND lock scroll
-                            lockScroll();
-                        } else if (value === '' || value === 'visible' || value === 'auto') {
-                            // Modal closing: remove padding AND unlock scroll
-                            unlockScroll();
-                        }
-                    }
-                    return originalSet.call(this, value);
-                },
-                get: originalOverflowSetter.get,
-                enumerable: originalOverflowSetter.enumerable,
-                configurable: true
-            });
-        }
+        // Never monkey-patch CSSStyleDeclaration.prototype on mobile WebKit.
+        // Provide explicit helpers for modal/fullscreen scroll lock behavior.
+        window.__setDocumentScrollLocked = function(locked) {
+            try {
+                if (locked) {
+                    lockScroll();
+                    document.documentElement.style.overflow = 'hidden';
+                    document.body.style.overflow = 'hidden';
+                } else {
+                    document.documentElement.style.overflow = '';
+                    document.body.style.overflow = '';
+                    unlockScroll();
+                }
+            } catch (e) {}
+        };
 
         // 🍎 SAFARI BUTTON RESPONSIVENESS: Add touch and click event fixes for Safari
         (function initSafariButtonFixes() {
@@ -18873,7 +18869,7 @@
                     } catch (e) { console.warn('showUpdatePrompt failed', e); }
                 }
 
-                if ('serviceWorker' in navigator && !window.__isIOSSafari && !window.__disableServiceWorkers) {
+                if ('serviceWorker' in navigator && !window.__isIOSWebKitBrowser && !window.__disableServiceWorkers) {
                     try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.main'); } catch (e) {}
                     // Remove any legacy /sw.js registration so old mobile clients stop
                     // being pinned to the simple worker and receive the modern updater.
@@ -18970,9 +18966,9 @@
                             try { showUpdatePrompt(); } catch (e) { console.warn('showUpdatePrompt failed:', e); }
                         }
                     });
-                } else if (window.__isIOSSafari) {
-                    console.log('🍎 iOS Safari reliability mode: service worker disabled; using live network app');
-                    try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.main', { skippedForIOSSafari: true }); } catch (e) {}
+                } else if (window.__isIOSWebKitBrowser) {
+                    console.log('🍎 iOS WebKit reliability mode: service worker disabled; using live network app');
+                    try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.main', { skippedForIOSWebKit: true }); } catch (e) {}
                 } else if (window.__privateSafeMode) {
                     console.log('🛡️ Private safe mode: service worker disabled for stability');
                     try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.main', { skippedForPrivateSafeMode: true }); } catch (e) {}
@@ -25051,7 +25047,7 @@ function setUploadModalHeader(title, subtitle) {
         (function setupPullToRefresh() {
             try {
                 const isSafariLike = !!window.__isSafariLikeBrowser;
-                const isIOS = !!window.__isIOSSafari;
+                const isIOS = !!window.__isIOSWebKitBrowser;
                 // Let native browser refresh behavior handle pull-down on Safari/iOS.
                 if (isSafariLike || isIOS) return;
 
@@ -29305,8 +29301,14 @@ function setUploadModalHeader(title, subtitle) {
                     ov.style.display = 'flex';
                     renderFullScreenGallery(list, index || 0);
                     // prevent background scroll
-                    document.documentElement.style.overflow = 'hidden';
-                    document.body.style.overflow = 'hidden';
+                    try {
+                        if (typeof window.__setDocumentScrollLocked === 'function') {
+                            window.__setDocumentScrollLocked(true);
+                        } else {
+                            document.documentElement.style.overflow = 'hidden';
+                            document.body.style.overflow = 'hidden';
+                        }
+                    } catch (e) {}
                 } catch (e) { console.warn('openFullScreenMedia failed', e); }
             };
 
@@ -29318,8 +29320,14 @@ function setUploadModalHeader(title, subtitle) {
                     if (mount && mount._onKey) document.removeEventListener('keydown', mount._onKey);
                     ov.style.display = 'none';
                     if (mount) mount.innerHTML = '';
-                    document.documentElement.style.overflow = '';
-                    document.body.style.overflow = '';
+                    try {
+                        if (typeof window.__setDocumentScrollLocked === 'function') {
+                            window.__setDocumentScrollLocked(false);
+                        } else {
+                            document.documentElement.style.overflow = '';
+                            document.body.style.overflow = '';
+                        }
+                    } catch (e) {}
                 } catch (e) { console.warn('closeFullScreenMedia failed', e); }
             };
         })();
@@ -51426,7 +51434,13 @@ function setUploadModalHeader(title, subtitle) {
                             }
                         }
                     } catch (e) {}
-                    document.body.style.overflow = 'hidden';
+                    try {
+                        if (typeof window.__setDocumentScrollLocked === 'function') {
+                            window.__setDocumentScrollLocked(true);
+                        } else {
+                            document.body.style.overflow = 'hidden';
+                        }
+                    } catch (e) {}
                     if (closeBtn) closeBtn.focus();
                     // Do NOT show built-in suggestions by default when opening the modal.
                     // The dropdown should only appear after the user starts typing/searching.
@@ -51443,7 +51457,13 @@ function setUploadModalHeader(title, subtitle) {
                         backdrop.setAttribute('aria-hidden','true');
                     }
                     if (modal) modal.classList.remove('open');
-                    document.body.style.overflow = '';
+                    try {
+                        if (typeof window.__setDocumentScrollLocked === 'function') {
+                            window.__setDocumentScrollLocked(false);
+                        } else {
+                            document.body.style.overflow = '';
+                        }
+                    } catch (e) {}
                     try { document.body.classList.remove('posting-page-open'); } catch (e) {}
                     if (pill) pill.focus();
                 }
