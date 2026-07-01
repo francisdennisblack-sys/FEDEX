@@ -2593,7 +2593,9 @@
                 // On iOS Safari, some taps render but never activate click handlers when
                 // the page has been through modal/overlay transitions. Bridge touchend to
                 // click for real action targets so inline onclick and JS listeners fire.
-                if (isIOS) {
+                // Emergency override: disable this bridge in iOS lite mode to avoid
+                // duplicate click dispatch and re-entrancy crashes.
+                if (isIOS && !window.__iosLiteMode) {
                     let lastTouch = { x: 0, y: 0, ts: 0 };
 
                     const shouldBridgeTap = (target) => {
@@ -2719,7 +2721,14 @@
                     const fullScreenMediaActive = !!(fullScreenMediaOverlay && getComputedStyle(fullScreenMediaOverlay).display !== 'none');
                     const hasUiLock = !!(document.body && document.body.classList.contains('location-change-loading-ui-lock'));
 
-                    if (uploadActive || viewActive || gridActive || loadingActive || profileActive || areaPickerActive || mediaLoadingActive || contactActive || reportActive || fullScreenMediaActive) return;
+                    const anyOverlayActive = uploadActive || viewActive || gridActive || loadingActive || profileActive || areaPickerActive || mediaLoadingActive || contactActive || reportActive || fullScreenMediaActive;
+
+                    if (window.__iosLiteMode && hasUiLock && !anyOverlayActive) {
+                        try { document.body.classList.remove('location-change-loading-ui-lock', 'posting-page-open'); } catch (e) {}
+                        try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    }
+
+                    if (anyOverlayActive) return;
 
                     // If no overlays are active, always restore interaction affordances.
                     try { document.documentElement.style.overflow = ''; } catch (e) {}
@@ -2769,6 +2778,8 @@
             try { window.addEventListener('focus', recover); } catch (e) {}
             try { window.addEventListener('pageshow', recover); } catch (e) {}
             try { setInterval(recover, 1200); } catch (e) {}
+            try { setTimeout(recover, 250); } catch (e) {}
+            try { setTimeout(recover, 800); } catch (e) {}
 
             // Last-resort iOS rescue: if Safari leaves an invisible full-screen blocker
             // over the page, clear it immediately on touch so taps become responsive.
