@@ -3132,6 +3132,112 @@
             try { setInterval(unlockIfStale, 1800); } catch (e) {}
         })();
 
+        // Global interaction guard (all users, all browsers): if no legitimate modal
+        // is open, clear stale UI locks/overlays so action controls remain tappable.
+        (function initGlobalInteractionGuard() {
+            const isActuallyBlocking = (el) => {
+                try {
+                    if (!el) return false;
+                    const cs = getComputedStyle(el);
+                    if (!cs) return false;
+                    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.pointerEvents === 'none') return false;
+                    const op = Number(cs.opacity || '1');
+                    if (Number.isFinite(op) && op <= 0.02) return false;
+                    const w = Number(el.offsetWidth || 0);
+                    const h = Number(el.offsetHeight || 0);
+                    return w > 0 && h > 0;
+                } catch (e) { return false; }
+            };
+
+            const hasLegitBlockingUI = () => {
+                try {
+                    const uploadModal = document.getElementById('uploadModal');
+                    const viewModal = document.getElementById('viewModal');
+                    const changeGridModal = document.getElementById('changeGridModal');
+                    const changeGridBackdrop = document.getElementById('changeGridModalBackdrop');
+                    const locationOverlay = document.getElementById('locationChangeLoading');
+                    const contactModal = document.getElementById('contactModal');
+                    const profileModal = document.getElementById('profileModal');
+                    const reportModal = document.getElementById('reportModal');
+                    const mediaLoadingOverlay = document.getElementById('mediaLoadingOverlay');
+                    const fullScreenMediaOverlay = document.getElementById('fullScreenMediaOverlay');
+                    const areaPickerModal = document.getElementById('areaPickerModal');
+
+                    if (uploadModal && uploadModal.classList.contains('active')) return true;
+                    if (viewModal && viewModal.classList.contains('active')) return true;
+                    if (changeGridModal && changeGridModal.classList.contains('open')) return true;
+                    if (changeGridBackdrop && isActuallyBlocking(changeGridBackdrop)) return true;
+                    if (locationOverlay && !locationOverlay.classList.contains('lcl-hiding') && isActuallyBlocking(locationOverlay) && !!window.__locationChangeLoadingActive) return true;
+                    if (contactModal && contactModal.classList.contains('active')) return true;
+                    if (profileModal && isActuallyBlocking(profileModal)) return true;
+                    if (reportModal && isActuallyBlocking(reportModal)) return true;
+                    if (mediaLoadingOverlay && isActuallyBlocking(mediaLoadingOverlay)) return true;
+                    if (fullScreenMediaOverlay && isActuallyBlocking(fullScreenMediaOverlay)) return true;
+                    if (areaPickerModal && isActuallyBlocking(areaPickerModal)) return true;
+                } catch (e) {}
+                return false;
+            };
+
+            const unlockIfStale = () => {
+                try {
+                    if (hasLegitBlockingUI()) return;
+
+                    try { document.body.classList.remove('posting-page-open', 'location-change-loading-ui-lock'); } catch (e) {}
+                    try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    try { document.body.style.overflow = ''; } catch (e) {}
+                    try { document.documentElement.style.overflow = ''; } catch (e) {}
+                    try { document.body.style.pointerEvents = 'auto'; } catch (e) {}
+                    try { document.documentElement.style.pointerEvents = 'auto'; } catch (e) {}
+
+                    const staleOverlayIds = [
+                        'changeGridModalBackdrop',
+                        'locationChangeLoading',
+                        'mediaLoadingOverlay',
+                        'fullScreenMediaOverlay',
+                        'areaPickerModal'
+                    ];
+                    staleOverlayIds.forEach((id) => {
+                        const ov = document.getElementById(id);
+                        if (!ov) return;
+                        try {
+                            const cs = getComputedStyle(ov);
+                            const stale = cs.display === 'none' || cs.visibility === 'hidden' || cs.pointerEvents === 'none' || Number(cs.opacity || '1') <= 0.02;
+                            if (stale || id === 'changeGridModalBackdrop' || id === 'locationChangeLoading') {
+                                ov.classList.remove('active', 'open');
+                                if (id === 'locationChangeLoading') ov.classList.add('lcl-hiding');
+                                ov.style.pointerEvents = 'none';
+                                ov.style.display = 'none';
+                                ov.setAttribute('aria-hidden', 'true');
+                            }
+                        } catch (e) {}
+                    });
+
+                    try { window.__locationChangeLoadingActive = false; } catch (e) {}
+                    try { window.__locationChangeLoadingStart = 0; } catch (e) {}
+
+                    ['addContentCTA', 'changeGridLocationPill', 'signInBtn', 'accountPill', 'accountArea', 'zonePredictorBox'].forEach((id) => {
+                        const el = document.getElementById(id);
+                        if (!el) return;
+                        try {
+                            el.classList.remove('disabled-while-posting');
+                            el.removeAttribute('aria-disabled');
+                            if (el.style.display === 'none') el.style.display = '';
+                            el.style.visibility = '';
+                            el.style.opacity = '';
+                            el.style.pointerEvents = 'auto';
+                        } catch (e) {}
+                    });
+                } catch (e) {}
+            };
+
+            try { document.addEventListener('click', unlockIfStale, { passive: true, capture: true }); } catch (e) {}
+            try { document.addEventListener('touchend', unlockIfStale, { passive: true, capture: true }); } catch (e) {}
+            try { window.addEventListener('focus', unlockIfStale); } catch (e) {}
+            try { window.addEventListener('pageshow', unlockIfStale); } catch (e) {}
+            try { document.addEventListener('visibilitychange', () => { if (!document.hidden) unlockIfStale(); }); } catch (e) {}
+            try { setInterval(unlockIfStale, 1500); } catch (e) {}
+        })();
+
         // Media lazy-load helpers: assign `src` from `data-src` when a node becomes visible
         function loadMediaForNode(node) {
             if (!node || !(node instanceof Element)) return;
