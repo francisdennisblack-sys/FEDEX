@@ -97,6 +97,24 @@
     <script>
         // 🎯 ENSURE CHANGE LOCATION PILL IS VISIBLE ON ALL DEVICES (Fallback for :has() support)
         (function ensureChangeLocationPillVisible() {
+            const ensureAddContentCtaVisible = () => {
+                const cta = document.getElementById('addContentCTA');
+                if (!cta) return;
+                const uploadModal = document.getElementById('uploadModal');
+                const viewModal = document.getElementById('viewModal');
+                const modalActive = !!((uploadModal && uploadModal.classList.contains('active')) || (viewModal && viewModal.classList.contains('active')) || document.body.classList.contains('posting-page-open') || document.body.classList.contains('location-change-loading-ui-lock'));
+                if (modalActive) return;
+                try {
+                    if (cta.style.display === 'none' || getComputedStyle(cta).display === 'none') {
+                        cta.style.display = 'flex';
+                    }
+                    cta.style.visibility = 'visible';
+                    cta.style.pointerEvents = 'auto';
+                    cta.style.opacity = '1';
+                    cta.style.zIndex = '12000';
+                } catch (e) {}
+            };
+
             // Check if :has() selector is supported
             const supportsHas = (() => {
                 try {
@@ -125,6 +143,7 @@
                     pill.style.opacity = '1';
                     pill.style.pointerEvents = 'auto';
                 }
+                ensureAddContentCtaVisible();
             };
             
             // Check on load
@@ -354,6 +373,53 @@
     </style>
 
         <script>
+            // iOS Safari reliability mode: force network app by disabling service workers.
+            // This avoids stale/offline shells that can leave the page non-interactive.
+            window.__isIOSSafari = (function () {
+                try {
+                    const ua = navigator.userAgent || '';
+                    const iOS = /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                    const isWebKit = /WebKit/i.test(ua);
+                    const isCriOS = /CriOS/i.test(ua);
+                    const isFxiOS = /FxiOS/i.test(ua);
+                    return !!(iOS && isWebKit && !isCriOS && !isFxiOS);
+                } catch (e) { return false; }
+            })();
+
+            window.__iosLiteMode = !!window.__isIOSSafari;
+            window.__iosFirstInteractionReady = false;
+            window.__iosDeferredStartupRunner = null;
+
+            if (window.__iosLiteMode) {
+                const armIOSInteraction = () => {
+                    try {
+                        if (window.__iosFirstInteractionReady) return;
+                        window.__iosFirstInteractionReady = true;
+                        if (typeof window.__iosDeferredStartupRunner === 'function') {
+                            try { window.__iosDeferredStartupRunner(); } catch (e) {}
+                        }
+                    } catch (e) {}
+                };
+                try { document.addEventListener('touchstart', armIOSInteraction, { passive: true, once: true, capture: true }); } catch (e) {}
+                try { document.addEventListener('click', armIOSInteraction, { once: true, capture: true }); } catch (e) {}
+                try { document.addEventListener('keydown', armIOSInteraction, { once: true, capture: true }); } catch (e) {}
+                // Fallback trigger so startup still proceeds even without a first gesture.
+                try { setTimeout(armIOSInteraction, 2500); } catch (e) {}
+            }
+
+            if (window.__isIOSSafari && 'serviceWorker' in navigator) {
+                try {
+                    navigator.serviceWorker.getRegistrations().then((regs) => {
+                        (regs || []).forEach((reg) => { try { reg.unregister(); } catch (e) {} });
+                    }).catch(() => {});
+                } catch (e) {}
+                try {
+                    if (window.caches && caches.keys) {
+                        caches.keys().then((keys) => Promise.all((keys || []).map((k) => caches.delete(k).catch(() => false)))).catch(() => {});
+                    }
+                } catch (e) {}
+            }
+
             // Strong absolute-position overlay for the spinning globe.
             (function absoluteGlobeOverlay(){
                 // Disabled: removing secondary globe overlay to avoid duplicate logo on mobile
@@ -381,8 +447,8 @@
                 }
                 // Register service worker to handle background location updates
                 try {
-                    if ('serviceWorker' in navigator) {
-                        navigator.serviceWorker.register('/sw.js?v=20260630T031210Z').then(reg => {
+                    if ('serviceWorker' in navigator && !window.__isIOSSafari) {
+                        navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' }).then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
                         }).catch(err => console.warn('ServiceWorker register failed', err));
 
@@ -2043,6 +2109,14 @@
 
         // 🍎 SAFARI BUTTON RESPONSIVENESS: Add touch and click event fixes for Safari
         (function initSafariButtonFixes() {
+            let isIOS = false;
+            try {
+                const ua = navigator.userAgent || '';
+                isIOS = /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            } catch (e) {}
+
+            const ACTIONABLE_SELECTOR = 'button, [role="button"], [onclick], a[href], #signInBtn, #uploadBtn, #changeGridLocationPill, #addContentCTA, #comeHomeBtn, #changeLocationBtn, #viewModal .cursiveBtn, #reportModal button, #changeGridModal button';
+
             // Ensure all buttons have proper touch handling
             document.addEventListener('DOMContentLoaded', function() {
                 const buttons = document.querySelectorAll('button, [role="button"], [onclick], .cursiveBtn, #uploadBtn, #changeLocationBtn, #comeHomeBtn');
@@ -2061,6 +2135,69 @@
                         }, { passive: true });
                     }
                 });
+
+                // On iOS Safari, some taps render but never activate click handlers when
+                // the page has been through modal/overlay transitions. Bridge touchend to
+                // click for real action targets so inline onclick and JS listeners fire.
+                if (isIOS) {
+                    let lastTouch = { x: 0, y: 0, ts: 0 };
+
+                    const shouldBridgeTap = (target) => {
+                        try {
+                            if (!target || !target.closest) return false;
+                            return !!target.closest(ACTIONABLE_SELECTOR);
+                        } catch (e) { return false; }
+                    };
+
+                    const resolveActionableFromPoint = (x, y) => {
+                        try {
+                            if (!Number.isFinite(x) || !Number.isFinite(y) || typeof document.elementsFromPoint !== 'function') return null;
+                            const stack = document.elementsFromPoint(x, y) || [];
+                            for (const node of stack) {
+                                if (!node || !node.closest) continue;
+                                const hit = node.closest(ACTIONABLE_SELECTOR);
+                                if (hit) return hit;
+                            }
+                        } catch (e) {}
+                        return null;
+                    };
+
+                    document.addEventListener('touchstart', function(e) {
+                        try {
+                            const t = e && e.changedTouches && e.changedTouches[0];
+                            if (!t) return;
+                            lastTouch = { x: Number(t.clientX) || 0, y: Number(t.clientY) || 0, ts: Date.now() };
+                        } catch (err) {}
+                    }, { passive: true, capture: true });
+
+                    document.addEventListener('touchend', function(e) {
+                        try {
+                            const target = e && e.target;
+                            let el = shouldBridgeTap(target) ? target.closest(ACTIONABLE_SELECTOR) : null;
+
+                            const touch = e && e.changedTouches && e.changedTouches[0];
+                            const x = touch ? Number(touch.clientX) : NaN;
+                            const y = touch ? Number(touch.clientY) : NaN;
+                            const moved = Number.isFinite(x) && Number.isFinite(y)
+                                ? Math.hypot((x - (lastTouch.x || 0)), (y - (lastTouch.y || 0)))
+                                : 0;
+                            const elapsed = Date.now() - (lastTouch.ts || 0);
+                            // Ignore drag/scroll gestures.
+                            if (moved > 16 || elapsed > 1200) return;
+
+                            if (!el) el = resolveActionableFromPoint(x, y);
+                            if (!el) return;
+                            // Let native handlers run first, then synthesize a click if Safari
+                            // doesn't dispatch one on its own.
+                            setTimeout(() => {
+                                try {
+                                    if (document.activeElement && document.activeElement !== el && el.focus) el.focus();
+                                } catch (e) {}
+                                try { el.click(); } catch (e) {}
+                            }, 0);
+                        } catch (err) {}
+                    }, { passive: true, capture: true });
+                }
             }, false);
             
             // Prevent body touch scrolling from blocking button interactions
@@ -2070,6 +2207,216 @@
                     return true;
                 }
             }, { passive: true });
+        })();
+
+        // iOS Safari can occasionally keep the page in a stale non-interactive state
+        // after modal/overlay transitions. Recover safely when no modal is visible.
+        (function initIOSInteractionRecovery() {
+            let isIOS = false;
+            try {
+                const ua = navigator.userAgent || '';
+                isIOS = /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            } catch (e) {}
+            if (!isIOS) return;
+
+            // Force stale iOS tabs onto the current build at least once.
+            try {
+                const BUILD_REFRESH_ID = '20260630T235500Z';
+                const buildSeenKey = 'iosBuildSeen';
+                const reloadDoneKey = 'iosBuildReloadDone:' + BUILD_REFRESH_ID;
+                const seenBuild = localStorage.getItem(buildSeenKey);
+                const reloadDone = sessionStorage.getItem(reloadDoneKey) === '1';
+                if (seenBuild !== BUILD_REFRESH_ID && !reloadDone) {
+                    localStorage.setItem(buildSeenKey, BUILD_REFRESH_ID);
+                    sessionStorage.setItem(reloadDoneKey, '1');
+                    try {
+                        if ('serviceWorker' in navigator) {
+                            navigator.serviceWorker.getRegistrations().then((regs) => {
+                                (regs || []).forEach((reg) => { try { reg.update && reg.update(); } catch (e) {} });
+                            }).catch(() => {});
+                        }
+                    } catch (e) {}
+                    try {
+                        const u = new URL(window.location.href);
+                        u.searchParams.set('v', BUILD_REFRESH_ID);
+                        window.location.replace(u.toString());
+                        return;
+                    } catch (e) {}
+                }
+            } catch (e) {}
+
+            const recover = () => {
+                try {
+                    const uploadModal = document.getElementById('uploadModal');
+                    const viewModal = document.getElementById('viewModal');
+                    const gridBackdrop = document.getElementById('changeGridModalBackdrop');
+                    const changeGridModal = document.getElementById('changeGridModal');
+                    const locationOverlay = document.getElementById('locationChangeLoading');
+                    const profileModal = document.getElementById('profileModal');
+                    const areaPickerModal = document.getElementById('areaPickerModal');
+                    const mediaLoadingOverlay = document.getElementById('mediaLoadingOverlay');
+                    const contactModal = document.getElementById('contactModal');
+                    const reportModal = document.getElementById('reportModal');
+                    const fullScreenMediaOverlay = document.getElementById('fullScreenMediaOverlay');
+
+                    const uploadActive = !!(uploadModal && uploadModal.classList.contains('active'));
+                    const viewActive = !!(viewModal && viewModal.classList.contains('active'));
+                    const gridVisible = !!(gridBackdrop && getComputedStyle(gridBackdrop).display !== 'none');
+                    const gridExpectedOpen = !!(changeGridModal && changeGridModal.classList.contains('open'));
+                    const gridActive = gridVisible && gridExpectedOpen;
+                    const loadingVisible = !!(locationOverlay && locationOverlay.parentNode && !locationOverlay.classList.contains('lcl-hiding') && getComputedStyle(locationOverlay).display !== 'none');
+                    const loadingExpected = !!window.__locationChangeLoadingActive;
+                    const loadingActive = loadingVisible && loadingExpected;
+                    const profileActive = !!(profileModal && getComputedStyle(profileModal).display !== 'none');
+                    const areaPickerActive = !!(areaPickerModal && getComputedStyle(areaPickerModal).display !== 'none');
+                    const mediaLoadingActive = !!(mediaLoadingOverlay && getComputedStyle(mediaLoadingOverlay).display !== 'none');
+                    const contactActive = !!(contactModal && contactModal.classList.contains('active'));
+                    const reportActive = !!(reportModal && getComputedStyle(reportModal).display !== 'none');
+                    const fullScreenMediaActive = !!(fullScreenMediaOverlay && getComputedStyle(fullScreenMediaOverlay).display !== 'none');
+                    const hasUiLock = !!(document.body && document.body.classList.contains('location-change-loading-ui-lock'));
+
+                    if (uploadActive || viewActive || gridActive || loadingActive || profileActive || areaPickerActive || mediaLoadingActive || contactActive || reportActive || fullScreenMediaActive) return;
+
+                    // If no overlays are active, always restore interaction affordances.
+                    try { document.documentElement.style.overflow = ''; } catch (e) {}
+                    try { document.body.style.overflow = ''; } catch (e) {}
+                    try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    if (hasUiLock) {
+                        try { document.body.classList.remove('location-change-loading-ui-lock'); } catch (e) {}
+                    }
+
+                    // Kill any stale full-screen blockers left behind by interrupted transitions.
+                    [
+                        profileModal,
+                        areaPickerModal,
+                        mediaLoadingOverlay,
+                        contactModal,
+                        reportModal,
+                        fullScreenMediaOverlay,
+                        gridBackdrop,
+                        locationOverlay
+                    ].forEach((ov) => {
+                        if (!ov) return;
+                        try {
+                            ov.classList.remove('active', 'open', 'lcl-hiding');
+                            ov.style.pointerEvents = 'none';
+                            ov.style.display = 'none';
+                            ov.setAttribute && ov.setAttribute('aria-hidden', 'true');
+                        } catch (e) {}
+                    });
+
+                    try { window.__locationChangeLoadingActive = false; } catch (e) {}
+                    try { window.__locationChangeLoadingStart = 0; } catch (e) {}
+
+                    ['addContentCTA', 'changeGridLocationPill', 'signInBtn', 'accountPill', 'accountArea'].forEach((id) => {
+                        const el = document.getElementById(id);
+                        if (!el) return;
+                        try {
+                            if (el.style.display === 'none') el.style.display = '';
+                            el.style.pointerEvents = 'auto';
+                            el.style.opacity = '';
+                            el.style.visibility = '';
+                        } catch (e) {}
+                    });
+                } catch (e) {}
+            };
+
+            try { document.addEventListener('visibilitychange', () => { if (!document.hidden) recover(); }); } catch (e) {}
+            try { window.addEventListener('focus', recover); } catch (e) {}
+            try { window.addEventListener('pageshow', recover); } catch (e) {}
+            try { setInterval(recover, 1200); } catch (e) {}
+
+            // Last-resort iOS rescue: if Safari leaves an invisible full-screen blocker
+            // over the page, clear it immediately on touch so taps become responsive.
+            const maybeRescueDeadScreen = (ev) => {
+                try {
+                    const t = ev && ev.changedTouches && ev.changedTouches[0];
+                    if (!t || typeof document.elementsFromPoint !== 'function') return;
+                    const x = Number(t.clientX);
+                    const y = Number(t.clientY);
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+                    const stack = document.elementsFromPoint(x, y) || [];
+                    if (!stack.length) return;
+
+                    const actionable = stack.find((n) => {
+                        try { return !!(n && n.closest && n.closest('button, [role="button"], [onclick], a[href], input, textarea, select')); } catch (e) { return false; }
+                    });
+                    if (actionable) return;
+
+                    const blocker = stack.find((n) => {
+                        if (!n || !n.id) return false;
+                        return [
+                            'changeGridModalBackdrop',
+                            'profileModal',
+                            'areaPickerModal',
+                            'areaPickerOverlay',
+                            'locationChangeLoading',
+                            'mediaLoadingOverlay',
+                            'contactModal',
+                            'reportModal',
+                            'fullScreenMediaOverlay',
+                            'viewModal',
+                            'uploadModal'
+                        ].includes(n.id);
+                    });
+                    // Fallback: unknown full-screen fixed layer acting as a tap shield.
+                    let dynamicBlocker = blocker;
+                    if (!dynamicBlocker) {
+                        dynamicBlocker = stack.find((n) => {
+                            try {
+                                if (!n || n === document.documentElement || n === document.body) return false;
+                                const cs = getComputedStyle(n);
+                                if (!cs || cs.pointerEvents === 'none' || cs.display === 'none' || cs.visibility === 'hidden') return false;
+                                const isFixed = cs.position === 'fixed' || cs.position === 'sticky';
+                                if (!isFixed) return false;
+                                const w = n.offsetWidth || 0;
+                                const h = n.offsetHeight || 0;
+                                const coversViewport = w >= (window.innerWidth * 0.92) && h >= (window.innerHeight * 0.92);
+                                if (!coversViewport) return false;
+                                const zi = Number(cs.zIndex);
+                                return Number.isFinite(zi) ? zi >= 999 : true;
+                            } catch (e) { return false; }
+                        });
+                    }
+                    if (!dynamicBlocker) return;
+
+                    const cs = getComputedStyle(dynamicBlocker);
+                    const isFullscreen = (cs.position === 'fixed' || cs.position === 'sticky') && dynamicBlocker.offsetWidth >= (window.innerWidth * 0.85) && dynamicBlocker.offsetHeight >= (window.innerHeight * 0.85);
+                    if (!isFullscreen) return;
+
+                    const modalExpectedOpen = !!document.querySelector('#uploadModal.active, #viewModal.active, #changeGridModal.open, #changeGridModalBackdrop[style*="display: flex"], #locationChangeLoading:not(.lcl-hiding), #fullScreenMediaOverlay[style*="display: flex"], #contactModal.active');
+                    if (modalExpectedOpen) return;
+
+                    try { dynamicBlocker.classList.remove('active', 'open', 'lcl-hiding'); } catch (e) {}
+                    try { dynamicBlocker.style.display = 'none'; } catch (e) {}
+                    try { dynamicBlocker.style.pointerEvents = 'none'; } catch (e) {}
+                    try { dynamicBlocker.setAttribute('aria-hidden', 'true'); } catch (e) {}
+                    try { document.body.classList.remove('location-change-loading-ui-lock'); } catch (e) {}
+                    try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    try { document.documentElement.style.overflow = ''; } catch (e) {}
+                    try { document.body.style.overflow = ''; } catch (e) {}
+                    try { document.documentElement.style.pointerEvents = 'auto'; } catch (e) {}
+                    try { document.body.style.pointerEvents = 'auto'; } catch (e) {}
+
+                    ['addContentCTA', 'changeGridLocationPill', 'signInBtn', 'accountPill', 'accountArea'].forEach((id) => {
+                        const el = document.getElementById(id);
+                        if (!el) return;
+                        try {
+                            if (el.style.display === 'none') el.style.display = '';
+                            el.style.pointerEvents = 'auto';
+                            el.style.visibility = '';
+                            el.style.opacity = '';
+                        } catch (e) {}
+                    });
+
+                    try { recover(); } catch (e) {}
+                    console.warn('🍎 iOS dead-screen rescue triggered; cleared blocker:', dynamicBlocker.id || dynamicBlocker.className || dynamicBlocker.tagName);
+                } catch (e) {}
+            };
+
+            try { document.addEventListener('touchstart', maybeRescueDeadScreen, { passive: true, capture: true }); } catch (e) {}
+            try { document.addEventListener('touchend', maybeRescueDeadScreen, { passive: true, capture: true }); } catch (e) {}
         })();
 
         // Media lazy-load helpers: assign `src` from `data-src` when a node becomes visible
@@ -17312,7 +17659,24 @@
                     } catch (e) { console.warn('showUpdatePrompt failed', e); }
                 }
 
-                if ('serviceWorker' in navigator) {
+                if ('serviceWorker' in navigator && !window.__isIOSSafari) {
+                    // Remove any legacy /sw.js registration so old mobile clients stop
+                    // being pinned to the simple worker and receive the modern updater.
+                    try {
+                        navigator.serviceWorker.getRegistrations().then((regs) => {
+                            (regs || []).forEach((reg) => {
+                                try {
+                                    const activeUrl = reg && reg.active && reg.active.scriptURL ? String(reg.active.scriptURL) : '';
+                                    const waitingUrl = reg && reg.waiting && reg.waiting.scriptURL ? String(reg.waiting.scriptURL) : '';
+                                    const installingUrl = reg && reg.installing && reg.installing.scriptURL ? String(reg.installing.scriptURL) : '';
+                                    if (activeUrl.includes('/sw.js') || waitingUrl.includes('/sw.js') || installingUrl.includes('/sw.js')) {
+                                        reg.unregister().then(() => console.log('🧹 Unregistered legacy /sw.js service worker'));
+                                    }
+                                } catch (e) { /* ignore per-registration errors */ }
+                            });
+                        }).catch(() => {});
+                    } catch (e) {}
+
                     // Fetch current deployed version (CI should update /version.json on each release)
                     fetch('/version.json', {cache: 'no-store'}).then(r => r.json()).then(ver => {
                         try {
@@ -17326,7 +17690,7 @@
                         // Log version info to console with styling
                         console.log('%c🎯 WiFiContent v' + window.__APP_VERSION__ + ' (' + window.__BUILD_DATE__ + ')', 'font-size:13px;font-weight:bold;color:#ffffff;background:#0066cc;padding:6px 10px;border-radius:3px');
 
-                        navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(window.__APP_VERSION__)).then(reg => {
+                        navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(window.__APP_VERSION__), { updateViaCache: 'none' }).then(reg => {
                             console.log('✅ Service Worker registered (version=' + window.__APP_VERSION__ + ') - offline mode active');
                         
                         // Attempt background sync if available
@@ -17353,7 +17717,7 @@
                     }).catch(err => {
                         // If version check fails, fall back to standard registration
                         console.warn('Version check failed; falling back to standard SW registration:', err);
-                        navigator.serviceWorker.register('/service-worker.js').then(reg => {
+                        navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(String(Date.now())), { updateViaCache: 'none' }).then(reg => {
                             console.log('✅ Service Worker registered (fallback) - offline mode active');
                         }).catch(err2 => console.warn('Service Worker fallback registration failed:', err2));
                     });
@@ -17370,9 +17734,22 @@
                         // New version available - prompt user to reload so client loads latest deployment
                         if (event.data.type === 'NEW_VERSION_AVAILABLE') {
                             console.log('🔔 New service worker version available — prompting user to reload');
+                            try {
+                                const activeVersion = String(window.__APP_VERSION__ || 'unknown');
+                                const reloadKey = 'lastAutoReloadedVersion';
+                                const alreadyReloaded = localStorage.getItem(reloadKey) === activeVersion;
+                                if (!alreadyReloaded) {
+                                    localStorage.setItem(reloadKey, activeVersion);
+                                    localStorage.setItem('programmaticReloadTS', String(Date.now()));
+                                    location.reload();
+                                    return;
+                                }
+                            } catch (e) { /* fall through to prompt */ }
                             try { showUpdatePrompt(); } catch (e) { console.warn('showUpdatePrompt failed:', e); }
                         }
                     });
+                } else if (window.__isIOSSafari) {
+                    console.log('🍎 iOS Safari reliability mode: service worker disabled; using live network app');
                 }
                 
                 // Version polling: periodically check /version.json and trigger SW update/reload
@@ -17397,7 +17774,7 @@
                                         // nothing to do; installing will activate
                                     } else {
                                         // Force a re-register with the new version query so browser fetches updated SW
-                                        try { navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(j.version)).catch(()=>{}); } catch(e) {}
+                                        try { navigator.serviceWorker.register('/service-worker.js?v=' + encodeURIComponent(j.version), { updateViaCache: 'none' }).catch(()=>{}); } catch(e) {}
                                     }
                                 }).finally(() => {
                                     // Prompt user to reload (non-blocking)
@@ -29911,12 +30288,19 @@ function setUploadModalHeader(title, subtitle) {
                     selectLocationFromSpecifyField(safeName, e);
                 };
                 div.ontouchstart = (e) => {
-                    e.preventDefault();
                     e.stopPropagation();
                     console.log('👆 POI DROPDOWN touchstart ->', safeName);
+                };
+                div.ontouchend = (e) => {
+                    e.stopPropagation();
+                    console.log('👆 POI DROPDOWN touchend ->', safeName);
                     selectLocationFromSpecifyField(safeName, e);
                 };
-                div.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
+                div.onclick = (e) => {
+                    e.stopPropagation();
+                    console.log('🖱️ POI DROPDOWN click ->', safeName);
+                    selectLocationFromSpecifyField(safeName, e);
+                };
                 div.title = `Select: ${safeName}`;
             };
             
@@ -30302,12 +30686,19 @@ function setUploadModalHeader(title, subtitle) {
                         selectLocationFromSpecifyField(clickValue, e, { preserveInputValue: true, zoneLabel: clickValue });
                     };
                     div.ontouchstart = (e) => {
-                        e.preventDefault();
+                        e.stopPropagation();
+                        refineSearchDebugLog('DB touchstart (virtual list)', { query, selected: clickValue, itemType: item.type || 'unknown' });
+                    };
+                    div.ontouchend = (e) => {
                         e.stopPropagation();
                         refineSearchDebugLog('DB select (virtual list touch)', { query, selected: clickValue, itemType: item.type || 'unknown' });
                         selectLocationFromSpecifyField(clickValue, e, { preserveInputValue: true, zoneLabel: clickValue });
                     };
-                    div.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
+                    div.onclick = (e) => {
+                        e.stopPropagation();
+                        refineSearchDebugLog('DB select (virtual list click)', { query, selected: clickValue, itemType: item.type || 'unknown' });
+                        selectLocationFromSpecifyField(clickValue, e, { preserveInputValue: true, zoneLabel: clickValue });
+                    };
                 };
                 if (typeof scroller.render === 'function') scroller.render();
                 return visibleRows.length;
@@ -31732,10 +32123,11 @@ function setUploadModalHeader(title, subtitle) {
 
         function subscribeToFirebasePostsWithReconnect() {
             try {
+                const iosLiteMode = !!window.__iosLiteMode;
                 // Keep a separate live mirror of mutable packaged post metadata.
                 // This lets us adjust viewer-facing tags without touching canonical posts.
                 try {
-                    if (!packagedPostsUnsubscribe) {
+                    if (!iosLiteMode && !packagedPostsUnsubscribe) {
                         const packagedRef = ref(database, 'posts_packaged');
                         packagedPostsUnsubscribe = onValue(packagedRef, (snap) => {
                             try {
@@ -31758,7 +32150,7 @@ function setUploadModalHeader(title, subtitle) {
                 // This provides separate Firebase records per post/context so we can
                 // change viewer tags without mutating canonical tags.
                 try {
-                    if (!packagedPostVariantsUnsubscribe) {
+                    if (!iosLiteMode && !packagedPostVariantsUnsubscribe) {
                         const variantsRef = ref(database, 'posts_packaged_variants');
                         packagedPostVariantsUnsubscribe = onValue(variantsRef, (snap) => {
                             try {
@@ -31798,7 +32190,7 @@ function setUploadModalHeader(title, subtitle) {
                 try {
                     const zid = currentZoneTag || window.currentZoneTag || null;
                     if (zid && !window.__zonePrefetchDoneFor) window.__zonePrefetchDoneFor = {};
-                    if (zid && window.__zonePrefetchDoneFor && !window.__zonePrefetchDoneFor[zid]) {
+                    if (!iosLiteMode && zid && window.__zonePrefetchDoneFor && !window.__zonePrefetchDoneFor[zid]) {
                         (async () => {
                             try {
                                 const zoneRef = ref(database, `posts_by_zone/${zid}`);
@@ -33593,111 +33985,182 @@ function setUploadModalHeader(title, subtitle) {
                                               areaPostCount > 50 ? 5000 : 10000;
                 console.log(`   Area density: ${areaPostCount} posts → ${(adaptiveDistThreshold/1000).toFixed(1)}km threshold`);
 
-                // STEP 3: Categorize posts
-                const local = [];      // 60% - same area + within adaptive distance
-                const quality = [];    // 20% - higher net than local max, ≤50km, farther first
-                const viral = [];      // 10% - top global posts (scaled to grid)
-                const boost = [];      // 10% - boostStatus='active' + not expired
-                const categorized = new Set();
+                // STEP 3: Build continuously re-ranked buckets
+                const nowMs = Date.now();
+                const clamp01 = (n) => Math.max(0, Math.min(1, Number(n) || 0));
+                const getCreatedAt = (post) => Number(post.timestamp || post.createdAt || post.ts || post.publishedAt || 0);
+                const getFreshness = (post) => {
+                    const createdAt = getCreatedAt(post);
+                    if (!createdAt) return 0;
+                    return clamp01(1 - ((nowMs - createdAt) / 86400000));
+                };
+                const getDistance = (post) => {
+                    const { lat, lon } = getPostCoords(post);
+                    if (!isFinite(lat) || !isFinite(lon)) return Infinity;
+                    return distMeters(lat, lon);
+                };
+                const getDistanceScore = (meters, scaleMeters = 3000) => {
+                    if (!isFinite(meters)) return 0;
+                    return 1 / (1 + (meters / scaleMeters));
+                };
+                const getNetScoreNorm = (post) => clamp01((getNetScore(post) + 20) / 120);
+                const selectedIds = new Set();
+                const addSelected = (arr) => {
+                    for (const item of arr) {
+                        if (item && item.post && item.post.id) selectedIds.add(item.post.id);
+                    }
+                };
 
-                // STEP 3A: 60% LOCAL (adaptive distance, area-matched)
-                for (const post of livePosts) {
-                    const postArea = post.county || post.areaTag || post.displayAreaTag || post.zoneTag || post.area || '';
-                    const isAreaMatch = postArea.toLowerCase() === userArea.toLowerCase();
-                    
-                    if (!isAreaMatch) continue;
-                    
-                    const { lat: postLat, lon: postLon } = getPostCoords(post);
-                    if (!isFinite(postLat) || !isFinite(postLon)) continue;
-                    
-                    const dist = distMeters(postLat, postLon);
-                    if (dist > adaptiveDistThreshold) continue;
-                    
-                    local.push({ post, dist, netScore: getNetScore(post) });
-                    categorized.add(post.id);
-                }
+                // Rotate only within high-quality candidate pools so content stays relevant
+                const rotationEpoch = Math.floor(nowMs / (6 * 60 * 1000)); // 6-minute rotation
+                const viewerHash = (Math.abs(Math.round((userLat * 1000) + (userLon * 1000))) || 0) % 997;
+                const pickTopWithRotation = (candidates, target, salt = 0, poolMultiplier = 3) => {
+                    if (!Array.isArray(candidates) || candidates.length === 0 || target <= 0) return [];
+                    const desired = Math.min(target, candidates.length);
+                    const poolSize = Math.min(candidates.length, Math.max(desired, desired * poolMultiplier));
+                    const pool = candidates.slice(0, poolSize);
+                    if (pool.length === 0) return [];
 
-                local.sort((a, b) => a.dist - b.dist); // Closest first
+                    const offset = (rotationEpoch + viewerHash + salt) % pool.length;
+                    const selected = [];
+                    const used = new Set();
+
+                    for (let i = 0; i < pool.length && selected.length < desired; i++) {
+                        const candidate = pool[(offset + i) % pool.length];
+                        const key = candidate && candidate.post && candidate.post.id;
+                        if (!key || used.has(key)) continue;
+                        used.add(key);
+                        selected.push(candidate);
+                    }
+
+                    if (selected.length < desired) {
+                        for (const candidate of candidates) {
+                            const key = candidate && candidate.post && candidate.post.id;
+                            if (!key || used.has(key)) continue;
+                            used.add(key);
+                            selected.push(candidate);
+                            if (selected.length >= desired) break;
+                        }
+                    }
+                    return selected;
+                };
+
                 const localTarget = Math.ceil(targetLimit * 0.60);
-                const localFinal = local.slice(0, localTarget);
-                console.log(`   60% LOCAL: ${localFinal.length}/${localTarget}`);
-
-                // STEP 3B: 20% QUALITY (higher net than local max, or any net>0 if no local, as far as possible)
-                {
-                    const maxLocalNet = localFinal.length > 0 ? Math.max(...localFinal.map(l => l.netScore)) : -Infinity;
-                    const qualityTarget = Math.ceil(targetLimit * 0.20);
-                    
-                    for (const post of livePosts) {
-                        if (categorized.has(post.id)) continue;
-                        
-                        const netScore = getNetScore(post);
-                        // If we have local content, quality must beat it; otherwise accept any net-positive post
-                        if (localFinal.length > 0 && netScore <= maxLocalNet) continue;
-                        if (localFinal.length === 0 && netScore < 0) continue;
-                        
-                        const { lat: postLat, lon: postLon } = getPostCoords(post);
-                        if (!isFinite(postLat) || !isFinite(postLon)) continue;
-                        
-                        const dist = distMeters(postLat, postLon);
-                        if (dist > 50000) continue; // 50km max for surrounding
-                        
-                        quality.push({ post, dist, netScore });
-                        categorized.add(post.id);
-                    }
-                    
-                    // Sort: FARTHER first (distance DESC), then by netScore DESC (tie-breaker)
-                    quality.sort((a, b) => (b.dist - a.dist) || (b.netScore - a.netScore));
-                    const qualityFinal = quality.slice(0, qualityTarget);
-                    console.log(`   20% QUALITY: ${qualityFinal.length}/${qualityTarget} (farther=better)`);
-                }
-
-                // STEP 3C: 10% VIRAL (top posts globally, scaled to grid size)
+                const qualityTarget = Math.ceil(targetLimit * 0.20);
                 const viralTarget = Math.ceil(targetLimit * 0.10);
-                for (const post of livePosts) {
-                    if (categorized.has(post.id)) continue;
-                    const netScore = getNetScore(post);
-                    if (netScore > 50) { // Top engagement threshold
-                        viral.push({ post, netScore });
-                        categorized.add(post.id);
-                    }
-                }
-                viral.sort((a, b) => b.netScore - a.netScore);
-                const viralFinal = viral.slice(0, viralTarget);
-                console.log(`   10% VIRAL: ${viralFinal.length}/${viralTarget}`);
-
-                // STEP 3D: 10% BOOST (ML-pre-filtered, hard cap 10%)
                 const boostTarget = Math.ceil(targetLimit * 0.10);
-                for (const post of livePosts) {
-                    if (categorized.has(post.id)) continue;
-                    // Check boost status: active + not expired
-                    if (post.boostStatus === 'active' && post.boostExpiresAt && post.boostExpiresAt > Date.now()) {
-                        boost.push({ post, netScore: getNetScore(post) });
-                        categorized.add(post.id);
-                    }
-                }
-                boost.sort((a, b) => b.netScore - a.netScore);
-                const boostFinal = boost.slice(0, boostTarget);
-                console.log(`   10% BOOST: ${boostFinal.length}/${boostTarget}`);
+
+                // STEP 3A: 60% LOCAL
+                // Prioritize nearest + freshest + better engagement so farther/older local posts
+                // are automatically replaced when better local posts appear.
+                const localCandidates = livePosts
+                    .map((post) => {
+                        const dist = getDistance(post);
+                        if (!isFinite(dist) || dist > adaptiveDistThreshold) return null;
+                        const localScore =
+                            (getDistanceScore(dist, Math.max(1000, adaptiveDistThreshold / 1.5)) * 0.72) +
+                            (getFreshness(post) * 0.18) +
+                            (getNetScoreNorm(post) * 0.10);
+                        return { post, dist, netScore: getNetScore(post), localScore };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => (b.localScore - a.localScore) || (a.dist - b.dist));
+
+                const localFinal = localCandidates.slice(0, localTarget);
+                addSelected(localFinal);
+                console.log(`   60% LOCAL: ${localFinal.length}/${localTarget} (nearest+freshest+best replacing older/farther)`);
+
+                // STEP 3B: 20% QUALITY
+                // Dynamic quality pass that also prefers relevance (closer + fresher + net-positive).
+                const qualityCandidates = livePosts
+                    .filter(post => !selectedIds.has(post.id))
+                    .map((post) => {
+                        const dist = getDistance(post);
+                        if (!isFinite(dist) || dist > 50000) return null; // within 50km
+                        const netScore = getNetScore(post);
+                        if (netScore < 0) return null;
+
+                        const qualityScore =
+                            (getNetScoreNorm(post) * 0.52) +
+                            (getFreshness(post) * 0.26) +
+                            (getDistanceScore(dist, 8000) * 0.22);
+                        return { post, dist, netScore, qualityScore };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => (b.qualityScore - a.qualityScore) || (a.dist - b.dist));
+
+                const qualityFinal = qualityCandidates.slice(0, qualityTarget);
+                addSelected(qualityFinal);
+                console.log(`   20% QUALITY: ${qualityFinal.length}/${qualityTarget} (high-quality and relevance-refreshed)`);
+
+                // STEP 3C: 10% VIRAL
+                // Viral candidates are taken from the CURRENT top 15 global performers.
+                // If top-15 membership changes, viral slots naturally replace previous posts.
+                const viralTop15 = livePosts
+                    .map((post) => {
+                        const netScore = getNetScore(post);
+                        const createdAt = getCreatedAt(post);
+                        const ageHours = Math.max(1, (nowMs - createdAt) / 3600000);
+                        const velocity = netScore / ageHours;
+                        const viralScore = (netScore * 0.70) + (velocity * 0.30);
+                        return { post, netScore, viralScore };
+                    })
+                    .filter(x => x.netScore > 0)
+                    .sort((a, b) => (b.viralScore - a.viralScore) || (b.netScore - a.netScore))
+                    .slice(0, 15);
+
+                const viralCandidates = viralTop15
+                    .filter(x => !selectedIds.has(x.post.id))
+                    .sort((a, b) => (b.viralScore - a.viralScore) || (b.netScore - a.netScore));
+
+                const viralFinal = pickTopWithRotation(viralCandidates, viralTarget, 17, 2);
+                addSelected(viralFinal);
+                console.log(`   10% VIRAL: ${viralFinal.length}/${viralTarget} (from live top-15, auto-replaces on ranking changes)`);
+
+                // STEP 3D: 10% BOOST
+                // Boost ranking is locality-first so nearby active boosts outrank far boosts.
+                // Rotates within top boost pool to avoid static repetition between grid refreshes.
+                const boostCandidates = livePosts
+                    .filter(post => !selectedIds.has(post.id))
+                    .map((post) => {
+                        if (!(post.boostStatus === 'active' && post.boostExpiresAt && post.boostExpiresAt > nowMs)) return null;
+                        const dist = getDistance(post);
+                        const locality = getDistanceScore(dist, 12000);
+                        const boostScore =
+                            (locality * 0.62) +
+                            (getNetScoreNorm(post) * 0.23) +
+                            (getFreshness(post) * 0.15);
+                        return { post, dist, netScore: getNetScore(post), boostScore };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => (b.boostScore - a.boostScore) || (a.dist - b.dist));
+
+                const boostFinal = pickTopWithRotation(boostCandidates, boostTarget, 53, 3);
+                addSelected(boostFinal);
+                console.log(`   10% BOOST: ${boostFinal.length}/${boostTarget} (locality-first rotation)`);
 
                 // STEP 4: Merge results and fill to target
                 const result = [];
                 result.push(...localFinal.map(x => x.post));
-                result.push(...quality.slice(0, Math.ceil(targetLimit * 0.20)).map(x => x.post));
+                result.push(...qualityFinal.map(x => x.post));
                 result.push(...viralFinal.map(x => x.post));
                 result.push(...boostFinal.map(x => x.post));
 
-                // Fill remaining slots from uncategorized live posts (by distance)
+                // Fill remaining slots from unselected live posts by blended relevance
                 if (result.length < targetLimit) {
                     const fillPosts = livePosts
-                        .filter(p => !categorized.has(p.id))
-                        .map(p => {
-                            const { lat: pLat, lon: pLon } = getPostCoords(p);
-                            const dist = isFinite(pLat) && isFinite(pLon) ? distMeters(pLat, pLon) : 999999;
-                            return { post: p, dist, netScore: getNetScore(p) };
+                        .filter(p => !selectedIds.has(p.id))
+                        .map((p) => {
+                            const dist = getDistance(p);
+                            const fallbackScore =
+                                (getDistanceScore(dist, 15000) * 0.50) +
+                                (getFreshness(p) * 0.30) +
+                                (getNetScoreNorm(p) * 0.20);
+                            return { post: p, dist, netScore: getNetScore(p), fallbackScore };
                         })
-                        .sort((a, b) => (a.dist - b.dist) || (b.netScore - a.netScore))
+                        .sort((a, b) => (b.fallbackScore - a.fallbackScore) || (a.dist - b.dist))
                         .slice(0, targetLimit - result.length);
-                    
+
                     result.push(...fillPosts.map(x => x.post));
                 }
 
@@ -33708,11 +34171,11 @@ function setUploadModalHeader(title, subtitle) {
                     const isManualCommit = window.__lastLocationChangeReason === 'user_commit' || window.__lastLocationChangeReason === 'return_home';
                     if (isManualCommit) {
                         window.__lastLocationChangeReason = null; // consume it
-                        const areaLabel = userArea && userArea !== 'Local area' ? userArea : `${userLat.toFixed(3)}, ${userLon.toFixed(3)}`;
                         const msg = localCount > 0
-                            ? `📍 ${localCount} local post${localCount > 1 ? 's' : ''} found near ${areaLabel}`
-                            : `📍 No local posts yet near ${areaLabel} — showing best content from nearby`;
-                        if (typeof showNotification === 'function') showNotification(msg);
+                            ? 'Local posts found in this area.'
+                            : 'No local content yet.';
+                        queueLocationCommitNotice(msg);
+                        setTimeout(() => { try { flushLocationCommitNotice(); } catch (e) {} }, 0);
                     }
                 } catch (e) { /* ignore toast errors */ }
 
@@ -33798,6 +34261,24 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         window.triggerLocationChangeRefilter = triggerLocationChangeRefilter;
+
+        function queueLocationCommitNotice(message) {
+            if (!message) return;
+            window.__pendingLocationCommitNotice = String(message);
+        }
+
+        function flushLocationCommitNotice() {
+            try {
+                const message = window.__pendingLocationCommitNotice;
+                if (!message) return false;
+                if (document.getElementById('locationChangeLoading')) return false;
+                window.__pendingLocationCommitNotice = null;
+                if (typeof showNotification === 'function') showNotification(message);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
 
         function getActiveViewerFeedKey() {
             try {
@@ -34221,7 +34702,6 @@ function setUploadModalHeader(title, subtitle) {
         // ============================================================================
         // UNIFIED CONTENT RANKING SYSTEM - Blend all post ranking systems
         // ============================================================================
-        // Combines: Area Hierarchy, Badge System, POI Detection, ML Recommendations, Zone Tags
         // Ensures seamless user experience across all systems
         // ============================================================================
         
@@ -39700,6 +40180,7 @@ function setUploadModalHeader(title, subtitle) {
                             if (typeof setTopControlsHiddenForLocationLoading === 'function') {
                                 setTopControlsHiddenForLocationLoading(false);
                             }
+                            setTimeout(() => { try { flushLocationCommitNotice(); } catch (e) {} }, 80);
                         } catch(e) {}
                     };
                     if (remaining > 0) { setTimeout(doRemove, remaining); } else { doRemove(); }
@@ -46875,18 +47356,29 @@ function setUploadModalHeader(title, subtitle) {
             
             // 📍 LAZY LOAD: Heavy operations happen AFTER content is visible
             // This provides instant visual feedback to user
-            setTimeout(() => {
-                console.log('⚡ LAZY LOAD: Phase 0 (geolocation + POI detection)');
-                initializePhase0().catch(err => {
-                    console.error('Phase 0 failed (non-critical):', err);
-                });
-            }, 100); // Defer slightly to let UI paint
-            
-            // 📡 LAZY LOAD: Posts from Firebase (non-blocking)
-            setTimeout(() => {
-                console.log('⚡ LAZY LOAD: Loading posts from Firebase...');
-                subscribeToFirebasePostsWithReconnect();
-            }, 200); // Defer to allow geolocation to start
+            const startHeavyBoot = () => {
+                if (window.__iosHeavyBootStarted) return;
+                window.__iosHeavyBootStarted = true;
+
+                setTimeout(() => {
+                    console.log('⚡ LAZY LOAD: Phase 0 (geolocation + POI detection)');
+                    initializePhase0().catch(err => {
+                        console.error('Phase 0 failed (non-critical):', err);
+                    });
+                }, window.__iosLiteMode ? 800 : 100);
+
+                // 📡 LAZY LOAD: Posts from Firebase (non-blocking)
+                setTimeout(() => {
+                    console.log('⚡ LAZY LOAD: Loading posts from Firebase...');
+                    subscribeToFirebasePostsWithReconnect();
+                }, window.__iosLiteMode ? 1200 : 200);
+            };
+
+            if (window.__iosLiteMode) {
+                window.__iosDeferredStartupRunner = startHeavyBoot;
+            } else {
+                startHeavyBoot();
+            }
 
             // Poll local server for posts as a fallback for development/testing when Firebase is unavailable
             function pollLocalServerPosts() {
@@ -49250,25 +49742,38 @@ function setUploadModalHeader(title, subtitle) {
                 // Apply restored userLocation cache (from backup or fresh geolocation) and refresh UI
                 function applyRestoredLocationAndRefreshUI(cacheObj) {
                     try {
+                        const isReturnHome = !!window.__locationChangeIsReturnHome;
                         if (cacheObj && cacheObj.lat != null && cacheObj.lon != null) {
                             try { window.userLocation = { lat: Number(cacheObj.lat), lon: Number(cacheObj.lon), accuracy: cacheObj.accuracy || null }; } catch(e) {}
                         }
-                        // If cache has a label/name, mirror into latestUserAreaTag
-                        try { if (cacheObj && (cacheObj.label || cacheObj.name)) window.latestUserAreaTag = String(cacheObj.label || cacheObj.name).trim(); } catch(e) {}
-                        // Make the restored location the active area tag
-                        try {
-                            const manualLabel = (cacheObj && (cacheObj.label || cacheObj.name || cacheObj.display)) || window.latestUserAreaTag || null;
-                            if (manualLabel) {
-                                try { window.currentZoneTag = String(manualLabel).trim(); } catch(e) {}
-                                try { window.currentAreaName = String(manualLabel).trim(); } catch(e) {}
-                                try { window.userSelectedZone = true; } catch(e) {}
-                            }
-                        } catch (e) {}
-                        // Persist the restored zone tag and saved location
-                        try {
-                            try { window.persistZoneTagForUser && window.persistZoneTagForUser(window.currentZoneTag, { manual: true }); } catch(e) {}
-                            try { if (cacheObj) localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: cacheObj.lat, lon: cacheObj.lon, label: (cacheObj.label || cacheObj.name || cacheObj.display) })); } catch(e) {}
-                        } catch (e) {}
+                        if (isReturnHome) {
+                            try { window.latestUserAreaTag = ''; } catch(e) {}
+                            try { window.currentZoneTag = 'Local area'; } catch(e) {}
+                            try { window.currentAreaName = 'Local area'; } catch(e) {}
+                            try { window.userSelectedZone = false; } catch(e) {}
+                            try { localStorage.removeItem('lastChosenLocation'); } catch(e) {}
+                            try { localStorage.removeItem('locationOverrideState'); } catch(e) {}
+                            try { localStorage.removeItem('manualLocationActive'); } catch(e) {}
+                            try { localStorage.setItem('forceLocalAreaTag', '1'); } catch(e) {}
+                            try { if (typeof window.resetZoneToLocalArea === 'function') window.resetZoneToLocalArea(); } catch(e) {}
+                        } else {
+                            // If cache has a label/name, mirror into latestUserAreaTag
+                            try { if (cacheObj && (cacheObj.label || cacheObj.name)) window.latestUserAreaTag = String(cacheObj.label || cacheObj.name).trim(); } catch(e) {}
+                            // Make the restored location the active area tag
+                            try {
+                                const manualLabel = (cacheObj && (cacheObj.label || cacheObj.name || cacheObj.display)) || window.latestUserAreaTag || null;
+                                if (manualLabel) {
+                                    try { window.currentZoneTag = String(manualLabel).trim(); } catch(e) {}
+                                    try { window.currentAreaName = String(manualLabel).trim(); } catch(e) {}
+                                    try { window.userSelectedZone = true; } catch(e) {}
+                                }
+                            } catch (e) {}
+                            // Persist the restored zone tag and saved location
+                            try {
+                                try { window.persistZoneTagForUser && window.persistZoneTagForUser(window.currentZoneTag, { manual: true }); } catch(e) {}
+                                try { if (cacheObj) localStorage.setItem('lastChosenLocation', JSON.stringify({ lat: cacheObj.lat, lon: cacheObj.lon, label: (cacheObj.label || cacheObj.name || cacheObj.display) })); } catch(e) {}
+                            } catch (e) {}
+                        }
                         try { checkSavedLocationAreaMatch && checkSavedLocationAreaMatch(); } catch (e) {}
                         // 🔁 Return Home: sync the lexical location to the restored coords so the
                         // grid re-ranks back to the home location on the renderGrid below.
@@ -49291,6 +49796,41 @@ function setUploadModalHeader(title, subtitle) {
                         try { if (typeof closeModal === 'function') closeModal(); } catch(e){}
                         // Notification suppressed: restored home state handled visually
                     } catch (e) { console.warn('applyRestoredLocationAndRefreshUI failed', e); }
+                }
+
+                function persistCommittedLocationOverride(selection, source = 'manual_commit') {
+                    try {
+                        if (!selection) return false;
+                        const lat = Number(selection.lat);
+                        const lon = Number(selection.lon);
+                        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+
+                        const now = Date.now();
+                        const label = String(selection.label || selection.name || selection.display || '').trim();
+                        const payload = {
+                            lat,
+                            lon,
+                            label,
+                            accuracy: Number(selection.accuracy) || 100,
+                            source,
+                            manual: true,
+                            changedAt: now,
+                            updatedAt: now
+                        };
+
+                        localStorage.setItem('manualLocationActive', '1');
+                        localStorage.setItem('lastChosenLocation', JSON.stringify(payload));
+                        localStorage.setItem('locationOverrideState', JSON.stringify(payload));
+                        localStorage.setItem('lastLocationTimestamp', String(now));
+
+                        window.userLocation = { lat, lon };
+                        try { setUserLocationCache(payload, { force: true }); } catch (e) { localStorage.setItem('userLocationCache', JSON.stringify(payload)); }
+
+                        return true;
+                    } catch (e) {
+                        console.warn('persistCommittedLocationOverride failed', e);
+                        return false;
+                    }
                 }
                 // Position the mini-earth pill so the globe icon sits just inside the grid edge
                 (function positionPill() {
@@ -49324,6 +49864,13 @@ function setUploadModalHeader(title, subtitle) {
 
                 function openModal(){
                     if (!backdrop) return;
+                    try {
+                        window.__activeLocationDraftToken = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+                        window.__tempLocationOverride = null;
+                        if (refineInput) refineInput.value = '';
+                        try { sessionStorage.removeItem('lastChosenLocationTemp'); } catch (e) {}
+                        try { localStorage.removeItem('lastChosenLocationTemp'); } catch (e) {}
+                    } catch (e) { /* ignore modal session reset failures */ }
                     backdrop.style.display = 'flex';
                     backdrop.setAttribute('aria-hidden','false');
                     if (modal) modal.classList.add('open');
@@ -49614,7 +50161,7 @@ function setUploadModalHeader(title, subtitle) {
                         // preserve original user location once
                         if (!window.__originalUserLocation) window.__originalUserLocation = window.userLocation || null;
                         // set temporary override and update the input immediately
-                        window.__tempLocationOverride = { lat: it.lat, lon: it.lon, label: it.label };
+                        window.__tempLocationOverride = { lat: it.lat, lon: it.lon, label: it.label, __draftToken: window.__activeLocationDraftToken || null };
                         // Persist a temporary selection so other tabs/components can read it
                         try {
                             if (typeof sessionStorage !== 'undefined') {
@@ -49776,7 +50323,7 @@ function setUploadModalHeader(title, subtitle) {
                         function select(it){
                             try {
                                 input.value = it.label;
-                                window.__tempLocationOverride = { lat: it.lat, lon: it.lon, label: it.label };
+                                window.__tempLocationOverride = { lat: it.lat, lon: it.lon, label: it.label, __draftToken: window.__activeLocationDraftToken || null };
                                 try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem('lastChosenLocationTemp', JSON.stringify(window.__tempLocationOverride)); } catch(e){}
                                 try { if (typeof localStorage !== 'undefined') localStorage.setItem('lastChosenLocationTemp', JSON.stringify(window.__tempLocationOverride)); } catch(e){}
                                 document.dispatchEvent(new CustomEvent('locationSelected',{detail:window.__tempLocationOverride}));
@@ -49879,14 +50426,28 @@ function setUploadModalHeader(title, subtitle) {
                                 } catch (e) { /* ignore remote geocode errors */ }
                             }
                             if (match) {
-                                window.__tempLocationOverride = { lat: Number(match.lat), lon: Number(match.lon), label: match.label || typed };
+                                window.__tempLocationOverride = { lat: Number(match.lat), lon: Number(match.lon), label: match.label || typed, __draftToken: window.__activeLocationDraftToken || null };
                                 console.log('LOCATION_OVERRIDE: resolved typed text to coords on commit:', window.__tempLocationOverride);
                             }
                         }
                     } catch (e) { console.warn('Failed to resolve typed location on commit', e); }
                     try {
+                        const activeDraft = String(window.__activeLocationDraftToken || '');
+                        const hasFreshSelection = !!(
+                            window.__tempLocationOverride &&
+                            Number.isFinite(Number(window.__tempLocationOverride.lat)) &&
+                            Number.isFinite(Number(window.__tempLocationOverride.lon)) &&
+                            String(window.__tempLocationOverride.__draftToken || '') === activeDraft
+                        );
+
+                        if (!hasFreshSelection) {
+                            console.log('Change location ignored: no new location selected in this modal session');
+                            return;
+                        }
+
                         if (window.__tempLocationOverride) {
                             const sel = window.__tempLocationOverride;
+                            try { persistCommittedLocationOverride(sel, 'change_location_commit'); } catch (e) { console.warn('manual override persistence helper failed', e); }
                             // Persist locally first so the chosen location survives refreshes immediately
                             try {
                                     // Backup any existing cached real browser location so Return Home can restore it
@@ -50040,6 +50601,16 @@ function setUploadModalHeader(title, subtitle) {
                     } catch (e) {}
                 });
                 if (comeHomeBtn) comeHomeBtn.addEventListener('click', function(){
+                    // Apply Return Home state immediately so the posting tag is reset
+                    // before any async restore work completes.
+                    try { window.__locationChangeIsReturnHome = true; } catch(e) {}
+                    try { localStorage.removeItem('manualLocationActive'); } catch(e) {}
+                    try { localStorage.removeItem('lastChosenLocation'); } catch(e) {}
+                    try { localStorage.setItem('forceLocalAreaTag', '1'); } catch(e) {}
+                    try { window.latestUserAreaTag = ''; } catch(e) {}
+                    try { if (typeof window.resetZoneToLocalArea === 'function') window.resetZoneToLocalArea(); } catch (e) {}
+                    try { if (typeof updateZonePredictor === 'function') updateZonePredictor(); } catch(e) {}
+
                     // Restore any backed-up cached real browser location, then clear manual flags
                     try {
                         const backup = localStorage.getItem('userLocationCacheBackup');
@@ -50063,6 +50634,7 @@ function setUploadModalHeader(title, subtitle) {
                                             console.info('Fetched fresh geolocation and cached');
                                             console.log('LOCATION_OVERRIDE: fresh geolocation cached', loc);
                                         } catch(e){}
+                                        try { window.__locationChangeIsReturnHome = true; } catch(e) {}
                                         try { applyRestoredLocationAndRefreshUI(loc); } catch(e) { console.warn('applyRestoredLocationAndRefreshUI failed after geolocation', e); }
                                     }).catch((err)=>{ console.warn('requestGeolocation failed', err); });
                                 }
@@ -50117,6 +50689,7 @@ function setUploadModalHeader(title, subtitle) {
                             }
                         } catch (e) { console.warn('Failed to sync restored location to Firebase', e); }
                         try { 
+                            try { window.__locationChangeIsReturnHome = true; } catch(e) {}
                             applyRestoredLocationAndRefreshUI(cacheObj); 
                             // 🎯 TRIGGER LOCATION-AWARE REFILTER (user returned home)
                             if (typeof triggerLocationChangeRefilter === 'function' && cacheObj && cacheObj.lat && cacheObj.lon) {

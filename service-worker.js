@@ -6,7 +6,7 @@
 const _swUrl = typeof self !== 'undefined' && self.location ? String(self.location.href) : '';
 const _swUrlObj = (() => { try { return new URL(_swUrl); } catch (e) { return null; } })();
 const _swVer = (_swUrlObj && _swUrlObj.searchParams && _swUrlObj.searchParams.get('v')) || 'mobile-optimized';
-const CACHE_NAME = 'wifi-content-v3-' + _swVer;
+const CACHE_NAME = 'wifi-content-v4-' + _swVer;
 const POSTS_CACHE = 'posts-cache-v2';
 const urlsToCache = [
   '/',
@@ -72,6 +72,7 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   const requestUrl = new URL(event.request.url);
+  const isSameOrigin = requestUrl.origin === self.location.origin;
 
   // Firebase endpoints: network first, cache fallback (keep previous behavior)
   if (event.request.url.includes('firebase') || event.request.url.includes('firestore') || event.request.url.includes('storage.googleapis')) {
@@ -89,22 +90,29 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Treat navigation requests (page loads) and requests for index.html as network-first so
-  // the browser visits the live deployment rather than an old cached index.html.
+  // Treat navigation requests and version-critical assets as network-first so
+  // mobile browsers always pick up new deployments quickly.
   const isNavigation = event.request.mode === 'navigate' || requestUrl.pathname === '/' || requestUrl.pathname.endsWith('/index.html');
+  const isVersionCriticalAsset = isSameOrigin && (
+    requestUrl.pathname.endsWith('/index.html') ||
+    requestUrl.pathname.endsWith('/version.json') ||
+    requestUrl.pathname.endsWith('/service-worker.js') ||
+    requestUrl.pathname.endsWith('/sw.js') ||
+    /\.(js|css|json)$/i.test(requestUrl.pathname)
+  );
 
-  if (isNavigation) {
+  if (isNavigation || isVersionCriticalAsset) {
     event.respondWith(
       fetch(event.request)
         .then((networkResponse) => {
-          // Update cache with fresh index.html/network response for offline fallback
+          // Keep a fresh cached copy for offline fallback, but always prefer network first.
           if (networkResponse && networkResponse.ok) {
             const clone = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', clone));
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
           }
           return networkResponse;
         })
-        .catch(() => caches.match('/index.html').then((cached) => cached || new Response('Service Unavailable', { status: 503 })))
+        .catch(() => caches.match(event.request).then((cached) => cached || caches.match('/index.html').then((fallback) => fallback || new Response('Service Unavailable', { status: 503 }))))
     );
     return;
   }
