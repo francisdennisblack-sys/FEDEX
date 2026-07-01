@@ -603,7 +603,14 @@
                         sessionStorage.setItem('__wificontent_force_reload', '1');
                         
                         // Hard reload after short delay to let assets cache-invalidate
-                        setTimeout(() => window.location.reload(true), 200);
+                        setTimeout(() => {
+                            try {
+                                if (window.programmaticReload) window.programmaticReload('version-mismatch');
+                                else window.location.reload();
+                            } catch (e) {
+                                try { window.location.reload(); } catch (e2) {}
+                            }
+                        }, 200);
                         try { if (window.__startupStageSuccess) window.__startupStageSuccess('initVersionCheck', { forcedReload: true, currentVersion: currentVersion, previousVersion: lastVersion }); } catch (e) {}
                         return;
                     }
@@ -830,6 +837,26 @@
                 }
             })();
 
+            // Cross-browser storage restriction probe (not Safari-specific).
+            // Private/restricted contexts in multiple browsers can fail writes,
+            // making persistence + cache behavior unstable.
+            window.__storageLikelyRestricted = (function () {
+                try {
+                    const k = '__storage_probe__';
+                    localStorage.setItem(k, '1');
+                    localStorage.removeItem(k);
+                    const s = '__session_probe__';
+                    sessionStorage.setItem(s, '1');
+                    sessionStorage.removeItem(s);
+                    return false;
+                } catch (e) {
+                    return true;
+                }
+            })();
+
+            // Disable SW in fragile persistence environments.
+            window.__disableServiceWorkers = !!(window.__privateSafeMode || window.__storageLikelyRestricted);
+
             // Safe storage wrapper: avoids hard crashes when Safari private mode
             // blocks persistent stores and falls back to memory values.
             window.__safeMemoryStore = window.__safeMemoryStore || {};
@@ -1004,7 +1031,7 @@
                 }
                 // Register service worker to handle background location updates
                 try {
-                    if ('serviceWorker' in navigator && !window.__isIOSSafari && !window.__privateSafeMode) {
+                    if ('serviceWorker' in navigator && !window.__isIOSSafari && !window.__disableServiceWorkers) {
                         try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.early'); } catch (e) {}
                         navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' }).then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
@@ -1028,7 +1055,7 @@
                                             try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
                                             try { applySavedLocationAuthoritative(); } catch(e) {}
                                             try { checkSavedLocationAreaMatch(); } catch(e) {}
-                                            try { location.reload(); } catch(e) {}
+                                            try { programmaticReload('sw-location-updated'); } catch(e) { try { location.reload(); } catch(e2) {} }
                                     } catch (e) { console.warn('Failed to apply SW location', e); }
                                 } else if (data && data.type === 'locationUpdateFailed') {
                                     console.warn('ServiceWorker failed to persist location:', data.error);
@@ -1055,24 +1082,26 @@
                         }
                     }
 
-                    // Centralized programmatic reload helper (marks cross-tab flag)
-                    function programmaticReload() {
-                        try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
-                        let navigatedAway = false;
-                        try { window.addEventListener('pagehide', function markPageHide(){ navigatedAway = true; }, { once: true }); } catch (e) {}
+                    // Centralized programmatic reload helper with circuit-breaker
+                    // to avoid reload loops in fragile/private browser contexts.
+                    function programmaticReload(reason) {
+                        const now = Date.now();
+                        try {
+                            const last = Number(sessionStorage.getItem('__last_programmatic_reload_at') || 0);
+                            if (last && (now - last) < 12000) {
+                                console.warn('🧯 programmaticReload throttled', { reason: reason || 'unspecified', ageMs: now - last });
+                                return false;
+                            }
+                        } catch (e) {}
+                        try { sessionStorage.setItem('__last_programmatic_reload_at', String(now)); } catch (e) {}
+                        try { localStorage.setItem('programmaticReloadTS', String(now)); } catch (e) {}
                         try {
                             window.location.reload();
+                            return true;
                         } catch (e) {
                             forceNavigateReload();
-                            return;
+                            return true;
                         }
-
-                        // If native reload was ignored (seen in some browser states), force navigation.
-                        setTimeout(() => {
-                            try {
-                                if (!navigatedAway) forceNavigateReload();
-                            } catch (e) {}
-                        }, 450);
                     }
                     try { window.programmaticReload = programmaticReload; } catch (e) {}
                     try { window.forceHardReload = function() { try { programmaticReload(); } catch (e) {} }; } catch (e) {}
@@ -18522,7 +18551,7 @@
                     } catch (e) { console.warn('showUpdatePrompt failed', e); }
                 }
 
-                if ('serviceWorker' in navigator && !window.__isIOSSafari && !window.__privateSafeMode) {
+                if ('serviceWorker' in navigator && !window.__isIOSSafari && !window.__disableServiceWorkers) {
                     try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.main'); } catch (e) {}
                     // Remove any legacy /sw.js registration so old mobile clients stop
                     // being pinned to the simple worker and receive the modern updater.
@@ -18612,7 +18641,7 @@
                                 if (!alreadyReloaded) {
                                     localStorage.setItem(reloadKey, activeVersion);
                                     localStorage.setItem('programmaticReloadTS', String(Date.now()));
-                                    location.reload();
+                                    try { programmaticReload('sw-new-version'); } catch (e3) { try { location.reload(); } catch(e4){} }
                                     return;
                                 }
                             } catch (e) { /* fall through to prompt */ }
