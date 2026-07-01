@@ -33013,6 +33013,19 @@ function setUploadModalHeader(title, subtitle) {
 
         function subscribeToFirebasePostsWithReconnect() {
             try {
+                if (!currentUserId) {
+                    try {
+                        const fallbackId = window.currentUserId || permanentUserId || localStorage.getItem('permanentUserId') || localStorage.getItem('userId') || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
+                        if (fallbackId) {
+                            currentUserId = fallbackId;
+                            try { window.currentUserId = fallbackId; } catch (e) {}
+                        }
+                    } catch (e) {}
+                }
+                if (currentUserId && !isConnected) {
+                    isConnected = true;
+                }
+
                 const iosLiteMode = !!window.__iosLiteMode;
                 // Keep a separate live mirror of mutable packaged post metadata.
                 // This lets us adjust viewer-facing tags without touching canonical posts.
@@ -33112,6 +33125,16 @@ function setUploadModalHeader(title, subtitle) {
                 firebaseUnsubscribe = subscribeToFirebasePosts((posts) => {
                     console.log('\n📬 Firebase snapshot received for shared posts');
                     console.log('  snapshot length:', posts.length);
+                    try {
+                        window.__lastFirebaseSnapshotAt = Date.now();
+                        window.__lastFirebaseSnapshotCount = Array.isArray(posts) ? posts.length : 0;
+                    } catch (e) {}
+                    try {
+                        if (window.firebaseLoadTimeoutId) {
+                            clearTimeout(window.firebaseLoadTimeoutId);
+                            window.firebaseLoadTimeoutId = null;
+                        }
+                    } catch (e) {}
                     try {
                         if (typeof window.__setConsoleSummaryMetrics === 'function') {
                             const activeUsersMetric = Number(window.onlineUserCount || onlineUserCount || 0);
@@ -33791,6 +33814,63 @@ function setUploadModalHeader(title, subtitle) {
                 // Will try again on next heartbeat
             }
         }
+
+        // Feed liveness watchdog: if snapshots stop while page remains visible,
+        // force a clean resubscribe and redraw so the app never appears "dead".
+        (function initFeedLivenessWatchdog() {
+            const ensureIdentity = () => {
+                try {
+                    if (currentUserId) return currentUserId;
+                    const fallbackId = window.currentUserId || permanentUserId || localStorage.getItem('permanentUserId') || localStorage.getItem('userId') || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
+                    if (fallbackId) {
+                        currentUserId = fallbackId;
+                        try { window.currentUserId = fallbackId; } catch (e) {}
+                        return fallbackId;
+                    }
+                } catch (e) {}
+                return null;
+            };
+
+            const recover = (reason) => {
+                try {
+                    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+                    if (document && document.hidden) return;
+
+                    const uid = ensureIdentity();
+                    if (!uid) return;
+
+                    const now = Date.now();
+                    const last = Number(window.__lastFirebaseSnapshotAt || 0);
+                    const staleMs = last > 0 ? (now - last) : Number.POSITIVE_INFINITY;
+                    if (staleMs < 20000) return;
+
+                    console.warn('⚠️ Feed liveness watchdog: snapshot stale, recovering', { reason: reason || 'interval', staleMs: staleMs, uid: uid });
+
+                    isConnected = true;
+                    try {
+                        if (typeof firebaseUnsubscribe === 'function') firebaseUnsubscribe();
+                    } catch (e) {}
+                    firebaseUnsubscribe = null;
+                    try {
+                        if (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function') window.firebaseUnsubscribe();
+                    } catch (e) {}
+                    try { window.firebaseUnsubscribe = null; } catch (e) {}
+
+                    try { subscribeToFirebasePostsWithReconnect(); } catch (e) {}
+                    try { if (typeof window.ensureDeviceFeed === 'function') window.ensureDeviceFeed(); } catch (e) {}
+                    try { window.lastRenderGridTime = 0; } catch (e) {}
+                    try { renderGrid(); } catch (e) {}
+
+                    try { window.__lastFirebaseSnapshotAt = now - 4000; } catch (e) {}
+                } catch (e) {}
+            };
+
+            try { window.__lastFirebaseSnapshotAt = Date.now(); } catch (e) {}
+            try { setInterval(() => recover('interval'), 7000); } catch (e) {}
+            try { window.addEventListener('focus', () => recover('focus')); } catch (e) {}
+            try { document.addEventListener('visibilitychange', () => { if (!document.hidden) recover('visible'); }); } catch (e) {}
+            try { window.addEventListener('online', () => recover('online')); } catch (e) {}
+        })();
 
         function normalizeAreaTagForViewerFeed(value) {
             const str = String(value || '').trim();
