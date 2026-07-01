@@ -799,6 +799,92 @@
                 } catch (e) { return false; }
             })();
 
+            window.__privateSafeMode = (function () {
+                try {
+                    const k = '__private_safe_probe__';
+                    localStorage.setItem(k, '1');
+                    localStorage.removeItem(k);
+                    const k2 = '__private_safe_probe2__';
+                    sessionStorage.setItem(k2, '1');
+                    sessionStorage.removeItem(k2);
+                    return false;
+                } catch (e) {
+                    return true;
+                }
+            })();
+
+            // Safe storage wrapper: avoids hard crashes when Safari private mode
+            // blocks persistent stores and falls back to memory values.
+            window.__safeMemoryStore = window.__safeMemoryStore || {};
+            window.safeStorage = {
+                get: function(key, fallbackValue) {
+                    try {
+                        const raw = localStorage.getItem(key);
+                        if (raw !== null && raw !== undefined) return raw;
+                    } catch (e) {}
+                    try {
+                        if (Object.prototype.hasOwnProperty.call(window.__safeMemoryStore, key)) {
+                            return window.__safeMemoryStore[key];
+                        }
+                    } catch (e) {}
+                    return fallbackValue;
+                },
+                set: function(key, value) {
+                    try {
+                        localStorage.setItem(key, String(value));
+                        return true;
+                    } catch (e) {}
+                    try {
+                        window.__safeMemoryStore[key] = String(value);
+                        return false;
+                    } catch (e) {}
+                    return false;
+                },
+                remove: function(key) {
+                    try { localStorage.removeItem(key); } catch (e) {}
+                    try { delete window.__safeMemoryStore[key]; } catch (e) {}
+                }
+            };
+
+            // Async IndexedDB probe for Safari private windows: if IDB is blocked or
+            // slow to open, enable private-safe mode and avoid persistence-heavy paths.
+            (function detectPrivateStorageRestrictions() {
+                if (!window.__isSafariLikeBrowser) return;
+                try {
+                    if (!window.indexedDB || typeof window.indexedDB.open !== 'function') {
+                        window.__privateSafeMode = true;
+                        return;
+                    }
+                    let settled = false;
+                    const req = window.indexedDB.open('__private_mode_probe__', 1);
+                    const to = setTimeout(function() {
+                        if (settled) return;
+                        settled = true;
+                        window.__privateSafeMode = true;
+                        try { console.warn('🍎 Private storage restriction detected: indexedDB timeout'); } catch (e) {}
+                    }, 1800);
+                    req.onupgradeneeded = function() {};
+                    req.onsuccess = function(e) {
+                        if (settled) return;
+                        settled = true;
+                        clearTimeout(to);
+                        try {
+                            const db = e && e.target && e.target.result;
+                            if (db) db.close();
+                        } catch (err) {}
+                    };
+                    req.onerror = function() {
+                        if (settled) return;
+                        settled = true;
+                        clearTimeout(to);
+                        window.__privateSafeMode = true;
+                        try { console.warn('🍎 Private storage restriction detected: indexedDB error'); } catch (e) {}
+                    };
+                } catch (e) {
+                    window.__privateSafeMode = true;
+                }
+            })();
+
             window.__safariHardSafeMode = !!window.__isSafariLikeBrowser;
 
             // Emergency Safari crash guard: reduce timer pressure from many fast loops
@@ -872,7 +958,7 @@
                 window.__iosFirstInteractionReady = true;
             }
 
-            if (window.__isIOSSafari && 'serviceWorker' in navigator) {
+            if (window.__isIOSSafari && !window.__privateSafeMode && 'serviceWorker' in navigator) {
                 try {
                     const iosCleanupKey = '__ios_sw_cleanup_done_session';
                     const alreadyCleaned = sessionStorage.getItem(iosCleanupKey) === '1';
@@ -954,7 +1040,7 @@
                 }
                 // Register service worker to handle background location updates
                 try {
-                    if ('serviceWorker' in navigator && !window.__isIOSSafari) {
+                    if ('serviceWorker' in navigator && !window.__isIOSSafari && !window.__privateSafeMode) {
                         try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.early'); } catch (e) {}
                         navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' }).then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
@@ -18417,7 +18503,7 @@
                     } catch (e) { console.warn('showUpdatePrompt failed', e); }
                 }
 
-                if ('serviceWorker' in navigator && !window.__isIOSSafari) {
+                if ('serviceWorker' in navigator && !window.__isIOSSafari && !window.__privateSafeMode) {
                     try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.main'); } catch (e) {}
                     // Remove any legacy /sw.js registration so old mobile clients stop
                     // being pinned to the simple worker and receive the modern updater.
@@ -18517,10 +18603,14 @@
                 } else if (window.__isIOSSafari) {
                     console.log('🍎 iOS Safari reliability mode: service worker disabled; using live network app');
                     try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.main', { skippedForIOSSafari: true }); } catch (e) {}
+                } else if (window.__privateSafeMode) {
+                    console.log('🛡️ Private safe mode: service worker disabled for stability');
+                    try { if (window.__startupStageSuccess) window.__startupStageSuccess('serviceWorker.register.main', { skippedForPrivateSafeMode: true }); } catch (e) {}
                 }
                 
                 // Version polling: periodically check /version.json and trigger SW update/reload
                 (function() {
+                    if (window.__privateSafeMode) return;
                     if (!('fetch' in window) || !('serviceWorker' in navigator)) return;
                     const POLL_INTERVAL = 60 * 1000; // 60s
                     let lastKnown = window.__APP_VERSION__ || null;
@@ -22477,6 +22567,9 @@ function setUploadModalHeader(title, subtitle) {
         // IndexedDB queue helpers for offline enqueueing
         function openQueueDB() {
             return new Promise((resolve, reject) => {
+                if (window.__privateSafeMode) {
+                    return reject(new Error('IDB disabled in private-safe mode'));
+                }
                 try {
                     const req = indexedDB.open('fedex-queue', 1);
                     req.onupgradeneeded = (e) => {
@@ -22492,6 +22585,14 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         async function enqueuePostToIDB(item) {
+            if (window.__privateSafeMode) {
+                window.__memoryQueuedPosts = window.__memoryQueuedPosts || [];
+                const nextId = Date.now() + Math.floor(Math.random() * 1000);
+                const record = Object.assign({}, item, { enqueueAt: Date.now(), enqueueId: nextId, inMemory: true });
+                window.__memoryQueuedPosts.push(record);
+                try { updateQueuedCount(); } catch (err) {}
+                return nextId;
+            }
             const db = await openQueueDB();
             return new Promise((resolve, reject) => {
                 try {
@@ -22518,6 +22619,10 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         async function getAllQueuedPosts() {
+            if (window.__privateSafeMode) {
+                window.__memoryQueuedPosts = window.__memoryQueuedPosts || [];
+                return window.__memoryQueuedPosts.slice();
+            }
             const db = await openQueueDB();
             return new Promise((resolve, reject) => {
                 try {
@@ -22531,6 +22636,12 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         async function removeQueuedPost(enqueueId) {
+            if (window.__privateSafeMode) {
+                window.__memoryQueuedPosts = window.__memoryQueuedPosts || [];
+                window.__memoryQueuedPosts = window.__memoryQueuedPosts.filter((x) => Number(x && x.enqueueId) !== Number(enqueueId));
+                try { updateQueuedCount(); } catch (err) {}
+                return true;
+            }
             const db = await openQueueDB();
             return new Promise((resolve, reject) => {
                 try {
