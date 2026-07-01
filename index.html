@@ -100,6 +100,27 @@
                 if (window.__startupDiagInstalled) return;
                 window.__startupDiagInstalled = true;
 
+                var startupUA = '';
+                var startupIsSafariLike = false;
+                try {
+                    startupUA = navigator.userAgent || '';
+                    startupIsSafariLike = /WebKit/i.test(startupUA) && /Safari/i.test(startupUA) && !/CriOS|FxiOS|EdgiOS|Chrome|Firefox|OPR|SamsungBrowser/i.test(startupUA);
+                } catch (e) {}
+
+                // Emergency Safari startup mode: keep diagnostics minimal to reduce
+                // startup pressure and avoid interaction deadlocks/crashes.
+                if (startupIsSafariLike) {
+                    window.__startupStageStart = function(){};
+                    window.__startupStageSuccess = function(){};
+                    window.__startupStageFail = function(){};
+                    window.__startupTrackPromise = function(name, promise) { return Promise.resolve(promise); };
+                    window.reportStartupDiagnostics = function() {
+                        return { safariSafeMode: true, skipped: 'startup-diagnostics' };
+                    };
+                    try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    return;
+                }
+
                 var baseConsole = {
                     log: console.log ? console.log.bind(console) : function(){},
                     info: console.info ? console.info.bind(console) : function(){},
@@ -781,20 +802,8 @@
             window.__iosDeferredStartupRunner = null;
 
             if (window.__iosLiteMode) {
-                const armIOSInteraction = () => {
-                    try {
-                        if (window.__iosFirstInteractionReady) return;
-                        window.__iosFirstInteractionReady = true;
-                        if (typeof window.__iosDeferredStartupRunner === 'function') {
-                            try { window.__iosDeferredStartupRunner(); } catch (e) {}
-                        }
-                    } catch (e) {}
-                };
-                try { document.addEventListener('touchstart', armIOSInteraction, { passive: true, once: true, capture: true }); } catch (e) {}
-                try { document.addEventListener('click', armIOSInteraction, { once: true, capture: true }); } catch (e) {}
-                try { document.addEventListener('keydown', armIOSInteraction, { once: true, capture: true }); } catch (e) {}
-                // Fallback trigger so startup still proceeds even without a first gesture.
-                try { setTimeout(armIOSInteraction, 2500); } catch (e) {}
+                // Emergency mode: do not gate startup behind first user interaction.
+                window.__iosFirstInteractionReady = true;
             }
 
             if (window.__isIOSSafari && 'serviceWorker' in navigator) {
@@ -47819,15 +47828,7 @@ function setUploadModalHeader(title, subtitle) {
             // On iOS lite mode, defer this preload until first interaction to avoid
             // first-second main-thread pressure that can make Safari feel unresponsive.
             if (window.__iosLiteMode) {
-                const prevRunner = window.__iosDeferredStartupRunner;
-                window.__iosDeferredStartupRunner = function runIOSDeferredStartup() {
-                    try {
-                        if (typeof prevRunner === 'function') prevRunner();
-                    } catch (e) {}
-                    try {
-                        setTimeout(_doDbPreload, 1400);
-                    } catch (e) {}
-                };
+                setTimeout(_doDbPreload, 1400);
             } else if (typeof requestIdleCallback === 'function') {
                 requestIdleCallback(_doDbPreload, { timeout: 2000 });
             } else {
@@ -48001,11 +48002,7 @@ function setUploadModalHeader(title, subtitle) {
                 }, window.__iosLiteMode ? 1200 : 200);
             };
 
-            if (window.__iosLiteMode) {
-                window.__iosDeferredStartupRunner = startHeavyBoot;
-            } else {
-                startHeavyBoot();
-            }
+            startHeavyBoot();
 
             // Poll local server for posts as a fallback for development/testing when Firebase is unavailable
             function pollLocalServerPosts() {
