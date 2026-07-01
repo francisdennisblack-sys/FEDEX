@@ -95,6 +95,43 @@
         try { document.documentElement.classList.add('app-startup-loading'); } catch (e) {}
     </script>
     <script>
+        (function initBootSafetyGuard() {
+            try {
+                const now = Date.now();
+                const ATTEMPT_KEY = '__boot_attempt_ts';
+                const FAIL_COUNT_KEY = '__boot_fail_count';
+                const SAFE_MODE_UNTIL_KEY = '__boot_safe_mode_until';
+
+                const safeModeUntil = Number(localStorage.getItem(SAFE_MODE_UNTIL_KEY) || 0);
+                if (safeModeUntil && safeModeUntil > now) {
+                    window.__bootSafeMode = true;
+                    window.__constrainedRuntime = true;
+                    window.__disableServiceWorkers = true;
+                }
+
+                const previousAttempt = Number(sessionStorage.getItem(ATTEMPT_KEY) || 0);
+                if (previousAttempt && (now - previousAttempt) < 45000) {
+                    const nextFailCount = Number(localStorage.getItem(FAIL_COUNT_KEY) || 0) + 1;
+                    localStorage.setItem(FAIL_COUNT_KEY, String(nextFailCount));
+                    if (nextFailCount >= 2) {
+                        localStorage.setItem(SAFE_MODE_UNTIL_KEY, String(now + (10 * 60 * 1000)));
+                        window.__bootSafeMode = true;
+                        window.__constrainedRuntime = true;
+                        window.__disableServiceWorkers = true;
+                    }
+                }
+
+                sessionStorage.setItem(ATTEMPT_KEY, String(now));
+                window.__markBootComplete = function markBootComplete() {
+                    try { sessionStorage.removeItem(ATTEMPT_KEY); } catch (e) {}
+                    try { localStorage.setItem(FAIL_COUNT_KEY, '0'); } catch (e) {}
+                };
+            } catch (e) {
+                // Keep startup going even if storage is restricted.
+            }
+        })();
+    </script>
+    <script>
         (function initStartupDiagnostics() {
             try {
                 if (window.__startupDiagInstalled) return;
@@ -107,15 +144,15 @@
                     startupIsSafariLike = /WebKit/i.test(startupUA) && /Safari/i.test(startupUA) && !/CriOS|FxiOS|EdgiOS|Chrome|Firefox|OPR|SamsungBrowser/i.test(startupUA);
                 } catch (e) {}
 
-                // Emergency Safari startup mode: keep diagnostics minimal to reduce
+                // Emergency startup mode: keep diagnostics minimal to reduce
                 // startup pressure and avoid interaction deadlocks/crashes.
-                if (startupIsSafariLike) {
+                if (startupIsSafariLike || window.__bootSafeMode) {
                     window.__startupStageStart = function(){};
                     window.__startupStageSuccess = function(){};
                     window.__startupStageFail = function(){};
                     window.__startupTrackPromise = function(name, promise) { return Promise.resolve(promise); };
                     window.reportStartupDiagnostics = function() {
-                        return { safariSafeMode: true, skipped: 'startup-diagnostics' };
+                        return { safeMode: true, safariSafeMode: !!startupIsSafariLike, bootSafeMode: !!window.__bootSafeMode, skipped: 'startup-diagnostics' };
                     };
                     try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
                     return;
@@ -48373,6 +48410,12 @@ function setUploadModalHeader(title, subtitle) {
 
         // Auto-initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
+            if (window.__primaryBootRunning || window.__primaryBootComplete) {
+                console.warn('⏭️ Primary boot already handled; skipping duplicate DOMContentLoaded run');
+                return;
+            }
+            window.__primaryBootRunning = true;
+            try {
             console.log('=== 🚀 DOMContentLoaded FIRED ===');
             
             // 📱 MOBILE DIAGNOSTICS
@@ -48821,6 +48864,24 @@ function setUploadModalHeader(title, subtitle) {
             });
             
             console.log('=== 🎉 DOMContentLoaded COMPLETE (UI ready, loading in background) ===');
+            } catch (bootErr) {
+                console.error('❌ Primary startup crashed; entering recovery path', bootErr);
+                try { initializeTheme(); } catch (e) {}
+                try { initializeGrid(); } catch (e) {}
+                try {
+                    if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                        setTimeout(() => {
+                            try { subscribeToFirebasePostsWithReconnect(); } catch (e) {}
+                        }, 250);
+                    }
+                } catch (e) {}
+            } finally {
+                window.__primaryBootRunning = false;
+                window.__primaryBootComplete = true;
+                try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                try { if (typeof window.__forceInteractionRecovery === 'function') window.__forceInteractionRecovery(); } catch (e) {}
+                try { if (typeof window.__markBootComplete === 'function') window.__markBootComplete(); } catch (e) {}
+            }
         });
         // Defer POI-on-load check — runs well after first paint to avoid startup congestion
         if (document.readyState === 'loading') {
