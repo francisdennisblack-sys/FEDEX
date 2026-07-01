@@ -9675,9 +9675,21 @@
                     document.body.appendChild(overlay);
                     window.__locationChangeLoadingActive = true;
                     window.__locationChangeLoadingStart = Date.now();
+                    const overlayToken = String(window.__locationChangeLoadingStart) + ':' + Math.random().toString(36).slice(2, 9);
+                    window.__locationChangeLoadingToken = overlayToken;
                     if (typeof setTopControlsHiddenForLocationLoading === 'function') {
                         setTopControlsHiddenForLocationLoading(true);
                     }
+                    // Fail-open safety: never leave controls locked indefinitely.
+                    setTimeout(() => {
+                        try {
+                            const stillActive = !!window.__locationChangeLoadingActive;
+                            const sameOverlay = window.__locationChangeLoadingToken === overlayToken;
+                            if (stillActive && sameOverlay) {
+                                clearLocationChangeLoadingOverlay('timeout-fail-open');
+                            }
+                        } catch (e) {}
+                    }, 7000);
                 } catch (e) {}
 
                 // 4. Reset the render throttle so the next renderGrid call goes through now.
@@ -9767,6 +9779,34 @@
             }
         }
         try { window.setTopControlsHiddenForLocationLoading = setTopControlsHiddenForLocationLoading; } catch (e) {}
+
+        function clearLocationChangeLoadingOverlay(reason) {
+            try {
+                const el = document.getElementById('locationChangeLoading');
+                if (el) {
+                    try { el.classList.add('lcl-hiding'); } catch (e) {}
+                    setTimeout(() => {
+                        try {
+                            const latest = document.getElementById('locationChangeLoading');
+                            if (latest === el || (latest && latest.classList.contains('lcl-hiding'))) {
+                                latest.remove();
+                            }
+                        } catch (e) {}
+                    }, 430);
+                }
+                try { window.__locationChangeLoadingActive = false; } catch (e) {}
+                try { window.__locationChangeLoadingStart = 0; } catch (e) {}
+                try { window.__locationChangeLoadingToken = null; } catch (e) {}
+                if (typeof setTopControlsHiddenForLocationLoading === 'function') {
+                    try { setTopControlsHiddenForLocationLoading(false); } catch (e) {}
+                }
+                setTimeout(() => { try { flushLocationCommitNotice(); } catch (e) {} }, 80);
+                try { console.log('🧹 Cleared location loading overlay:', reason || 'unspecified'); } catch (e) {}
+            } catch (e) {
+                console.warn('clearLocationChangeLoadingOverlay failed', e);
+            }
+        }
+        try { window.clearLocationChangeLoadingOverlay = clearLocationChangeLoadingOverlay; } catch (e) {}
 
 
         function maybeSetAutoZoneTag(newTag) {
@@ -40170,18 +40210,7 @@ function setUploadModalHeader(title, subtitle) {
                     const MIN_SEARCH_MS = 1800;
                     const remaining = Math.max(0, MIN_SEARCH_MS - elapsed);
                     const doRemove = () => {
-                        try {
-                            const el = document.getElementById('locationChangeLoading');
-                            if (el) {
-                                el.classList.add('lcl-hiding');
-                                setTimeout(() => { try { el.remove(); } catch(e){} }, 430);
-                            }
-                            window.__locationChangeLoadingActive = false;
-                            if (typeof setTopControlsHiddenForLocationLoading === 'function') {
-                                setTopControlsHiddenForLocationLoading(false);
-                            }
-                            setTimeout(() => { try { flushLocationCommitNotice(); } catch (e) {} }, 80);
-                        } catch(e) {}
+                        try { clearLocationChangeLoadingOverlay('posts-arrived'); } catch(e) {}
                     };
                     if (remaining > 0) { setTimeout(doRemove, remaining); } else { doRemove(); }
                 }
