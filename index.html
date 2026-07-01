@@ -160,6 +160,17 @@
     <script>
         // 🔄 AGGRESSIVE CACHE-BUSTING: Force consistency across all browsers/devices
         (function initVersionCheck() {
+            const isIOSSafari = (function () {
+                try {
+                    const ua = navigator.userAgent || '';
+                    const iOS = /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                    const isWebKit = /WebKit/i.test(ua);
+                    const isCriOS = /CriOS/i.test(ua);
+                    const isFxiOS = /FxiOS/i.test(ua);
+                    return !!(iOS && isWebKit && !isCriOS && !isFxiOS);
+                } catch (e) { return false; }
+            })();
+
             // Store current version in sessionStorage (per tab)
             const now = Date.now();
             const versionCheckKey = '__wificontent_version_check_' + now;
@@ -190,6 +201,14 @@
                     // If version changed, clear caches and mark for reload.
                     // IMPORTANT: never force-reload on an unknown/failed version fetch,
                     // otherwise Safari can get trapped in refresh loops.
+                    // iOS Safari: skip forced reload entirely to preserve stable manual refresh.
+                    if (isIOSSafari) {
+                        if (hasReliableRemoteVersion) {
+                            sessionStorage.setItem('__wificontent_last_version', currentVersion);
+                        }
+                        sessionStorage.setItem('__wificontent_load_time', String(now));
+                        return;
+                    }
                     if (hasReliableRemoteVersion && lastVersion && lastVersion !== currentVersion) {
                         console.warn('⚠️ VERSION MISMATCH: Site updated, clearing caches');
                         
@@ -426,12 +445,6 @@
                         navigator.serviceWorker.getRegistrations().then((regs) => {
                             (regs || []).forEach((reg) => { try { reg.unregister(); } catch (e) {} });
                         }).catch(() => {});
-                        // Avoid clearing all caches on every reload; do it once per session only.
-                        try {
-                            if (window.caches && caches.keys) {
-                                caches.keys().then((keys) => Promise.all((keys || []).map((k) => caches.delete(k).catch(() => false)))).catch(() => {});
-                            }
-                        } catch (e) {}
                     }
                 } catch (e) {}
             }
@@ -468,6 +481,12 @@
                     } catch (e) {}
                 };
 
+                // Hard-refresh safeguard: never keep startup loading state too long on iOS.
+                try {
+                    setTimeout(() => {
+                        try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    }, 1200);
+                } catch (e) {}
                 try { setTimeout(unlock, 3500); } catch (e) {}
                 try { setTimeout(unlock, 6500); } catch (e) {}
             })();
