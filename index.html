@@ -770,17 +770,8 @@
             pointer-events: none !important;
             opacity: 0 !important;
         }
-        /* Additional guard: while the loading overlay element exists in the DOM,
-           keep the same controls hidden regardless of JS state timing. */
-        body:has(#locationChangeLoading) #addContentCTA,
-        body:has(#locationChangeLoading) #changeGridLocationPill,
-        body:has(#locationChangeLoading) #signInBtn,
-        body:has(#locationChangeLoading) #accountPill,
-        body:has(#locationChangeLoading) #accountArea {
-            display: none !important;
-            pointer-events: none !important;
-            opacity: 0 !important;
-        }
+          /* Removed DOM-presence-only location overlay lock. It could keep controls
+              hidden after overlay teardown race conditions on Safari. */
     </style>
 
         <script>
@@ -10381,6 +10372,52 @@
             }
         }
         try { window.clearLocationChangeLoadingOverlay = clearLocationChangeLoadingOverlay; } catch (e) {}
+
+        // Safari fail-open watchdog: clear stale location loading overlays/locks that
+        // can survive transitions and leave the app non-interactive.
+        (function initLocationOverlayStaleWatchdog() {
+            const isSafariLike = (() => {
+                try {
+                    const ua = navigator.userAgent || '';
+                    return /WebKit/i.test(ua) && /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|Chrome|Firefox|OPR|SamsungBrowser/i.test(ua);
+                } catch (e) { return false; }
+            })();
+
+            if (!isSafariLike) return;
+
+            const clearStale = () => {
+                try {
+                    const overlay = document.getElementById('locationChangeLoading');
+                    const active = !!window.__locationChangeLoadingActive;
+                    const hasUiLock = !!(document.body && document.body.classList.contains('location-change-loading-ui-lock'));
+                    const now = Date.now();
+                    const startedAt = Number(window.__locationChangeLoadingStart || 0);
+                    const elapsed = startedAt > 0 ? (now - startedAt) : 0;
+                    const overlayVisible = !!(overlay && overlay.parentNode && getComputedStyle(overlay).display !== 'none' && !overlay.classList.contains('lcl-hiding'));
+
+                    const shouldClear =
+                        (overlay && !active) ||
+                        (hasUiLock && !overlayVisible && !active) ||
+                        (active && elapsed > 15000);
+
+                    if (!shouldClear) return;
+
+                    try {
+                        if (typeof clearLocationChangeLoadingOverlay === 'function') {
+                            clearLocationChangeLoadingOverlay('safari-stale-watchdog');
+                        }
+                    } catch (e) {}
+                    try { document.body.classList.remove('location-change-loading-ui-lock'); } catch (e) {}
+                    try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    try { document.body.style.overflow = ''; } catch (e) {}
+                    try { document.documentElement.style.overflow = ''; } catch (e) {}
+                } catch (e) {}
+            };
+
+            try { setInterval(clearStale, 1200); } catch (e) {}
+            try { document.addEventListener('visibilitychange', () => { if (!document.hidden) clearStale(); }); } catch (e) {}
+            try { window.addEventListener('pageshow', clearStale); } catch (e) {}
+        })();
 
 
         function maybeSetAutoZoneTag(newTag) {
