@@ -173,8 +173,143 @@
                     buttonEvents: {},
                     buttonProbeTotal: 0
                 };
+                var STARTUP_FAILURE_KEY = '__startup_failure_reports_v1';
+                var STARTUP_FAILURE_MAX = 30;
+                var startupPersistCount = 0;
                 window.__startupDiag = diag;
                 window.__baseConsole = baseConsole;
+
+                function readFailureReports() {
+                    try {
+                        var raw = localStorage.getItem(STARTUP_FAILURE_KEY);
+                        if (!raw) return [];
+                        var parsed = JSON.parse(raw);
+                        return Array.isArray(parsed) ? parsed : [];
+                    } catch (e) {
+                        return [];
+                    }
+                }
+
+                function writeFailureReports(list) {
+                    try {
+                        localStorage.setItem(STARTUP_FAILURE_KEY, JSON.stringify(list));
+                    } catch (e) {}
+                }
+
+                function getRuntimeEnvSnapshot() {
+                    var nav = (typeof navigator !== 'undefined') ? navigator : {};
+                    var conn = nav.connection || nav.mozConnection || nav.webkitConnection || null;
+                    var vp = null;
+                    try {
+                        vp = {
+                            width: window.innerWidth || 0,
+                            height: window.innerHeight || 0,
+                            dpr: Number(window.devicePixelRatio || 1)
+                        };
+                    } catch (e) {
+                        vp = { width: 0, height: 0, dpr: 1 };
+                    }
+                    return {
+                        userAgent: String((nav && nav.userAgent) || ''),
+                        platform: String((nav && nav.platform) || ''),
+                        language: String((nav && nav.language) || ''),
+                        viewport: vp,
+                        readyState: String((document && document.readyState) || ''),
+                        online: typeof nav.onLine === 'boolean' ? nav.onLine : null,
+                        cookieEnabled: typeof nav.cookieEnabled === 'boolean' ? nav.cookieEnabled : null,
+                        serviceWorkerEnabled: !!(nav && nav.serviceWorker),
+                        indexedDBEnabled: !!window.indexedDB,
+                        localStorageEnabled: !!window.localStorage,
+                        sessionStorageEnabled: !!window.sessionStorage,
+                        bootSafeMode: !!window.__bootSafeMode,
+                        constrainedRuntime: !!window.__constrainedRuntime,
+                        disableServiceWorkers: !!window.__disableServiceWorkers,
+                        privateSafeMode: !!window.__privateSafeMode,
+                        iosLiteMode: !!window.__iosLiteMode,
+                        network: conn ? {
+                            effectiveType: conn.effectiveType || null,
+                            downlink: Number(conn.downlink || 0) || null,
+                            rtt: Number(conn.rtt || 0) || null,
+                            saveData: !!conn.saveData
+                        } : null
+                    };
+                }
+
+                function persistStartupFailure(kind, payload) {
+                    try {
+                        if (startupPersistCount >= 8) return;
+                        startupPersistCount += 1;
+                        var entry = {
+                            ts: Date.now(),
+                            kind: String(kind || 'startup-failure'),
+                            payload: payload || null,
+                            env: getRuntimeEnvSnapshot(),
+                            stageCount: diag.stages.length,
+                            eventCount: diag.events.length
+                        };
+                        var reports = readFailureReports();
+                        reports.push(entry);
+                        if (reports.length > STARTUP_FAILURE_MAX) reports = reports.slice(-STARTUP_FAILURE_MAX);
+                        writeFailureReports(reports);
+                        window.__lastStartupFailureReport = entry;
+                    } catch (e) {}
+                }
+
+                function bytesToMb(v) {
+                    var n = Number(v || 0);
+                    if (!Number.isFinite(n) || n <= 0) return 0;
+                    return Number((n / (1024 * 1024)).toFixed(3));
+                }
+
+                function buildLoadFootprintReport() {
+                    var out = {
+                        ts: Date.now(),
+                        transferMB: 0,
+                        encodedBodyMB: 0,
+                        decodedBodyMB: 0,
+                        entries: 0,
+                        byType: {}
+                    };
+                    try {
+                        if (!window.performance || typeof performance.getEntriesByType !== 'function') return out;
+                        var resources = performance.getEntriesByType('resource') || [];
+                        out.entries = resources.length;
+                        for (var i = 0; i < resources.length; i++) {
+                            var r = resources[i] || {};
+                            var typ = String(r.initiatorType || 'other');
+                            if (!out.byType[typ]) {
+                                out.byType[typ] = { count: 0, transferMB: 0, encodedBodyMB: 0, decodedBodyMB: 0 };
+                            }
+                            out.byType[typ].count += 1;
+                            out.byType[typ].transferMB += bytesToMb(r.transferSize || 0);
+                            out.byType[typ].encodedBodyMB += bytesToMb(r.encodedBodySize || 0);
+                            out.byType[typ].decodedBodyMB += bytesToMb(r.decodedBodySize || 0);
+                            out.transferMB += bytesToMb(r.transferSize || 0);
+                            out.encodedBodyMB += bytesToMb(r.encodedBodySize || 0);
+                            out.decodedBodyMB += bytesToMb(r.decodedBodySize || 0);
+                        }
+                        out.transferMB = Number(out.transferMB.toFixed(3));
+                        out.encodedBodyMB = Number(out.encodedBodyMB.toFixed(3));
+                        out.decodedBodyMB = Number(out.decodedBodyMB.toFixed(3));
+                    } catch (e) {}
+                    return out;
+                }
+
+                window.reportLoadFootprint = function() {
+                    var rpt = buildLoadFootprintReport();
+                    try { baseConsole.log('[STARTUP] load footprint', rpt); } catch (e) {}
+                    return rpt;
+                };
+
+                window.getStartupFailureReports = function() {
+                    return readFailureReports();
+                };
+
+                window.clearStartupFailureReports = function() {
+                    try { localStorage.removeItem(STARTUP_FAILURE_KEY); } catch (e) {}
+                };
+
+                window.__persistStartupFailure = persistStartupFailure;
 
                 function pushEvent(level, message, data) {
                     var entry = { ts: Date.now(), level: level, message: String(message || ''), data: data || null };
@@ -223,6 +358,14 @@
                     }
                     diag.stages.push({ name: key, status: 'fail', ts: now, elapsedMs: Math.max(0, now - startedAt), error: errObj, data: data || null });
                     pushEvent('error', 'stage fail: ' + key, { elapsedMs: Math.max(0, now - startedAt), error: errObj, data: data || null });
+                    try {
+                        persistStartupFailure('stage-fail', {
+                            stage: key,
+                            elapsedMs: Math.max(0, now - startedAt),
+                            error: errObj,
+                            data: data || null
+                        });
+                    } catch (e) {}
                 }
 
                 function trackPromise(name, promise, timeoutMs) {
@@ -465,6 +608,7 @@
                 }
 
                 window.reportStartupDiagnostics = function() {
+                    var failureReports = readFailureReports();
                     var report = {
                         startedAt: diag.startedAt,
                         elapsedMs: Date.now() - diag.startedAt,
@@ -472,6 +616,9 @@
                         activeStageNames: Object.keys(diag.activeStages || {}),
                         buttonProbeTotal: diag.buttonProbeTotal,
                         buttonTargetsSeen: Object.keys(diag.buttonEvents || {}).length,
+                        persistedFailureReports: failureReports.length,
+                        lastPersistedFailure: failureReports.length ? failureReports[failureReports.length - 1] : null,
+                        loadFootprint: buildLoadFootprintReport(),
                         lastStages: diag.stages.slice(-25),
                         lastEvents: diag.events.slice(-50)
                     };
@@ -496,6 +643,15 @@
                         stageFail('startup-loading-lock', e);
                     }
                 }, 12000);
+
+                setTimeout(function() {
+                    try {
+                        var fp = buildLoadFootprintReport();
+                        if (fp && fp.transferMB >= 5) {
+                            pushEvent('warn', 'startup load footprint high', fp);
+                        }
+                    } catch (e) {}
+                }, 6000);
 
                 stageSuccess('startup-diagnostics.bootstrap');
             } catch (e) {
@@ -48866,6 +49022,14 @@ function setUploadModalHeader(title, subtitle) {
             console.log('=== 🎉 DOMContentLoaded COMPLETE (UI ready, loading in background) ===');
             } catch (bootErr) {
                 console.error('❌ Primary startup crashed; entering recovery path', bootErr);
+                try {
+                    if (typeof window.__persistStartupFailure === 'function') {
+                        window.__persistStartupFailure('primary-boot-crash', {
+                            message: bootErr && bootErr.message ? String(bootErr.message) : String(bootErr || 'unknown'),
+                            stack: bootErr && bootErr.stack ? String(bootErr.stack) : null
+                        });
+                    }
+                } catch (e) {}
                 try { initializeTheme(); } catch (e) {}
                 try { initializeGrid(); } catch (e) {}
                 try {
