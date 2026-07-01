@@ -938,7 +938,7 @@
             // Safari startup fail-open: if a stale full-screen layer/lock survives boot,
             // force-clear it so the app never looks frozen on first load.
             (function initIOSSafariStartupFailOpen() {
-                if (!(window.__isIOSSafari || window.__isSafariLikeBrowser)) return;
+                if (!window.__isIOSSafari) return;
                 const unlock = () => {
                     try {
                         const uploadActive = !!document.querySelector('#uploadModal.active');
@@ -1038,50 +1038,44 @@
                     }
                 } catch (e) { /* ignore registration errors */ }
 
-                    function buildSafariReloadUrl() {
+                    function buildForcedReloadUrl() {
                         try {
                             const u = new URL(window.location.href);
-                            u.searchParams.set('__sr', String(Date.now()));
+                            u.searchParams.set('__reload', String(Date.now()));
                             return u.toString();
                         } catch (e) {
                             const sep = window.location.href.indexOf('?') >= 0 ? '&' : '?';
-                            return window.location.href + sep + '__sr=' + Date.now();
+                            return window.location.href + sep + '__reload=' + Date.now();
+                        }
+                    }
+
+                    function forceNavigateReload() {
+                        try { window.location.replace(buildForcedReloadUrl()); } catch (e) {
+                            try { window.location.href = buildForcedReloadUrl(); } catch (e2) {}
                         }
                     }
 
                     // Centralized programmatic reload helper (marks cross-tab flag)
                     function programmaticReload() {
                         try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
+                        let navigatedAway = false;
+                        try { window.addEventListener('pagehide', function markPageHide(){ navigatedAway = true; }, { once: true }); } catch (e) {}
                         try {
-                            // Safari can occasionally ignore location.reload() under stale page states.
-                            // Use URL replace with a short cache-busting query to guarantee navigation.
-                            if (window.__isIOSSafari || window.__isSafariLikeBrowser) {
-                                const forceUrl = buildSafariReloadUrl();
-                                window.location.replace(forceUrl);
-                                return;
-                            }
-                            location.reload();
+                            window.location.reload();
                         } catch (e) {
-                            try { window.location.replace(buildSafariReloadUrl()); } catch (e2) {}
+                            forceNavigateReload();
+                            return;
                         }
+
+                        // If native reload was ignored (seen in some browser states), force navigation.
+                        setTimeout(() => {
+                            try {
+                                if (!navigatedAway) forceNavigateReload();
+                            } catch (e) {}
+                        }, 450);
                     }
                     try { window.programmaticReload = programmaticReload; } catch (e) {}
-                    try { window.forceSafariReload = function() { try { programmaticReload(); } catch (e) {} }; } catch (e) {}
-
-                    // Safari reload fail-safe: always honor Cmd/Ctrl+R and F5.
-                    try {
-                        document.addEventListener('keydown', function(e) {
-                            try {
-                                const key = String((e && e.key) || '').toLowerCase();
-                                const isReloadShortcut = ((e.metaKey || e.ctrlKey) && key === 'r') || key === 'f5';
-                                if (!isReloadShortcut) return;
-                                if (!(window.__isIOSSafari || window.__isSafariLikeBrowser)) return;
-                                e.preventDefault();
-                                e.stopPropagation();
-                                programmaticReload();
-                            } catch (err) {}
-                        }, true);
-                    } catch (e) {}
+                    try { window.forceHardReload = function() { try { programmaticReload(); } catch (e) {} }; } catch (e) {}
 
                 function findCreateTextEl() {
                     const createBox = document.querySelector('.add-content-box');
