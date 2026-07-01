@@ -137,6 +137,20 @@
                 if (window.__startupDiagInstalled) return;
                 window.__startupDiagInstalled = true;
 
+                // Emergency global lite mode: keep startup diagnostics minimal
+                // across all browsers while launch stability is being restored.
+                if (window.__globalEmergencyLiteMode) {
+                    window.__startupStageStart = function(){};
+                    window.__startupStageSuccess = function(){};
+                    window.__startupStageFail = function(){};
+                    window.__startupTrackPromise = function(name, promise) { return Promise.resolve(promise); };
+                    window.reportStartupDiagnostics = function() {
+                        return { safeMode: true, globalEmergencyLiteMode: true, skipped: 'startup-diagnostics' };
+                    };
+                    try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    return;
+                }
+
                 var startupUA = '';
                 var startupIsSafariLike = false;
                 var startupIsIOSWebKit = false;
@@ -738,7 +752,7 @@
             }
             
             // Also check periodically for safety
-            setInterval(checkPillVisibility, 1000);
+            setInterval(checkPillVisibility, window.__globalEmergencyLiteMode ? 5000 : 1000);
         })();
     </script>
     <script>
@@ -1060,8 +1074,12 @@
                 }
             })();
 
+            // Emergency global launch recovery mode (temporary): prioritize app load
+            // over background/offline features until cross-browser startup is stable.
+            window.__globalEmergencyLiteMode = true;
+
             // Disable SW in fragile persistence environments.
-            window.__disableServiceWorkers = !!(window.__privateSafeMode || window.__storageLikelyRestricted);
+            window.__disableServiceWorkers = !!(window.__privateSafeMode || window.__storageLikelyRestricted || window.__globalEmergencyLiteMode);
 
             // Safe storage wrapper: avoids hard crashes when Safari private mode
             // blocks persistent stores and falls back to memory values.
@@ -1158,6 +1176,11 @@
             // Force network-only mode for all iOS WebKit browsers (Safari + iOS Chrome/Firefox/Edge).
             if (window.__isIOSWebKitBrowser) {
                 window.__disableServiceWorkers = true;
+            }
+
+            if (window.__globalEmergencyLiteMode) {
+                window.__disableServiceWorkers = true;
+                window.__constrainedRuntime = true;
             }
 
             if (window.__isIOSWebKitBrowser && !window.__privateSafeMode && 'serviceWorker' in navigator) {
@@ -48646,6 +48669,10 @@ function setUploadModalHeader(title, subtitle) {
             // are not delayed. Databases are only needed when the user opens the
             // posting / search UI, so loading them 800ms after DOM ready is fine.
             const _doDbPreload = function() {
+                if (window.__globalEmergencyLiteMode) {
+                    console.log('🪶 Emergency lite mode: skipping startup DB preloads');
+                    return;
+                }
                 if (window.__constrainedRuntime) {
                     console.log('🪶 Constrained runtime: skipping heavy DB preloads at startup');
                     return;
@@ -48867,18 +48894,20 @@ function setUploadModalHeader(title, subtitle) {
                 if (window.__iosHeavyBootStarted) return;
                 window.__iosHeavyBootStarted = true;
 
+                const emergencyLite = !!window.__globalEmergencyLiteMode;
+
                 setTimeout(() => {
                     console.log('⚡ LAZY LOAD: Phase 0 (geolocation + POI detection)');
                     initializePhase0().catch(err => {
                         console.error('Phase 0 failed (non-critical):', err);
                     });
-                }, window.__constrainedRuntime ? 1200 : (window.__iosLiteMode ? 800 : 100));
+                }, emergencyLite ? 2200 : (window.__constrainedRuntime ? 1200 : (window.__iosLiteMode ? 800 : 100)));
 
                 // 📡 LAZY LOAD: Posts from Firebase (non-blocking)
                 setTimeout(() => {
                     console.log('⚡ LAZY LOAD: Loading posts from Firebase...');
                     subscribeToFirebasePostsWithReconnect();
-                }, window.__constrainedRuntime ? 2200 : (window.__iosLiteMode ? 1200 : 200));
+                }, emergencyLite ? 3200 : (window.__constrainedRuntime ? 2200 : (window.__iosLiteMode ? 1200 : 200)));
             };
 
             startHeavyBoot();
