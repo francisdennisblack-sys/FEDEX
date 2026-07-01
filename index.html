@@ -766,9 +766,8 @@
         body.location-change-loading-ui-lock #signInBtn,
         body.location-change-loading-ui-lock #accountPill,
         body.location-change-loading-ui-lock #accountArea {
-            display: none !important;
-            pointer-events: none !important;
-            opacity: 0 !important;
+            pointer-events: auto !important;
+            opacity: 1 !important;
         }
           /* Removed DOM-presence-only location overlay lock. It could keep controls
               hidden after overlay teardown race conditions on Safari. */
@@ -787,6 +786,19 @@
                     return !!(iOS && isWebKit && !isCriOS && !isFxiOS);
                 } catch (e) { return false; }
             })();
+
+            window.__isSafariLikeBrowser = (function () {
+                try {
+                    const ua = navigator.userAgent || '';
+                    return /WebKit/i.test(ua) && /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|Chrome|Firefox|OPR|SamsungBrowser/i.test(ua);
+                } catch (e) { return false; }
+            })();
+
+            try {
+                if (window.__isSafariLikeBrowser && document && document.documentElement) {
+                    document.documentElement.classList.add('safari-emergency-mode');
+                }
+            } catch (e) {}
 
             window.__iosLiteMode = !!window.__isIOSSafari;
             window.__iosFirstInteractionReady = false;
@@ -8614,7 +8626,18 @@
         async function forceGridRefresh() {
             console.log('🔥 forceGridRefresh: Starting full grid refresh.');
             if (!currentUserId) {
-                console.warn('Cannot refresh grid without a currentUserId.');
+                try {
+                    const fallbackId = window.currentUserId || permanentUserId || localStorage.getItem('permanentUserId') || localStorage.getItem('userId') || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
+                    if (fallbackId) {
+                        currentUserId = fallbackId;
+                        try { window.currentUserId = fallbackId; } catch (e) {}
+                        try { localStorage.setItem('userId', String(fallbackId)); } catch (e) {}
+                        console.warn('forceGridRefresh: recovered missing currentUserId using fallback id');
+                    }
+                } catch (e) {}
+            }
+            if (!currentUserId) {
+                console.warn('Cannot refresh grid without a currentUserId after fallback.');
                 return;
             }
 
@@ -10317,6 +10340,7 @@
 
         function setTopControlsHiddenForLocationLoading(hidden) {
             try {
+                const safariEmergency = !!window.__isSafariLikeBrowser;
                 try {
                     if (document && document.body) {
                         document.body.classList.toggle('location-change-loading-ui-lock', !!hidden);
@@ -10327,6 +10351,14 @@
                     const el = document.getElementById(id);
                     if (!el) return;
                     if (hidden) {
+                        if (safariEmergency) {
+                            try {
+                                el.style.pointerEvents = 'auto';
+                                el.style.opacity = '';
+                                el.style.visibility = '';
+                            } catch (e) {}
+                            return;
+                        }
                         if (!Object.prototype.hasOwnProperty.call(el.dataset, 'preLocationLoadingDisplay')) {
                             el.dataset.preLocationLoadingDisplay = el.style.display || '';
                         }
@@ -32740,6 +32772,16 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         function startAutoRefresh() {
+            if (!currentUserId) {
+                try {
+                    const fallbackId = window.currentUserId || permanentUserId || localStorage.getItem('permanentUserId') || localStorage.getItem('userId') || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
+                    if (fallbackId) {
+                        currentUserId = fallbackId;
+                        try { window.currentUserId = fallbackId; } catch (e) {}
+                    }
+                } catch (e) {}
+            }
+
             // Clear existing interval if any
             if (refreshInterval) {
                 clearInterval(refreshInterval);
@@ -32792,6 +32834,57 @@ function setUploadModalHeader(title, subtitle) {
                 }
             }, 30000);
         }
+
+        (function initSafariEmergencyAutoRecover() {
+            if (!window.__isSafariLikeBrowser) return;
+
+            const recover = () => {
+                try {
+                    const uploadActive = !!document.querySelector('#uploadModal.active');
+                    const viewActive = !!document.querySelector('#viewModal.active');
+                    const gridActive = !!document.querySelector('#changeGridModal.open');
+                    const contactActive = !!document.querySelector('#contactModal.active');
+                    const reportActive = !!document.querySelector('#reportModal.active');
+                    const blockingExpected = uploadActive || viewActive || gridActive || contactActive || reportActive;
+
+                    if (!blockingExpected) {
+                        try { document.body.classList.remove('location-change-loading-ui-lock', 'posting-page-open'); } catch (e) {}
+                        try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                        ['addContentCTA', 'changeGridLocationPill', 'signInBtn', 'accountPill', 'accountArea'].forEach((id) => {
+                            const el = document.getElementById(id);
+                            if (!el) return;
+                            try {
+                                if (el.style.display === 'none') el.style.display = '';
+                                el.style.pointerEvents = 'auto';
+                                el.style.opacity = '';
+                                el.style.visibility = '';
+                            } catch (e) {}
+                        });
+                    }
+
+                    if (!currentUserId) {
+                        try {
+                            const fallbackId = window.currentUserId || permanentUserId || localStorage.getItem('permanentUserId') || localStorage.getItem('userId') || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
+                            if (fallbackId) {
+                                currentUserId = fallbackId;
+                                window.currentUserId = fallbackId;
+                            }
+                        } catch (e) {}
+                    }
+
+                    if (isConnected && currentUserId && !firebaseUnsubscribe) {
+                        try { subscribeToFirebasePostsWithReconnect(); } catch (e) {}
+                    }
+                } catch (e) {}
+            };
+
+            try { setInterval(recover, 1500); } catch (e) {}
+            try { document.addEventListener('visibilitychange', function() { if (!document.hidden) recover(); }); } catch (e) {}
+            try { window.addEventListener('focus', recover); } catch (e) {}
+            try { window.addEventListener('pageshow', recover); } catch (e) {}
+            try { setTimeout(recover, 250); } catch (e) {}
+            try { setTimeout(recover, 1000); } catch (e) {}
+        })();
 
         function subscribeToFirebasePostsWithReconnect() {
             try {
