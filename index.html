@@ -1114,6 +1114,35 @@
                 }
             };
 
+            // Global storage fail-open: if native storage throws in private/restricted
+            // contexts, expose safe accessors and attempt to shim getItem/setItem.
+            (function installStorageFailOpenShim() {
+                window.__lsGet = function(key, fallbackValue) {
+                    let v = null;
+                    try { v = window.localStorage.getItem(key); } catch (e) { v = null; }
+                    if (v !== null && v !== undefined) return v;
+                    let m = null;
+                    try { m = window.safeStorage.get(key, null); } catch (e) { m = null; }
+                    return (m !== null && m !== undefined) ? m : fallbackValue;
+                };
+                window.__lsSet = function(key, value) {
+                    let ok = false;
+                    try { window.localStorage.setItem(key, String(value)); ok = true; } catch (e) { ok = false; }
+                    if (!ok) {
+                        try { window.safeStorage.set(key, value); return false; } catch (e) { return false; }
+                    }
+                    return true;
+                };
+                window.__ssGet = function(key, fallbackValue) {
+                    let v = null;
+                    try { v = window.sessionStorage.getItem(key); } catch (e) { v = null; }
+                    return (v !== null && v !== undefined) ? v : fallbackValue;
+                };
+                window.__ssSet = function(key, value) {
+                    try { window.sessionStorage.setItem(key, String(value)); return true; } catch (e) { return false; }
+                };
+            })();
+
             // Async IndexedDB probe for Safari private windows: if IDB is blocked or
             // slow to open, enable private-safe mode and avoid persistence-heavy paths.
             (function detectPrivateStorageRestrictions() {
@@ -9069,12 +9098,13 @@
         // Call `window.dumpAuthDiagnostics()` from console after reproducing the issue.
         window.dumpAuthDiagnostics = async function() {
             try {
+                const safeLsGet = function(key) { try { return localStorage.getItem(key); } catch (e) { return null; } };
                 console.groupCollapsed('🧪 Auth Diagnostics');
                 console.log('Time:', new Date().toISOString());
                 console.log('window.auth currentUser:', window.auth && window.auth.currentUser);
                 try { console.log('auth.currentUser.uid:', window.auth && window.auth.currentUser && window.auth.currentUser.uid); } catch(_){}
-                console.log('localStorage.userId:', localStorage.getItem('userId'));
-                console.log('localStorage.lastSessionAuthId:', localStorage.getItem('lastSessionAuthId'));
+                console.log('localStorage.userId:', safeLsGet('userId'));
+                console.log('localStorage.lastSessionAuthId:', safeLsGet('lastSessionAuthId'));
                 console.log('sessionStorage keys:', Object.keys(sessionStorage));
                 try {
                     const dbs = await indexedDB.databases ? await indexedDB.databases() : 'indexedDB.databases() not supported';
@@ -18276,7 +18306,7 @@
             }
             
             // Check localStorage
-            const cachedId = localStorage.getItem('userId');
+            const cachedId = (function(){ try { return localStorage.getItem('userId'); } catch (e) { return null; } })();
             console.log('\nlocalStorage.userId:', cachedId);
             
             // Check Firebase path
@@ -18293,12 +18323,13 @@
         // ============================================================================
         function getPermanentUserId() {
             // Check localStorage first (persistent across sessions)
-            let permanentId = localStorage.getItem('permanentUserId');
+            let permanentId = null;
+            try { permanentId = localStorage.getItem('permanentUserId'); } catch (e) { permanentId = null; }
             
             if (!permanentId) {
                 // Create new permanent ID (format: perm-{timestamp}-{random})
                 permanentId = `perm-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
-                localStorage.setItem('permanentUserId', permanentId);
+                try { localStorage.setItem('permanentUserId', permanentId); } catch (e) {}
                 console.log(`\n✨ NEW AUTH SESSION CREATED`);
                 console.log(`   Permanent ID: ${permanentId}`);
                 console.log(`   Time: ${new Date().toLocaleString()}`);
@@ -18609,7 +18640,7 @@
         // ============================================================================
         
         // STEP 1: Check for cached userId (handles hard refresh instantly)
-        const cachedUserId = localStorage.getItem('userId');
+        const cachedUserId = (function(){ try { return localStorage.getItem('userId'); } catch (e) { return null; } })();
         if (cachedUserId) {
             currentUserId = cachedUserId;
             console.log('✅ Step 1: Using cached userId from localStorage:', currentUserId);
@@ -18621,7 +18652,7 @@
         const permanentUserId = getPermanentUserId();
         
         // STEP 1c: Check if IDs survived refresh (for diagnostics)
-        const previousSessionAuthId = localStorage.getItem('lastSessionAuthId');
+        const previousSessionAuthId = (function(){ try { return localStorage.getItem('lastSessionAuthId'); } catch (e) { return null; } })();
         
         let __startupFirstAuthCallbackSeen = false;
         try { if (window.__startupStageStart) window.__startupStageStart('auth.onAuthStateChanged.wait'); } catch (e) {}
@@ -18661,7 +18692,7 @@
                 const newUserId = isSignedInUser ? user.uid : permanentUserId;
                 currentUserId = newUserId;
                 try { window.currentUserId = currentUserId; } catch (e) {}
-                localStorage.setItem('userId', currentUserId);
+                try { localStorage.setItem('userId', currentUserId); } catch (e) {}
 
                 // Rehydrate username if local storage was cleared but auth session survived.
                 try {
@@ -18727,7 +18758,7 @@
                 }
                 
                 // Store current session auth ID for next refresh check
-                localStorage.setItem('lastSessionAuthId', newUserId);
+                try { localStorage.setItem('lastSessionAuthId', newUserId); } catch (e) {}
 
                 // Respect any persisted manual-location suppression flag so we don't
                 // automatically retag posts when the user explicitly changed location.
