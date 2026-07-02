@@ -93,6 +93,7 @@
             </script>
     <script>
         try { document.documentElement.classList.add('app-startup-loading'); } catch (e) {}
+        window.__bootStartedAt = Date.now();
     </script>
     <script>
         // Safari/WebKit startup compatibility layer for older engines.
@@ -151,6 +152,7 @@
         window.__disableServiceWorkers = true;
         window.__constrainedRuntime = true;
         window.__enableFastInitialLoad = false;
+        window.__enableZonePrefetchBootstrap = false;
         try { document.documentElement.classList.add('core-website-mode'); } catch (e) {}
 
         // Remove stale SW/cache state from previous builds so browsers run only core site logic.
@@ -34214,6 +34216,38 @@ function setUploadModalHeader(title, subtitle) {
                 // gridId and authId determine filtering/routing in renderGrid
                 console.log('  ✅ Subscribing to shared posts collection');
                 console.log('  🔍 FIREBASE PATH: posts (SHARED COLLECTION)');
+
+                const requestAuthoritativeGridRender = (reason) => {
+                    try {
+                        const bootStartedAt = Number(window.__bootStartedAt || Date.now());
+                        const inStartup = (Date.now() - bootStartedAt) < 15000;
+                        const renderNow = () => {
+                            try {
+                                if (typeof window.requestGridUpdate === 'function') {
+                                    window.requestGridUpdate(reason || 'firebase-snapshot');
+                                } else {
+                                    try { window.lastRenderGridTime = 0; } catch (e) {}
+                                    renderGrid();
+                                }
+                            } catch (e) {}
+                        };
+
+                        if (!inStartup) {
+                            renderNow();
+                            return;
+                        }
+
+                        if (window.__startupSnapshotRenderTimer) {
+                            clearTimeout(window.__startupSnapshotRenderTimer);
+                            window.__startupSnapshotRenderTimer = null;
+                        }
+                        window.__startupSnapshotRenderTimer = setTimeout(() => {
+                            window.__startupSnapshotRenderTimer = null;
+                            renderNow();
+                        }, 380);
+                    } catch (e) {}
+                };
+
                 // PREFETCH: If we know the user's zone, do a targeted prefetch of
                 // posts listed under `posts_by_zone/{zone}` so the client can
                 // display high-quality local posts immediately without waiting
@@ -34221,7 +34255,15 @@ function setUploadModalHeader(title, subtitle) {
                 try {
                     const zid = currentZoneTag || window.currentZoneTag || null;
                     if (zid && !window.__zonePrefetchDoneFor) window.__zonePrefetchDoneFor = {};
-                    if (!iosLiteMode && !safariMinimal && zid && window.__zonePrefetchDoneFor && !window.__zonePrefetchDoneFor[zid]) {
+                    if (
+                        !iosLiteMode &&
+                        !safariMinimal &&
+                        !window.__constrainedRuntime &&
+                        window.__enableZonePrefetchBootstrap === true &&
+                        zid &&
+                        window.__zonePrefetchDoneFor &&
+                        !window.__zonePrefetchDoneFor[zid]
+                    ) {
                         (async () => {
                             try {
                                 const zoneRef = ref(database, `posts_by_zone/${zid}`);
@@ -34952,10 +34994,9 @@ function setUploadModalHeader(title, subtitle) {
                         console.warn('Failed to sort locked/new posts after Firebase sync:', e);
                     }
 
-                    // Fresh Firebase data arrived: force immediate paint.
-                    // Otherwise the global 30s render throttle can delay first visible posts.
-                    try { window.lastRenderGridTime = 0; } catch (e) {}
-                    renderGrid();
+                    // Fresh Firebase data arrived: schedule a single authoritative paint
+                    // during startup to avoid visible post-list churn.
+                    requestAuthoritativeGridRender('firebase-snapshot-final');
                 });
                 window.firebaseUnsubscribe = firebaseUnsubscribe;
                 
@@ -34966,7 +35007,7 @@ function setUploadModalHeader(title, subtitle) {
                 if (!gridContent[fallbackKey]) {
                     gridContent[fallbackKey] = [];
                 }
-                renderGrid();
+                requestAuthoritativeGridRender('firebase-error-fallback');
                 // Will try again on next heartbeat
             }
         }
