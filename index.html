@@ -44946,6 +44946,12 @@ function setUploadModalHeader(title, subtitle) {
                 // we'll be using the temp/shared fallback for now.
                 contentKey = 'temp-posts';
             }
+
+            const isDeviceScopedGuestFeed = !!(
+                window.readOnlyViewer &&
+                window.currentGuestFeedKey &&
+                String(contentKey) === String(window.currentGuestFeedKey)
+            );
             
             // 🔍 DEBUG: Log gridContent state at start of renderGrid
             if (shouldDebug) {
@@ -45014,37 +45020,44 @@ function setUploadModalHeader(title, subtitle) {
             console.log(`✅ STEP 3 - ASSEMBLED: allPosts now has ${allPosts.length} posts after reading from contentKey`);
             
             // Then add posts from other keys (backfilled content)
-            // ALWAYS MERGE shared-posts next so global feed is visible to every viewer
-            if (gridContent['shared-posts'] && Array.isArray(gridContent['shared-posts'])) {
-                gridContent['shared-posts'].forEach(post => {
-                    if (!post || !post.id) return;
-                    if (isPostHiddenForViewer(post, currentUserId)) return;
-                    if (!seenPostIds.has(post.id)) {
-                        seenPostIds.add(post.id);
-                        // Mark contentSource so downstream algorithms can prefer local posts
-                        if (!post.contentSource) post.contentSource = 'SHARED';
-                        allPosts.push(post);
-                    }
-                });
-            }
-
-            // Then add posts from other keys (backfilled content)
-            for (const key in gridContent) {
-                if (key !== contentKey && key !== 'shared-posts' && gridContent[key]) {
-                    // Add posts from other keys that aren't already included
-                    gridContent[key].forEach(post => {
+            // For device-scoped guest feed, DO NOT backfill from shared buckets.
+            // That path re-introduces broad/old posts after the curated guest feed
+            // has already been computed, causing visible add/remove churn.
+            if (!isDeviceScopedGuestFeed) {
+                // ALWAYS MERGE shared-posts next so global feed is visible to every viewer
+                if (gridContent['shared-posts'] && Array.isArray(gridContent['shared-posts'])) {
+                    gridContent['shared-posts'].forEach(post => {
                         if (!post || !post.id) return;
+                        if (isPostHiddenForViewer(post, currentUserId)) return;
                         if (!seenPostIds.has(post.id)) {
-                            // Filter out posts hidden for this viewer across all hide/report/delete sources.
-                            if (isPostHiddenForViewer(post, currentUserId)) {
-                                return; // skip
-                            }
-                            // Apply cross-zone display rules to avoid noisy duplication
-                            if (!isAllowedCrossZone(post)) return;
                             seenPostIds.add(post.id);
+                            // Mark contentSource so downstream algorithms can prefer local posts
+                            if (!post.contentSource) post.contentSource = 'SHARED';
                             allPosts.push(post);
                         }
                     });
+                }
+            }
+
+            // Then add posts from other keys (backfilled content)
+            if (!isDeviceScopedGuestFeed) {
+                for (const key in gridContent) {
+                    if (key !== contentKey && key !== 'shared-posts' && gridContent[key]) {
+                        // Add posts from other keys that aren't already included
+                        gridContent[key].forEach(post => {
+                            if (!post || !post.id) return;
+                            if (!seenPostIds.has(post.id)) {
+                                // Filter out posts hidden for this viewer across all hide/report/delete sources.
+                                if (isPostHiddenForViewer(post, currentUserId)) {
+                                    return; // skip
+                                }
+                                // Apply cross-zone display rules to avoid noisy duplication
+                                if (!isAllowedCrossZone(post)) return;
+                                seenPostIds.add(post.id);
+                                allPosts.push(post);
+                            }
+                        });
+                    }
                 }
             }
             
