@@ -1670,6 +1670,85 @@
                 window.__constrainedRuntime = true;
             }
 
+            window.__collectRuntimeDecisionSnapshot = function(stage) {
+                const mem = Number((navigator && navigator.deviceMemory) || 0);
+                const cores = Number((navigator && navigator.hardwareConcurrency) || 0);
+                const snapshot = {
+                    stage: String(stage || 'unknown'),
+                    userAgent: String((navigator && navigator.userAgent) || ''),
+                    viewport: {
+                        width: Number(window.innerWidth || 0),
+                        height: Number(window.innerHeight || 0)
+                    },
+                    visibilityState: String((document && document.visibilityState) || 'unknown'),
+                    batterySavingMode: !!window.__universalSurvivalMode,
+                    flags: {
+                        coreWebsiteMode: !!window.__coreWebsiteMode,
+                        globalEmergencyLiteMode: !!window.__globalEmergencyLiteMode,
+                        constrainedRuntime: !!window.__constrainedRuntime,
+                        fragileRuntimeMode: !!window.__fragileRuntimeMode,
+                        universalSurvivalMode: !!window.__universalSurvivalMode,
+                        iosLiteMode: !!window.__iosLiteMode,
+                        minimalSafariRuntime: !!window.__minimalSafariRuntime,
+                        safariHardSafeMode: !!window.__safariHardSafeMode,
+                        privateSafeMode: !!window.__privateSafeMode,
+                        storageLikelyRestricted: !!window.__storageLikelyRestricted,
+                        disableServiceWorkers: !!window.__disableServiceWorkers,
+                        bootSafeMode: !!window.__bootSafeMode,
+                        authPersistenceLikelyBroken: !!window.__authPersistenceLikelyBroken,
+                        isIOSWebKitBrowser: !!window.__isIOSWebKitBrowser,
+                        isSafariLikeBrowser: !!window.__isSafariLikeBrowser,
+                        isMobileBrowser: !!window.__isMobileBrowser,
+                        mobileStartupFastMode: !!window.__mobileStartupFastMode
+                    },
+                    resources: {
+                        deviceMemory: Number.isFinite(mem) && mem > 0 ? mem : 'unknown',
+                        hardwareConcurrency: Number.isFinite(cores) && cores > 0 ? cores : 'unknown'
+                    },
+                    startup: {
+                        startupStrictWindowMs: Number(window.__startupStrictWindowMs || 0),
+                        bootAgeMs: Math.max(0, Date.now() - Number(window.__bootStartedAt || Date.now()))
+                    }
+                };
+
+                snapshot.path = {
+                    ultraMinimalBoot: !!(
+                        snapshot.flags.fragileRuntimeMode ||
+                        snapshot.flags.isIOSWebKitBrowser ||
+                        snapshot.flags.isSafariLikeBrowser ||
+                        snapshot.flags.universalSurvivalMode
+                    ),
+                    startupFastPath: !!(
+                        snapshot.flags.globalEmergencyLiteMode ||
+                        snapshot.flags.constrainedRuntime ||
+                        snapshot.flags.iosLiteMode ||
+                        snapshot.flags.isSafariLikeBrowser ||
+                        snapshot.flags.isIOSWebKitBrowser
+                    )
+                };
+
+                const reasons = [];
+                if (snapshot.flags.coreWebsiteMode) reasons.push('core-website-mode-hardcoded');
+                if (snapshot.flags.globalEmergencyLiteMode) reasons.push('global-emergency-lite-hardcoded');
+                if (snapshot.flags.bootSafeMode) reasons.push('boot-safety-guard');
+                if (snapshot.flags.privateSafeMode) reasons.push('private-safe-mode');
+                if (snapshot.flags.storageLikelyRestricted) reasons.push('storage-restricted');
+                if (snapshot.flags.authPersistenceLikelyBroken) reasons.push('auth-persistence-broken');
+                if (snapshot.flags.fragileRuntimeMode) reasons.push('fragile-runtime');
+                if (snapshot.flags.universalSurvivalMode) reasons.push('universal-survival');
+                if (snapshot.flags.isIOSWebKitBrowser) reasons.push('ios-webkit-platform');
+                if (snapshot.flags.isSafariLikeBrowser) reasons.push('safari-like-platform');
+                if (snapshot.path.ultraMinimalBoot) reasons.push('ultra-minimal-boot-selected');
+                if (snapshot.path.startupFastPath) reasons.push('startup-fast-path-selected');
+                snapshot.reasons = reasons;
+
+                try {
+                    window.__lastRuntimeDecisionSnapshot = snapshot;
+                    console.log('🧭 Runtime decision snapshot', snapshot);
+                } catch (e) {}
+                return snapshot;
+            };
+
             if (window.__isIOSWebKitBrowser && !window.__privateSafeMode && 'serviceWorker' in navigator) {
                 try {
                     const iosCleanupKey = '__ios_sw_cleanup_done_session';
@@ -9804,6 +9883,11 @@
                         hardwareConcurrency: cores || 'unknown'
                     });
                 }
+                try {
+                    if (typeof window.__collectRuntimeDecisionSnapshot === 'function') {
+                        window.__collectRuntimeDecisionSnapshot('post-storage-check');
+                    }
+                } catch (e) {}
             } catch (e) {
                 window.__constrainedRuntime = !!(window.__privateSafeMode || window.__authPersistenceLikelyBroken);
             }
@@ -49570,6 +49654,11 @@ function setUploadModalHeader(title, subtitle) {
             const runUltraMinimalBoot = () => {
                 try {
                     console.warn('🛟 Ultra-minimal fragile-runtime boot path active');
+                    try {
+                        if (typeof window.__collectRuntimeDecisionSnapshot === 'function') {
+                            window.__collectRuntimeDecisionSnapshot('runUltraMinimalBoot');
+                        }
+                    } catch (e) {}
                     try { initializeTheme(); } catch (e) {}
                     try { updateAccountUI(); } catch (e) {}
                     try { initializeGrid(); } catch (e) {}
@@ -49592,6 +49681,12 @@ function setUploadModalHeader(title, subtitle) {
                     console.error('Ultra-minimal boot failed', e);
                 }
             };
+
+            try {
+                if (typeof window.__collectRuntimeDecisionSnapshot === 'function') {
+                    window.__collectRuntimeDecisionSnapshot('before-primary-boot-branch');
+                }
+            } catch (e) {}
 
             if (window.__fragileRuntimeMode || window.__isIOSWebKitBrowser || window.__isSafariLikeBrowser || window.__universalSurvivalMode) {
                 runUltraMinimalBoot();
