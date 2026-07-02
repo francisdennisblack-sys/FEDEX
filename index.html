@@ -1052,6 +1052,15 @@
                 } catch (e) { return false; }
             })();
 
+            window.__isDesktopSafariStableCandidate = (function () {
+                try {
+                    return !!(
+                        window.__isSafariLikeBrowser &&
+                        !window.__isMobileBrowser
+                    );
+                } catch (e) { return false; }
+            })();
+
             window.__privateSafeMode = (function () {
                 try {
                     const k = '__private_safe_probe__';
@@ -1094,6 +1103,23 @@
                 window.__storageLikelyRestricted ||
                 window.__isMobileBrowser
             );
+
+            // Massive cross-browser stabilization profile:
+            // If desktop Safari is the only consistently stable environment,
+            // treat all other environments as survival-mode until startup is
+            // fully re-proven. This intentionally trades optional features for
+            // deterministic launch.
+            window.__universalSurvivalMode = !!(
+                !window.__isDesktopSafariStableCandidate ||
+                window.__privateSafeMode ||
+                window.__storageLikelyRestricted
+            );
+
+            try {
+                if (window.__universalSurvivalMode) {
+                    window.__constrainedRuntime = true;
+                }
+            } catch (e) {}
 
             // Runtime stability layer (wide-scope):
             // 1) clamp interval churn instead of disabling all intervals,
@@ -1233,7 +1259,12 @@
             })();
 
             // Disable SW in fragile persistence environments.
-            window.__disableServiceWorkers = !!(window.__privateSafeMode || window.__storageLikelyRestricted || window.__fragileRuntimeMode);
+            window.__disableServiceWorkers = !!(
+                window.__privateSafeMode ||
+                window.__storageLikelyRestricted ||
+                window.__fragileRuntimeMode ||
+                window.__universalSurvivalMode
+            );
 
             // Safe storage wrapper: avoids hard crashes when Safari private mode
             // blocks persistent stores and falls back to memory values.
@@ -13363,11 +13394,13 @@
             let isAtPOI = false;
             let gridRadius = 0.5; // Default POI radius
             let contentScope = 'NETWORK_AREA';
+            let anchorPOI = null;
             
             if (nearestPOI && poiDistance <= POI_CLOSE_RANGE) {
                 // ✅ CLOSE: Within 45 feet - use POI name
                 displayName = `${nearestPOI.name || nearestPOI.category}`;
                 isAtPOI = true;
+                anchorPOI = nearestPOI;
                 
                 // For POI: use POI-specific smaller grid radius
                 const POI_RADII = {
@@ -13394,6 +13427,15 @@
                 isAtPOI = false;
                 gridRadius = 0.5; // Default area grid radius
                 contentScope = 'AREA_NAME';
+                anchorPOI = {
+                    id: `area_${Math.round(userLat * 1000)}_${Math.round(userLon * 1000)}`,
+                    name: displayName,
+                    lat: userLat,
+                    lon: userLon,
+                    category: 'area',
+                    type: 'area',
+                    emoji: ''
+                };
             }
             
             return {
@@ -13407,6 +13449,8 @@
                 // Display info
                 displayName: displayName,
                 isAtPOI: isAtPOI,
+                poi: anchorPOI,
+                distance: Number.isFinite(poiDistance) ? poiDistance : 0,
                 poiData: isAtPOI ? nearestPOI : null,
                 poiDistance: isAtPOI ? poiDistance : null,
                 
@@ -18876,9 +18920,9 @@
                 }
             } catch (e) {}
 
-            // Emergency fragile-runtime auth boot path: avoid heavy profile/grid/location
-            // initialization in private/mobile browsers and keep launch lightweight.
-            if (window.__fragileRuntimeMode) {
+            // Emergency survival auth boot path: avoid heavy profile/grid/location
+            // initialization in unstable runtimes and keep launch deterministic.
+            if (window.__fragileRuntimeMode || window.__universalSurvivalMode) {
                 try {
                     const fallbackGuestId = (typeof getPermanentUserId === 'function') ? getPermanentUserId() : ('guest-' + Date.now());
                     const resolvedId = user && user.uid ? user.uid : fallbackGuestId;
@@ -18896,14 +18940,16 @@
                         window.__fragileRuntimeSubscribed = true;
                         setTimeout(() => {
                             try {
-                                if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                                if (typeof window.__requestCoreFeedSubscribe === 'function') {
+                                    window.__requestCoreFeedSubscribe('auth-survival-boot');
+                                } else if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
                                     subscribeToFirebasePostsWithReconnect();
                                 }
-                            } catch (e) { console.warn('fragile auth boot: subscribe failed', e); }
+                            } catch (e) { console.warn('survival auth boot: subscribe failed', e); }
                         }, 1400);
                     }
                 } catch (e) {
-                    console.warn('fragile auth boot failed', e);
+                    console.warn('survival auth boot failed', e);
                 }
                 return;
             }
@@ -33776,6 +33822,22 @@ function setUploadModalHeader(title, subtitle) {
 
         function subscribeToFirebasePostsWithReconnect() {
             try {
+                const now = Date.now();
+                const lastAttempt = Number(window.__lastSubscribeAttemptTs || 0);
+                if (lastAttempt && (now - lastAttempt) < 900) {
+                    console.log('⏱️ subscribeToFirebasePostsWithReconnect throttled');
+                    return;
+                }
+                window.__lastSubscribeAttemptTs = now;
+
+                // Guard first: avoid executing any optional subscription side-effects
+                // when a primary listener is already active.
+                if ((firebaseUnsubscribe && typeof firebaseUnsubscribe === 'function') ||
+                    (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function')) {
+                    console.log('⚠️ subscribeToFirebasePostsWithReconnect: listener already active - skipping new subscribe');
+                    return;
+                }
+
                 if (!currentUserId) {
                     try {
                         const fallbackId = window.currentUserId || permanentUserId || localStorage.getItem('permanentUserId') || localStorage.getItem('userId') || (typeof getPermanentUserId === 'function' ? getPermanentUserId() : null);
@@ -33836,12 +33898,6 @@ function setUploadModalHeader(title, subtitle) {
                     console.warn('Failed to subscribe posts_packaged_variants mirror', e);
                 }
 
-                // Prevent creating multiple listeners — if one exists, skip creating another
-                if ((firebaseUnsubscribe && typeof firebaseUnsubscribe === 'function') ||
-                    (window.firebaseUnsubscribe && typeof window.firebaseUnsubscribe === 'function')) {
-                    console.log('⚠️ subscribeToFirebasePostsWithReconnect: listener already active - skipping new subscribe');
-                    return;
-                }
                 console.log('\n🔗🔗🔗 subscribeToFirebasePostsWithReconnect CALLED 🔗🔗🔗');
                 console.log('  currentUserId:', currentUserId);
                 console.log('  currentGridId:', currentGridId);
@@ -48897,6 +48953,39 @@ function setUploadModalHeader(title, subtitle) {
             try { window.addEventListener('unhandledrejection', ev => { try { console.error('❌ UNHANDLED PROMISE REJECTION:', ev.reason); } catch(e){} }); } catch(e){}
         })();
 
+        // Centralized feed subscription scheduler.
+        // Multiple startup/auth/watchdog paths can request a subscription,
+        // but only one real subscribe attempt should happen in a short window.
+        window.__coreFeedSubscribeTimer = null;
+        window.__lastCoreFeedSubscribeAt = 0;
+        window.__requestCoreFeedSubscribe = function(source) {
+            const src = String(source || 'unknown');
+            try {
+                if (window.__coreFeedSubscribeTimer) {
+                    clearTimeout(window.__coreFeedSubscribeTimer);
+                    window.__coreFeedSubscribeTimer = null;
+                }
+            } catch (e) {}
+
+            const delay = (window.__universalSurvivalMode || window.__fragileRuntimeMode) ? 1200 : 300;
+            window.__coreFeedSubscribeTimer = setTimeout(function() {
+                window.__coreFeedSubscribeTimer = null;
+                try {
+                    const now = Date.now();
+                    const last = Number(window.__lastCoreFeedSubscribeAt || 0);
+                    if ((now - last) < 1200) {
+                        return;
+                    }
+                    window.__lastCoreFeedSubscribeAt = now;
+                    if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                        subscribeToFirebasePostsWithReconnect();
+                    }
+                } catch (e) {
+                    try { console.warn('core feed subscribe scheduler failed', { source: src, error: e }); } catch (_) {}
+                }
+            }, delay);
+        };
+
         // Auto-initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
             if (window.__primaryBootRunning || window.__primaryBootComplete) {
@@ -48917,7 +49006,9 @@ function setUploadModalHeader(title, subtitle) {
                     // Delay all heavy startup and only bring up core feed subscription.
                     setTimeout(() => {
                         try {
-                            if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                            if (typeof window.__requestCoreFeedSubscribe === 'function') {
+                                window.__requestCoreFeedSubscribe('ultra-minimal-boot');
+                            } else if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
                                 subscribeToFirebasePostsWithReconnect();
                             }
                         } catch (e) {
@@ -48929,7 +49020,7 @@ function setUploadModalHeader(title, subtitle) {
                 }
             };
 
-            if (window.__fragileRuntimeMode || window.__isIOSWebKitBrowser) {
+            if (window.__fragileRuntimeMode || window.__isIOSWebKitBrowser || window.__universalSurvivalMode) {
                 runUltraMinimalBoot();
                 return;
             }
@@ -49168,8 +49259,11 @@ function setUploadModalHeader(title, subtitle) {
                         const dragDistance = e.clientY - mouseDownY;
                         if (dragDistance > 80) {
                             gridContainer.style.transform = `translateY(${dragDistance / 3}px)`;
-                            document.getElementById('pull-to-refresh-indicator').style.display = 'block';
-                            document.getElementById('pull-to-refresh-indicator').style.opacity = Math.min(1, dragDistance / 150);
+                            const pullIndicator = document.getElementById('pull-to-refresh-indicator');
+                            if (pullIndicator) {
+                                pullIndicator.style.display = 'block';
+                                pullIndicator.style.opacity = Math.min(1, dragDistance / 150);
+                            }
                         }
                     }
                 }, { passive: true });
@@ -49177,7 +49271,10 @@ function setUploadModalHeader(title, subtitle) {
                 gridContainer.addEventListener('mouseup', (e) => {
                     const dragDistance = e.clientY - mouseDownY;
                     gridContainer.style.transform = 'translateY(0)';
-                    document.getElementById('pull-to-refresh-indicator').style.opacity = 0;
+                    const pullIndicator = document.getElementById('pull-to-refresh-indicator');
+                    if (pullIndicator) {
+                        pullIndicator.style.opacity = 0;
+                    }
                     
                     if (dragDistance > 80 && gridContainer.scrollTop === 0 && !refreshCooldown) {
                         refreshCooldown = true;
@@ -49220,7 +49317,11 @@ function setUploadModalHeader(title, subtitle) {
                 // 📡 LAZY LOAD: Posts from Firebase (non-blocking)
                 setTimeout(() => {
                     console.log('⚡ LAZY LOAD: Loading posts from Firebase...');
-                    subscribeToFirebasePostsWithReconnect();
+                    if (typeof window.__requestCoreFeedSubscribe === 'function') {
+                        window.__requestCoreFeedSubscribe('lazy-heavy-boot');
+                    } else {
+                        subscribeToFirebasePostsWithReconnect();
+                    }
                 }, emergencyLite ? 3200 : (window.__constrainedRuntime ? 2200 : (window.__iosLiteMode ? 1200 : 200)));
             };
 
@@ -49403,7 +49504,13 @@ function setUploadModalHeader(title, subtitle) {
                 try {
                     if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
                         setTimeout(() => {
-                            try { subscribeToFirebasePostsWithReconnect(); } catch (e) {}
+                            try {
+                                if (typeof window.__requestCoreFeedSubscribe === 'function') {
+                                    window.__requestCoreFeedSubscribe('primary-boot-crash-recovery');
+                                } else {
+                                    subscribeToFirebasePostsWithReconnect();
+                                }
+                            } catch (e) {}
                         }, 250);
                     }
                 } catch (e) {}
