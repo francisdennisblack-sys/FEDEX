@@ -297,6 +297,28 @@
                 const ATTEMPT_KEY = '__boot_attempt_ts';
                 const FAIL_COUNT_KEY = '__boot_fail_count';
                 const SAFE_MODE_UNTIL_KEY = '__boot_safe_mode_until';
+                const INTENTIONAL_UNLOAD_KEY = '__boot_intentional_unload_ts';
+
+                let navType = 'unknown';
+                try {
+                    const navEntries = (performance && typeof performance.getEntriesByType === 'function')
+                        ? performance.getEntriesByType('navigation')
+                        : [];
+                    if (navEntries && navEntries[0] && navEntries[0].type) {
+                        navType = String(navEntries[0].type);
+                    }
+                } catch (e) {}
+
+                const recentIntentionalUnload = (function() {
+                    try {
+                        const ts = Number(sessionStorage.getItem(INTENTIONAL_UNLOAD_KEY) || 0);
+                        if (!ts) return false;
+                        const age = now - ts;
+                        return age >= 0 && age < 15000;
+                    } catch (e) {
+                        return false;
+                    }
+                })();
 
                 const safeModeUntil = Number(localStorage.getItem(SAFE_MODE_UNTIL_KEY) || 0);
                 if (safeModeUntil && safeModeUntil > now) {
@@ -306,7 +328,13 @@
                 }
 
                 const previousAttempt = Number(sessionStorage.getItem(ATTEMPT_KEY) || 0);
-                if (previousAttempt && (now - previousAttempt) < 45000) {
+                const treatAsBootFailure = !!(
+                    previousAttempt &&
+                    (now - previousAttempt) < 45000 &&
+                    navType !== 'reload' &&
+                    !recentIntentionalUnload
+                );
+                if (treatAsBootFailure) {
                     const nextFailCount = Number(localStorage.getItem(FAIL_COUNT_KEY) || 0) + 1;
                     localStorage.setItem(FAIL_COUNT_KEY, String(nextFailCount));
                     if (nextFailCount >= 2) {
@@ -320,8 +348,17 @@
                 sessionStorage.setItem(ATTEMPT_KEY, String(now));
                 window.__markBootComplete = function markBootComplete() {
                     try { sessionStorage.removeItem(ATTEMPT_KEY); } catch (e) {}
+                    try { sessionStorage.removeItem(INTENTIONAL_UNLOAD_KEY); } catch (e) {}
                     try { localStorage.setItem(FAIL_COUNT_KEY, '0'); } catch (e) {}
                 };
+
+                const markIntentionalUnload = function() {
+                    try { sessionStorage.setItem(INTENTIONAL_UNLOAD_KEY, String(Date.now())); } catch (e) {}
+                    try { sessionStorage.removeItem(ATTEMPT_KEY); } catch (e) {}
+                };
+
+                try { window.addEventListener('beforeunload', markIntentionalUnload); } catch (e) {}
+                try { window.addEventListener('pagehide', markIntentionalUnload); } catch (e) {}
             } catch (e) {
                 // Keep startup going even if storage is restricted.
             }
