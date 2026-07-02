@@ -34173,6 +34173,10 @@ function setUploadModalHeader(title, subtitle) {
         async function connectToPOI() {
             try {
             // Reverted: No legacy WiFi detection needed - using POI proximity / currentUserId directly
+                if (!currentUserId) {
+                    console.log('connectToPOI: currentUserId not ready, skipping legacy POI connect');
+                    return;
+                }
                 
                 console.log('====== USER CONNECTION (POI) ======');
                 console.log('User ID:', currentUserId);
@@ -34217,14 +34221,36 @@ function setUploadModalHeader(title, subtitle) {
                 console.log('startAutoRefresh() complete');
             } catch (error) {
                 console.error('POI detection error:', error);
-                // Update status dot to red
-                const statusDot = document.getElementById('statusDot');
-                statusDot.classList.remove('connected');
-                statusDot.classList.add('disconnected');
-                document.getElementById('connectionInfo').style.display = 'none';
-                document.getElementById('testButtons').style.display = 'none';
-                document.getElementById('grid').style.display = 'none';
+                // Fail open. Legacy POI connect errors must NEVER blank the page.
+                try {
+                    const statusDot = document.getElementById('statusDot');
+                    if (statusDot) {
+                        statusDot.classList.remove('connected');
+                        statusDot.classList.add('disconnected');
+                    }
+                } catch (e) {}
+                try {
+                    const connInfo = document.getElementById('connectionInfo');
+                    if (connInfo) connInfo.style.display = 'none';
+                } catch (e) {}
+                try {
+                    const testButtons = document.getElementById('testButtons');
+                    if (testButtons) testButtons.style.display = 'none';
+                } catch (e) {}
+                try {
+                    const gridEl = document.getElementById('grid');
+                    if (gridEl) gridEl.style.display = 'grid';
+                } catch (e) {}
                 isConnected = false;
+                try { initializeGrid(); } catch (e) {}
+                try { window.lastRenderGridTime = 0; } catch (e) {}
+                try {
+                    if (typeof window.requestGridUpdate === 'function') {
+                        window.requestGridUpdate('connectToPOI-error-fail-open');
+                    } else if (typeof renderGrid === 'function') {
+                        renderGrid();
+                    }
+                } catch (e) {}
             }
         }
 
@@ -47387,12 +47413,16 @@ function setUploadModalHeader(title, subtitle) {
         function checkPOIOnLoad() {
             // Automatically try to connect to nearest POI on page load
             console.log('Checking POI proximity on page load...');
+            if (!currentUserId) {
+                console.log('checkPOIOnLoad: currentUserId not ready, skipping legacy POI connect');
+                return;
+            }
             connectToPOI();
         }
         
         // Retry POI connection periodically if not connected
         function retryPOIConnection() {
-            if (!isConnected) {
+            if (!isConnected && currentUserId) {
                 console.log('Retrying POI connection...');
                 connectToPOI();
             }
