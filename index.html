@@ -24641,6 +24641,30 @@ function setUploadModalHeader(title, subtitle) {
                     
                     const allPosts = [];
                     const seenPostIds = new Set(); // Track unique post IDs to prevent duplicates
+                    const snapshotNowMs = Date.now();
+                    const startupStrictWindowMs = Number(window.__startupStrictWindowMs || 20000);
+                    const startupAgeMs = snapshotNowMs - Number(window.__bootStartedAt || snapshotNowMs);
+                    const inStartupWindow = startupAgeMs < startupStrictWindowMs;
+                    const isStrictStartupFeed = !!(
+                        window.__coreWebsiteMode ||
+                        window.__globalEmergencyLiteMode ||
+                        window.__constrainedRuntime ||
+                        window.__isSafariLikeBrowser ||
+                        window.__isIOSWebKitBrowser
+                    );
+                    let isSignedInViewer = false;
+                    try { isSignedInViewer = localStorage.getItem('isSignedIn') === '1'; } catch (e) { isSignedInViewer = false; }
+                    const strictStartupAdmission = !isSignedInViewer && isStrictStartupFeed && inStartupWindow;
+                    const startupAdmissionMaxAgeMs = Number(
+                        window.__startupAdmissionMaxAgeMs ||
+                        (window.__mobileStartupFastMode ? 6 * 60 * 60 * 1000 : 12 * 60 * 60 * 1000)
+                    );
+                    const normalizePostTimestamp = (postObj) => {
+                        const rawTs = postObj && (postObj.timestamp || postObj.createdAt || postObj.created_at || postObj.time || postObj.postedAt || postObj.ts || 0);
+                        const parsed = Number(rawTs);
+                        if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+                        return parsed < 1000000000000 ? parsed * 1000 : parsed;
+                    };
                     
                     if (snapshot.exists()) {
                         const postsObj = snapshot.val();
@@ -24677,8 +24701,9 @@ function setUploadModalHeader(title, subtitle) {
                             // Filter expired posts before they reach any render path. This
                             // ensures signed-out users (who may connect before the scheduled
                             // purgeExpiredPostsFromFirebase timer fires) never see stale posts.
-                            const _postTs = (postsObj[postId] || {}).timestamp || (postsObj[postId] || {}).createdAt || 0;
-                            if (_postTs && (Date.now() - Number(_postTs)) > 24 * 60 * 60 * 1000) {
+                            const incomingRaw = postsObj[postId] || {};
+                            const _postTs = normalizePostTimestamp(incomingRaw);
+                            if (_postTs && (snapshotNowMs - _postTs) > 24 * 60 * 60 * 1000) {
                                 // Mark globally deleted so it can't re-enter via any other path
                                 try { window.globallyDeletedPostIds = window.globallyDeletedPostIds || new Set(); window.globallyDeletedPostIds.add(postId); } catch(e){}
                                 try {
@@ -24694,10 +24719,23 @@ function setUploadModalHeader(title, subtitle) {
                                 try { if (typeof renderGrid === 'function') { window.lastRenderGridTime = 0; renderGrid(); } } catch (e) {}
                                 return; // expired — skip
                             }
+
+                            // Hard-refresh startup gate for unsigned viewers: only admit
+                            // recent posts with valid timestamps so stale/global backlog
+                            // cannot flood in and then disappear once stricter filters settle.
+                            if (strictStartupAdmission) {
+                                if (!_postTs) return;
+                                if ((snapshotNowMs - _postTs) > startupAdmissionMaxAgeMs) return;
+                            }
                             
                             seenPostIds.add(postId);
                             // Defensive merge: if incoming post has missing/empty content, preserve cached content
-                            const incoming = postsObj[postId] || {};
+                            const incoming = incomingRaw || {};
+                            if (!_postTs) {
+                                incoming.__missingTimestamp = true;
+                            } else {
+                                incoming.timestamp = incoming.timestamp || _postTs;
+                            }
                             // Normalize any server-side denormalized badges into simple client fields
                             try {
                                 const rawBadgeMap = incoming.badges || incoming.badgesMap || null;
@@ -35190,7 +35228,7 @@ function setUploadModalHeader(title, subtitle) {
         }
 
         function buildGuestViewerFeed(sourcePosts) {
-            const deduped = [];
+            let deduped = [];
             const seen = new Set();
             const base = Array.isArray(sourcePosts) ? sourcePosts : [];
             const MAX_POSTS = window.__mobileStartupFastMode ? 600 : 2000;
@@ -35201,6 +35239,39 @@ function setUploadModalHeader(title, subtitle) {
                 seen.add(post.id);
                 deduped.push(post);
                 if (deduped.length >= MAX_POSTS) break;
+            }
+
+            const nowMs = Date.now();
+            const startupStrictWindowMs = Number(window.__startupStrictWindowMs || 20000);
+            const bootAgeMs = nowMs - Number(window.__bootStartedAt || nowMs);
+            const inStartupWindow = bootAgeMs < startupStrictWindowMs;
+            const startupCap = Number(window.__startupGuestHardRefreshCap || (window.__mobileStartupFastMode ? 48 : 72));
+            const startupGuestMaxAgeMs = Number(window.__startupGuestMaxAgeMs || (window.__mobileStartupFastMode ? 6 * 60 * 60 * 1000 : 12 * 60 * 60 * 1000));
+            const tsForGuest = (post) => {
+                const raw = post && (post.timestamp || post.createdAt || post.created_at || post.time || post.postedAt || post.ts || 0);
+                const parsed = Number(raw);
+                if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+                return parsed < 1000000000000 ? parsed * 1000 : parsed;
+            };
+
+            if (inStartupWindow && deduped.length > 0) {
+                const startupFiltered = deduped
+                    .filter(p => {
+                        const ts = tsForGuest(p);
+                        return ts && (nowMs - ts) <= startupGuestMaxAgeMs;
+                    })
+                    .sort((a, b) => tsForGuest(b) - tsForGuest(a));
+
+                if (startupFiltered.length > 0) {
+                    deduped = startupFiltered.slice(0, startupCap);
+                } else {
+                    deduped = deduped
+                        .slice()
+                        .sort((a, b) => tsForGuest(b) - tsForGuest(a))
+                        .slice(0, startupCap);
+                }
+
+                console.log(`🧩 Guest startup flood guard: capped feed to ${deduped.length} posts`);
             }
 
             const hasConsent = hasLocationConsentForViewerFeed();
