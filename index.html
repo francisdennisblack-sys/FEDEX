@@ -34887,12 +34887,18 @@ function setUploadModalHeader(title, subtitle) {
                             const deviceKey = String(deviceId);
                             window.currentGuestFeedKey = deviceKey;
 
+                            // Pin early startup rendering to device guest feed so
+                            // shared/area fallback buckets cannot flash old posts.
+                            const lockMs = Number(window.__guestFeedStartupLockMs || window.__startupStrictWindowMs || 20000);
+                            window.__guestFeedStartupLockUntil = Date.now() + lockMs;
+
                             const guestFeed = buildGuestViewerFeed(authoritativeVisible);
                             gridContent[deviceKey] = guestFeed.posts;
                             console.log(`  ✅ guest feed populated for ${deviceKey}: mode=${guestFeed.mode}, zone=${guestFeed.zoneTag || 'none'}, posts=${(gridContent[deviceKey] || []).length}`);
                         } else {
                             window.readOnlyViewer = false;
                             window.currentGuestFeedKey = null;
+                            window.__guestFeedStartupLockUntil = 0;
                         }
                     } catch(e) { console.warn('Failed building device-scoped read-only feed', e); }
                     
@@ -36611,6 +36617,9 @@ function setUploadModalHeader(title, subtitle) {
             try {
                 const isSignedIn = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
                 const guestKey = window.currentGuestFeedKey ? String(window.currentGuestFeedKey) : null;
+                const guestLockUntil = Number(window.__guestFeedStartupLockUntil || 0);
+                const guestLockActive = !isSignedIn && guestKey && Date.now() < guestLockUntil;
+                if (guestLockActive && Array.isArray(gridContent[guestKey]) && gridContent[guestKey].length > 0) return guestKey;
                 // Prefer showing the area feed when a location/zone is selected
                 if (currentZoneTag && Array.isArray(gridContent[currentZoneTag]) && gridContent[currentZoneTag].length > 0) return currentZoneTag;
                 if (!isSignedIn && guestKey && Array.isArray(gridContent[guestKey]) && gridContent[guestKey].length > 0) return guestKey;
@@ -45004,9 +45013,13 @@ function setUploadModalHeader(title, subtitle) {
             // fall back to the shared global feed so signed-in users don't see an empty grid.
             const isSignedInViewer = (function(){ try { return localStorage.getItem('isSignedIn') === '1'; } catch(e){ return false; } })();
             const guestFeedKey = (window.readOnlyViewer && window.currentGuestFeedKey) ? String(window.currentGuestFeedKey) : null;
+            const guestLockUntil = Number(window.__guestFeedStartupLockUntil || 0);
+            const guestLockActive = !isSignedInViewer && guestFeedKey && Date.now() < guestLockUntil;
 
             let contentKey = 'temp-posts';
-            if (!isSignedInViewer && guestFeedKey && Array.isArray(gridContent[guestFeedKey]) && gridContent[guestFeedKey].length > 0) {
+            if (guestLockActive && Array.isArray(gridContent[guestFeedKey]) && gridContent[guestFeedKey].length > 0) {
+                contentKey = guestFeedKey;
+            } else if (!isSignedInViewer && guestFeedKey && Array.isArray(gridContent[guestFeedKey]) && gridContent[guestFeedKey].length > 0) {
                 contentKey = guestFeedKey;
             } else if (currentUserId && Array.isArray(gridContent[currentUserId]) && gridContent[currentUserId].length > 0) {
                 contentKey = currentUserId;
