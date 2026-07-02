@@ -384,24 +384,15 @@
                     return;
                 }
 
-                var startupUA = '';
-                var startupIsSafariLike = false;
-                var startupIsIOSWebKit = false;
-                try {
-                    startupUA = navigator.userAgent || '';
-                    startupIsSafariLike = /WebKit/i.test(startupUA) && /Safari/i.test(startupUA) && !/CriOS|FxiOS|EdgiOS|Chrome|Firefox|OPR|SamsungBrowser/i.test(startupUA);
-                    startupIsIOSWebKit = (/WebKit/i.test(startupUA) && (/iP(hone|ad|od)/i.test(startupUA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)));
-                } catch (e) {}
-
-                // Emergency startup mode: keep diagnostics minimal to reduce
-                // startup pressure and avoid interaction deadlocks/crashes.
-                if (startupIsSafariLike || startupIsIOSWebKit || window.__bootSafeMode) {
+                // Emergency startup mode: keep diagnostics minimal only when the
+                // boot-safety guard explicitly requests it.
+                if (window.__bootSafeMode) {
                     window.__startupStageStart = function(){};
                     window.__startupStageSuccess = function(){};
                     window.__startupStageFail = function(){};
                     window.__startupTrackPromise = function(name, promise) { return Promise.resolve(promise); };
                     window.reportStartupDiagnostics = function() {
-                        return { safeMode: true, safariSafeMode: !!startupIsSafariLike, iosWebkitSafeMode: !!startupIsIOSWebKit, bootSafeMode: !!window.__bootSafeMode, skipped: 'startup-diagnostics' };
+                        return { safeMode: true, bootSafeMode: !!window.__bootSafeMode, skipped: 'startup-diagnostics' };
                     };
                     try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
                     return;
@@ -49930,6 +49921,45 @@ function setUploadModalHeader(title, subtitle) {
                     }
                 } catch (e) {}
             }, 3500);
+
+            // Startup feed watchdog: if startup completed but the grid is still empty,
+            // force one deterministic resubscribe + render recovery pass.
+            setTimeout(() => {
+                try {
+                    const hasAnyPosts = Object.values(gridContent || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
+                    const hasGridBoxes = document.querySelectorAll('.grid-box[data-post-id]').length > 0;
+                    const uiLocked = !!(
+                        (document && document.documentElement && document.documentElement.classList.contains('app-startup-loading')) ||
+                        (document && document.body && document.body.classList.contains('location-change-loading-ui-lock'))
+                    );
+                    if (hasAnyPosts || hasGridBoxes || uiLocked) return;
+
+                    console.warn('🛠️ Startup feed watchdog: empty grid detected, forcing feed recovery');
+                    try {
+                        if (typeof window.__forceInteractionRecovery === 'function') {
+                            window.__forceInteractionRecovery();
+                        }
+                    } catch (e) {}
+
+                    try {
+                        if (typeof window.__requestCoreFeedSubscribe === 'function') {
+                            window.__requestCoreFeedSubscribe('startup-feed-watchdog');
+                        } else if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                            subscribeToFirebasePostsWithReconnect();
+                        }
+                    } catch (e) {
+                        console.warn('startup-feed-watchdog subscribe failed', e);
+                    }
+
+                    try {
+                        if (typeof window.requestGridUpdate === 'function') {
+                            window.requestGridUpdate('startup-feed-watchdog');
+                        } else if (typeof renderGrid === 'function') {
+                            renderGrid();
+                        }
+                    } catch (e) {}
+                } catch (e) {}
+            }, 5200);
             
             // 🔄 DESKTOP REFRESH: Support mouse wheel and drag-down refresh on desktop
             const gridContainer = document.getElementById('grid');
