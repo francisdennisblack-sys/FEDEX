@@ -19,12 +19,21 @@ module.exports = async function handler(req, res) {
   };
 
   try {
+    // Keep this endpoint fast for mobile Safari. If upstream geocoding is slow,
+    // immediately fall back to a stable local label instead of stalling startup.
+    const ctrl = new AbortController();
+    const timeoutId = setTimeout(() => {
+      try { ctrl.abort(); } catch (e) {}
+    }, 650);
+
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
     const resp = await fetch(url, {
       headers: {
         'User-Agent': 'wificontent/1.0 (+https://wificontent.com)'
-      }
+      },
+      signal: ctrl.signal
     });
+    clearTimeout(timeoutId);
 
     if (!resp.ok) return res.status(200).json(fallback);
 
