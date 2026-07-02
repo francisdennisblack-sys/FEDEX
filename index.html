@@ -95,6 +95,43 @@
         try { document.documentElement.classList.add('app-startup-loading'); } catch (e) {}
     </script>
     <script>
+        // Core-only mode: keep startup path minimal and disable extra runtime systems.
+        // This preserves the responsive website UI while reducing moving parts.
+        window.__coreWebsiteMode = true;
+        window.__globalEmergencyLiteMode = true;
+        window.__disableServiceWorkers = true;
+        window.__constrainedRuntime = true;
+        try { document.documentElement.classList.add('core-website-mode'); } catch (e) {}
+
+        // Remove stale SW/cache state from previous builds so browsers run only core site logic.
+        (function clearLegacyRuntimeState() {
+            if (!window.__coreWebsiteMode) return;
+            const run = async function () {
+                try {
+                    if ('serviceWorker' in navigator && navigator.serviceWorker && typeof navigator.serviceWorker.getRegistrations === 'function') {
+                        const regs = await navigator.serviceWorker.getRegistrations();
+                        for (const reg of regs) {
+                            try { await reg.unregister(); } catch (e) {}
+                        }
+                    }
+                } catch (e) {}
+                try {
+                    if ('caches' in window && typeof caches.keys === 'function') {
+                        const keys = await caches.keys();
+                        for (const key of keys) {
+                            try { await caches.delete(key); } catch (e) {}
+                        }
+                    }
+                } catch (e) {}
+            };
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => { run(); }, { once: true });
+            } else {
+                run();
+            }
+        })();
+    </script>
+    <script>
         (function initBootSafetyGuard() {
             try {
                 const now = Date.now();
@@ -759,6 +796,11 @@
         // 🔄 AGGRESSIVE CACHE-BUSTING: Force consistency across all browsers/devices
         (function initVersionCheck() {
             try { if (window.__startupStageStart) window.__startupStageStart('initVersionCheck'); } catch (e) {}
+            if (window.__coreWebsiteMode || window.__globalEmergencyLiteMode) {
+                try { sessionStorage.setItem('__wificontent_load_time', String(Date.now())); } catch (e) {}
+                try { if (window.__startupStageSuccess) window.__startupStageSuccess('initVersionCheck', { skipped: true, reason: 'core-website-mode' }); } catch (e) {}
+                return;
+            }
             const isIOSWebKit = !!window.__isIOSWebKitBrowser;
 
             // Store current version in sessionStorage (per tab)
@@ -1092,9 +1134,11 @@
                 }
             })();
 
-            // Emergency lite mode is now opt-in. Keep the app closer to the
-            // previously stable baseline while still protecting fragile runtimes.
-            window.__globalEmergencyLiteMode = false;
+            // Emergency lite mode is opt-in unless core mode already forced it on.
+            // Keep explicit core-mode startup decisions intact.
+            if (typeof window.__globalEmergencyLiteMode === 'undefined') {
+                window.__globalEmergencyLiteMode = false;
+            }
 
             // Fragile runtime mode: private/restricted/mobile contexts get a
             // safer scheduler profile without fully disabling core primitives.
@@ -1484,7 +1528,7 @@
                 }
                 // Register service worker to handle background location updates
                 try {
-                    if ('serviceWorker' in navigator && !window.__isIOSWebKitBrowser && !window.__disableServiceWorkers) {
+                    if ('serviceWorker' in navigator && !window.__isIOSWebKitBrowser && !window.__disableServiceWorkers && !window.__coreWebsiteMode) {
                         try { if (window.__startupStageStart) window.__startupStageStart('serviceWorker.register.early'); } catch (e) {}
                         navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' }).then(reg => {
                             console.log('ServiceWorker registered:', reg.scope);
@@ -1705,8 +1749,14 @@
             window.CLEANUP_FLAGS.SKIP_MEGA_ULTRA = true;
             window.CLEANUP_FLAGS.SKIP_POST_CACHES = true;
             window.SKIP_HEAVY_TASKS = true;
+            // Ensure data source defaults exist before reading samplePath.
+            window.DATA_SOURCES = window.DATA_SOURCES || {
+                useSamples: true,
+                samplePath: '/data/samples',
+                remoteBase: ''
+            };
             // Route raw POI fetches to sample path so direct calls to '/master_*.json' hit samples.
-            window.POI_BASE_URL = window.DATA_SOURCES.samplePath;
+            window.POI_BASE_URL = window.DATA_SOURCES.samplePath || '/data/samples';
             console.log('🔰 SAFETY: Using sample data and skipping mega/ultra DB loads — heavy tasks disabled');
         </script>
     <script>
@@ -5648,7 +5698,7 @@
         }
         
         // Force service worker to update
-        if ('serviceWorker' in navigator) {
+        if ('serviceWorker' in navigator && !window.__coreWebsiteMode) {
             navigator.serviceWorker.getRegistrations().then(registrations => {
                 registrations.forEach(reg => {
                     reg.update(); // Force check for updates
