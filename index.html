@@ -1636,9 +1636,25 @@
             // slow to open, enable private-safe mode and avoid persistence-heavy paths.
             (function detectPrivateStorageRestrictions() {
                 if (!window.__isIOSWebKitBrowser) return;
+
+                const recomputeSafetyModes = function() {
+                    try {
+                        window.__safariHardSafeMode = !!(window.__isIOSWebKitBrowser && window.__privateSafeMode);
+                        window.__iosLiteMode = !!(window.__isIOSWebKitBrowser && window.__privateSafeMode);
+                        window.__minimalSafariRuntime = !!window.__privateSafeMode;
+                        if (window.__safariHardSafeMode) {
+                            window.__constrainedRuntime = true;
+                            window.__disableServiceWorkers = true;
+                        }
+                    } catch (e) {}
+                };
+
+                try { window.__recomputeSafariSafetyModes = recomputeSafetyModes; } catch (e) {}
+
                 try {
                     if (!window.indexedDB || typeof window.indexedDB.open !== 'function') {
                         window.__privateSafeMode = true;
+                        recomputeSafetyModes();
                         return;
                     }
                     let settled = false;
@@ -1646,8 +1662,10 @@
                     const to = setTimeout(function() {
                         if (settled) return;
                         settled = true;
-                        window.__privateSafeMode = true;
-                        try { console.warn('🍎 Private storage restriction detected: indexedDB timeout'); } catch (e) {}
+                        // Timeout alone is not a definitive private-mode signal on
+                        // Mobile Safari; it can also happen on slow cold starts.
+                        try { window.__privateStorageProbeTimedOut = true; } catch (e) {}
+                        try { console.warn('🍎 IndexedDB probe timed out; not forcing private-safe mode'); } catch (e) {}
                     }, 1800);
                     req.onupgradeneeded = function() {};
                     req.onsuccess = function(e) {
@@ -1658,16 +1676,19 @@
                             const db = e && e.target && e.target.result;
                             if (db) db.close();
                         } catch (err) {}
+                        recomputeSafetyModes();
                     };
                     req.onerror = function() {
                         if (settled) return;
                         settled = true;
                         clearTimeout(to);
                         window.__privateSafeMode = true;
+                        recomputeSafetyModes();
                         try { console.warn('🍎 Private storage restriction detected: indexedDB error'); } catch (e) {}
                     };
                 } catch (e) {
                     window.__privateSafeMode = true;
+                    recomputeSafetyModes();
                 }
             })();
 
@@ -1685,6 +1706,12 @@
             window.__iosFirstInteractionReady = false;
             window.__iosDeferredStartupRunner = null;
             window.__minimalSafariRuntime = !!window.__privateSafeMode;
+
+            try {
+                if (typeof window.__recomputeSafariSafetyModes === 'function') {
+                    window.__recomputeSafariSafetyModes();
+                }
+            } catch (e) {}
 
             if (window.__iosLiteMode) {
                 // Emergency mode: do not gate startup behind first user interaction.
