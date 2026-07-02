@@ -153,6 +153,9 @@
         window.__constrainedRuntime = true;
         window.__enableFastInitialLoad = false;
         window.__enableZonePrefetchBootstrap = false;
+        window.__disableFallbackDeviceFeed = true;
+        window.__enableUnsignedSyntheticFeed = false;
+        window.__enableTopLikedRotation = false;
         window.__startupStrictWindowMs = 20000;
         window.__mobileStartupFastMode = (function () {
             try {
@@ -35223,8 +35226,18 @@ function setUploadModalHeader(title, subtitle) {
         // One-time fallback that fetches posts directly and builds the device feed
         async function fallbackPopulateDeviceFeed() {
             try {
+                if (window.__disableFallbackDeviceFeed) return;
                 // If gridContent already populated, skip
                 if (Object.keys(gridContent || {}).length > 0) return;
+
+                const bootAgeMs = Date.now() - Number(window.__bootStartedAt || Date.now());
+                const startupStrictWindowMs = Number(window.__startupStrictWindowMs || 20000);
+                if (bootAgeMs < startupStrictWindowMs) return;
+
+                const existingShared = (window.gridContent && Array.isArray(window.gridContent['shared-posts']))
+                    ? window.gridContent['shared-posts'].length
+                    : 0;
+                if (existingShared > 0) return;
 
                 let posts = [];
                 if (typeof getPostsFromFirebase === 'function') {
@@ -35283,8 +35296,20 @@ function setUploadModalHeader(title, subtitle) {
         // isn't reachable in this runtime (ensures unsigned users see posts).
         window.ensureDeviceFeed = async function() {
             try {
+                if (window.__disableFallbackDeviceFeed) return;
                 if (typeof window.gridContent === 'undefined' || window.gridContent === null) window.gridContent = {};
                 const gc = window.gridContent;
+
+                const startupStrictWindowMs = Number(window.__startupStrictWindowMs || 20000);
+                const bootAgeMs = Date.now() - Number(window.__bootStartedAt || Date.now());
+                const inStartupWindow = bootAgeMs < startupStrictWindowMs;
+
+                const existingShared = Array.isArray(gc['shared-posts']) ? gc['shared-posts'].length : 0;
+                const existingGuest = (window.currentGuestFeedKey && Array.isArray(gc[String(window.currentGuestFeedKey)]))
+                    ? gc[String(window.currentGuestFeedKey)].length
+                    : 0;
+                if (existingShared > 0 || existingGuest > 0) return;
+
                 if (typeof fallbackPopulateDeviceFeed === 'function') {
                     try { await fallbackPopulateDeviceFeed(); if (Object.keys(window.gridContent||{}).length>0) return; } catch(e) { /* fall through */ }
                 }
@@ -35306,6 +35331,11 @@ function setUploadModalHeader(title, subtitle) {
                 }
 
                 if (!posts || posts.length === 0) {
+                    if (inStartupWindow) {
+                        // Let realtime subscription settle before fallback APIs inject
+                        // broad/older shared posts that can cause visible churn.
+                        return;
+                    }
                     // Try local test API as a quick test fallback
                     try {
                         const localResp = await fetch('/api/posts/test-zone');
@@ -35451,7 +35481,9 @@ function setUploadModalHeader(title, subtitle) {
             };
 
                 // Run the unsigned-user test-post population non-blocking on load.
-                try { window.populateTestPostsIfUnsigned(); } catch(e) {}
+                if (window.__enableUnsignedSyntheticFeed === true) {
+                    try { window.populateTestPostsIfUnsigned(); } catch(e) {}
+                }
 
                 // ------------------------------
                 // Top-liked rotation engine
@@ -35534,7 +35566,9 @@ function setUploadModalHeader(title, subtitle) {
                 };
 
                 // Start rotation for real users grid (non-blocking). Guards prevent signed-in interference.
-                try { window.startTopLikedRotation(); } catch(e) {}
+                if (window.__enableTopLikedRotation === true) {
+                    try { window.startTopLikedRotation(); } catch(e) {}
+                }
 
 
         // Update post count display on UI
