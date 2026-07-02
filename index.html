@@ -49617,13 +49617,38 @@ function setUploadModalHeader(title, subtitle) {
                 window.__iosHeavyBootStarted = true;
 
                 const emergencyLite = !!window.__globalEmergencyLiteMode;
+                const startupFastPath = !!(
+                    emergencyLite ||
+                    window.__constrainedRuntime ||
+                    window.__iosLiteMode ||
+                    window.__isSafariLikeBrowser ||
+                    window.__isIOSWebKitBrowser
+                );
+
+                // Critical path first: subscribe feed early so visible content appears quickly
+                // after cache clears on production devices.
+                const startCoreFeedNow = () => {
+                    try {
+                        if (typeof window.__requestCoreFeedSubscribe === 'function') {
+                            window.__requestCoreFeedSubscribe('startup-fast-path');
+                        } else {
+                            subscribeToFirebasePostsWithReconnect();
+                        }
+                    } catch (e) { console.warn('startup-fast-path subscribe failed', e); }
+                };
+
+                if (startupFastPath) {
+                    setTimeout(startCoreFeedNow, 120);
+                    // Safety retry for transient startup races.
+                    setTimeout(startCoreFeedNow, 2200);
+                }
 
                 setTimeout(() => {
                     console.log('⚡ LAZY LOAD: Phase 0 (geolocation + POI detection)');
                     initializePhase0().catch(err => {
                         console.error('Phase 0 failed (non-critical):', err);
                     });
-                }, emergencyLite ? 2200 : (window.__constrainedRuntime ? 1200 : (window.__iosLiteMode ? 800 : 100)));
+                }, startupFastPath ? 3000 : 100);
 
                 // 📡 LAZY LOAD: Posts from Firebase (non-blocking)
                 setTimeout(() => {
@@ -49633,7 +49658,7 @@ function setUploadModalHeader(title, subtitle) {
                     } else {
                         subscribeToFirebasePostsWithReconnect();
                     }
-                }, emergencyLite ? 3200 : (window.__constrainedRuntime ? 2200 : (window.__iosLiteMode ? 1200 : 200)));
+                }, startupFastPath ? 650 : 200);
             };
 
             startHeavyBoot();
