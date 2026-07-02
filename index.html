@@ -132,6 +132,97 @@
         })();
     </script>
     <script>
+        (function hardenWebStorageAccess() {
+            const memLocal = Object.create(null);
+            const memSession = Object.create(null);
+
+            function normalizeKey(key) {
+                return String(key);
+            }
+
+            function patchStorage(kind, memoryStore) {
+                const obj = kind === 'local' ? window.localStorage : window.sessionStorage;
+                if (!obj || !window.Storage || !window.Storage.prototype) return false;
+
+                const proto = window.Storage.prototype;
+                const nativeGetItem = proto.getItem;
+                const nativeSetItem = proto.setItem;
+                const nativeRemoveItem = proto.removeItem;
+                const nativeClear = proto.clear;
+                const nativeKey = proto.key;
+
+                const wrappedGetItem = function (key) {
+                    const k = normalizeKey(key);
+                    try {
+                        const value = nativeGetItem.call(this, k);
+                        if (value !== null && value !== undefined) memoryStore[k] = String(value);
+                        return value;
+                    } catch (e) {
+                        return Object.prototype.hasOwnProperty.call(memoryStore, k) ? memoryStore[k] : null;
+                    }
+                };
+
+                const wrappedSetItem = function (key, value) {
+                    const k = normalizeKey(key);
+                    const v = String(value);
+                    memoryStore[k] = v;
+                    try { nativeSetItem.call(this, k, v); } catch (e) {}
+                };
+
+                const wrappedRemoveItem = function (key) {
+                    const k = normalizeKey(key);
+                    delete memoryStore[k];
+                    try { nativeRemoveItem.call(this, k); } catch (e) {}
+                };
+
+                const wrappedClear = function () {
+                    for (const k in memoryStore) {
+                        if (Object.prototype.hasOwnProperty.call(memoryStore, k)) delete memoryStore[k];
+                    }
+                    try { nativeClear.call(this); } catch (e) {}
+                };
+
+                const wrappedKey = function (index) {
+                    try {
+                        const fromNative = nativeKey.call(this, index);
+                        if (fromNative !== null && fromNative !== undefined) return fromNative;
+                    } catch (e) {}
+                    const keys = Object.keys(memoryStore);
+                    return (index >= 0 && index < keys.length) ? keys[index] : null;
+                };
+
+                try {
+                    Object.defineProperty(proto, 'getItem', { value: wrappedGetItem, configurable: true, writable: true });
+                    Object.defineProperty(proto, 'setItem', { value: wrappedSetItem, configurable: true, writable: true });
+                    Object.defineProperty(proto, 'removeItem', { value: wrappedRemoveItem, configurable: true, writable: true });
+                    Object.defineProperty(proto, 'clear', { value: wrappedClear, configurable: true, writable: true });
+                    Object.defineProperty(proto, 'key', { value: wrappedKey, configurable: true, writable: true });
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            }
+
+            function storageWorks(storageObj) {
+                if (!storageObj) return false;
+                const probeKey = '__storage_harden_probe__';
+                try {
+                    storageObj.setItem(probeKey, '1');
+                    storageObj.removeItem(probeKey);
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            }
+
+            const localOk = storageWorks(window.localStorage);
+            const sessionOk = storageWorks(window.sessionStorage);
+            if (!localOk) patchStorage('local', memLocal);
+            if (!sessionOk) patchStorage('session', memSession);
+            window.__storageShimEnabled = !localOk || !sessionOk;
+        })();
+    </script>
+    <script>
         (function initBootSafetyGuard() {
             try {
                 const now = Date.now();
@@ -12200,11 +12291,16 @@
         let lastDetectedZone = null;
         let lastLocationUpdateTime = 0;
         const ZONE_UPDATE_THROTTLE = 3000; // Update zone every 3 seconds minimum
-        let isContinuousTrackingPermitted = localStorage.getItem('poiContentContinuousLocation') === 'true';
+        let isContinuousTrackingPermitted = false;
+        try {
+            isContinuousTrackingPermitted = localStorage.getItem('poiContentContinuousLocation') === 'true';
+        } catch (e) {
+            isContinuousTrackingPermitted = false;
+        }
 
         function persistContinuousLocationConsent(source = 'unknown') {
             isContinuousTrackingPermitted = true;
-            localStorage.setItem('poiContentContinuousLocation', 'true');
+            try { localStorage.setItem('poiContentContinuousLocation', 'true'); } catch (e) {}
             console.log(`📍 Continuous location consent persisted (${source})`);
         }
 
@@ -16470,6 +16566,9 @@
             closeZoneSelector();
         }
         function updateZonePredictor() {
+            const safeLocalGet = (key) => {
+                try { return localStorage.getItem(key); } catch (e) { return null; }
+            };
             const zonePredictorElement = document.getElementById('zonePredictor');
             if (zonePredictorElement) {
                 const coords = getCanonicalUserCoords({ maxAgeMs: 10 * 60 * 1000 });
@@ -16520,8 +16619,8 @@
                     // survive hard refresh on mobile (where Firebase restore is slow/unreliable)
                     // because localStorage is read synchronously right here, no async needed.
                     const hasCommittedLocation = !forceLocalAreaTag &&
-                        localStorage.getItem('manualLocationActive') === '1' &&
-                        !!localStorage.getItem('lastChosenLocation');
+                        safeLocalGet('manualLocationActive') === '1' &&
+                        !!safeLocalGet('lastChosenLocation');
                     if ((window.__freshNavigateLoad && !hasCommittedLocation) || forceLocalAreaTag) {
                         // Genuine first visit with no committed location, or user forced Local area.
                         manualLabel = '';
@@ -42120,12 +42219,12 @@ function setUploadModalHeader(title, subtitle) {
          * 📥 Load more posts from database when scroll threshold reached
          * Implements infinite scroll with Firebase pagination
          */
-        let isLoadingMore = false;
-        let postBatchOffset = 0; // Track how many posts we've already loaded
+        var isLoadingMore = false;
+        var postBatchOffset = 0; // Track how many posts we've already loaded
         // 🚀 MOBILE OPTIMIZATION: Dynamic batch sizing - PERFORMANCE ONLY (NOT LAYOUT)
         const isMobileLowBandwidth = /iPhone|iPad|Android/i.test(navigator.userAgent) && window.innerWidth < 600;
         const POST_BATCH_SIZE = isMobileLowBandwidth ? 30 : 200; // Mobile: 30 posts, Desktop: 200 (for loading speed only)
-        let allFirebasePosts = []; // Cache of all posts from Firebase
+        var allFirebasePosts = []; // Cache of all posts from Firebase
         
         async function loadMorePostsFromDatabase() {
             if (isLoadingMore) {
