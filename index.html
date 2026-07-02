@@ -1095,6 +1095,41 @@
                 window.__isMobileBrowser
             );
 
+            // Emergency runtime governor: reduce post-open crash risk by clamping
+            // recurring timers and disabling heavy DOM observers on fragile runtimes.
+            (function installFragileRuntimeGovernor() {
+                if (!window.__fragileRuntimeMode) return;
+                try {
+                    window.__intervalMinDelayMs = 12000;
+                    const __nativeSetInterval = window.setInterval ? window.setInterval.bind(window) : null;
+                    if (__nativeSetInterval) {
+                        window.setInterval = function(handler, timeout) {
+                            try {
+                                let ms = Number(timeout || 0);
+                                if (!Number.isFinite(ms) || ms < window.__intervalMinDelayMs) {
+                                    ms = window.__intervalMinDelayMs;
+                                }
+                                const args = Array.prototype.slice.call(arguments, 2);
+                                return __nativeSetInterval.apply(window, [handler, ms].concat(args));
+                            } catch (e) {
+                                return 0;
+                            }
+                        };
+                    }
+                } catch (e) {}
+
+                try {
+                    // No-op MutationObserver to prevent observer storms in fragile browsers.
+                    window.MutationObserver = function() {
+                        this.observe = function() {};
+                        this.disconnect = function() {};
+                        this.takeRecords = function() { return []; };
+                    };
+                } catch (e) {}
+
+                try { console.warn('🛟 Fragile runtime governor enabled (interval clamp + MutationObserver off)'); } catch (e) {}
+            })();
+
             // Disable SW in fragile persistence environments.
             window.__disableServiceWorkers = !!(window.__privateSafeMode || window.__storageLikelyRestricted || window.__globalEmergencyLiteMode);
 
