@@ -3734,83 +3734,10 @@
                     }
                 });
 
-                // On iOS Safari, some taps render but never activate click handlers when
-                // the page has been through modal/overlay transitions. Bridge touchend to
-                // click for real action targets so inline onclick and JS listeners fire.
-                // Emergency override: disable this bridge in iOS lite mode to avoid
-                // duplicate click dispatch and re-entrancy crashes.
-                if (isIOS && !window.__iosLiteMode) {
-                    let lastTouch = { x: 0, y: 0, ts: 0 };
-
-                    const shouldBridgeTap = (target) => {
-                        try {
-                            if (!target || !target.closest) return false;
-                            return !!target.closest(ACTIONABLE_SELECTOR);
-                        } catch (e) { return false; }
-                    };
-
-                    const resolveActionableFromPoint = (x, y) => {
-                        try {
-                            if (!Number.isFinite(x) || !Number.isFinite(y) || typeof document.elementsFromPoint !== 'function') return null;
-                            const stack = document.elementsFromPoint(x, y) || [];
-                            for (const node of stack) {
-                                if (!node || !node.closest) continue;
-                                const hit = node.closest(ACTIONABLE_SELECTOR);
-                                if (hit) return hit;
-                            }
-                        } catch (e) {}
-                        return null;
-                    };
-
-                    document.addEventListener('touchstart', function(e) {
-                        try {
-                            const t = e && e.changedTouches && e.changedTouches[0];
-                            if (!t) return;
-                            lastTouch = { x: Number(t.clientX) || 0, y: Number(t.clientY) || 0, ts: Date.now() };
-                        } catch (err) {}
-                    }, { passive: true, capture: true });
-
-                    document.addEventListener('touchend', function(e) {
-                        try {
-                            const target = e && e.target;
-                            let el = shouldBridgeTap(target) ? target.closest(ACTIONABLE_SELECTOR) : null;
-
-                            const touch = e && e.changedTouches && e.changedTouches[0];
-                            const x = touch ? Number(touch.clientX) : NaN;
-                            const y = touch ? Number(touch.clientY) : NaN;
-
-                            // Do not synthesize clicks for backdrop taps when profile/signup modal is open.
-                            // Otherwise Safari can click the underlying Signup button and immediately reopen modal.
-                            try {
-                                const profileModal = document.getElementById('profileModal');
-                                const profileOpen = !!(profileModal && getComputedStyle(profileModal).display !== 'none');
-                                if (profileOpen) {
-                                    const profileContent = profileModal.querySelector('.modal-content');
-                                    const tappedInsideContent = !!(target && profileContent && profileContent.contains(target));
-                                    if (!tappedInsideContent) return;
-                                }
-                            } catch (_) {}
-
-                            const moved = Number.isFinite(x) && Number.isFinite(y)
-                                ? Math.hypot((x - (lastTouch.x || 0)), (y - (lastTouch.y || 0)))
-                                : 0;
-                            const elapsed = Date.now() - (lastTouch.ts || 0);
-                            // Ignore drag/scroll gestures.
-                            if (moved > 16 || elapsed > 1200) return;
-
-                            if (!el) el = resolveActionableFromPoint(x, y);
-                            if (!el) return;
-                            // Let native handlers run first, then synthesize a click if Safari
-                            // doesn't dispatch one on its own.
-                            setTimeout(() => {
-                                try {
-                                    if (document.activeElement && document.activeElement !== el && el.focus) el.focus();
-                                } catch (e) {}
-                                try { el.click(); } catch (e) {}
-                            }, 0);
-                        } catch (err) {}
-                    }, { passive: true, capture: true });
-                }
+                // Legacy iOS synthetic touchend->click bridging removed.
+                // Safari Private Browsing now works without it, and keeping it on
+                // standard Mobile Safari creates a divergent interaction path with
+                // duplicate clicks and re-entrancy risk after overlay transitions.
             }, false);
             
             // Prevent body touch scrolling from blocking button interactions
@@ -3867,7 +3794,7 @@
 
                     const anyOverlayActive = uploadActive || viewActive || gridActive || loadingActive || profileActive || areaPickerActive || mediaLoadingActive || contactActive || reportActive || fullScreenMediaActive;
 
-                    if (window.__iosLiteMode && hasUiLock && !anyOverlayActive) {
+                    if (window.__isIOSWebKitBrowser && hasUiLock && !anyOverlayActive) {
                         try { document.body.classList.remove('location-change-loading-ui-lock', 'posting-page-open'); } catch (e) {}
                         try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
                     }
