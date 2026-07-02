@@ -1100,17 +1100,13 @@
             (function installFragileRuntimeGovernor() {
                 if (!window.__fragileRuntimeMode) return;
                 try {
-                    window.__intervalMinDelayMs = 12000;
                     const __nativeSetInterval = window.setInterval ? window.setInterval.bind(window) : null;
                     if (__nativeSetInterval) {
                         window.setInterval = function(handler, timeout) {
                             try {
-                                let ms = Number(timeout || 0);
-                                if (!Number.isFinite(ms) || ms < window.__intervalMinDelayMs) {
-                                    ms = window.__intervalMinDelayMs;
-                                }
-                                const args = Array.prototype.slice.call(arguments, 2);
-                                return __nativeSetInterval.apply(window, [handler, ms].concat(args));
+                                // Emergency kill-switch: disable recurring intervals entirely
+                                // in fragile mode to prevent timer storms / memory pressure.
+                                return 0;
                             } catch (e) {
                                 return 0;
                             }
@@ -1127,7 +1123,7 @@
                     };
                 } catch (e) {}
 
-                try { console.warn('🛟 Fragile runtime governor enabled (interval clamp + MutationObserver off)'); } catch (e) {}
+                try { console.warn('🛟 Fragile runtime governor enabled (intervals off + MutationObserver off)'); } catch (e) {}
             })();
 
             // Disable SW in fragile persistence environments.
@@ -18730,6 +18726,39 @@
                     });
                 }
             } catch (e) {}
+
+            // Emergency fragile-runtime auth boot path: avoid heavy profile/grid/location
+            // initialization in private/mobile browsers and keep launch lightweight.
+            if (window.__fragileRuntimeMode) {
+                try {
+                    const fallbackGuestId = (typeof getPermanentUserId === 'function') ? getPermanentUserId() : ('guest-' + Date.now());
+                    const resolvedId = user && user.uid ? user.uid : fallbackGuestId;
+                    currentUserId = resolvedId;
+                    try { window.currentUserId = resolvedId; } catch (_) {}
+                    try { if (typeof window.__lsSet === 'function') window.__lsSet('userId', resolvedId); } catch (_) {}
+
+                    try { initializeTheme(); } catch (_) {}
+                    try { if (typeof updateAccountUI === 'function') updateAccountUI(); } catch (_) {}
+                    try { if (typeof initializeGrid === 'function') initializeGrid(); } catch (_) {}
+                    try { document.documentElement.classList.remove('app-startup-loading'); } catch (_) {}
+                    try { if (typeof window.__forceInteractionRecovery === 'function') window.__forceInteractionRecovery(); } catch (_) {}
+
+                    if (!window.__fragileRuntimeSubscribed) {
+                        window.__fragileRuntimeSubscribed = true;
+                        setTimeout(() => {
+                            try {
+                                if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                                    subscribeToFirebasePostsWithReconnect();
+                                }
+                            } catch (e) { console.warn('fragile auth boot: subscribe failed', e); }
+                        }, 1400);
+                    }
+                } catch (e) {
+                    console.warn('fragile auth boot failed', e);
+                }
+                return;
+            }
+
             try { if (window.dumpAuthDiagnostics) await window.dumpAuthDiagnostics(); } catch(e){ console.warn('dumpAuthDiagnostics call failed', e); }
             
             if (user) {
