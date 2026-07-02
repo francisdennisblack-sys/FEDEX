@@ -1083,51 +1083,157 @@
                 }
             })();
 
-            // Emergency global launch recovery mode (temporary): prioritize app load
-            // over background/offline features until cross-browser startup is stable.
-            window.__globalEmergencyLiteMode = true;
+            // Emergency lite mode is now opt-in. Keep the app closer to the
+            // previously stable baseline while still protecting fragile runtimes.
+            window.__globalEmergencyLiteMode = false;
 
-            // Fragile runtime mode: force minimal startup on mobile/private/restricted contexts.
+            // Fragile runtime mode: private/restricted/mobile contexts get a
+            // safer scheduler profile without fully disabling core primitives.
             window.__fragileRuntimeMode = !!(
-                window.__globalEmergencyLiteMode ||
                 window.__privateSafeMode ||
                 window.__storageLikelyRestricted ||
                 window.__isMobileBrowser
             );
 
-            // Emergency runtime governor: reduce post-open crash risk by clamping
-            // recurring timers and disabling heavy DOM observers on fragile runtimes.
-            (function installFragileRuntimeGovernor() {
-                if (!window.__fragileRuntimeMode) return;
-                try {
-                    const __nativeSetInterval = window.setInterval ? window.setInterval.bind(window) : null;
-                    if (__nativeSetInterval) {
-                        window.setInterval = function(handler, timeout) {
+            // Runtime stability layer (wide-scope):
+            // 1) clamp interval churn instead of disabling all intervals,
+            // 2) throttle hot MutationObserver callbacks in fragile mode,
+            // 3) fail-open into survival mode after error bursts.
+            (function installRuntimeStabilityLayer() {
+                const nativeSetInterval = window.setInterval ? window.setInterval.bind(window) : null;
+                const nativeClearInterval = window.clearInterval ? window.clearInterval.bind(window) : null;
+                if (!nativeSetInterval || !nativeClearInterval) return;
+
+                const intervalRegistry = new Map();
+                let intervalTokenSeed = 1;
+                const minDelayMs = window.__fragileRuntimeMode ? 1800 : 250;
+                const maxIntervals = window.__fragileRuntimeMode ? 18 : 72;
+
+                function clearOldestInterval() {
+                    let oldestToken = null;
+                    let oldestCreatedAt = Infinity;
+                    intervalRegistry.forEach((meta, token) => {
+                        if (meta && meta.createdAt < oldestCreatedAt) {
+                            oldestCreatedAt = meta.createdAt;
+                            oldestToken = token;
+                        }
+                    });
+                    if (oldestToken !== null) {
+                        const oldest = intervalRegistry.get(oldestToken);
+                        try { if (oldest && oldest.nativeId !== undefined) nativeClearInterval(oldest.nativeId); } catch (e) {}
+                        intervalRegistry.delete(oldestToken);
+                    }
+                }
+
+                function normalizeDelay(timeout) {
+                    const raw = Number(timeout);
+                    if (!Number.isFinite(raw) || raw < 0) return minDelayMs;
+                    return Math.max(minDelayMs, raw);
+                }
+
+                window.setInterval = function(handler, timeout) {
+                    try {
+                        if (intervalRegistry.size >= maxIntervals) clearOldestInterval();
+                        const token = intervalTokenSeed++;
+                        const delay = normalizeDelay(timeout);
+                        const wrapped = function() {
                             try {
-                                // Emergency kill-switch: disable recurring intervals entirely
-                                // in fragile mode to prevent timer storms / memory pressure.
-                                return 0;
+                                if (typeof handler === 'function') {
+                                    handler();
+                                } else if (typeof handler === 'string') {
+                                    try { (0, eval)(handler); } catch (e) {}
+                                }
                             } catch (e) {
-                                return 0;
+                                try { console.warn('Interval handler error (contained)', e); } catch (_) {}
                             }
                         };
+                        const nativeId = nativeSetInterval(wrapped, delay);
+                        intervalRegistry.set(token, { nativeId: nativeId, createdAt: Date.now() });
+                        return token;
+                    } catch (e) {
+                        return 0;
                     }
+                };
+
+                window.clearInterval = function(token) {
+                    try {
+                        if (intervalRegistry.has(token)) {
+                            const meta = intervalRegistry.get(token);
+                            intervalRegistry.delete(token);
+                            if (meta && meta.nativeId !== undefined) {
+                                try { nativeClearInterval(meta.nativeId); } catch (e) {}
+                            }
+                            return;
+                        }
+                    } catch (e) {}
+                    try { nativeClearInterval(token); } catch (e) {}
+                };
+
+                if (window.__fragileRuntimeMode && window.MutationObserver) {
+                    try {
+                        const NativeMutationObserver = window.MutationObserver;
+                        window.MutationObserver = function(callback) {
+                            if (typeof callback !== 'function') {
+                                return new NativeMutationObserver(callback);
+                            }
+                            let lastRunAt = 0;
+                            const throttledCallback = function(mutations, observer) {
+                                const now = Date.now();
+                                if ((now - lastRunAt) < 300) return;
+                                lastRunAt = now;
+                                try { callback(mutations, observer); } catch (e) {
+                                    try { console.warn('MutationObserver callback error (contained)', e); } catch (_) {}
+                                }
+                            };
+                            return new NativeMutationObserver(throttledCallback);
+                        };
+                        window.MutationObserver.prototype = NativeMutationObserver.prototype;
+                    } catch (e) {}
+                }
+
+                window.__enterSurvivalMode = function(reason) {
+                    try { console.warn('🧯 Entering survival mode', { reason: reason || 'unspecified' }); } catch (e) {}
+                    try { document.documentElement.classList.remove('app-startup-loading'); } catch (e) {}
+                    try {
+                        intervalRegistry.forEach((meta) => {
+                            try { if (meta && meta.nativeId !== undefined) nativeClearInterval(meta.nativeId); } catch (e) {}
+                        });
+                        intervalRegistry.clear();
+                    } catch (e) {}
+                };
+
+                let burstErrors = 0;
+                let burstWindowStart = Date.now();
+                function registerRuntimeBurst(errorType) {
+                    const now = Date.now();
+                    if ((now - burstWindowStart) > 8000) {
+                        burstWindowStart = now;
+                        burstErrors = 0;
+                    }
+                    burstErrors += 1;
+                    if (burstErrors >= 5) {
+                        try { window.__enterSurvivalMode('error-burst:' + String(errorType || 'unknown')); } catch (e) {}
+                        burstErrors = 0;
+                        burstWindowStart = now;
+                    }
+                }
+
+                try {
+                    window.addEventListener('error', function() { registerRuntimeBurst('error'); }, { passive: true });
+                    window.addEventListener('unhandledrejection', function() { registerRuntimeBurst('unhandledrejection'); }, { passive: true });
                 } catch (e) {}
 
                 try {
-                    // No-op MutationObserver to prevent observer storms in fragile browsers.
-                    window.MutationObserver = function() {
-                        this.observe = function() {};
-                        this.disconnect = function() {};
-                        this.takeRecords = function() { return []; };
-                    };
+                    console.warn('🛟 Runtime stability layer enabled', {
+                        fragile: !!window.__fragileRuntimeMode,
+                        minDelayMs: minDelayMs,
+                        maxIntervals: maxIntervals
+                    });
                 } catch (e) {}
-
-                try { console.warn('🛟 Fragile runtime governor enabled (intervals off + MutationObserver off)'); } catch (e) {}
             })();
 
             // Disable SW in fragile persistence environments.
-            window.__disableServiceWorkers = !!(window.__privateSafeMode || window.__storageLikelyRestricted || window.__globalEmergencyLiteMode);
+            window.__disableServiceWorkers = !!(window.__privateSafeMode || window.__storageLikelyRestricted || window.__fragileRuntimeMode);
 
             // Safe storage wrapper: avoids hard crashes when Safari private mode
             // blocks persistent stores and falls back to memory values.
@@ -1398,6 +1504,42 @@
                         }
                     }
 
+                    // Recovery reload: aggressively clear stale runtime layers that can
+                    // trap browsers on a broken shell (old SW/cache state), then navigate.
+                    async function forceRecoveryReload(reason) {
+                        const why = String(reason || 'manual-recovery');
+                        try { console.warn('🧰 forceRecoveryReload start', { reason: why }); } catch (e) {}
+
+                        try {
+                            if ('serviceWorker' in navigator && navigator.serviceWorker && typeof navigator.serviceWorker.getRegistrations === 'function') {
+                                const regs = await navigator.serviceWorker.getRegistrations();
+                                await Promise.all((regs || []).map((reg) => {
+                                    try { return reg.unregister(); } catch (e) { return Promise.resolve(false); }
+                                }));
+                            }
+                        } catch (e) {
+                            try { console.warn('forceRecoveryReload: SW unregister failed', e); } catch (_) {}
+                        }
+
+                        try {
+                            if (window.caches && typeof caches.keys === 'function') {
+                                const names = await caches.keys();
+                                await Promise.all((names || []).map((name) => {
+                                    try { return caches.delete(name); } catch (e) { return Promise.resolve(false); }
+                                }));
+                            }
+                        } catch (e) {
+                            try { console.warn('forceRecoveryReload: cache purge failed', e); } catch (_) {}
+                        }
+
+                        try { sessionStorage.removeItem('__last_programmatic_reload_at'); } catch (e) {}
+                        try { localStorage.setItem('programmaticReloadTS', String(Date.now())); } catch (e) {}
+                        try { localStorage.removeItem('lastAutoReloadedVersion'); } catch (e) {}
+
+                        forceNavigateReload();
+                        return true;
+                    }
+
                     // Centralized programmatic reload helper with circuit-breaker
                     // to avoid reload loops in fragile/private browser contexts.
                     function programmaticReload(reason) {
@@ -1426,7 +1568,14 @@
                         }
                     }
                     try { window.programmaticReload = programmaticReload; } catch (e) {}
-                    try { window.forceHardReload = function() { try { programmaticReload(); } catch (e) {} }; } catch (e) {}
+                    try { window.forceRecoveryReload = forceRecoveryReload; } catch (e) {}
+                    try {
+                        window.forceHardReload = function() {
+                            try { forceRecoveryReload('forceHardReload'); } catch (e) {
+                                try { programmaticReload('forceHardReload-fallback'); } catch (e2) {}
+                            }
+                        };
+                    } catch (e) {}
 
                 function findCreateTextEl() {
                     const createBox = document.querySelector('.add-content-box');
