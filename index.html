@@ -34541,6 +34541,14 @@ function setUploadModalHeader(title, subtitle) {
                     const incomingVisible = uniquePosts.filter(p => !isPostHiddenForViewer(p, currentUserId));
                     const previousVisible = Array.isArray(gridContent[contentKey]) ? gridContent[contentKey] : [];
                     let mergedVisible = incomingVisible;
+                    let authoritativeVisible = Array.isArray(mergedVisible) ? mergedVisible.slice() : [];
+                    const isStrictStartupFeed = !!(
+                        window.__coreWebsiteMode ||
+                        window.__globalEmergencyLiteMode ||
+                        window.__constrainedRuntime ||
+                        window.__isSafariLikeBrowser ||
+                        window.__isIOSWebKitBrowser
+                    );
 
                     // Warmup guard: during relaunch/reconnect, transient snapshots can be
                     // temporarily sparse. Preserve previous visible posts to avoid UI flicker.
@@ -34548,7 +34556,7 @@ function setUploadModalHeader(title, subtitle) {
                         const listenerAgeMs = Date.now() - Number(window.__firebaseListenerStartedAt || 0);
                         const inWarmup = listenerAgeMs < 45000 || callCount <= 3;
                         const droppedTooFast = previousVisible.length >= 20 && incomingVisible.length < Math.floor(previousVisible.length * 0.7);
-                        if (inWarmup && droppedTooFast) {
+                        if (!isStrictStartupFeed && inWarmup && droppedTooFast) {
                             const _now = Date.now();
                             const _ttlMs = 24 * 60 * 60 * 1000;
                             const byId = new Map();
@@ -34565,6 +34573,7 @@ function setUploadModalHeader(title, subtitle) {
                                 byId.set(id, prev);
                             });
                             mergedVisible = Array.from(byId.values());
+                            authoritativeVisible = Array.isArray(mergedVisible) ? mergedVisible.slice() : [];
                             console.warn(`🛡️ Snapshot churn guard: preserved ${mergedVisible.length - incomingVisible.length} posts during warmup`);
                         }
                     } catch (e) {
@@ -34674,7 +34683,19 @@ function setUploadModalHeader(title, subtitle) {
                             });
                             console.log(`🔍 Distance filter: removed ${beforeCount - finalVisible.length} posts beyond ${maxMiles} miles`);
                         }
+
+                        // Strict startup mode: cap first payload size to prevent rendering
+                        // large stale backlogs before the prioritized feed settles.
+                        if (isStrictStartupFeed && finalVisible.length > 240) {
+                            finalVisible = finalVisible
+                                .slice()
+                                .sort((a, b) => Number((b && (b.timestamp || b.createdAt)) || 0) - Number((a && (a.timestamp || a.createdAt)) || 0))
+                                .slice(0, 240);
+                            console.log(`🧩 Strict startup feed cap applied: ${finalVisible.length} posts`);
+                        }
+
                         gridContent[contentKey] = finalVisible;
+                        authoritativeVisible = Array.isArray(finalVisible) ? finalVisible.slice() : [];
                         console.log(`  ✅ gridContent['${contentKey}'] updated with ${gridContent[contentKey].length} posts (${uniquePosts.length - gridContent[contentKey].length} hidden filtered)`);
 
                         // If there are zero posts from the user's current area/zone,
@@ -34713,6 +34734,7 @@ function setUploadModalHeader(title, subtitle) {
 
                                 if (toInject.length > 0) {
                                     gridContent[contentKey] = (Array.isArray(finalVisible) ? finalVisible.slice() : []).concat(toInject);
+                                    authoritativeVisible = Array.isArray(gridContent[contentKey]) ? gridContent[contentKey].slice() : authoritativeVisible;
                                     console.log(`🔁 Fallback: injected ${toInject.length} global top posts for zone=${zoneKeyLower || 'none'}`);
                                 } else {
                                     console.log('🔁 Fallback: no global top posts available to inject');
@@ -34722,6 +34744,7 @@ function setUploadModalHeader(title, subtitle) {
                     } catch (e) {
                         // Fallback: assign mergedVisible if filtering fails
                         gridContent[contentKey] = mergedVisible;
+                        authoritativeVisible = Array.isArray(mergedVisible) ? mergedVisible.slice() : authoritativeVisible;
                         console.warn('Distance filtering failed, assigned mergedVisible fallback', e);
                     }
 
@@ -34738,7 +34761,7 @@ function setUploadModalHeader(title, subtitle) {
                             const deviceKey = String(deviceId);
                             window.currentGuestFeedKey = deviceKey;
 
-                            const guestFeed = buildGuestViewerFeed(uniquePosts);
+                            const guestFeed = buildGuestViewerFeed(authoritativeVisible);
                             gridContent[deviceKey] = guestFeed.posts;
                             console.log(`  ✅ guest feed populated for ${deviceKey}: mode=${guestFeed.mode}, zone=${guestFeed.zoneTag || 'none'}, posts=${(gridContent[deviceKey] || []).length}`);
                         } else {
