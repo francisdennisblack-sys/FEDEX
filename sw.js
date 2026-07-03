@@ -1,29 +1,9 @@
-// Legacy SW cleanup shim.
-// If old clients still reference /sw.js, this worker clears stale caches and
-// unregisters itself so the app can move to the latest runtime path.
+// Simple Service Worker to persist user location and notify clients
 self.addEventListener('install', (e) => {
   self.skipWaiting();
 });
-
 self.addEventListener('activate', (e) => {
-  e.waitUntil((async () => {
-    try {
-      const cacheNames = await caches.keys();
-      await Promise.all((cacheNames || []).map((name) => caches.delete(name)));
-    } catch (err) {}
-
-    try {
-      await self.clients.claim();
-      const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      clients.forEach((c) => {
-        try { c.postMessage({ type: 'LEGACY_SW_CLEANED' }); } catch (e) {}
-      });
-    } catch (err) {}
-
-    try {
-      await self.registration.unregister();
-    } catch (err) {}
-  })());
+  e.waitUntil(self.clients.claim());
 });
 
 function openDB() {
