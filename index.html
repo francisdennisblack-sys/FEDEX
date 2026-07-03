@@ -49981,6 +49981,48 @@ function setUploadModalHeader(title, subtitle) {
                 } catch (e) {}
             }, 5200);
 
+            // Direct startup bootstrap: if Safari still has an empty grid, fetch
+            // the shared posts collection once immediately and seed the guest feed.
+            // This mirrors the localhost effect of showing real posts even before
+            // the long-lived listener path has fully settled.
+            const bootstrapSafariStartupFeed = async (reason) => {
+                try {
+                    const hasAnyPosts = Object.values(gridContent || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
+                    const hasGridBoxes = document.querySelectorAll('.grid-box[data-post-id]').length > 0;
+                    if (hasAnyPosts || hasGridBoxes) return false;
+
+                    const fetchedPosts = await getPostsFromFirebase();
+                    if (!Array.isArray(fetchedPosts) || fetchedPosts.length === 0) return false;
+
+                    const sharedKey = 'shared-posts';
+                    gridContent[sharedKey] = fetchedPosts.slice();
+                    try { window.gridContent = window.gridContent || {}; window.gridContent[sharedKey] = fetchedPosts.slice(); } catch (e) {}
+
+                    try {
+                        if (typeof window.ensureDeviceFeed === 'function') {
+                            window.ensureDeviceFeed();
+                        }
+                    } catch (e) {}
+
+                    try { window.lastRenderGridTime = 0; } catch (e) {}
+                    try {
+                        if (typeof window.requestGridUpdate === 'function') {
+                            window.requestGridUpdate(reason || 'safari-startup-bootstrap');
+                        } else if (typeof renderGrid === 'function') {
+                            renderGrid();
+                        }
+                    } catch (e) {}
+                    console.warn('🍎 Safari startup bootstrap seeded posts from direct Firebase fetch', {
+                        reason: reason || 'unknown',
+                        count: fetchedPosts.length
+                    });
+                    return true;
+                } catch (e) {
+                    console.warn('Safari startup bootstrap failed', e);
+                    return false;
+                }
+            };
+
             // Safari startup parity with localhost recovery: keep retrying the
             // same deterministic feed bootstrap while the grid is still empty.
             // Localhost previously benefited from repeated post injection/polling;
@@ -49988,6 +50030,7 @@ function setUploadModalHeader(title, subtitle) {
             // using real device/feed paths instead of localhost test data.
             if (window.__isIOSWebKitBrowser || window.__isSafariLikeBrowser) {
                 try {
+                    try { setTimeout(() => { bootstrapSafariStartupFeed('safari-startup-bootstrap-initial'); }, 2200); } catch (e) {}
                     const safariStartupRecoveryStartedAt = Date.now();
                     const safariStartupRecoveryInterval = setInterval(() => {
                         try {
@@ -50015,6 +50058,7 @@ function setUploadModalHeader(title, subtitle) {
                                     window.ensureDeviceFeed();
                                 }
                             } catch (e) {}
+                            try { bootstrapSafariStartupFeed('safari-startup-recovery-tick'); } catch (e) {}
                             try {
                                 if (typeof window.__requestCoreFeedSubscribe === 'function') {
                                     window.__requestCoreFeedSubscribe('safari-startup-recovery');
