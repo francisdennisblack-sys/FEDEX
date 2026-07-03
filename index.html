@@ -49980,6 +49980,60 @@ function setUploadModalHeader(title, subtitle) {
                     } catch (e) {}
                 } catch (e) {}
             }, 5200);
+
+            // Safari startup parity with localhost recovery: keep retrying the
+            // same deterministic feed bootstrap while the grid is still empty.
+            // Localhost previously benefited from repeated post injection/polling;
+            // production Safari needs the same repeated recovery pressure, but
+            // using real device/feed paths instead of localhost test data.
+            if (window.__isIOSWebKitBrowser || window.__isSafariLikeBrowser) {
+                try {
+                    const safariStartupRecoveryStartedAt = Date.now();
+                    const safariStartupRecoveryInterval = setInterval(() => {
+                        try {
+                            const elapsed = Date.now() - safariStartupRecoveryStartedAt;
+                            if (elapsed > 30000) {
+                                clearInterval(safariStartupRecoveryInterval);
+                                return;
+                            }
+
+                            const hasAnyPosts = Object.values(gridContent || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
+                            const hasGridBoxes = document.querySelectorAll('.grid-box[data-post-id]').length > 0;
+                            if (hasAnyPosts || hasGridBoxes) {
+                                clearInterval(safariStartupRecoveryInterval);
+                                return;
+                            }
+
+                            console.warn('🍎 Safari startup recovery tick: empty grid, retrying feed bootstrap');
+                            try {
+                                if (typeof window.__forceInteractionRecovery === 'function') {
+                                    window.__forceInteractionRecovery();
+                                }
+                            } catch (e) {}
+                            try {
+                                if (typeof window.ensureDeviceFeed === 'function') {
+                                    window.ensureDeviceFeed();
+                                }
+                            } catch (e) {}
+                            try {
+                                if (typeof window.__requestCoreFeedSubscribe === 'function') {
+                                    window.__requestCoreFeedSubscribe('safari-startup-recovery');
+                                } else if (typeof subscribeToFirebasePostsWithReconnect === 'function') {
+                                    subscribeToFirebasePostsWithReconnect();
+                                }
+                            } catch (e) {}
+                            try {
+                                if (typeof window.requestGridUpdate === 'function') {
+                                    window.requestGridUpdate('safari-startup-recovery');
+                                } else if (typeof renderGrid === 'function') {
+                                    window.lastRenderGridTime = 0;
+                                    renderGrid();
+                                }
+                            } catch (e) {}
+                        } catch (e) {}
+                    }, 3500);
+                } catch (e) {}
+            }
             
             // 🔄 DESKTOP REFRESH: Support mouse wheel and drag-down refresh on desktop
             const gridContainer = document.getElementById('grid');
